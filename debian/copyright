@@ -1,4 +1,4 @@
-This package was debianized by Xolotl Loki <xoloki@unknown> on
+This package was debianized by Xolotl Loki <xoloki@gmail.com> on
 Sat, 06 Jun 2009 22:59:04 -0700.
 
 It was downloaded from <url://example.com>
@@ -17,7 +17,7 @@ License:
 
     <Put the license of the package here indented by 4 spaces>
 
-The Debian packaging is copyright 2009, Xolotl Loki <xoloki@unknown> and
+The Debian packaging is copyright 2009, Xolotl Loki <xoloki@gmail.com> and
 is licensed under the GPL, see `/usr/share/common-licenses/GPL'.
 
 # Please also look if there are files or directories which have a

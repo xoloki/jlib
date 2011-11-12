@@ -1,18 +1,18 @@
 Source: jlib
 Section: unknown
 Priority: extra
-Maintainer: Xolotl Loki <xoloki@unknown>
+Maintainer: Xolotl Loki <xoloki@gmail.com>
 Build-Depends: debhelper (>= 7), autotools-dev
 Standards-Version: 3.8.0
-Homepage: <insert the upstream URL, if relevant>
+Homepage: 
 
 Package: jlib
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Description: <insert up to 60 chars description>
- <insert long description, indented with spaces>
+Description: C++ cornucopia
+ C++ libraries for crypto, net, media, gl, sys
 
 Package: jlib-doc
 Architecture: all
 Description: documentation for jlib
- <insert long description, indented with spaces>
+ C++ libraries for crypto, net, media, gl, sys

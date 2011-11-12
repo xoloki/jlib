@@ -55,5 +55,5 @@ available via the Info system.
 .SH AUTHOR
 jlib was written by <upstream author>.
 .PP
-This manual page was written by Xolotl Loki <xoloki@unknown>,
+This manual page was written by Xolotl Loki <xoloki@gmail.com>,
 for the Debian project (and may be used by others).
