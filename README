@@ -1,0 +1,52 @@
+README for jlib-1.2.x
+------------------------
+jlib is a library of STL compatible C++ utility classes.
+
+
+REQUIREMENTS
+------------
+1. gcc-3.1         <http://gcc.gnu.org>
+2. libsigc++-1.0.3 <http://libsigc.sourceforge.net>
+3. openssl         <http://www.openssl.org>
+
+INSTALLATION
+------------
+First, make sure you're using gcc-3.0 or greater.  No gcc-2.x compiler
+will work, since the STL support is extremely primitive.  I've never
+tried compiling with a non-gcc compiler; if you get it to work, send me
+a note.
+
+If you're installing from CVS, you first need to 
+
+    libtoolize && aclocal && autoheader && automake -a && autoconf
+
+For the default installation:
+
+	./configure
+	make
+	make install
+
+
+If you want to change any of the defaults, 
+
+	./configure --with-OPTION=VALUE
+
+For a list of options,
+	
+	./configure --help
+
+LICENSE
+-------
+This library is distributed under the GPL.  See the file COPYING
+for details.
+
+
+CONTACT
+-------
+Copyright (c) 2000 Joe Yandle <jwy@divisionbyzero.com>
+
+jlib homepage:	
+
+	http://jlib.sourceforge.net/
+
+	

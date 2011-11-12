@@ -1,0 +1,3 @@
+jlib-1.2.0:
+	New improved directory layout enabling vpath builds and internal make check
+	
