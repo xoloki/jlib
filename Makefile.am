@@ -1,3 +1,3 @@
 SUBDIRS = jlib tests
 
-EXTRA_DIST = config.h.in
+EXTRA_DIST = config.h.in debian
