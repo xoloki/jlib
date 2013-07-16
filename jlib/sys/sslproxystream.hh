@@ -146,7 +146,7 @@ namespace jlib {
                 //std::cerr << "locking OpenSSL ctx mutex" << std::endl;
                 s_ctx_mutex.lock();
                 if(s_ctx == 0) {
-                    s_ctx = SSL_CTX_new(SSLv2_client_method());
+                    s_ctx = SSL_CTX_new(SSLv23_client_method());
                 }
                 s_ctx_mutex.unlock();
                 //std::cerr << "unlocking OpenSSL mutex" << std::endl;

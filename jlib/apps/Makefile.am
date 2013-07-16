@@ -26,10 +26,12 @@ jjoy2xev_LDADD = $(top_builddir)/jlib/x/libjx.la \
 	$(top_builddir)/jlib/util/libjutil.la 
 
 jhyper_SOURCES = jhyper.cc
-jhyper_LDADD = $(top_builddir)/jlib/x/libjx.la
+jhyper_LDADD = $(top_builddir)/jlib/x/libjx.la \
+	$(top_builddir)/jlib/x/libjx.la
 
 jglxhyper_SOURCES = jglxhyper.cc Hyper.hh
-jglxhyper_LDADD = $(top_builddir)/jlib/glx/libjglx.la 
+jglxhyper_LDADD = $(top_builddir)/jlib/glx/libjglx.la  \
+	$(top_builddir)/jlib/x/libjx.la
 
 jgluthyper_SOURCES = jgluthyper.cc
 jgluthyper_LDADD = $(top_builddir)/jlib/glut/libjglut.la 
@@ -41,7 +43,10 @@ jgltorus_SOURCES = jgltorus.cc
 jgltorus_LDADD = $(top_builddir)/jlib/glut/libjglut.la 
 
 jglxbox_SOURCES = jglxbox.cc
-jglxbox_LDADD = $(top_builddir)/jlib/glx/libjglx.la
+jglxbox_LDADD = $(top_builddir)/jlib/glx/libjglx.la \
+	$(top_builddir)/jlib/glu/libjglu.la \
+	$(top_builddir)/jlib/gl/libjgl.la \
+	$(top_builddir)/jlib/x/libjx.la
 
 jcrypt_SOURCES = jcrypt.cc
 jcrypt_LDADD = $(top_builddir)/jlib/crypt/libjcrypt.la \

@@ -223,45 +223,45 @@ void handle_button(sys::joystick::event e) {
 }
 
 int main(int argc, char** argv) {
-    try {
-        std::string device = "/dev/input/js0";
-        if(argc > 1)
-            device = argv[1];
+    while(true) {
+        try {
+            std::string device = "/dev/input/js0";
+            if(argc > 1)
+                device = argv[1];
 
-        std::string apath = "/home/xoloki/src/jlib-1.2/jlib/apps/wow-axes.map";
-        if(argc > 2) 
-            apath = argv[2];
+            std::string apath = "/home/xoloki/src/jlib-1.2/jlib/apps/wow-axes.map";
+            if(argc > 2) 
+                apath = argv[2];
 
-        std::string bpath = "/home/xoloki/src/jlib-1.2/jlib/apps/wow-buttons.map";
-        if(argc > 3) 
-            bpath = argv[3];
+            std::string bpath = "/home/xoloki/src/jlib-1.2/jlib/apps/wow-buttons.map";
+            if(argc > 3) 
+                bpath = argv[3];
 
-        sys::joystick joystick(device);
-        std::ifstream axes(apath.data());
-        std::ifstream buttons(bpath.data());
+            sys::joystick joystick(device);
+            std::ifstream axes(apath.data());
+            std::ifstream buttons(bpath.data());
 
-        init_axis_map(axes);
-        init_button_map(buttons);
+            init_axis_map(axes);
+            init_button_map(buttons);
 
-        while(true) {
-            sys::joystick::event e = joystick.read();
-            if(DEBUG)
-                std::cout << e << std::endl;
+            while(true) {
+                sys::joystick::event e = joystick.read();
+                if(DEBUG)
+                    std::cout << e << std::endl;
 
-            if(e.jse.type & JS_EVENT_AXIS)
-                handle_axis(e);
-            else
-                handle_button(e);
-        } 
-    }
-    catch(std::exception& e) {
-        std::cerr << e.what() << std::endl;
-        std::exit(1);
-    } catch(...) {
-        std::cerr << "unknown exception" << std::endl;
-        std::exit(1);
+                if(e.jse.type & JS_EVENT_AXIS)
+                    handle_axis(e);
+                else
+                    handle_button(e);
+            } 
+        }
+        catch(std::exception& e) {
+            std::cerr << e.what() << std::endl;
+        } catch(...) {
+            std::cerr << "unknown exception" << std::endl;
+        }
+        usleep(50000);
     }
 
     std::exit(0);
 }
-

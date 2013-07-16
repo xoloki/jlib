@@ -43,7 +43,7 @@ namespace jlib {
             
             static const unsigned int BUF_SIZE = 1024;
 
-            basic_sslbuf(std::string host, unsigned int port, SSL_METHOD* method, bool delay = false)
+            basic_sslbuf(std::string host, unsigned int port, const SSL_METHOD* method, bool delay = false)
                 : basic_socketbuf<charT,traitT>(host,port),
                   m_ctx(0),
                   m_ssl(0),
@@ -229,7 +229,7 @@ namespace jlib {
             
             SSL_CTX* m_ctx;
             SSL* m_ssl;
-            SSL_METHOD* m_method;
+            const SSL_METHOD* m_method;
             bool m_delay;
         };
         
