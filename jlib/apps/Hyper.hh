@@ -40,7 +40,7 @@ struct triple {
 template<typename T, typename Plot>
 class HyperPlot : public Plot {
 public:
-    enum Shape { CUBOID, PYRAMOID, SPHEROID };
+    enum Shape { CUBOID, PYRAMOID, STAROID, SPHEROID };
 
     HyperPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h);
 
@@ -71,6 +71,7 @@ protected:
     vertex<T> center; 
     vertex<T> up; 
     Shape shape;
+    T r2;
 };
 
 template<typename T, typename Plot>
@@ -94,6 +95,33 @@ template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::initialize(uint n) {
     r = n - 1;
+    r2 = (n < 8 ? 3 : (1.1 * std::sqrt(static_cast<T>(n))));
+
+    switch(shape) {
+    case CUBOID: {
+        break;
+    } 
+    case PYRAMOID: {
+        break;
+    } 
+    case STAROID: {
+        switch(n) {
+        case 1:
+        case 2:
+            r2 = 6;
+            break;
+        case 3:
+            r2 = 4.25;
+            break;
+        default:
+            r2 = (2.1 * std::sqrt(static_cast<T>(n)));
+            break;
+        }
+    }
+    case SPHEROID: {
+        break;
+    } 
+    }
 
     initialize_glazzies(n);
     setClip(clip);
@@ -110,6 +138,11 @@ void HyperPlot<T,Plot>::initialize(uint n) {
     } 
     case PYRAMOID: {
         pyramoid<T> object(n);
+        add(object);
+        break;
+    } 
+    case STAROID: {
+        staroid<T> object(n);
         add(object);
         break;
     } 
@@ -209,18 +242,27 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
         initialize_rotation(this->D);
     } else if(key == 't' || key == 'g') {
         int x = static_cast<int>(shape);
-
+        
         x += (key == 't' ? 1 : -1);
-
+        
         if(x > static_cast<int>(SPHEROID))
             x = static_cast<int>(CUBOID);
         else if(x < CUBOID) {
             x = static_cast<int>(SPHEROID);
         }
-
+        
         shape = static_cast<Shape>(x);
-
+    
         initialize(this->D);
+/*
+    } else if(key == 'y' || key == 'h') {
+        T x = (key == 't' ? 0.1 : -0.1);
+        r2 += x;
+
+        initialize_glazzies(this->D);
+        initialize_rotation(this->D);
+        (*this) * matrix<T>::lookAt(this->D, eye, up, center);
+*/
     }
 }
 
@@ -267,8 +309,7 @@ void HyperPlot<T,Plot>::initialize_rotation(uint n) {
 template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::initialize_glazzies(uint n) {
-    const T r2 = (n < 8 ? 3 : (1.1 * std::sqrt(static_cast<T>(n))));
-    const T r22 = r2 / 2;
+    T r22 = r2 / 2;
 
     clip.clear();
     clip.push_back(std::make_pair(-r22, r22));
