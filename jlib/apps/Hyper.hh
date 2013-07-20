@@ -267,17 +267,20 @@ void HyperPlot<T,Plot>::initialize_rotation(uint n) {
 template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::initialize_glazzies(uint n) {
+    const T r2 = (n < 8 ? 3 : (1.1 * std::sqrt(static_cast<T>(n))));
+    const T r22 = r2 / 2;
+
     clip.clear();
-    clip.push_back(std::make_pair(-1.5, 1.5));
-    clip.push_back(std::make_pair(-1.5, 1.5));
+    clip.push_back(std::make_pair(-r22, r22));
+    clip.push_back(std::make_pair(-r22, r22));
     
     eye.change(n);
     eye[0] = 0;
     eye[1] = 0;
 
     for(uint i = 2; i < n; i++) {
-        clip.push_back(std::make_pair(1.5, 4.5));
-        eye[i] = 3;
+        clip.push_back(std::make_pair(r22, 3*r22));
+        eye[i] = r2;
     }
 }
 
