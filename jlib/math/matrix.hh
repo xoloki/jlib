@@ -970,10 +970,67 @@ inline
 spheroid<T>::spheroid(uint n) 
     : object<T>(n)
 {
+    const T r2 = std::sqrt(static_cast<T>(this->D));
+    const T nr2 = -1 * r2;
+
     // draw longitude lines from +R Y axis through each of the others down to -R
 
 
     // draw latitude lines with Y zero using each pair of axes 
+
+
+    for(uint i = 0; i < this->D; i++) {
+        {
+            // add top vertex   
+            std::vector<T> vals;
+            
+            for(uint j = 0; j < this->D; j++) {
+                vals.push_back(j == i ? r2 : 0);
+            }
+            
+            std::list< vertex<T> > a; 
+            vertex<T> vertex(vals);
+            this->v.push_back(vertex);
+            this->adj.push_back(a);
+        }
+        
+        {
+            // add bottom vertex   
+            std::vector<T> vals;
+            for(uint j = 0; j < this->D; j++) {
+                vals.push_back(j == i ? nr2 : 0);
+            }
+            
+            std::list< vertex<T> > a; 
+            vertex<T> vertex(vals);
+            this->v.push_back(vertex);
+            this->adj.push_back(a);
+        }
+    }
+
+    for(uint i = 0; i < std::pow(2.0, static_cast<int>(this->D)); i++) {
+        std::vector<T> vals;
+        
+        for(uint j = 0; j < this->D; j++) {
+            vals.push_back(((i >> j) & 0x1) ? 1 : -1);
+        }
+
+        for(uint k = 0; k < this->D; k++) {
+            if(vals[k] == 1) {
+                std::list< vertex<T> > a; a.push_back(this->v[2*k]);
+                vertex<T> vertex(vals);
+                this->v.push_back(vertex);
+                this->adj.push_back(a);
+                this->adj[2*k].push_back(vertex);
+            } else if(vals[k] == -1) {
+                std::list< vertex<T> > a; a.push_back(this->v[2*k + 1]);
+                vertex<T> vertex(vals);
+                this->v.push_back(vertex);
+                this->adj.push_back(a);
+                this->adj[2*k + 1].push_back(vertex);
+            }
+        }
+    }
 }
 
 

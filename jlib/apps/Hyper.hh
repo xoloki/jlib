@@ -40,6 +40,8 @@ struct triple {
 template<typename T, typename Plot>
 class HyperPlot : public Plot {
 public:
+    enum Shape { CUBOID, PYRAMOID, SPHEROID };
+
     HyperPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h);
 
     virtual void change(uint n);
@@ -68,7 +70,7 @@ protected:
     vertex<T> eye; 
     vertex<T> center; 
     vertex<T> up; 
-
+    Shape shape;
 };
 
 template<typename T, typename Plot>
@@ -82,7 +84,8 @@ HyperPlot<T,Plot>::HyperPlot(uint n, std::vector< std::pair<T,T> > c, uint w, ui
       waiting(false),
       eye(n),
       center(n),
-      up(n)
+      up(n),
+      shape(CUBOID)
 {
     initialize(n);
 }
@@ -99,8 +102,24 @@ void HyperPlot<T,Plot>::initialize(uint n) {
     initialize_rotation(n);
     (*this) * matrix<T>::lookAt(n, eye, up, center);
 
-    cuboid<T> object(n);
-    add(object);
+    switch(shape) {
+    case CUBOID: {
+        cuboid<T> object(n);
+        add(object);
+        break;
+    } 
+    case PYRAMOID: {
+        pyramoid<T> object(n);
+        add(object);
+        break;
+    } 
+    case SPHEROID: {
+        spheroid<T> object(n);
+        add(object);
+        break;
+    } 
+    }
+
 }
 
 template<typename T, typename Plot>
@@ -188,6 +207,20 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
 
         r = nr;
         initialize_rotation(this->D);
+    } else if(key == 't' || key == 'g') {
+        int x = static_cast<int>(shape);
+
+        x += (key == 't' ? 1 : -1);
+
+        if(x > static_cast<int>(SPHEROID))
+            x = static_cast<int>(CUBOID);
+        else if(x < CUBOID) {
+            x = static_cast<int>(SPHEROID);
+        }
+
+        shape = static_cast<Shape>(x);
+
+        initialize(this->D);
     }
 }
 
