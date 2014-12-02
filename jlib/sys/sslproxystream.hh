@@ -77,7 +77,7 @@ namespace jlib {
                 }
                 else {
                     char_type* end = this->eback()+count;
-                    setg(this->eback(), this->eback(), end);
+                    this->setg(this->eback(), this->eback(), end);
                     
                     return traits_type::to_int_type(*this->gptr());
                 }
@@ -108,7 +108,7 @@ namespace jlib {
                     current += count;
                 }
                 
-                setp(this->pbase(), this->pbase()+BUF_SIZE);
+                this->setp(this->pbase(), this->pbase()+BUF_SIZE);
                 return 0;                
             }
 

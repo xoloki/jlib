@@ -124,7 +124,7 @@ void HyperPlot<T,Plot>::initialize(uint n) {
     }
 
     initialize_glazzies(n);
-    setClip(clip);
+    this->setClip(clip);
     change(n);
     
     initialize_rotation(n);
@@ -133,22 +133,22 @@ void HyperPlot<T,Plot>::initialize(uint n) {
     switch(shape) {
     case CUBOID: {
         cuboid<T> object(n);
-        add(object);
+        this->add(object);
         break;
     } 
     case PYRAMOID: {
         pyramoid<T> object(n);
-        add(object);
+        this->add(object);
         break;
     } 
     case STAROID: {
         staroid<T> object(n);
-        add(object);
+        this->add(object);
         break;
     } 
     case SPHEROID: {
         spheroid<T> object(n);
-        add(object);
+        this->add(object);
         break;
     } 
     }

@@ -173,7 +173,7 @@ namespace jlib {
                 std::cerr << "basic_databuf<charT,traitT>::sync()"<<std::endl;
 
             this->m_data.append(this->pbase(), this->pptr() - this->pbase());
-            setp(this->pbase(), this->pbase() + BUF_SIZE);
+            this->setp(this->pbase(), this->pbase() + BUF_SIZE);
 
             return 0;                
         }
@@ -273,7 +273,7 @@ namespace jlib {
             if(p < m_data.length()) {
                 char_type* c = const_cast<char_type*>(m_data.data())+static_cast<int>(p);
                 char_type* e = const_cast<char_type*>(m_data.data())+static_cast<int>(m_data.length());
-                setg(c, c, e);
+                this->setg(c, c, e);
                 this->m_pos = static_cast<pos_type>(m_data.length());
             }
             else {

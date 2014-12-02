@@ -185,15 +185,15 @@ namespace jlib {
         void basic_notebuf<charT,traitT>::set_note(std::string note) {
             m_note = note;
             
-            set_data(create_data(m_freq));
+            this->set_data(this->create_data(this->m_freq));
         }
 
         template< typename charT, typename traitT >
         inline
         void basic_notebuf<charT,traitT>::set_note(double freq) {
-            m_freq = freq;
+            this->m_freq = freq;
 
-            set_data(create_data(m_freq));
+            this->set_data(this->create_data(this->m_freq));
         }
 
         template< typename charT, typename traitT >
@@ -218,7 +218,7 @@ namespace jlib {
         inline
         void basic_notebuf<charT,traitT>::set_time(double time) {
             m_time = time;
-            set_data(create_data(m_freq));
+            this->set_data(this->create_data(this->m_freq));
         }
 
         template< typename charT, typename traitT >
@@ -229,7 +229,7 @@ namespace jlib {
             time = cycle_round / get_freq();
 
             m_time = time;
-            set_data(create_data(m_freq));
+            this->set_data(this->create_data(this->m_freq));
         }
 
         template< typename charT, typename traitT >
@@ -352,28 +352,28 @@ namespace jlib {
         inline
         void basic_notebuf<charT,traitT>::set_bits_per_sample(int s) {
             basic_streambuf<charT,traitT>::set_bits_per_sample(s);
-            set_data(create_data(m_freq));
+            this->set_data(this->create_data(this->m_freq));
         }
 
         template< typename charT, typename traitT >
         inline
         void basic_notebuf<charT,traitT>::set_channels(int s) {
             basic_streambuf<charT,traitT>::set_channels(s);
-            set_data(create_data(m_freq));
+            this->set_data(this->create_data(this->m_freq));
         }
 
         template< typename charT, typename traitT >
         inline
         void basic_notebuf<charT,traitT>::set_samples_per_sec(int s) {
             basic_streambuf<charT,traitT>::set_samples_per_sec(s);
-            set_data(create_data(m_freq));
+            this->set_data(this->create_data(this->m_freq));
         }
 
         template< typename charT, typename traitT >
         inline
         void basic_notebuf<charT,traitT>::set_format(int s) {
             basic_streambuf<charT,traitT>::set_format(s);
-            set_data(create_data(m_freq));
+            this->set_data(this->create_data(this->m_freq));
         }
 
 
