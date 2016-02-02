@@ -318,14 +318,14 @@ void HyperPlot<T,Plot>::initialize(uint n) {
     r = n - 1;
 
     initialize_glazzies(n);
-    setClip(clip);
+    this->setClip(clip);
     change(n);
     
     initialize_rotation(n);
     (*this) * matrix<T>::lookAt(n, eye, up, center);
 
     cuboid<T> object(n);
-    add(object);
+    this->add(object);
 }
 
 template<typename T, typename Plot>

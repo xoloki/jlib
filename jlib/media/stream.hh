@@ -201,10 +201,10 @@ namespace jlib {
         inline
         basic_streambuf<charT,traitT>::basic_streambuf() {
             m_get_buf = new char_type[BUF_SIZE];
-            setg(m_get_buf,m_get_buf,m_get_buf);
+            this->setg(m_get_buf,m_get_buf,m_get_buf);
             
             m_put_buf = new char_type[BUF_SIZE];
-            setp(m_put_buf,m_put_buf+BUF_SIZE);
+            this->setp(m_put_buf,m_put_buf+BUF_SIZE);
 
             m_eintr = false;
             m_length = pos_type(off_type(traits_type::eof()));
