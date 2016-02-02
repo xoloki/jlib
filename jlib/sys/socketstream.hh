@@ -68,10 +68,10 @@ namespace jlib {
                 char_type* tmp;
                 
                 tmp = new char_type[BUF_SIZE];
-                setg(tmp,tmp,tmp);
+                this->setg(tmp,tmp,tmp);
                 
                 tmp = new char_type[BUF_SIZE];
-                setp(tmp,tmp+BUF_SIZE);
+                this->setp(tmp,tmp+BUF_SIZE);
                 
                 //_M_mode = (std::ios_base::in | std::ios_base::out);
                 
@@ -112,7 +112,7 @@ namespace jlib {
                 }
                 else {
                     char_type* end = this->eback()+count;
-                    setg(this->eback(), this->eback(), end);
+                    this->setg(this->eback(), this->eback(), end);
                     
                     return traits_type::to_int_type(*this->gptr());
                 }
@@ -157,7 +157,7 @@ namespace jlib {
                     current += count;
                 }
                 
-                setp(this->pbase(), this->pbase()+BUF_SIZE);
+                this->setp(this->pbase(), this->pbase()+BUF_SIZE);
                 return 0;                
             }
 

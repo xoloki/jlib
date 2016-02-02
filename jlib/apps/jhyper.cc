@@ -26,6 +26,8 @@
 
 #include <jlib/x/Plot.hh>
 
+#include <jlib/util/util.hh>
+
 using namespace jlib::math;
 
 const long double PI = 3.14159265358979323846264338;
@@ -121,6 +123,10 @@ void HyperPlot::draw() {
     i = 0;
 
     jlib::x::Plot<T>::draw();
+
+    this->set_foreground(1, 1, 1);
+    this->move(5, 5);
+    this->draw_string("N="+jlib::util::string_value(this->D));
 
     if(first) first = false;
 }

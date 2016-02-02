@@ -27,11 +27,13 @@ jjoy2xev_LDADD = $(top_builddir)/jlib/x/libjx.la \
 
 jhyper_SOURCES = jhyper.cc
 jhyper_LDADD = $(top_builddir)/jlib/x/libjx.la \
-	$(top_builddir)/jlib/x/libjx.la
+	$(top_builddir)/jlib/x/libjx.la \
+	$(top_builddir)/jlib/util/libjutil.la
 
 jglxhyper_SOURCES = jglxhyper.cc Hyper.hh
 jglxhyper_LDADD = $(top_builddir)/jlib/glx/libjglx.la  \
-	$(top_builddir)/jlib/x/libjx.la
+	$(top_builddir)/jlib/x/libjx.la \
+	$(top_builddir)/jlib/util/libjutil.la
 
 jgluthyper_SOURCES = jgluthyper.cc
 jgluthyper_LDADD = $(top_builddir)/jlib/glut/libjglut.la 

@@ -26,7 +26,7 @@
 #include <unistd.h>
 
 
-typedef double T;
+typedef float T;
 typedef jlib::glx::Plot<T> PlotType;
 
 

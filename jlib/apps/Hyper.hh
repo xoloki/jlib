@@ -22,6 +22,7 @@
 #define JLIB_APPS_HYPER_HH
 
 #include <jlib/math/math.hh>
+#include <jlib/util/util.hh>
 
 #include <cstdlib>
 
@@ -162,6 +163,11 @@ void HyperPlot<T,Plot>::draw() {
 
     Plot::draw();
 
+    this->set_foreground(1, 1, 1);
+    this->move(5, 5);
+    this->draw_string("N="+util::string_value(this->D)+" R="+util::string_value(this->r));
+    this->flush();
+
     if(first) first = false;
 }
 
@@ -180,7 +186,7 @@ void HyperPlot<T,Plot>::draw_point(std::pair<uint,uint> point) {
     if(first) {
         triple<T> color; color.r = 0; color.b = 0; color.g = 0;
 
-        const T MIN = 0.666;
+        const T MIN = 1.5;
         while(color.r + color.b + color.g < MIN) {
             color.r = static_cast<T>(std::rand() % 256) / 255.0;
             color.g = static_cast<T>(std::rand() % 256) / 255.0;
@@ -201,7 +207,7 @@ void HyperPlot<T,Plot>::draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> 
     triple<T> color = colors[i-1];
     //set_foreground(color.r, color.g, color.b);
     GLfloat fcolors[4];
-    fcolors[0] = color.r; fcolors[1] = color.g; fcolors[2] = color.b; fcolors[3] = 1.0;
+    fcolors[0] = color.r; fcolors[1] = color.g; fcolors[2] = color.b; fcolors[3] = 0.5;
     glColor3fv(fcolors);
     glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, fcolors);
 
