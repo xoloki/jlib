@@ -21,6 +21,7 @@
 
 #include <jlib/glx/Plot.hh>
 #include <jlib/apps/Hyper.hh>
+#include <jlib/util/util.hh>
 
 #include <iostream>
 #include <unistd.h>
@@ -38,6 +39,13 @@ public:
         key_press.connect(sigc::mem_fun(this, &GLXPlot::key_pressed));
         button_press.connect(sigc::mem_fun(this, &GLXPlot::button_pressed));
         timeout.connect(sigc::mem_fun(this, &GLXPlot::on_timeout));
+    }
+
+    void set_color(const triple<T>& color) {
+        GLfloat fcolors[4];
+        fcolors[0] = color.r; fcolors[1] = color.g; fcolors[2] = color.b; fcolors[3] = 0.5;
+        glColor3fv(fcolors);
+        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, fcolors);
     }
 
     void key_pressed(std::string key, int x, int y) {

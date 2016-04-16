@@ -32,10 +32,11 @@ jhyper_LDADD = $(top_builddir)/jlib/x/libjx.la \
 
 jglxhyper_SOURCES = jglxhyper.cc Hyper.hh
 jglxhyper_LDADD = $(top_builddir)/jlib/glx/libjglx.la  \
+	$(top_builddir)/jlib/x/libjx.la  \
 	$(top_builddir)/jlib/util/libjutil.la -lGL -lGLU
 
 jgluthyper_SOURCES = jgluthyper.cc
-jgluthyper_LDADD = $(top_builddir)/jlib/glut/libjglut.la -lGL -lGLU -lglut
+jgluthyper_LDADD = $(top_builddir)/jlib/x/libjx.la $(top_builddir)/jlib/glut/libjglut.la -lGL -lGLU -lglut
 
 jhardhyper_SOURCES = jhardhyper.cc
 jhardhyper_LDADD = $(top_builddir)/jlib/glut/libjglut.la -lGL -lGLU -lglut

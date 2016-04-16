@@ -37,6 +37,13 @@ public:
         glut::Main::idle.connect(sigc::mem_fun(this, &GLUTPlot::on_timeout));
     }
 
+    void set_color(const triple<T>& color) {
+        GLfloat fcolors[4];
+        fcolors[0] = color.r; fcolors[1] = color.g; fcolors[2] = color.b; fcolors[3] = 0.5;
+        glColor3fv(fcolors);
+        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, fcolors);
+    }
+
     void on_timeout() {
         HyperPlot<T, PlotType>::on_timeout();
         

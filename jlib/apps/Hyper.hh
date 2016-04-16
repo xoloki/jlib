@@ -49,6 +49,7 @@ public:
     virtual void draw();
     virtual void draw_point(std::pair<uint,uint> point);
     virtual void draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2);
+    virtual void set_color(const triple<T>& color) = 0;
 
     void key_pressed(unsigned char key,int x,int y);
     void button_pressed(int button, int state, int x, int y);
@@ -163,11 +164,6 @@ void HyperPlot<T,Plot>::draw() {
 
     Plot::draw();
 
-    this->set_foreground(1, 1, 1);
-    this->move(5, 5);
-    this->draw_string("N="+util::string_value(this->D)+" R="+util::string_value(this->r));
-    this->flush();
-
     if(first) first = false;
 }
 
@@ -206,10 +202,8 @@ inline
 void HyperPlot<T,Plot>::draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2) {
     triple<T> color = colors[i-1];
     //set_foreground(color.r, color.g, color.b);
-    GLfloat fcolors[4];
-    fcolors[0] = color.r; fcolors[1] = color.g; fcolors[2] = color.b; fcolors[3] = 0.5;
-    glColor3fv(fcolors);
-    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, fcolors);
+
+    this->set_color(color);
 
     std::pair<uint,uint> mid; 
     mid.first = (p1.first + p2.first) / 2;
