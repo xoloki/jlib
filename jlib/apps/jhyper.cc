@@ -83,6 +83,7 @@ int main(int argc, char** argv) {
     try {
         XPlot plot(D, std::vector< std::pair<T,T> >(), 700, 700);
 
+        plot.set_timeout(5000);
         plot.run();
     }
     catch(std::exception& e) {
