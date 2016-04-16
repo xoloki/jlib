@@ -37,8 +37,11 @@ typedef jlib::x::Plot<T> PlotType;
 class XPlot : public HyperPlot<T, PlotType> {
 public:
     XPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
-        : HyperPlot<T, PlotType>(n, c, w, h)
+        : HyperPlot<T, PlotType>(n, c, w, h),
+          m_timeout(5000)
     {
+        set_timeout(m_timeout);
+
         key_press.connect(sigc::mem_fun(this, &XPlot::key_pressed));
         button_press.connect(sigc::mem_fun(this, &XPlot::button_pressed));
         timeout.connect(sigc::mem_fun(this, &XPlot::on_timeout));
@@ -51,7 +54,7 @@ public:
         
         this->set_foreground(255, 255, 255);
         this->move(25, 25);
-        this->draw_string("N=" + jlib::util::string_value(this->D) + " R=" + util::string_value(this->r));
+        this->draw_string("N=" + jlib::util::string_value(this->D) + " R=" + util::string_value(this->r) + " T=" + util::string_value((int)this->m_timeout)+"us");
         
         if(first) first = false;
     }
@@ -62,6 +65,11 @@ public:
     
     void key_pressed(std::string key, int x, int y) {
         HyperPlot<T, PlotType>::key_pressed(key[0], x, y);
+
+        if(key == "y" || key == "h") {
+            m_timeout += (key == "y" ? 100 : -100);
+            set_timeout(m_timeout);
+        }
     }
 
     void button_pressed(int button, int x, int y) {
@@ -72,6 +80,8 @@ public:
         HyperPlot<T, PlotType>::on_timeout();
         this->draw();
     }
+
+    long m_timeout;
 };
 
 int main(int argc, char** argv) {
@@ -83,7 +93,6 @@ int main(int argc, char** argv) {
     try {
         XPlot plot(D, std::vector< std::pair<T,T> >(), 700, 700);
 
-        plot.set_timeout(5000);
         plot.run();
     }
     catch(std::exception& e) {
