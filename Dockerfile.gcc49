@@ -1,0 +1,15 @@
+############################################################
+# Dockerfile to build jlib for gcc:4.9
+# Based on Ubuntu Image
+############################################################
+
+# Set the base image to use to gcc:4.9
+FROM gcc:4.9
+
+# Set the file maintainer
+MAINTAINER Joey Yandle
+
+RUN apt-get update
+RUN apt-get install -y pkg-config libsigc++-2.0-dev libglibmm-2.4-dev libgpgme11-dev libx11-dev freeglut3-dev
+
+ENTRYPOINT /bin/bash
