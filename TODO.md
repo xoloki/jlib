@@ -10,3 +10,5 @@ CODE
 ----
 Start moving away from libsigc++ in favor of std::function et alia.  jlib/apps/jlib-mail.cc is a good place to start.
 
+Verify certs in SSL code.
+
