@@ -173,10 +173,10 @@ namespace jlib {
                 
                 if(getenv("JLIB_MAIL_GLOB_TEXT"))
                     std::cout << e.get_globbed_text() << std::endl;
-                else if(getenv("JLIB_MAIL_PRIMARY_TEXT"))
-                    std::cout << e.get_primary_text() << std::endl;
-                else
+                else if(getenv("JLIB_MAIL_RAW_TEXT"))
                     std::cout << e.data() << std::endl;
+                else
+                    std::cout << e.get_primary_text() << std::endl;
             }
 
          
