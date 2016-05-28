@@ -2,7 +2,7 @@ STYLE
 -----
 Remove excess indentation.  Don't indent for namespace.
 
-Add spaces around '=', ',', etc.
+Add spaces around '=', ',', '<<', etc.
 
 Remove internal jlib:: tokens in .cc files.  Everything should be under that namespace anyway.
 
