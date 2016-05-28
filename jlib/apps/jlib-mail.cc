@@ -35,6 +35,7 @@
 #include <iostream>
 #include <exception>
 #include <sstream>
+#include <cstdlib>
 
 #define CATCH_EXCEPTIONS 1
 
@@ -146,6 +147,10 @@ namespace jlib {
                     delete m_folder;
                     m_folder = 0;
                 }
+
+                std::string prompt = "Enter password for " + s + "> ";
+                char* pass = ::getpass(prompt.c_str());
+                url.set_pass(pass);
 
                 if(jlib::util::lower(url.get_protocol()).find("imap") != std::string::npos) {
                     m_folder = new jlib::net::Imap4Folder(url);
