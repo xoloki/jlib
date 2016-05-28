@@ -38,7 +38,7 @@ class XPlot : public HyperPlot<T, PlotType> {
 public:
     XPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
         : HyperPlot<T, PlotType>(n, c, w, h),
-          m_timeout(5000)
+          m_timeout(10000)
     {
         set_timeout(m_timeout);
 

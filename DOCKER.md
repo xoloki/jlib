@@ -4,10 +4,10 @@ To build using docker, first install latest docker. Then do the following:
 ln -s Dockerfile.gcc49 Dockerfile
 
 # build the container
-sudo docker build -t jlib-build:4.9 .
+sudo docker build -t jlib-build:gcc49 .
 
 # run the container
-sudo docker run -tiv /home/dragon/src/jlib:/src/jlib jlib-build:4.9
+sudo docker run -tiv `pwd`:/src/jlib jlib-build:gcc49
 
 # from inside the container
 cd /src/jlib
