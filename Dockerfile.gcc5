@@ -14,5 +14,7 @@ RUN apt install -y gcc-5 g++-5
 RUN apt install -y pkg-config libsigc++-2.0-dev libglibmm-2.4-dev libgpgme11-dev libx11-dev freeglut3-dev 
 RUN apt install -y pkg-config autoconf automake libtool autotools-dev autoconf-archive
 RUN apt install -y libssl-dev
+RUN apt install -y libmagick++-dev
+RUN apt install -y gdb
 
 ENTRYPOINT /bin/bash

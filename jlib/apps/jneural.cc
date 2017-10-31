@@ -8,6 +8,8 @@
 
 #include <cmath>
 
+#include <Magick++.h>
+
 namespace jlib {
 namespace ml {
 
@@ -131,10 +133,6 @@ int main(int argc, char** argv) {
 	testing_file = argv[2];
     }
   
-    //jlib::sys::Directory dir("mnist_dataset");
-    //std::vector<std::string> files = dir.list_files();
-
-    //for(std::string file : files) {
     std::cout << "Opening " << training_file << std::endl;
     uint epochs = 5;
     for(uint e = 0; e < epochs; e++) {
@@ -208,6 +206,48 @@ int main(int argc, char** argv) {
 		correct++;
 	}
 
+    }
+
+    jlib::sys::Directory dir("my_own_images");
+    std::vector<std::string> files = dir.list_files();
+
+    for(std::string file : files) {
+	if(jlib::util::begins(file, "joey-")) {
+	    try {
+	    std::cout << "Opening " << file << std::endl;
+	    std::string nstr = file.substr(5, 1);
+	    int n = jlib::util::int_value(nstr);
+
+	    Magick::Image image(dir.get_path() + "/" + file);
+	    matrix<double> input(image.rows()*image.columns(), 1);
+	    for(uint y = 0; y < image.rows(); y++) {
+		for(uint x = 0; x < image.columns(); x++) {
+		    Magick::Color color = image.pixelColor(x, y);
+		    input(y*image.columns() + x, 0) = ((65535 - color.intensity()) / 65535.0) * 0.99 + 0.01;
+		    //std::cout << "Setting color intensity to " << input(y*image.columns() + x, 0) << std::endl;
+		}
+	    }
+
+	    matrix<double> output = nn.query(input);
+
+	    double max = output(0, 0);
+	    uint x = 0;
+	    for(uint i = 1; i < output.M; i++) {
+		if(output(i, 0) > max) {
+		    max = output(i, 0);
+		    x = i;
+		}
+	    }
+      
+	    std::cout << "Expected " << n << " got " << x << " (" << (100*max) << "%)" << std::endl;
+	    if(n != x)
+		std::cout << output << std::endl;
+
+	    
+	    } catch(...) {
+		std::cerr << "Caught exception" << std::endl;
+	    }
+	}
     }
 
     double ratio = correct / double(count);

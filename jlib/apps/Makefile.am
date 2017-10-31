@@ -59,4 +59,6 @@ jnote_LDADD = $(top_builddir)/jlib/media/libjmedia.la \
 	$(top_builddir)/jlib/sys/libjsys.la
 
 jneural_SOURCES = jneural.cc
-jneural_LDADD = $(top_builddir)/jlib/util/libjutil.la
+jneural_LDADD = $(top_builddir)/jlib/util/libjutil.la \
+	$(top_builddir)/jlib/sys/libjsys.la
+

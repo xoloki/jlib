@@ -36,8 +36,11 @@ namespace jlib {
                 m_name = "/";
             }
             else {
-                int i = m_path.find_last_of("/");
-                m_name = m_path.substr(i);
+		std::string::size_type i = m_path.find_last_of("/");
+		if(i != std::string::npos)
+		    m_name = m_path.substr(i);
+		else
+		    m_name = m_path;
             }
         }
         
