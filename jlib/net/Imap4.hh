@@ -27,8 +27,6 @@
 #include <jlib/util/URL.hh>
 #include <jlib/net/Email.hh>
 
-#include <sigc++/object.h>
-
 #include <vector>
 #include <map>
 

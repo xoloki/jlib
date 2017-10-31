@@ -23,7 +23,7 @@
 
 #include <jlib/net/Email.hh>
 
-#include <sigc++/object.h>
+#include <sigc++/trackable.h>
 
 #include <string>
 #include <iostream>

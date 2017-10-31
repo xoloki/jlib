@@ -1,0 +1,18 @@
+############################################################
+# Dockerfile to build jlib for gcc:4.9
+# Based on Ubuntu Image
+############################################################
+
+# Set the base image to use to gcc:4.9
+FROM ubuntu:16.04
+
+# Set the file maintainer
+MAINTAINER Joey Yandle
+
+RUN apt update
+RUN apt install -y gcc-5 g++-5
+RUN apt install -y pkg-config libsigc++-2.0-dev libglibmm-2.4-dev libgpgme11-dev libx11-dev freeglut3-dev 
+RUN apt install -y pkg-config autoconf automake libtool autotools-dev autoconf-archive
+RUN apt install -y libssl-dev
+
+ENTRYPOINT /bin/bash

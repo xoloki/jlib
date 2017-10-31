@@ -31,6 +31,7 @@
 #include <list>
 #include <string>
 #include <sstream>
+#include <functional>
 
 #include <cmath>
 #include <cstdarg>
@@ -56,6 +57,18 @@ public:
 
     class mismatch : public std::exception {};
     class singular : public std::exception {};
+    class mismatched : public std::runtime_error {
+    public:
+	mismatched(uint ar, uint ac, uint br, uint bc)
+	    : std::runtime_error(format(ar, ac, br, bc))
+	{}
+
+	static std::string format(uint ar, uint ac, uint br, uint bc) {
+	    std::ostringstream o;
+	    o << "mismatch matricies [" << ar << "," << ac << "], [" << br << "," << bc << "]";
+	    return o.str();
+	}
+    };
 
     matrix(uint rows, uint cols);
     matrix(uint rows, uint cols, const matrix<T>& m, uint roff, uint coff);
@@ -64,10 +77,17 @@ public:
     const T& operator()(uint r, uint c) const;
 
     matrix<T>& operator*=(const matrix<T>& m);
-
+    matrix<T>& operator+=(const matrix<T>& m);
+    matrix<T>& operator-=(const matrix<T>& m);
+    
     operator buffer<T>();
     operator const buffer<T>() const;
 
+    matrix<T> transpose() const;
+
+    void foreach(std::function<void (T&)> handler);
+    void foreach_index(std::function<void (uint r, uint c, T&)> handler);
+    
     //matrix<T> row(uint i) const;
     //matrix<T> col(uint i) const;
 
@@ -97,11 +117,16 @@ protected:
     // use buffer in column-major mode so we can pass data off to GL without copying
     // also, this lets us represent a column vector simply
     buffer<T> rep;
+
+    bool transposed = false;
 };
 
 
 template<typename T>    
 matrix<T> operator*(const matrix<T>& a, const matrix<T>& b);
+
+template<typename T>    
+matrix<T> operator^(const matrix<T>& a, const matrix<T>& b);
 
 template<typename T>    
 matrix<T> strassen(const matrix<T>& a, const matrix<T>& b);
@@ -110,7 +135,25 @@ template<typename T>
 matrix<T> operator*(const matrix<T>& a, const T& b);
 
 template<typename T>    
+matrix<T> operator*(const T& b, const matrix<T>& a);
+
+template<typename T>    
+matrix<T> operator+(const matrix<T>& a, const T& b);
+
+template<typename T>    
+matrix<T> operator+(const T& b, const matrix<T>& a);
+
+template<typename T>    
+matrix<T> operator-(const matrix<T>& a, const T& b);
+
+template<typename T>    
+matrix<T> operator-(const T& b, const matrix<T>& a);
+
+template<typename T>    
 matrix<T> operator+(const matrix<T>& a, const matrix<T>& b);
+
+template<typename T>    
+matrix<T> operator-(const matrix<T>& a, const matrix<T>& b);
 
 template<typename T>    
 bool operator==(const matrix<T>& a, const matrix<T>& b);
@@ -219,7 +262,7 @@ template<typename T>
 inline
 matrix<T> operator*(const matrix<T>& a, const matrix<T>& b) {
     if(a.N != b.M)
-        throw typename matrix<T>::mismatch();
+        throw typename matrix<T>::mismatched(a.M, a.N, b.M, b.N);
     
     matrix<T> ret(a.M, b.N);
     
@@ -239,6 +282,23 @@ matrix<T> operator*(const matrix<T>& a, const matrix<T>& b) {
 
 template<typename T>    
 inline
+matrix<T> operator^(const matrix<T>& a, const matrix<T>& b) {
+    if(a.M != b.M || a.N != b.N)
+        throw typename matrix<T>::mismatched(a.M, a.N, b.M, b.N);
+    
+    matrix<T> ret(a.M, b.N);
+    
+    for(uint j = 0; j < b.N; j++) {
+        for(uint i = 0; i < a.M; i++) {
+            ret(i,j) = a(i, j) * b(i, j);
+        }
+    }
+
+    return ret;
+}
+
+template<typename T>    
+inline
 matrix<T> strassen(const matrix<T>& a, const matrix<T>& b) {
     
 }
@@ -247,10 +307,72 @@ matrix<T> strassen(const matrix<T>& a, const matrix<T>& b) {
 template<typename T>    
 inline
 matrix<T> operator*(const matrix<T>& a, const T& b) {
-    matrix<T> ret = a;
+    matrix<T> ret(a.M, a.N);
     for(uint i = 0; i < a.M; i++) {
         for(uint j = 0; j < a.N; j++) {
-            ret(i,j) *= b;
+            ret(i,j) = a(i, j) * b;
+        }
+    }
+    return ret;
+}
+
+template<typename T>    
+inline
+matrix<T> operator*(const T& b, const matrix<T>& a) {
+    matrix<T> ret(a.M, a.N);
+    for(uint i = 0; i < a.M; i++) {
+        for(uint j = 0; j < a.N; j++) {
+            ret(i,j) = a(i, j) * b;
+        }
+    }
+    return ret;
+}
+
+
+template<typename T>    
+inline
+matrix<T> operator+(const matrix<T>& a, const T& b) {
+    matrix<T> ret(a.M, a.N);
+    for(uint i = 0; i < a.M; i++) {
+        for(uint j = 0; j < a.N; j++) {
+            ret(i,j) = a(i, j) + b;
+        }
+    }
+    return ret;
+}
+
+template<typename T>    
+inline
+matrix<T> operator+(const T& b, const matrix<T>& a) {
+    matrix<T> ret(a.M, a.N);
+    for(uint i = 0; i < a.M; i++) {
+        for(uint j = 0; j < a.N; j++) {
+            ret(i,j) = a(i, j) + b;
+        }
+    }
+    return ret;
+}
+
+
+template<typename T>    
+inline
+matrix<T> operator-(const matrix<T>& a, const T& b) {
+    matrix<T> ret(a.M, a.N);
+    for(uint i = 0; i < a.M; i++) {
+        for(uint j = 0; j < a.N; j++) {
+            ret(i,j) = a(i, j) - b;
+        }
+    }
+    return ret;
+}
+
+template<typename T>    
+inline
+matrix<T> operator-(const T& b, const matrix<T>& a) {
+    matrix<T> ret(a.M, a.N);
+    for(uint i = 0; i < a.M; i++) {
+        for(uint j = 0; j < a.N; j++) {
+            ret(i,j) = b - a(i, j);
         }
     }
     return ret;
@@ -263,10 +385,26 @@ matrix<T> operator+(const matrix<T>& a, const matrix<T>& b) {
     if(a.M != b.M || a.N != b.N)
         throw matrix<T>::mismatch();
 
+    matrix<T> ret(a.M, a.N);
+    for(uint i = 0; i < a.M; i++) {
+        for(uint j = 0; j < a.N; j++) {
+            ret(i,j) = a(i, j) + b(i, j);
+        }
+    }
+    return ret;    
+}
+
+
+template<typename T>    
+inline
+matrix<T> operator-(const matrix<T>& a, const matrix<T>& b) {
+    if(a.M != b.M || a.N != b.N)
+        throw typename matrix<T>::mismatch();
+
     matrix<T> ret = a;
     for(uint i = 0; i < a.M; i++) {
         for(uint j = 0; j < a.N; j++) {
-            ret(i,j) += b[i][j];
+	    ret(i,j) = a(i, j) - b(i, j);
         }
     }
     return ret;    
@@ -376,15 +514,41 @@ matrix<T>::matrix(uint rows, uint cols, const matrix<T>& m, uint roff, uint coff
 
 template<typename T>
 inline
+void matrix<T>::foreach(std::function<void (T&)> handler) {
+    for(uint i = 0; i < this->M; i++) {
+        for(uint j = 0; j < this->N; j++) {
+            handler((*this)(i,j));
+        }
+    }
+}
+    
+template<typename T>
+inline
+void matrix<T>::foreach_index(std::function<void (uint,uint,T&)> handler) {
+    for(uint i = 0; i < this->M; i++) {
+        for(uint j = 0; j < this->N; j++) {
+            handler(i, j, (*this)(i,j));
+        }
+    }
+}
+    
+template<typename T>
+inline
 T& matrix<T>::operator()(uint r, uint c) {
-    return rep[c * M + r];
+    if(!transposed)
+	return rep[c * M + r];
+    else
+	return rep[r * N + c];
 }
 
 
 template<typename T>
 inline
 const T& matrix<T>::operator()(uint r, uint c) const {
-    return rep[c * M + r];
+    if(!transposed)
+	return rep[c * M + r];
+    else
+	return rep[r * N + c];
 }
 
 
@@ -395,6 +559,37 @@ matrix<T>& matrix<T>::operator*=(const matrix<T>& m) {
     return *this;
 }
 
+template<typename T>    
+inline
+matrix<T>& matrix<T>::operator+=(const matrix<T>& b) {
+    if(this->M != b.M || this->N != b.N)
+        throw typename matrix<T>::mismatch();
+
+    matrix<T>& ret = *this;
+    for(uint i = 0; i < this->M; i++) {
+        for(uint j = 0; j < this->N; j++) {
+            ret(i,j) += b(i, j);
+        }
+    }
+    
+    return ret;    
+}
+
+
+template<typename T>    
+inline
+matrix<T>& matrix<T>::operator-=(const matrix<T>& b) {
+    if(this->M != b.M || this->N != b.N)
+        throw typename matrix<T>::mismatch();
+
+    matrix<T>& ret = *this;
+    for(uint i = 0; i < this->M; i++) {
+        for(uint j = 0; j < this->N; j++) {
+	    ret(i,j) -= b(i, j);
+        }
+    }
+    return ret;    
+}
 
 template<typename T>
 inline
@@ -409,7 +604,18 @@ matrix<T>::operator const buffer<T>() const {
     return rep;
 }
 
-    /*
+template<typename T>
+inline
+matrix<T> matrix<T>::transpose() const {
+    matrix<T> ret(N, M);
+
+    ret.rep = rep;
+    ret.transposed = !transposed;
+
+    return ret;
+}
+
+/*
 template<typename T>
 inline
 std::vector<T> matrix<T>::row(uint x) const {

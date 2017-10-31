@@ -29,6 +29,8 @@ using jlib::math::matrix;
 using jlib::math::cuboid;
 using jlib::math::vertex;
 using jlib::util::tokenize;
+using jlib::util::int_value;
+using jlib::util::double_value;
 
 int main(int argc, char** argv) {
     std::string ss[] = {
@@ -116,7 +118,18 @@ int main(int argc, char** argv) {
         std::cout << tp4 << std::endl << std::endl;
         
         cuboid<double> square(2);
-        
+
+	matrix<int> reg(3, 1);
+
+	reg(0, 0) = 0;
+	reg(1, 0) = 1;
+	reg(2, 0) = 2;
+	
+	matrix<int> trans = reg.transpose();
+
+	std::cout << reg << std::endl;
+	std::cout << trans << std::endl;
+	
     } catch (matrix<int>::mismatch) {
         std::cerr << "matrices are mismatched" << std::endl;
         return 1;
