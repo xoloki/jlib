@@ -122,6 +122,7 @@ int main(int argc, char** argv) {
     const int INODES = 784;
     std::string training_file = "mnist_dataset/mnist_train_full.csv";
     std::string testing_file = "mnist_dataset/mnist_test_full.csv";
+    uint epochs = 5;
 
     jlib::ml::NeuralNetwork<double> nn(INODES, HNODES, ONODES, 0.1);
 
@@ -132,40 +133,43 @@ int main(int argc, char** argv) {
     if(argc > 2) {
 	testing_file = argv[2];
     }
+
+    if(argc > 3) {
+	epochs = jlib::util::int_value(argv[3]);
+    }
   
     std::cout << "Opening " << training_file << std::endl;
-    uint epochs = 5;
     for(uint e = 0; e < epochs; e++) {
 	std::cout << "Training epoch " << e << std::endl;
-    std::ifstream ifs(training_file);
-    while(ifs) {
-	std::string line;
-	std::getline(ifs, line);
-	if(ifs) {
-	    std::vector<std::string> inlist = jlib::util::tokenize(line, ",");
-	    int size = inlist.size() - 1;
+	std::ifstream ifs(training_file);
+	while(ifs) {
+	    std::string line;
+	    std::getline(ifs, line);
+	    if(ifs) {
+		std::vector<std::string> inlist = jlib::util::tokenize(line, ",");
+		int size = inlist.size() - 1;
   
-	    //std::cout << "Got " << size << " elements" << std::endl;
+		//std::cout << "Got " << size << " elements" << std::endl;
       
-	    int label = jlib::util::int_value(inlist.front());
-	    matrix<double> input(size, 1);
+		int label = jlib::util::int_value(inlist.front());
+		matrix<double> input(size, 1);
       
-	    for(std::size_t i = 0; i < size; i++) {
-		input(i, 0) = ((jlib::util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
+		for(std::size_t i = 0; i < size; i++) {
+		    input(i, 0) = ((jlib::util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
+		}
+      
+		matrix<double> target(ONODES, 1);
+		for(int i = 0; i < ONODES; i++) {
+		    if(i == label)
+			target(i, 0) = 0.99;
+		    else
+			target(i, 0) = 0.01;
+		}
+      
+		nn.train(input, target);
 	    }
-      
-	    matrix<double> target(ONODES, 1);
-	    for(int i = 0; i < ONODES; i++) {
-		if(i == label)
-		    target(i, 0) = 0.99;
-		else
-		    target(i, 0) = 0.01;
-	    }
-      
-	    nn.train(input, target);
 	}
-    }
-    ifs.close();
+	ifs.close();
     }
   
     std::cout << "Opening " << testing_file << std::endl;
@@ -210,7 +214,8 @@ int main(int argc, char** argv) {
 
     jlib::sys::Directory dir("my_own_images");
     std::vector<std::string> files = dir.list_files();
-
+    
+    
     for(std::string file : files) {
 	if(jlib::util::begins(file, "joey-")) {
 	    try {
@@ -218,12 +223,55 @@ int main(int argc, char** argv) {
 	    std::string nstr = file.substr(5, 1);
 	    int n = jlib::util::int_value(nstr);
 
+	    using MagickCore::Quantum;
+	    const uint QMAX = QuantumRange;
+	    const uint SIZE = 28;
 	    Magick::Image image(dir.get_path() + "/" + file);
+
+	    uint rrem = image.rows() % SIZE;
+	    uint crem = image.columns() % SIZE;
+
+	    uint radd = (rrem == 0 ? 0 : SIZE - rrem);
+	    uint cadd = (crem == 0 ? 0 : SIZE - crem);
+
+	    uint nrow = image.rows() + radd;
+	    uint ncol = image.columns() + cadd;
+
+	    if(nrow != ncol) {
+		int diff = nrow - ncol;
+		if(diff > 0) {
+		    cadd += diff;
+		} else {
+		    radd -= diff;
+		}
+	    }
+	    
+	    if(radd != 0 || cadd != 0) {
+		Magick::Image icopy(image);
+		Magick::Image base(Magick::Geometry(image.columns() + cadd, image.rows() + radd), Magick::Color("white"));
+		base.composite(icopy, cadd/2, radd/2, Magick::OverCompositeOp);
+
+		std::cout << "Scaling image from " << image.rows() << "x" << image.columns() << " to " << base.rows() << "x" <<  base.columns() << std::endl;
+		
+		if(base.rows() != base.columns())
+		    std::cerr << "Not square!" << std::endl;
+
+		if(base.rows() % SIZE != 0)
+		    std::cerr << "Not SIZE aligned" << std::endl;
+		
+		uint scale = base.rows() / SIZE;
+		std::cout << "Scale down 1/" << scale << std::endl;
+
+		base.zoom(Magick::Geometry(SIZE, SIZE));
+
+		image = base;
+	    }
+	    
 	    matrix<double> input(image.rows()*image.columns(), 1);
 	    for(uint y = 0; y < image.rows(); y++) {
 		for(uint x = 0; x < image.columns(); x++) {
 		    Magick::Color color = image.pixelColor(x, y);
-		    input(y*image.columns() + x, 0) = ((65535 - color.intensity()) / 65535.0) * 0.99 + 0.01;
+		    input(y*image.columns() + x, 0) = ((QMAX - color.intensity()) / double(QMAX)) * 0.99 + 0.01;
 		    //std::cout << "Setting color intensity to " << input(y*image.columns() + x, 0) << std::endl;
 		}
 	    }
