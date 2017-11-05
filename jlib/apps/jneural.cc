@@ -1,5 +1,12 @@
+/* -*- mode: C++ c-basic-offset: 4  -*-
+ * 
+ * Copyright (c) 2017 Joey Yandle <xoloki@gmail.com>
+ * 
+ */
+
 #include <jlib/math/matrix.hh>
 #include <jlib/util/util.hh>
+#include <jlib/util/json.hh>
 #include <jlib/sys/Directory.hh>
 
 #include <functional>
@@ -16,6 +23,19 @@ namespace ml {
 template<typename T>
 class NeuralNetwork {
 public:
+    NeuralNetwork(util::json::object::ptr p)
+	: NeuralNetwork(p->get("ninput"), p->get("nhidden"), p->get("noutput"), p->get("lrate"))
+    {
+	m_wih.foreach_index([&](uint r, uint c, T& x) {
+		x = p->obj("wih")->get(r*m_ninput + c);
+	    });
+
+	
+	m_who.foreach_index([&](uint r, uint c, T& x) {
+		x = p->obj("who")->get(r*m_nhidden + c);
+	    });
+    }
+    
     NeuralNetwork(uint ninput, uint nhidden, uint noutput, double lrate)
 	: m_ninput(ninput),
 	  m_nhidden(nhidden),
@@ -76,6 +96,11 @@ public:
 	return final_outputs;
     }
 
+    util::json::object::ptr json() const {
+	util::json::object::ptr p = util::json::object::create();
+	return p;
+    }
+    
 protected:
     int m_ninput;
     int m_nhidden;
@@ -90,6 +115,7 @@ protected:
 }
 
 using namespace jlib;
+using namespace jlib::util;
 
 int main(int argc, char** argv) {
     const int HNODES = 200;
@@ -265,7 +291,6 @@ int main(int argc, char** argv) {
 	    std::cout << "Expected " << n << " got " << x << " (" << (100*max) << "%)" << std::endl;
 	    if(n != x)
 		std::cout << output << std::endl;
-
 	    
 	    } catch(std::exception& e) {
 		std::cerr << "Caught exception: " << e.what() << std::endl;
