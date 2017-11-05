@@ -292,6 +292,8 @@ int main(int argc, char** argv) {
 		std::cout << output << std::endl;
 
 	    
+	    } catch(std::exception& e) {
+		std::cerr << "Caught exception: " << e.what() << std::endl;
 	    } catch(...) {
 		std::cerr << "Caught exception" << std::endl;
 	    }
