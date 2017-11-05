@@ -8,6 +8,7 @@
 #include <jlib/util/util.hh>
 #include <jlib/util/json.hh>
 #include <jlib/sys/Directory.hh>
+#include <jlib/sys/sys.hh>
 
 #include <functional>
 #include <random>
@@ -96,8 +97,28 @@ public:
 	return final_outputs;
     }
 
-    util::json::object::ptr json() const {
+    //(p->get("ninput"), p->get("nhidden"), p->get("noutput"), p->get("lrate"))
+    
+    util::json::object::ptr json() {
 	util::json::object::ptr p = util::json::object::create();
+
+	p->add("ninput", m_ninput);
+	p->add("nhidden", m_nhidden);
+	p->add("noutput", m_noutput);
+	p->add("lrate", m_lrate);
+
+	util::json::array::ptr wih = util::json::array::create();
+	m_wih.foreach([&](T& x) {
+		wih->add(x);
+	    });
+	p->add("wih", wih);
+	
+	util::json::array::ptr who = util::json::array::create();
+	m_who.foreach([&](T& x) {
+		who->add(x);
+	    });
+	p->add("who", who);
+	
 	return p;
     }
     
@@ -140,37 +161,52 @@ int main(int argc, char** argv) {
     }
   
     std::cout << "Opening " << training_file << std::endl;
-    for(uint e = 0; e < epochs; e++) {
-	std::cout << "Training epoch " << e << std::endl;
-	std::ifstream ifs(training_file);
-	while(ifs) {
-	    std::string line;
-	    std::getline(ifs, line);
-	    if(ifs) {
-		std::vector<std::string> inlist = util::tokenize(line, ",");
-		int size = inlist.size() - 1;
-  
-		//std::cout << "Got " << size << " elements" << std::endl;
-      
-		int label = util::int_value(inlist.front());
-		math::matrix<double> input(size, 1);
-      
-		for(std::size_t i = 0; i < size; i++) {
-		    input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
+    if(ends(training_file, ".csv")) {
+	for(uint e = 0; e < epochs; e++) {
+	    std::cout << "Training epoch " << e << std::endl;
+	    std::ifstream ifs(training_file);
+	    while(ifs) {
+		std::string line;
+		std::getline(ifs, line);
+		if(ifs) {
+		    std::vector<std::string> inlist = util::tokenize(line, ",");
+		    int size = inlist.size() - 1;
+		    
+		    //std::cout << "Got " << size << " elements" << std::endl;
+		    
+		    int label = util::int_value(inlist.front());
+		    math::matrix<double> input(size, 1);
+		    
+		    for(std::size_t i = 0; i < size; i++) {
+			input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
+		    }
+		    
+		    math::matrix<double> target(ONODES, 1);
+		    for(int i = 0; i < ONODES; i++) {
+			if(i == label)
+			    target(i, 0) = 0.99;
+			else
+			    target(i, 0) = 0.01;
+		    }
+		    
+		    nn.train(input, target);
 		}
-      
-		math::matrix<double> target(ONODES, 1);
-		for(int i = 0; i < ONODES; i++) {
-		    if(i == label)
-			target(i, 0) = 0.99;
-		    else
-			target(i, 0) = 0.01;
-		}
-      
-		nn.train(input, target);
 	    }
+	    ifs.close();
 	}
-	ifs.close();
+
+	if(argc > 4) {
+	    std::string output_file = argv[4];
+	    json::object::ptr o = nn.json();
+	}
+	
+    } else {
+	std::string cache;
+	std::ifstream ifs(training_file);
+	sys::read(ifs, cache);
+
+	json::object::ptr o = json::object::create(cache);
+	
     }
   
     std::cout << "Opening " << testing_file << std::endl;
