@@ -51,45 +51,20 @@ public:
     }
 
     void train(math::matrix<T> inputs, math::matrix<T> targets) {
-	//std::cout << "m_wih[" << m_wih.M << "," << m_wih.N << "] \n" << m_wih << std::endl;
-	//std::cout << "inputs[" << inputs.M << "," << inputs.N << "] \n" << inputs << std::endl;
-	//std::cout << "targets[" << targets.M << "," << targets.N << "] \n" << targets << std::endl;
-
 	math::matrix<T> hidden_inputs = m_wih * inputs;
-	//std::cout << "hidden_inputs[" << hidden_inputs.M << "," << hidden_inputs.N << "] \n" << hidden_inputs << std::endl;
-
 	math::matrix<T> hidden_outputs = m_activation_function(hidden_inputs);
-	//std::cout << "hidden_outputs[" << hidden_outputs.M << "," << hidden_outputs.N << "] \n" << hidden_outputs << std::endl;
-
 	math::matrix<T> final_inputs = m_who * hidden_outputs;
 	math::matrix<T> final_outputs = m_activation_function(final_inputs);
 	//std::cout << "final_outputs[" << final_outputs.M << "," << final_outputs.N << "] \n" << final_outputs << std::endl;
     
-	// output layer error is the (target - actual)
 	math::matrix<T> output_errors = targets - final_outputs;
 	//std::cout << "output_errors[" << output_errors.M << "," << output_errors.N << "] \n" << output_errors << std::endl;
 
-	// hidden layer error is the output_errors, split by weights, recombined at hidden nodes
-	math::matrix<T> whoT = m_who.transpose();
-	math::matrix<T> hidden_errors = whoT * output_errors;
+	math::matrix<T> hidden_errors = m_who.transpose() * output_errors;
 	//std::cout << "hidden_errors[" << hidden_errors.M << "," << hidden_errors.N << "] \n" << hidden_errors << std::endl;
 
-	// update the weights for the links between the hidden and output layers
-	math::matrix<T> hoT = hidden_outputs.transpose();
-	m_who += m_lrate * (((output_errors ^ final_outputs ^ (1.0 - final_outputs)) * hoT));
-	/*
-	  m_who.foreach_index([&](uint k, uint j, T& v) {
-	  v += (m_lrate * ( output_errors(k, 0) * final_outputs(k, 0) * (1.0 - final_outputs(k, 0)) * hoT(0, j) ));
-	  });
-	*/
-	// update the weights for the links between the input and hidden layers
-	math::matrix<T> iT = inputs.transpose();
-	m_wih += m_lrate * ((hidden_errors ^ hidden_outputs ^ (1.0 - hidden_outputs)) * iT);
-	/*
-	  m_wih.foreach_index([&](uint k, uint j, T& v) {
-	  v += (m_lrate * ( hidden_errors(k, 0) * hidden_outputs(k, 0) * (1.0 - hidden_outputs(k, 0)) * iT(0, j) ));
-	  });
-	*/
+	m_who += m_lrate * (((output_errors ^ final_outputs ^ (1.0 - final_outputs)) * hidden_outputs.transpose()));
+	m_wih += m_lrate * ((hidden_errors ^ hidden_outputs ^ (1.0 - hidden_outputs)) * inputs.transpose());
     }
 
     math::matrix<T> query(math::matrix<T> inputs) {
@@ -114,7 +89,7 @@ protected:
 }
 }
 
-using jlib::math::matrix;
+using namespace jlib;
 
 int main(int argc, char** argv) {
     const int HNODES = 200;
@@ -124,7 +99,7 @@ int main(int argc, char** argv) {
     std::string testing_file = "mnist_dataset/mnist_test_full.csv";
     uint epochs = 5;
 
-    jlib::ml::NeuralNetwork<double> nn(INODES, HNODES, ONODES, 0.1);
+    ml::NeuralNetwork<double> nn(INODES, HNODES, ONODES, 0.1);
 
     if(argc > 1) {
 	training_file = argv[1];
@@ -135,7 +110,7 @@ int main(int argc, char** argv) {
     }
 
     if(argc > 3) {
-	epochs = jlib::util::int_value(argv[3]);
+	epochs = util::int_value(argv[3]);
     }
   
     std::cout << "Opening " << training_file << std::endl;
@@ -146,19 +121,19 @@ int main(int argc, char** argv) {
 	    std::string line;
 	    std::getline(ifs, line);
 	    if(ifs) {
-		std::vector<std::string> inlist = jlib::util::tokenize(line, ",");
+		std::vector<std::string> inlist = util::tokenize(line, ",");
 		int size = inlist.size() - 1;
   
 		//std::cout << "Got " << size << " elements" << std::endl;
       
-		int label = jlib::util::int_value(inlist.front());
-		matrix<double> input(size, 1);
+		int label = util::int_value(inlist.front());
+		math::matrix<double> input(size, 1);
       
 		for(std::size_t i = 0; i < size; i++) {
-		    input(i, 0) = ((jlib::util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
+		    input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
 		}
       
-		matrix<double> target(ONODES, 1);
+		math::matrix<double> target(ONODES, 1);
 		for(int i = 0; i < ONODES; i++) {
 		    if(i == label)
 			target(i, 0) = 0.99;
@@ -181,19 +156,19 @@ int main(int argc, char** argv) {
 	std::string line;
 	std::getline(tfs, line);
 	if(tfs) {
-	    std::vector<std::string> inlist = jlib::util::tokenize(line, ",");
+	    std::vector<std::string> inlist = util::tokenize(line, ",");
 	    int size = inlist.size() - 1;
   
 	    //std::cout << "Got " << size << " elements" << std::endl;
       
-	    int label = jlib::util::int_value(inlist.front());
-	    matrix<double> input(size, 1);
+	    int label = util::int_value(inlist.front());
+	    math::matrix<double> input(size, 1);
       
 	    for(std::size_t i = 0; i < size; i++) {
-		input(i, 0) = ((jlib::util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
+		input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
 	    }
 
-	    matrix<double> output = nn.query(input);
+	    math::matrix<double> output = nn.query(input);
 
 	    double max = output(0, 0);
 	    uint x = 0;
@@ -212,16 +187,16 @@ int main(int argc, char** argv) {
 
     }
 
-    jlib::sys::Directory dir("my_own_images");
+    sys::Directory dir("my_own_images");
     std::vector<std::string> files = dir.list_files();
     
     
     for(std::string file : files) {
-	if(jlib::util::begins(file, "joey-")) {
+	if(util::begins(file, "joey-")) {
 	    try {
 	    std::cout << "Opening " << file << std::endl;
 	    std::string nstr = file.substr(5, 1);
-	    int n = jlib::util::int_value(nstr);
+	    int n = util::int_value(nstr);
 
 	    using MagickCore::Quantum;
 	    const uint QMAX = QuantumRange;
@@ -267,7 +242,7 @@ int main(int argc, char** argv) {
 		image = base;
 	    }
 	    
-	    matrix<double> input(image.rows()*image.columns(), 1);
+	    math::matrix<double> input(image.rows()*image.columns(), 1);
 	    for(uint y = 0; y < image.rows(); y++) {
 		for(uint x = 0; x < image.columns(); x++) {
 		    Magick::Color color = image.pixelColor(x, y);
@@ -276,7 +251,7 @@ int main(int argc, char** argv) {
 		}
 	    }
 
-	    matrix<double> output = nn.query(input);
+	    math::matrix<double> output = nn.query(input);
 
 	    double max = output(0, 0);
 	    uint x = 0;
