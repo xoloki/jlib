@@ -40,8 +40,8 @@ protected:
     
 class object {
 public:
-    typedef boost::shared_ptr<object> ptr;
-    typedef boost::shared_ptr<array> arrayptr;
+    typedef std::shared_ptr<object> ptr;
+    typedef std::shared_ptr<array> arrayptr;
     
     static ptr create();
     static ptr create(std::string data);
@@ -82,7 +82,7 @@ private:
     
 class array {
 public:
-    typedef boost::shared_ptr<array> ptr;
+    typedef std::shared_ptr<array> ptr;
     
     static ptr create();
     static ptr create(std::string data);
