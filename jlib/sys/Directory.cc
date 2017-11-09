@@ -69,12 +69,12 @@ namespace jlib {
         
         
         std::vector<std::string> Directory::list_files(bool p_full_path) const {
-            std::vector<std::string> ret = list(static_cast<jlib::sys::file_type>(REGULAR));
+            std::vector<std::string> ret = list(static_cast<jlib::sys::file_type>(REGULAR), p_full_path);
             return ret;
         }
         
         std::vector<std::string> Directory::list_dirs(bool p_full_path) const {
-            std::vector<std::string> ret = list((jlib::sys::file_type)DIRECTORY);
+            std::vector<std::string> ret = list((jlib::sys::file_type)DIRECTORY, p_full_path);
             return ret;        
         }
         
