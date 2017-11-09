@@ -382,7 +382,7 @@ char convert(int n) {
     } else if(n < 36) {
 	return 'A' + (n - 10);
     } else {
-	return 'A' + (n - 36);
+	return 'a' + (n - 36);
     }
 }
 
