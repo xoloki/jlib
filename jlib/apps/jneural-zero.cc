@@ -197,15 +197,21 @@ int main(int argc, char** argv) {
         if(argc > 4) {
             std::string output_file = argv[4];
             json::object::ptr o = nn.json();
+            std::string str = o->str();
+            
+            std::cout << "Writing json output to " << output_file << std::endl;
+            
+            std::ofstream ofs(output_file);
+            ofs << str;
         }
-	
     } else {
         std::string cache;
         std::ifstream ifs(training_file);
         sys::read(ifs, cache);
 
         json::object::ptr o = json::object::create(cache);
-	
+
+        nn = ml::NeuralNetwork<double>(o);
     }
   
     std::cout << "Opening " << testing_file << std::endl;
