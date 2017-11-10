@@ -285,7 +285,7 @@ namespace jlib {
             return strtol(s.c_str(), NULL, base);
         }
         
-        double double_value(std::string s) { return double_value(s); }
+        double double_value(std::string s) { return doubleValue(s); }
         double doubleValue(std::string s) {
             return strtod(s.c_str(), NULL);
         }
