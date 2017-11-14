@@ -227,8 +227,11 @@ int main(int argc, char** argv) {
                 files[x] = tmp;
             }
                     
-            //auto samples = root.list_dirs(true);
-            //for(auto sample : samples) {
+	    math::matrix<double> target(ONODES, 1);
+	    target.foreach([&](T& val) {
+		    val = 0.01;
+		});
+	    
             for(int i = 0; i < files.size(); i++) {
                 std::string sample = files[i];
                 
@@ -249,29 +252,14 @@ int main(int argc, char** argv) {
                     continue;
                 
                 //std::cout << "Parsed label " << convert(n) << std::endl;
-                
-                math::matrix<double> target(ONODES, 1);
-                for(int i = 0; i < ONODES; i++) {
-                    if(i == n)
-                        target(i, 0) = 0.99;
-                    else
-                        target(i, 0) = 0.01;
-                }
-		    
+
+		target(n, 0) = 0.99;
+
                 math::matrix<T> input = load(sample, R, C);
-		    
                 nn.train(input, target);
+
+		target(n, 0) = 0.01;
             }
-        }
-	
-        if(!output_file.empty()) {
-            json::object::ptr o = nn.json();
-            std::string str = o->str();
-	    
-            std::cout << "Writing json output to " << output_file << std::endl;
-	    
-            std::ofstream ofs(output_file);
-            ofs << str;
         }
     }
 
@@ -308,58 +296,58 @@ int main(int argc, char** argv) {
             }
             ifs.close();
         }
-
-        if(!output_file.empty()) {
-            json::object::ptr o = nn.json();
-            std::string str = o->str();
-            
-            std::cout << "Writing json output to " << output_file << std::endl;
-            
-            std::ofstream ofs(output_file);
-            ofs << str;
-        }        
     }
 
+    if(!output_file.empty()) {
+	json::object::ptr o = nn.json();
+	std::string str = o->str();
+        
+	std::cout << "Writing json output to " << output_file << std::endl;
+        
+	std::ofstream ofs(output_file);
+	ofs << str;
+    }        
+    
     if(!test_mnist_path.empty()) {
         std::cout << "Opening " << test_mnist_path << std::endl;
 
-    uint count = 0, correct = 0;
+	uint count = 0, correct = 0;
   
-    std::ifstream tfs(test_mnist_path);
-    while(tfs) {
-        std::string line;
-        std::getline(tfs, line);
-        if(tfs) {
-            std::vector<std::string> inlist = util::tokenize(line, ",");
-            int size = inlist.size() - 1;
+	std::ifstream tfs(test_mnist_path);
+	while(tfs) {
+	    std::string line;
+	    std::getline(tfs, line);
+	    if(tfs) {
+		std::vector<std::string> inlist = util::tokenize(line, ",");
+		int size = inlist.size() - 1;
   
-            //std::cout << "Got " << size << " elements" << std::endl;
+		//std::cout << "Got " << size << " elements" << std::endl;
       
-            int label = util::int_value(inlist.front());
-            math::matrix<double> input(size, 1);
+		int label = util::int_value(inlist.front());
+		math::matrix<double> input(size, 1);
       
-            for(std::size_t i = 0; i < size; i++) {
-                input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
-            }
+		for(std::size_t i = 0; i < size; i++) {
+		    input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
+		}
 
-            math::matrix<double> output = nn.query(input);
+		math::matrix<double> output = nn.query(input);
 
-            double max = output(0, 0);
-            uint x = 0;
-            for(uint i = 1; i < output.M; i++) {
-                if(output(i, 0) > max) {
-                    max = output(i, 0);
-                    x = i;
-                }
-            }
+		double max = output(0, 0);
+		uint x = 0;
+		for(uint i = 1; i < output.M; i++) {
+		    if(output(i, 0) > max) {
+			max = output(i, 0);
+			x = i;
+		    }
+		}
       
-            //std::cout << "Expected " << label << " got " << x << std::endl;
-            count++;
-            if(label == x)
-                correct++;
-        }
+		//std::cout << "Expected " << label << " got " << x << std::endl;
+		count++;
+		if(label == x)
+		    correct++;
+	    }
 
-    }
+	}
 
         double ratio = correct / double(count);
         std::cout << "Got " << ratio * 100 << "% success rate" << std::endl;
