@@ -192,6 +192,18 @@ int main(int argc, char** argv) {
     int INODES = R*C;
     ml::NeuralNetwork<double> nn(INODES, HNODES, ONODES, train_rate);
     
+    if(!load_file.empty()) {
+        std::cout << "Loading json output from " << load_file << std::endl;
+
+        std::string cache;
+        std::ifstream ifs(load_file);
+        sys::read(ifs, cache);
+	
+        json::object::ptr o = json::object::create(cache);
+	
+        nn = ml::NeuralNetwork<double>(o);
+    }
+
     if(!train_path.empty()) {
         for(uint e = 0; e < epochs; e++) {
             std::cout << "Training epoch " << e << std::endl;
@@ -261,16 +273,6 @@ int main(int argc, char** argv) {
             std::ofstream ofs(output_file);
             ofs << str;
         }
-    } else if(!load_file.empty()) {
-        std::cout << "Loading json output from " << load_file << std::endl;
-
-        std::string cache;
-        std::ifstream ifs(load_file);
-        sys::read(ifs, cache);
-	
-        json::object::ptr o = json::object::create(cache);
-	
-        nn = ml::NeuralNetwork<double>(o);
     }
 
     if(!train_mnist_path.empty()) {
