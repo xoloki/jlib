@@ -142,15 +142,16 @@ typedef double T;
 
 math::matrix<T> load(std::string path, uint r, uint c, bool greyscale = true);
 char convert(int n);
+int convert(char c);
+char capitalize(char c);
 
 std::tuple<uint,double> getmax(math::matrix<T> m);
 
 int main(int argc, char** argv) {
-    const uint R = 90;
-    const uint C = 120;
+    uint R = 90;
+    uint C = 120;
     int HNODES = 1024;
     const int ONODES = 62;
-    const int INODES = R*C;
     const std::string S = "Sample";
     uint epochs = 1;
     std::string train_path, test_train_path, test_my_path, load_file, output_file;
@@ -174,9 +175,14 @@ int main(int argc, char** argv) {
             output_file = argv[++i];
         } else if(arg == "--hidden-nodes") {
             HNODES = util::int_value(argv[++i]);
+        } else if(arg == "--image-rows") {
+            R = util::int_value(argv[++i]);
+        } else if(arg == "--image-cols") {
+            C = util::int_value(argv[++i]);
         }
     }
 
+    int INODES = R*C;
     ml::NeuralNetwork<double> nn(INODES, HNODES, ONODES, train_rate);
     
     if(!train_path.empty()) {
@@ -247,6 +253,8 @@ int main(int argc, char** argv) {
         sys::Directory root(test_train_path);
         auto samples = root.list_dirs(true);
         for(auto sample : samples) {
+            uint scount = 0, scorrect = 0;
+            uint ocount = 0, ocorrect = 0;
             //std::cout << "Opening sample " << sample << std::endl;
             std::string::size_type x = sample.find(S);
             std::string number = sample.substr(x + S.size());
@@ -256,6 +264,10 @@ int main(int argc, char** argv) {
             if(!number.empty())
                 n = util::int_value(number) - 1;
 
+            char c = convert(n);
+            char oc = capitalize(c);
+            int o = convert(oc);
+            
             //std::cout << "Parsed label " << n << std::endl;
 	    
             sys::Directory sdir(sample);
@@ -264,7 +276,7 @@ int main(int argc, char** argv) {
             for(auto image : images) {
                 //std::cout << "Opening image " << image << std::endl;
 		
-                math::matrix<T> input = load(image, 90, 120);
+                math::matrix<T> input = load(image, R, C);
                 math::matrix<double> output = nn.query(input);
 		
                 double max = output(0, 0);
@@ -276,14 +288,26 @@ int main(int argc, char** argv) {
                     }
                 }
 		
-                std::cout << "Expected " << convert(n) << " got " << convert(x) << " (" << (100*max) << "%)" << std::endl;
+                //std::cout << "Expected " << convert(n) << " got " << convert(x) << " (" << (100*max) << "%)" << std::endl;
                 count++;
+                scount++;
                 if(n != x) {
-                    //std::cout << output << std::endl;
+                    if(o == x) {
+                        ocorrect++;
+                    }
                 } else {
                     correct++;
+                    scorrect++;
                 }
             }
+            
+            double ratio = scorrect / double(scount);
+            double oratio = (scorrect + ocorrect) / double(scount);
+            if(o != n)
+                std::cout << "Got " << ratio * 100 << "% success rate for " << convert(n) << ", " << 100 * oratio << " including " << oc << std::endl;
+            else
+                std::cout << "Got " << ratio * 100 << "% success rate for " << convert(n) << std::endl;
+
         }
 
         double ratio = correct / double(count);
@@ -306,7 +330,7 @@ int main(int argc, char** argv) {
                 math::matrix<T> input = load(file, R, C);
                 math::matrix<double> output = nn.query(input);
                 auto rmax = getmax(output);
-                uint x = std::get<0>(rmax);
+                int x = std::get<0>(rmax);
                 double max = std::get<1>(rmax);
 	    
                 std::cout << "Expected " << convert(n) << " got " << convert(x) << " (" << (100*max) << "%)" << std::endl;
@@ -389,6 +413,26 @@ char convert(int n) {
         return 'A' + (n - 10);
     } else {
         return 'a' + (n - 36);
+    }
+}
+
+int convert(char c) {
+    if(c >= '0' && c <= '9')
+        return c - '0';
+    else if(c >= 'A' && c <= 'Z')
+        return 10 + (c - 'A');
+    else
+        return 36 + (c - 'a');
+}
+
+char capitalize(char c) {
+    if(std::isalpha(c)) {
+        if(std::isupper(c))
+            return std::tolower(c);
+        else
+            return std::toupper(c);
+    } else {
+        return c;
     }
 }
 
