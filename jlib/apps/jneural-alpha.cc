@@ -19,6 +19,8 @@
 
 #include <Magick++.h>
 
+std::default_random_engine generator;
+
 namespace jlib {
 namespace ml {
 
@@ -45,8 +47,6 @@ public:
           m_wih(m_nhidden, m_ninput),
           m_who(m_noutput, m_nhidden)
     {
-        std::default_random_engine generator;
-
         T hbound = pow(m_nhidden, -0.5);
         std::uniform_real_distribution<T> hdist(-hbound, hbound);
 
@@ -151,8 +151,9 @@ int main(int argc, char** argv) {
     uint R = 90;
     uint C = 120;
     int HNODES = 256;
-    const int ONODES = 62;
+    int ONODES = 62;
     const std::string S = "Sample";
+    const std::string I = "img";
     uint epochs = 1;
     std::string train_path, test_train_path, test_my_path, load_file, output_file;
     double train_rate = 0.1;
@@ -175,6 +176,8 @@ int main(int argc, char** argv) {
             output_file = argv[++i];
         } else if(arg == "--hidden-nodes") {
             HNODES = util::int_value(argv[++i]);
+        } else if(arg == "--output-nodes") {
+            ONODES = util::int_value(argv[++i]);
         } else if(arg == "--image-rows") {
             R = util::int_value(argv[++i]);
         } else if(arg == "--image-cols") {
@@ -188,20 +191,47 @@ int main(int argc, char** argv) {
     if(!train_path.empty()) {
         for(uint e = 0; e < epochs; e++) {
             std::cout << "Training epoch " << e << std::endl;
-	    
-            sys::Directory root(train_path);
-            auto samples = root.list_dirs(true);
-            for(auto sample : samples) {
-                //std::cout << "Opening sample " << sample << std::endl;
-                std::string::size_type x = sample.find(S);
-                std::string number = sample.substr(x + S.size());
+
+            std::vector<std::string> files;
+
+            std::ifstream ifs(train_path + "/all.txt~");
+            while(ifs) {
+                std::string img;
+                ifs >> img;
+                if(ifs) {
+                    files.push_back(train_path + "/" + img);
+                }
+            }
+
+            std::uniform_int_distribution<int> idist(0, files.size());
+            for(int i = 0; i < files.size(); i++) {
+                int x = idist(generator);
+                std::string tmp = files[i];
+                files[i] = files[x];
+                files[x] = tmp;
+            }
+                    
+            //auto samples = root.list_dirs(true);
+            //for(auto sample : samples) {
+            for(int i = 0; i < files.size(); i++) {
+                std::string sample = files[i];
+                
+                std::cout << "Opening sample " << sample << std::endl;
+                std::string slice = util::slice(sample, I, "-");
+                std::cout << "Sliced out " << slice << std::endl;
+                
+                std::string number = slice;
+                
                 while(!number.empty() && number[0] == '0')
                     number.erase(0, 1);
                 int n = 0;
                 if(!number.empty())
                     n = util::int_value(number) - 1;
-		
-                //std::cout << "Parsed label " << convert(n) << std::endl;
+
+                if(n >= ONODES)
+                    continue;
+                
+                std::cout << "Parsed label " << convert(n) << std::endl;
 		
                 math::matrix<double> target(ONODES, 1);
                 for(int i = 0; i < ONODES; i++) {
@@ -211,18 +241,9 @@ int main(int argc, char** argv) {
                         target(i, 0) = 0.01;
                 }
 		    
-                sys::Directory sdir(sample);
-                auto images = sdir.list_files(true);
-
-                std::cout << "Loading " << images.size() << " images for " << convert(n) << std::endl;
-                
-                for(auto image : images) {
-                    //std::cout << "Opening image " << image << std::endl;
+                math::matrix<T> input = load(sample, R, C);
 		    
-                    math::matrix<T> input = load(image, R, C);
-		    
-                    nn.train(input, target);
-                }
+                nn.train(input, target);
             }
         }
 	
@@ -264,6 +285,9 @@ int main(int argc, char** argv) {
             if(!number.empty())
                 n = util::int_value(number) - 1;
 
+            if(n >= ONODES)
+                continue;
+                
             char c = convert(n);
             char oc = capitalize(c);
             int o = convert(oc);

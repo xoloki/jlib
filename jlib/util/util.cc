@@ -113,7 +113,7 @@ namespace jlib {
             std::string::size_type i, j;
             
             if( (i=s.find(d1)) != s.npos && (j=s.find(d2,i+1)) != s.npos ) {
-                return s.substr(i+1,j-i-1);
+                return s.substr(i+d1.size(),j-(i+d1.size()));
             }
             else {
                 return s;
