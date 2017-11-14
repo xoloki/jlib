@@ -150,12 +150,12 @@ std::tuple<uint,double> getmax(math::matrix<T> m);
 int main(int argc, char** argv) {
     uint R = 90;
     uint C = 120;
-    int HNODES = 1024;
+    int HNODES = 256;
     const int ONODES = 62;
     const std::string S = "Sample";
     uint epochs = 1;
     std::string train_path, test_train_path, test_my_path, load_file, output_file;
-    double train_rate = 0.3;
+    double train_rate = 0.1;
     
     for(int i = 1; i < argc; i++) {
         std::string arg = argv[i];
