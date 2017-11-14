@@ -155,7 +155,7 @@ int main(int argc, char** argv) {
     const std::string S = "Sample";
     const std::string I = "img";
     uint epochs = 1;
-    std::string train_path, test_train_path, test_my_path, load_file, output_file;
+    std::string train_path, test_train_path, test_my_path, load_file, output_file, train_mnist_path, test_mnist_path;
     double train_rate = 0.1;
     
     for(int i = 1; i < argc; i++) {
@@ -168,6 +168,10 @@ int main(int argc, char** argv) {
             train_rate = util::double_value(argv[++i]);
         } else if(arg == "--test-train-path") {
             test_train_path = argv[++i];
+        } else if(arg == "--train-mnist-path") {
+            train_mnist_path = argv[++i];
+        } else if(arg == "--test-mnist-path") {
+            test_mnist_path = argv[++i];
         } else if(arg == "--test-my-path") {
             test_my_path = argv[++i];
         } else if(arg == "--load-file") {
@@ -198,12 +202,12 @@ int main(int argc, char** argv) {
             while(ifs) {
                 std::string img;
                 ifs >> img;
-                if(ifs) {
+                if(ifs && !img.empty()) {
                     files.push_back(train_path + "/" + img);
                 }
             }
 
-            std::uniform_int_distribution<int> idist(0, files.size());
+            std::uniform_int_distribution<int> idist(0, files.size()-1);
             for(int i = 0; i < files.size(); i++) {
                 int x = idist(generator);
                 std::string tmp = files[i];
@@ -216,14 +220,15 @@ int main(int argc, char** argv) {
             for(int i = 0; i < files.size(); i++) {
                 std::string sample = files[i];
                 
-                std::cout << "Opening sample " << sample << std::endl;
+                //std::cout << "Opening sample " << sample << std::endl;
                 std::string slice = util::slice(sample, I, "-");
-                std::cout << "Sliced out " << slice << std::endl;
+                //std::cout << "Sliced out " << slice << std::endl;
                 
                 std::string number = slice;
                 
                 while(!number.empty() && number[0] == '0')
                     number.erase(0, 1);
+                
                 int n = 0;
                 if(!number.empty())
                     n = util::int_value(number) - 1;
@@ -231,8 +236,8 @@ int main(int argc, char** argv) {
                 if(n >= ONODES)
                     continue;
                 
-                std::cout << "Parsed label " << convert(n) << std::endl;
-		
+                //std::cout << "Parsed label " << convert(n) << std::endl;
+                
                 math::matrix<double> target(ONODES, 1);
                 for(int i = 0; i < ONODES; i++) {
                     if(i == n)
@@ -268,6 +273,96 @@ int main(int argc, char** argv) {
         nn = ml::NeuralNetwork<double>(o);
     }
 
+    if(!train_mnist_path.empty()) {
+        for(uint e = 0; e < epochs; e++) {
+            std::cout << "Training epoch " << e << std::endl;
+            std::ifstream ifs(train_mnist_path);
+            while(ifs) {
+                std::string line;
+                std::getline(ifs, line);
+                if(ifs) {
+                    std::vector<std::string> inlist = util::tokenize(line, ",");
+                    int size = inlist.size() - 1;
+		    
+                    //std::cout << "Got " << size << " elements" << std::endl;
+		    
+                    int label = util::int_value(inlist.front());
+                    math::matrix<double> input(size, 1);
+		    
+                    for(std::size_t i = 0; i < size; i++) {
+                        input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
+                    }
+		    
+                    math::matrix<double> target(ONODES, 1);
+                    for(int i = 0; i < ONODES; i++) {
+                        if(i == label)
+                            target(i, 0) = 0.99;
+                        else
+                            target(i, 0) = 0.01;
+                    }
+		    
+                    nn.train(input, target);
+                }
+            }
+            ifs.close();
+        }
+
+        if(!output_file.empty()) {
+            json::object::ptr o = nn.json();
+            std::string str = o->str();
+            
+            std::cout << "Writing json output to " << output_file << std::endl;
+            
+            std::ofstream ofs(output_file);
+            ofs << str;
+        }        
+    }
+
+    if(!test_mnist_path.empty()) {
+        std::cout << "Opening " << test_mnist_path << std::endl;
+
+    uint count = 0, correct = 0;
+  
+    std::ifstream tfs(test_mnist_path);
+    while(tfs) {
+        std::string line;
+        std::getline(tfs, line);
+        if(tfs) {
+            std::vector<std::string> inlist = util::tokenize(line, ",");
+            int size = inlist.size() - 1;
+  
+            //std::cout << "Got " << size << " elements" << std::endl;
+      
+            int label = util::int_value(inlist.front());
+            math::matrix<double> input(size, 1);
+      
+            for(std::size_t i = 0; i < size; i++) {
+                input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
+            }
+
+            math::matrix<double> output = nn.query(input);
+
+            double max = output(0, 0);
+            uint x = 0;
+            for(uint i = 1; i < output.M; i++) {
+                if(output(i, 0) > max) {
+                    max = output(i, 0);
+                    x = i;
+                }
+            }
+      
+            //std::cout << "Expected " << label << " got " << x << std::endl;
+            count++;
+            if(label == x)
+                correct++;
+        }
+
+    }
+
+        double ratio = correct / double(count);
+        std::cout << "Got " << ratio * 100 << "% success rate" << std::endl;
+
+    }
     if(!test_train_path.empty()) {
         uint count = 0, correct = 0;
 
