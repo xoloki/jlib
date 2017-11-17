@@ -154,7 +154,7 @@ int main(int argc, char** argv) {
     int ONODES = 62;
     const std::string S = "Sample";
     const std::string I = "img";
-    uint epochs = 1;
+    uint epochs = 1, train_multi = 1;
     std::string train_path, test_train_path, test_my_path, load_file, output_file, train_mnist_path, test_mnist_path;
     double train_rate = 0.1;
     
@@ -164,6 +164,8 @@ int main(int argc, char** argv) {
             train_path = argv[++i];
         } else if(arg == "--train-epochs") {
             epochs = util::int_value(argv[++i]);
+        } else if(arg == "--train-multi") {
+            train_multi = util::int_value(argv[++i]);
         } else if(arg == "--train-rate") {
             train_rate = util::double_value(argv[++i]);
         } else if(arg == "--test-train-path") {
@@ -204,98 +206,89 @@ int main(int argc, char** argv) {
         nn = ml::NeuralNetwork<double>(o);
     }
 
+    std::vector<std::tuple<int,math::matrix<T>>> inputs;
+    
     if(!train_path.empty()) {
-        for(uint e = 0; e < epochs; e++) {
-            std::cout << "Training epoch " << e << std::endl;
+	std::cout << "Training handwriting from " << train_path << std::endl;
+	
+	std::ifstream ifs(train_path + "/all.txt~");
+	while(ifs) {
+	    std::string img;
+	    ifs >> img;
+	    if(ifs && !img.empty()) {
+		std::string path = train_path + "/" + img;
+                std::string num = util::slice(path, I, "-");
 
-            std::vector<std::string> files;
-
-            std::ifstream ifs(train_path + "/all.txt~");
-            while(ifs) {
-                std::string img;
-                ifs >> img;
-                if(ifs && !img.empty()) {
-                    files.push_back(train_path + "/" + img);
-                }
-            }
-
-            std::uniform_int_distribution<int> idist(0, files.size()-1);
-            for(int i = 0; i < files.size(); i++) {
-                int x = idist(generator);
-                std::string tmp = files[i];
-                files[i] = files[x];
-                files[x] = tmp;
-            }
-                    
-	    math::matrix<double> target(ONODES, 1);
-	    target.foreach([&](T& val) {
-		    val = 0.01;
-		});
-	    
-            for(int i = 0; i < files.size(); i++) {
-                std::string sample = files[i];
-                
-                //std::cout << "Opening sample " << sample << std::endl;
-                std::string slice = util::slice(sample, I, "-");
-                //std::cout << "Sliced out " << slice << std::endl;
-                
-                std::string number = slice;
-                
-                while(!number.empty() && number[0] == '0')
-                    number.erase(0, 1);
+                while(!num.empty() && num[0] == '0')
+                    num.erase(0, 1);
                 
                 int n = 0;
-                if(!number.empty())
-                    n = util::int_value(number) - 1;
+                if(!num.empty())
+                    n = util::int_value(num) - 1;
 
                 if(n >= ONODES)
                     continue;
-                
-                //std::cout << "Parsed label " << convert(n) << std::endl;
 
-		target(n, 0) = 0.99;
+		math::matrix<T> input = load(path, R, C);
 
-                math::matrix<T> input = load(sample, R, C);
-                nn.train(input, target);
-
-		target(n, 0) = 0.01;
+		for(int i = 0; i < train_multi; i++)
+		    inputs.push_back(std::make_tuple(n, input));
             }
-        }
+	}
     }
 
     if(!train_mnist_path.empty()) {
-        for(uint e = 0; e < epochs; e++) {
-            std::cout << "Training epoch " << e << std::endl;
-            std::ifstream ifs(train_mnist_path);
-            while(ifs) {
-                std::string line;
-                std::getline(ifs, line);
-                if(ifs) {
-                    std::vector<std::string> inlist = util::tokenize(line, ",");
-                    int size = inlist.size() - 1;
-		    
-                    //std::cout << "Got " << size << " elements" << std::endl;
-		    
-                    int label = util::int_value(inlist.front());
-                    math::matrix<double> input(size, 1);
-		    
-                    for(std::size_t i = 0; i < size; i++) {
-                        input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
-                    }
-		    
-                    math::matrix<double> target(ONODES, 1);
-                    for(int i = 0; i < ONODES; i++) {
-                        if(i == label)
-                            target(i, 0) = 0.99;
-                        else
-                            target(i, 0) = 0.01;
-                    }
-		    
-                    nn.train(input, target);
-                }
-            }
-            ifs.close();
-        }
+	std::cout << "Training mnist data from " << train_mnist_path << std::endl;
+	std::ifstream ifs(train_mnist_path);
+	while(ifs) {
+	    std::string line;
+	    std::getline(ifs, line);
+	    if(ifs) {
+		std::vector<std::string> inlist = util::tokenize(line, ",");
+		int size = inlist.size() - 1;
+		
+		//std::cout << "Got " << size << " elements" << std::endl;
+		
+		int label = util::int_value(inlist.front());
+		math::matrix<double> input(size, 1);
+		
+		for(std::size_t i = 0; i < size; i++) {
+		    input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
+		}
+
+		inputs.push_back(std::make_tuple(label, input));
+	    }
+	}
+    }
+
+    math::matrix<T> target(ONODES, 1);
+    target.foreach([](T& x) {
+	    x = 0.01;
+	});
+
+    std::uniform_int_distribution<int> idist(0, inputs.size()-1);
+    for(int i = 0; i < inputs.size(); i++) {
+	int x = idist(generator);
+	auto tmp = inputs[i];
+	inputs[i] = inputs[x];
+	inputs[x] = tmp;
+    }
+
+    if(!inputs.empty()) {
+	for(uint e = 0; e < epochs; e++) {
+	    std::cout << "Training epoch " << e << ", " << inputs.size() << " inputs" << std::endl;
+	    
+	    for(auto i : inputs) {
+		int n = std::get<0>(i);
+		math::matrix<T> input = std::get<1>(i);
+		
+		target(n, 0) = 0.99;
+		
+		nn.train(input, target);
+		
+		target(n, 0) = 0.01;
+	    }
+	}
     }
 
     if(!output_file.empty()) {
@@ -353,6 +346,7 @@ int main(int argc, char** argv) {
         std::cout << "Got " << ratio * 100 << "% success rate" << std::endl;
 
     }
+
     if(!test_train_path.empty()) {
         uint count = 0, correct = 0;
 
@@ -434,6 +428,9 @@ int main(int argc, char** argv) {
 	    
                 int n = util::int_value(util::slice(file, "-", "-"));
 
+		if(n >= ONODES)
+		    continue;
+		
                 std::cout << "Parsed label " << n << std::endl;
 	    
                 math::matrix<T> input = load(file, R, C);
