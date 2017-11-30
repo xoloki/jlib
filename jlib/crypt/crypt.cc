@@ -464,9 +464,16 @@ namespace jlib {
             }
 
             void data::write(std::string data) {
-                gpgme_error_t err = gpgme_data_write(m_data, data.data(), data.length());
-                if(gpgme_err_code(err) != GPG_ERR_NO_ERROR) {
-                    throw exception(err);
+                std::size_t n = gpgme_data_write(m_data, data.data(), data.length());
+                if(n != data.size()) {
+                    std::ostringstream os;
+                    os << "Only wrote " << n << " of " + data.size();
+                    throw std::runtime_error(os.str());
+                }
+                    
+
+                if(n == -1) {
+                    throw exception(errno);
                 } 
             }
 
