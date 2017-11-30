@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
     std::vector<std::tuple<int,math::matrix<T>>> inputs;
     
     if(!train_path.empty()) {
-	std::cout << "Training handwriting from " << train_path << std::endl;
+	std::cout << "Loading handwriting from " << train_path << std::endl;
 	
 	std::ifstream ifs(train_path + "/all.txt~");
 	while(ifs) {
@@ -238,7 +238,7 @@ int main(int argc, char** argv) {
     }
 
     if(!train_mnist_path.empty()) {
-	std::cout << "Training mnist data from " << train_mnist_path << std::endl;
+	std::cout << "Loading mnist data from " << train_mnist_path << std::endl;
 	std::ifstream ifs(train_mnist_path);
 	while(ifs) {
 	    std::string line;
@@ -261,22 +261,25 @@ int main(int argc, char** argv) {
 	}
     }
 
-    math::matrix<T> target(ONODES, 1);
-    target.foreach([](T& x) {
-	    x = 0.01;
-	});
-
-    std::uniform_int_distribution<int> idist(0, inputs.size()-1);
-    for(int i = 0; i < inputs.size(); i++) {
-	int x = idist(generator);
-	auto tmp = inputs[i];
-	inputs[i] = inputs[x];
-	inputs[x] = tmp;
-    }
-
     if(!inputs.empty()) {
+	math::matrix<T> target(ONODES, 1);
+	target.foreach([](T& x) {
+		x = 0.01;
+	    });
+	
+	std::uniform_int_distribution<int> idist(0, inputs.size()-1);
+	
 	for(uint e = 0; e < epochs; e++) {
 	    std::cout << "Training epoch " << e << ", " << inputs.size() << " inputs" << std::endl;
+
+	    std::cout << "Shuffling inputs... " << std::flush;
+	    for(int i = 0; i < inputs.size(); i++) {
+		int x = idist(generator);
+		auto tmp = inputs[i];
+		inputs[i] = inputs[x];
+		inputs[x] = tmp;
+	    }
+	    std::cout << "done" << std::endl;
 	    
 	    for(auto i : inputs) {
 		int n = std::get<0>(i);
