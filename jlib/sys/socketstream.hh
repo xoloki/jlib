@@ -172,6 +172,8 @@ namespace jlib {
 
             bool interrupted() { return m_eintr; }
 
+            int get_socket() { return m_sock; }
+            
         protected:
             void open_socket(std::string host, unsigned int port) {
                 struct sockaddr_in sa;
@@ -262,6 +264,8 @@ namespace jlib {
 
             bool interrupted() { return m_buf->interrupted(); }
 
+            int get_socket() { return m_buf->get_socket(); }
+            
         protected:
             basic_socketbuf<charT,traitT>* m_buf;
         };

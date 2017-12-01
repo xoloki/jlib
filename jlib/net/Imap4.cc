@@ -471,6 +471,9 @@ namespace jlib {
             }
 
             if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "done opening"<<std::endl;
+
+            sock->exceptions(std::ios_base::failbit | std::ios_base::badbit | std::ios_base::eofbit );
+            
             std::string buf;
             sys::getline(*sock, buf);
             if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "read first line: " << buf << std::endl;
@@ -612,6 +615,59 @@ namespace jlib {
 
         std::vector<std::string> Imap4::idle(sys::socketstream& sock) {
             std::vector<std::string> ret = handshake(sock,"IDLE");
+            parse(ret);
+            return ret;
+        }
+
+        std::vector<std::string> Imap4::idle_send(sys::socketstream& sock) {
+            std::string buf;
+            std::string data = "IDLE";
+            std::string com = tag(1)+" "+data;
+            std::vector<std::string> ret;
+
+            m_idle = true;
+            
+            if(getenv("JLIB_NET_IMAP4_DEBUG")) {
+                std::cout << com << std::endl;
+            }
+            sock << com << ENDL << std::flush;
+
+            std::string end = "+";
+
+            while(!util::begins(buf, end)) {
+                sys::getline(sock, buf);
+                if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << buf << std::endl;
+                ret.push_back(buf);
+            }
+            if(util::ibegins(buf, tag()+" NO") || util::ibegins(buf, tag()+" BAD")) {
+                std::string err = buf.substr(tag().length()+1);
+                throw exception(err);
+            }
+
+            parse(ret);
+            return ret;
+        }
+
+        std::vector<std::string> Imap4::idle_done(sys::socketstream& sock) {
+            std::string buf;
+            std::vector<std::string> ret;
+
+            if(getenv("JLIB_NET_IMAP4_DEBUG")) 
+                std::cout << "DONE" << std::endl;
+            sock << "DONE" << ENDL << std::flush;
+
+            m_idle = false;
+            
+            while(!util::begins(buf, tag())) {
+                sys::getline(sock, buf);
+                if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << buf << std::endl;
+                ret.push_back(buf);
+            }
+            if(util::ibegins(buf, tag()+" NO") || util::ibegins(buf, tag()+" BAD")) {
+                std::string err = buf.substr(tag().length()+1);
+                throw exception(err);
+            }
+
             parse(ret);
             return ret;
         }

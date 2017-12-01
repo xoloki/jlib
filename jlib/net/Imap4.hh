@@ -122,6 +122,8 @@ namespace jlib {
              * @return status update information
              */
             std::vector<std::string> idle(jlib::sys::socketstream& sock);
+            std::vector<std::string> idle_send(jlib::sys::socketstream& sock);
+            std::vector<std::string> idle_done(jlib::sys::socketstream& sock);
 
             /**
              * The LOGOUT command informs the server that the client is done with
@@ -588,6 +590,7 @@ namespace jlib {
             int m_width;
             State m_state;
             jlib::util::URL m_url;
+            bool m_idle = false;
         };
         
     }
