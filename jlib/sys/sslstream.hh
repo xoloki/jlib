@@ -28,6 +28,7 @@
 #include <openssl/err.h>
 
 #include <sstream>
+#include <atomic>
 
 namespace jlib {
     namespace sys {
@@ -200,22 +201,22 @@ namespace jlib {
                     std::cerr << "basic_sslbuf::open_ssl()"<<std::endl;
 
                 int err;
-                static bool s_init = false;
-                static Glib::Mutex s_init_mutex;
-
-                s_init_mutex.lock();
-                if(!s_init) {
-                    s_init = true;
+                bool f = false;
+                static std::atomic<bool> s_init(false);
+                if(s_init.compare_exchange_strong(f, true, std::memory_order_seq_cst)) {
                     SSL_load_error_strings();
                     SSL_library_init();
                 }
-                s_init_mutex.unlock();
 
                 m_ctx = SSL_CTX_new(m_method);
                 if(m_ctx == 0) {
                     std::cerr <<"exception in jlib::sys::sslstream::open_ssl()"<<std::endl;
                     throw typename basic_socketbuf<charT, traitT>::exception("error calling SSL_CTX_new()");
                 }
+
+                SSL_CTX_set_options(m_ctx, SSL_OP_NO_SSLv2|SSL_OP_NO_SSLv3);
+                SSL_CTX_set_verify(m_ctx, SSL_VERIFY_PEER, nullptr);
+                SSL_CTX_load_verify_locations(m_ctx, nullptr, "/etc/ssl/certs");
                 
                 m_ssl = SSL_new(m_ctx);
                 if(m_ssl == 0) {

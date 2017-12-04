@@ -176,6 +176,9 @@ namespace jlib {
             
         protected:
             void open_socket(std::string host, unsigned int port) {
+                m_host = host;
+                m_port = port;
+
                 struct sockaddr_in sa;
                 struct hostent* hp;
                 
