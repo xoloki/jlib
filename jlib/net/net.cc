@@ -853,6 +853,32 @@ namespace jlib {
                 finish(mail, rcpt, data, stream);
             }
                 
+            void send_ssl_auth(std::string mail, std::string rcpt, std::string data, std::string host, unsigned int port, std::string user, std::string pass) {
+                sys::sslstream stream(host, port);
+                std::list<std::string> r;
+
+                r = eshake(stream, "EHLO localhost", "250");
+                bool plain = false;
+                for(std::list<std::string>::iterator i = r.begin(); i != r.end(); i++) {
+                    if(i->find("AUTH") == 0) {
+                        if(i->find("PLAIN") != std::string::npos) {
+                            plain = true;
+                            break;
+                        } else {
+                            throw exception("AUTH option does not include plain: " + (*i));
+                        }
+                    }
+                }
+
+                if(!plain)
+                    throw exception("No AUTH option");
+                
+                std::string token = crypt::base64::encode(std::string(1, '\0') + user + std::string(1, '\0') + pass);
+                handshake(stream, "AUTH PLAIN " + token, "235");
+
+                finish(mail, rcpt, data, stream);
+            }
+                
             void send(std::string mail, std::string rcpt, std::string data, sys::socketstream& stream) {
                 std::string helo = "localhost";
                 std::string greet;

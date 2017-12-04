@@ -267,12 +267,12 @@ namespace jlib {
             {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
                     std::cerr << "basic_tlsstream::basic_tlsstream(" << host << ", " << port << ", " << std::boolalpha << delay << ")"<<std::endl;
-                this->m_buf=new basic_sslbuf<charT,traitT>(host,port, TLSv1_client_method(), delay);
+                this->m_buf=new basic_sslbuf<charT,traitT>(host,port, SSLv23_client_method(), delay);
                 this->init(this->m_buf);
             }
             
             void open(std::string host, unsigned int port, bool delay = false) {
-                this->m_buf=new basic_sslbuf<charT,traitT>(host,port, TLSv1_client_method(), delay);
+                this->m_buf=new basic_sslbuf<charT,traitT>(host,port, SSLv23_client_method(), delay);
                 this->init(this->m_buf);
             }
 

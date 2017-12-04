@@ -165,6 +165,7 @@ namespace jlib {
 
             void send_tls(std::string mail, std::string rcpt, std::string data, std::string host,unsigned int port);
             void send_tls_auth(std::string mail, std::string rcpt, std::string data, std::string host,unsigned int port, std::string user, std::string pass);
+            void send_ssl_auth(std::string mail, std::string rcpt, std::string data, std::string host,unsigned int port, std::string user, std::string pass);
         }
 
         namespace http {
