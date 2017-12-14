@@ -22,7 +22,55 @@ template<typename T>
 class NeuralNetwork {
 public:
     NeuralNetwork(util::json::object::ptr p);
-    NeuralNetwork(double lrate, uint ninput, uint noutput, uint nhidden);
+
+    template<typename... Args>
+    NeuralNetwork(double lrate, uint ninput, uint noutput, Args&&... args)
+        : NeuralNetwork(lrate, ninput, std::vector<uint>({args...}), noutput)
+    {
+    }
+
+    NeuralNetwork(double lrate, uint ninput, const std::vector<uint>& hidden, uint noutput)
+        : m_ninput(ninput),
+          m_noutput(noutput),
+          m_lrate(lrate),
+          m_nhidden(hidden),
+          m_wih(m_nhidden.front(), m_ninput),
+          m_who(m_noutput, m_nhidden.back())
+    {
+        if(m_nhidden.empty())
+            throw std::runtime_error("Need at least one hidden layer");
+
+        T hbound = pow(m_nhidden[0], -0.5);
+        std::uniform_real_distribution<T> hdist(-hbound, hbound);
+        
+        m_wih.foreach([&](T& x) {
+                x = hdist(m_generator);
+            });
+        
+        T obound = pow(m_noutput, -0.5);
+        std::uniform_real_distribution<T> odist(-obound, obound);
+        
+        m_who.foreach([&](T& x) {
+                x = odist(m_generator);
+            });
+
+        for(int i = 1; i < m_nhidden.size(); i++) {
+            // add a deep matrix from [i-1] to [i]
+            m_deep.push_back(math::matrix<T>(m_nhidden[i-1], m_nhidden[i]));
+            m_deep.back().foreach([&](T& x) {
+                x = hdist(m_generator);
+            });
+        }
+
+        // sigmoid function
+        m_activation_function = [](math::matrix<T> input) {
+            math::matrix<T> output(input.M, input.N);
+            input.foreach_index([&](uint r, uint c, T& val) {
+                    output(r, c) = (1.0 / (1.0 + exp(-val))); //tanh(val);
+                });
+            return output;
+        }; 
+    }
 
     void train(math::matrix<T> inputs, math::matrix<T> targets);
     math::matrix<T> query(math::matrix<T> inputs);
@@ -32,9 +80,18 @@ public:
     std::default_random_engine& get_generator();
     
 protected:
-    int m_ninput;
-    int m_nhidden;
-    int m_noutput;
+    template<typename... Args>    
+    void add_hidden(uint arg, Args&&... args) {
+        m_nhidden.push_back(arg);
+        add_hidden(args...);
+    }
+
+    void add_hidden() {
+    }
+
+    uint m_ninput;
+    std::vector<uint> m_nhidden;
+    uint m_noutput;
     double m_lrate;
     math::matrix<T> m_wih;
     math::matrix<T> m_who;
@@ -52,43 +109,10 @@ NeuralNetwork<T>::NeuralNetwork(util::json::object::ptr p)
         });
     
     m_who.foreach_index([&](uint r, uint c, T& x) {
-            x = p->obj("who")->get(r*m_nhidden + c);
+            x = p->obj("who")->get(r*m_nhidden[0] + c);
         });
 }
     
-template<typename T>
-NeuralNetwork<T>::NeuralNetwork(double lrate, uint ninput, uint noutput, uint nhidden)
-    : m_ninput(ninput),
-      m_nhidden(nhidden),
-      m_noutput(noutput),
-      m_lrate(lrate),
-      m_wih(m_nhidden, m_ninput),
-      m_who(m_noutput, m_nhidden)
-{
-    T hbound = pow(m_nhidden, -0.5);
-    std::uniform_real_distribution<T> hdist(-hbound, hbound);
-    
-    m_wih.foreach([&](T& x) {
-            x = hdist(m_generator);
-        });
-    
-    T obound = pow(m_noutput, -0.5);
-    std::uniform_real_distribution<T> odist(-obound, obound);
-    
-    m_who.foreach([&](T& x) {
-            x = odist(m_generator);
-        });
-    
-    // sigmoid function
-    m_activation_function = [](math::matrix<T> input) {
-        math::matrix<T> output(input.M, input.N);
-        input.foreach_index([&](uint r, uint c, T& val) {
-                output(r, c) = (1.0 / (1.0 + exp(-val))); //tanh(val);
-            });
-        return output;
-    }; 
-}
-
 template<typename T>
 void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     math::matrix<T> hidden_inputs = m_wih * inputs;
@@ -111,6 +135,16 @@ template<typename T>
 math::matrix<T> NeuralNetwork<T>::query(math::matrix<T> inputs) {
     math::matrix<T> hidden_inputs = m_wih * inputs;
     math::matrix<T> hidden_outputs = m_activation_function(hidden_inputs);
+
+    for(int i = 1; i < m_nhidden.size(); i++) {
+        // add a deep matrix from [i-1] to [i]
+        m_deep.push_back(math::matrix<T>(m_nhidden[i-1], m_nhidden[i]));
+        m_deep.back().foreach([&](T& x) {
+                x = hdist(m_generator);
+            });
+    }
+
+
     math::matrix<T> final_inputs = m_who * hidden_outputs;
     math::matrix<T> final_outputs = m_activation_function(final_inputs);
     
@@ -122,7 +156,7 @@ util::json::object::ptr NeuralNetwork<T>::json() {
     util::json::object::ptr p = util::json::object::create();
     
     p->add("ninput", m_ninput);
-    p->add("nhidden", m_nhidden);
+    p->add("nhidden", m_nhidden[0]);
     p->add("noutput", m_noutput);
     p->add("lrate", m_lrate);
     
