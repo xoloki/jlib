@@ -147,29 +147,42 @@ namespace jlib {
                 std::cerr << "ASImapBox::on_check_recent: m_idle " << std::hex << m_idle << std::endl;
             }
 
-            unsigned int old_exists = exists();
-            unsigned int old_recent = recent();
+            try {
+                unsigned int old_exists = exists();
+                unsigned int old_recent = recent();
+                
+                if(m_idle) 
+                    idle(*m_sock);
+                else
+                    noop(*m_sock);
+                
+                unsigned int new_exists = exists();
+                unsigned int new_recent = recent();
+                
+                
+                if((new_recent > old_recent) || (new_exists > old_exists)) {
+                    unsigned int diff = (new_recent > old_recent) ? (new_recent - old_recent) : (new_exists - old_exists);
 
-            if(m_idle) 
-                idle(*m_sock);
-            else
-                noop(*m_sock);
-
-            unsigned int new_exists = exists();
-            unsigned int new_recent = recent();
-
-
-            if((new_recent > old_recent) || (new_exists > old_exists)) {
-                unsigned int diff = (new_recent > old_recent) ? (new_recent - old_recent) : (new_exists - old_exists);
-
-                push(MailBoxResponse(MailBoxResponse::STATUS, "Found " + util::string_value(diff) +
-                                     " new messages in " + path + ", " + util::string_value(m_exists) + " total, " + util::string_value(m_unseen) + " unseen"));
-                for(int i = (m_exists - diff); i < m_exists; i++) {
-                    folder_indx_type sindx; sindx.push_back(i);
-                    this->push(MailBoxRequest(MailBoxRequest::LIST_MESSAGES, folder, sindx));
+                    push(MailBoxResponse(MailBoxResponse::STATUS, "Found " + util::string_value(diff) +
+                                         " new messages in " + path + ", " + util::string_value(m_exists) + " total, " + util::string_value(m_unseen) + " unseen"));
+                    for(int i = (m_exists - diff); i < m_exists; i++) {
+                        folder_indx_type sindx; sindx.push_back(i);
+                        this->push(MailBoxRequest(MailBoxRequest::LIST_MESSAGES, folder, sindx));
+                    }
+                } else {
+                    push(MailBoxResponse(MailBoxResponse::STATUS, "No new messages in folder " + path + ", " + util::string_value(m_exists) + " total, " + util::string_value(m_unseen) + " unseen"));
                 }
-            } else {
-                push(MailBoxResponse(MailBoxResponse::STATUS, "No new messages in folder " + path + ", " + util::string_value(m_exists) + " total, " + util::string_value(m_unseen) + " unseen"));
+            } catch(std::ios_base::failure& se) {
+                push(MailBoxResponse(MailBoxResponse::STATUS, "Stream error checking folder " + path + " for recent messages: " + std::string(se.what())));
+                while(true) {
+                    try {
+                        this->on_init();
+                        break;
+                    } catch(std::exception& e) {
+                        push(MailBoxResponse(MailBoxResponse::STATUS, "Error reinitializing mailbox after stream exception, sleep and try again: " + std::string(se.what())));
+                        sleep(5);
+                    }
+                }
             }
         }
 
