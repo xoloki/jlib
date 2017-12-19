@@ -134,8 +134,8 @@ void object::add(std::string key, object::arrayptr val) {
     val->m_put = false;
 }
     
-std::string object::str() const {
-    std::string ret(json_object_to_json_string(m_obj));
+std::string object::str(bool pretty) const {
+    std::string ret(json_object_to_json_string_ext(m_obj, pretty ? JSON_C_TO_STRING_PRETTY : JSON_C_TO_STRING_SPACED));
     
     return ret;
 }
@@ -181,7 +181,7 @@ array::array(std::string data)
     
 array::~array() { 
     if(m_put)
-	json_object_put(m_obj); 
+        json_object_put(m_obj); 
 }
     
 void array::add(std::string val) {
@@ -209,14 +209,13 @@ void array::add(object::ptr val) {
     val->m_put = false;
 }
     
-proxy array::get(unsigned int x) const {
-    return proxy(json_object_array_get_idx(m_obj, x));
+void array::add(array::ptr val) {
+    json_object_array_add(m_obj, val->obj());
+    val->m_put = false;
 }
     
-std::string array::str() const {
-    std::string ret(json_object_to_json_string(m_obj));
-    
-    return ret;
+proxy array::get(unsigned int x) const {
+    return proxy(json_object_array_get_idx(m_obj, x));
 }
     
 int array::size() const {
@@ -225,6 +224,12 @@ int array::size() const {
     
 json_object* array::obj() {
     return m_obj;
+}
+
+std::string array::str() const {
+    std::string ret(json_object_to_json_string(m_obj));
+    
+    return ret;
 }
     
 }

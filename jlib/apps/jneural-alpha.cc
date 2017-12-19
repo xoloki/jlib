@@ -37,7 +37,7 @@ std::tuple<uint,double> getmax(math::matrix<T> m);
 int main(int argc, char** argv) {
     uint R = 90;
     uint C = 120;
-    int HNODES = 256;
+    std::vector<uint> HNODES;
     int ONODES = 62;
     const std::string S = "Sample";
     const std::string I = "img";
@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
         } else if(arg == "--output-file") {
             output_file = argv[++i];
         } else if(arg == "--hidden-nodes") {
-            HNODES = util::int_value(argv[++i]);
+            HNODES.push_back(std::stoi(argv[++i]));
         } else if(arg == "--output-nodes") {
             ONODES = util::int_value(argv[++i]);
         } else if(arg == "--image-rows") {
@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
     }
 
     int INODES = R*C;
-    ai::NeuralNetwork<double> nn(train_rate, INODES, ONODES, HNODES);
+    ai::NeuralNetwork<double> nn(train_rate, INODES, HNODES, ONODES);
     
     if(!load_file.empty()) {
         std::cout << "Loading json output from " << load_file << std::endl;
@@ -96,14 +96,14 @@ int main(int argc, char** argv) {
     std::vector<std::tuple<int,math::matrix<T>>> inputs;
     
     if(!train_path.empty()) {
-	std::cout << "Loading handwriting from " << train_path << std::endl;
+        std::cout << "Loading handwriting from " << train_path << std::endl;
 	
-	std::ifstream ifs(train_path + "/all.txt~");
-	while(ifs) {
-	    std::string img;
-	    ifs >> img;
-	    if(ifs && !img.empty()) {
-		std::string path = train_path + "/" + img;
+        std::ifstream ifs(train_path + "/all.txt~");
+        while(ifs) {
+            std::string img;
+            ifs >> img;
+            if(ifs && !img.empty()) {
+                std::string path = train_path + "/" + img;
                 std::string num = util::slice(path, I, "-");
 
                 while(!num.empty() && num[0] == '0')
@@ -116,121 +116,121 @@ int main(int argc, char** argv) {
                 if(n >= ONODES)
                     continue;
 
-		math::matrix<T> input = load(path, R, C);
+                math::matrix<T> input = load(path, R, C);
 
-		for(int i = 0; i < train_multi; i++)
-		    inputs.push_back(std::make_tuple(n, input));
+                for(int i = 0; i < train_multi; i++)
+                    inputs.push_back(std::make_tuple(n, input));
             }
-	}
+        }
     }
 
     if(!train_mnist_path.empty()) {
-	std::cout << "Loading mnist data from " << train_mnist_path << std::endl;
-	std::ifstream ifs(train_mnist_path);
-	while(ifs) {
-	    std::string line;
-	    std::getline(ifs, line);
-	    if(ifs) {
-		std::vector<std::string> inlist = util::tokenize(line, ",");
-		int size = inlist.size() - 1;
+        std::cout << "Loading mnist data from " << train_mnist_path << std::endl;
+        std::ifstream ifs(train_mnist_path);
+        while(ifs) {
+            std::string line;
+            std::getline(ifs, line);
+            if(ifs) {
+                std::vector<std::string> inlist = util::tokenize(line, ",");
+                int size = inlist.size() - 1;
 		
-		//std::cout << "Got " << size << " elements" << std::endl;
+                //std::cout << "Got " << size << " elements" << std::endl;
 		
-		int label = util::int_value(inlist.front());
-		math::matrix<double> input(size, 1);
+                int label = util::int_value(inlist.front());
+                math::matrix<double> input(size, 1);
 		
-		for(std::size_t i = 0; i < size; i++) {
-		    input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
-		}
+                for(std::size_t i = 0; i < size; i++) {
+                    input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
+                }
 
-		inputs.push_back(std::make_tuple(label, input));
-	    }
-	}
+                inputs.push_back(std::make_tuple(label, input));
+            }
+        }
     }
 
     if(!inputs.empty()) {
-	math::matrix<T> target(ONODES, 1);
-	target.foreach([](T& x) {
-		x = 0.01;
-	    });
+        math::matrix<T> target(ONODES, 1);
+        target.foreach([](T& x) {
+                x = 0.01;
+            });
 	
-	std::uniform_int_distribution<int> idist(0, inputs.size()-1);
+        std::uniform_int_distribution<int> idist(0, inputs.size()-1);
 	
-	for(uint e = 0; e < epochs; e++) {
-	    std::cout << "Training epoch " << e << ", " << inputs.size() << " inputs" << std::endl;
+        for(uint e = 0; e < epochs; e++) {
+            std::cout << "Training epoch " << e << ", " << inputs.size() << " inputs" << std::endl;
 
-	    std::cout << "Shuffling inputs... " << std::flush;
-	    for(int i = 0; i < inputs.size(); i++) {
-		int x = idist(generator);
-		auto tmp = inputs[i];
-		inputs[i] = inputs[x];
-		inputs[x] = tmp;
-	    }
-	    std::cout << "done" << std::endl;
+            std::cout << "Shuffling inputs... " << std::flush;
+            for(int i = 0; i < inputs.size(); i++) {
+                int x = idist(generator);
+                auto tmp = inputs[i];
+                inputs[i] = inputs[x];
+                inputs[x] = tmp;
+            }
+            std::cout << "done" << std::endl;
 	    
-	    for(auto i : inputs) {
-		int n = std::get<0>(i);
-		math::matrix<T> input = std::get<1>(i);
+            for(auto i : inputs) {
+                int n = std::get<0>(i);
+                math::matrix<T> input = std::get<1>(i);
 		
-		target(n, 0) = 0.99;
+                target(n, 0) = 0.99;
 		
-		nn.train(input, target);
+                nn.train(input, target);
 		
-		target(n, 0) = 0.01;
-	    }
-	}
+                target(n, 0) = 0.01;
+            }
+        }
     }
 
     if(!output_file.empty()) {
-	json::object::ptr o = nn.json();
-	std::string str = o->str();
+        json::object::ptr o = nn.json();
+        std::string str = o->str(true);
         
-	std::cout << "Writing json output to " << output_file << std::endl;
+        std::cout << "Writing json output to " << output_file << std::endl;
         
-	std::ofstream ofs(output_file);
-	ofs << str;
+        std::ofstream ofs(output_file);
+        ofs << str;
     }        
     
     if(!test_mnist_path.empty()) {
         std::cout << "Opening " << test_mnist_path << std::endl;
 
-	uint count = 0, correct = 0;
+        uint count = 0, correct = 0;
   
-	std::ifstream tfs(test_mnist_path);
-	while(tfs) {
-	    std::string line;
-	    std::getline(tfs, line);
-	    if(tfs) {
-		std::vector<std::string> inlist = util::tokenize(line, ",");
-		int size = inlist.size() - 1;
+        std::ifstream tfs(test_mnist_path);
+        while(tfs) {
+            std::string line;
+            std::getline(tfs, line);
+            if(tfs) {
+                std::vector<std::string> inlist = util::tokenize(line, ",");
+                int size = inlist.size() - 1;
   
-		//std::cout << "Got " << size << " elements" << std::endl;
+                //std::cout << "Got " << size << " elements" << std::endl;
       
-		int label = util::int_value(inlist.front());
-		math::matrix<double> input(size, 1);
+                int label = util::int_value(inlist.front());
+                math::matrix<double> input(size, 1);
       
-		for(std::size_t i = 0; i < size; i++) {
-		    input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
-		}
+                for(std::size_t i = 0; i < size; i++) {
+                    input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
+                }
 
-		math::matrix<double> output = nn.query(input);
+                math::matrix<double> output = nn.query(input);
 
-		double max = output(0, 0);
-		uint x = 0;
-		for(uint i = 1; i < output.M; i++) {
-		    if(output(i, 0) > max) {
-			max = output(i, 0);
-			x = i;
-		    }
-		}
+                double max = output(0, 0);
+                uint x = 0;
+                for(uint i = 1; i < output.M; i++) {
+                    if(output(i, 0) > max) {
+                        max = output(i, 0);
+                        x = i;
+                    }
+                }
       
-		//std::cout << "Expected " << label << " got " << x << std::endl;
-		count++;
-		if(label == x)
-		    correct++;
-	    }
+                //std::cout << "Expected " << label << " got " << x << std::endl;
+                count++;
+                if(label == x)
+                    correct++;
+            }
 
-	}
+        }
 
         double ratio = correct / double(count);
         std::cout << "Got " << ratio * 100 << "% success rate" << std::endl;
@@ -318,8 +318,8 @@ int main(int argc, char** argv) {
 	    
                 int n = util::int_value(util::slice(file, "-", "-"));
 
-		if(n >= ONODES)
-		    continue;
+                if(n >= ONODES)
+                    continue;
 		
                 std::cout << "Parsed label " << n << std::endl;
 	    

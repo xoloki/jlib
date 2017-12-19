@@ -62,7 +62,7 @@ public:
     ptr obj(std::string key);
     ptr obj(unsigned int x);
     
-    std::string str() const;
+    std::string str(bool pretty = false) const;
     
     json_object* obj();
     
@@ -95,6 +95,7 @@ public:
     void add(double val);
     void add(long double val);
     void add(object::ptr val);
+    void add(array::ptr val);
     
     proxy get(unsigned int x) const;
     
