@@ -44,6 +44,7 @@ int main(int argc, char** argv) {
     uint epochs = 1, train_multi = 1;
     std::string train_path, test_train_path, test_my_path, load_file, output_file, train_mnist_path, test_mnist_path;
     double train_rate = 0.1;
+    int train_decay = -1;
     
     for(int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -55,6 +56,8 @@ int main(int argc, char** argv) {
             train_multi = util::int_value(argv[++i]);
         } else if(arg == "--train-rate") {
             train_rate = util::double_value(argv[++i]);
+        } else if(arg == "--train-decay") {
+            train_decay = std::stoi(argv[++i]);
         } else if(arg == "--test-train-path") {
             test_train_path = argv[++i];
         } else if(arg == "--train-mnist-path") {
@@ -79,9 +82,12 @@ int main(int argc, char** argv) {
     }
 
     int INODES = R*C;
-    ai::NeuralNetwork<double> nn(train_rate, INODES, HNODES, ONODES);
+
+    std::unique_ptr<ai::NeuralNetwork<double>> nn;
     
-    if(!load_file.empty()) {
+    if(load_file.empty()) {
+	nn.reset(new ai::NeuralNetwork<double>(train_rate, INODES, HNODES, ONODES));
+    } else {
         std::cout << "Loading json output from " << load_file << std::endl;
 
         std::string cache;
@@ -90,7 +96,7 @@ int main(int argc, char** argv) {
 	
         json::object::ptr o = json::object::create(cache);
 	
-        nn = ai::NeuralNetwork<double>(o);
+        nn.reset(new ai::NeuralNetwork<double>(o));
     }
 
     std::vector<std::tuple<int,math::matrix<T>>> inputs;
@@ -158,7 +164,12 @@ int main(int argc, char** argv) {
 	
         for(uint e = 0; e < epochs; e++) {
             std::cout << "Training epoch " << e << ", " << inputs.size() << " inputs" << std::endl;
-
+	    if(train_decay > 0 && ((e % train_decay) == (train_decay - 1))) {
+		std::cout << "Decay training rate from " << train_rate << " to " << (train_rate / 10.0) << std::endl;
+		train_rate /= 10.0;
+		nn->set_rate(train_rate);
+	    }
+	    
             std::cout << "Shuffling inputs... " << std::flush;
             for(int i = 0; i < inputs.size(); i++) {
                 int x = idist(generator);
@@ -174,7 +185,7 @@ int main(int argc, char** argv) {
 		
                 target(n, 0) = 0.99;
 		
-                nn.train(input, target);
+                nn->train(input, target);
 		
                 target(n, 0) = 0.01;
             }
@@ -182,7 +193,7 @@ int main(int argc, char** argv) {
     }
 
     if(!output_file.empty()) {
-        json::object::ptr o = nn.json();
+        json::object::ptr o = nn->json();
         std::string str = o->str(true);
         
         std::cout << "Writing json output to " << output_file << std::endl;
@@ -213,7 +224,7 @@ int main(int argc, char** argv) {
                     input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
                 }
 
-                math::matrix<double> output = nn.query(input);
+                math::matrix<double> output = nn->query(input);
 
                 double max = output(0, 0);
                 uint x = 0;
@@ -270,7 +281,7 @@ int main(int argc, char** argv) {
                 //std::cout << "Opening image " << image << std::endl;
 		
                 math::matrix<T> input = load(image, R, C);
-                math::matrix<double> output = nn.query(input);
+                math::matrix<double> output = nn->query(input);
 		
                 double max = output(0, 0);
                 uint x = 0;
@@ -324,7 +335,7 @@ int main(int argc, char** argv) {
                 std::cout << "Parsed label " << n << std::endl;
 	    
                 math::matrix<T> input = load(file, R, C);
-                math::matrix<double> output = nn.query(input);
+                math::matrix<double> output = nn->query(input);
                 auto rmax = getmax(output);
                 int x = std::get<0>(rmax);
                 double max = std::get<1>(rmax);

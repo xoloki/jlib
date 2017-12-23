@@ -37,17 +37,10 @@ public:
     util::json::object::ptr json();
 
     std::default_random_engine& get_generator();
+
+    void set_rate(double rate);
     
 protected:
-    template<typename... Args>    
-    void add_hidden(uint arg, Args&&... args) {
-        m_nhidden.push_back(arg);
-        add_hidden(args...);
-    }
-
-    void add_hidden() {
-    }
-
     uint m_ninput;
     std::vector<uint> m_nhidden;
     uint m_noutput;
@@ -87,9 +80,12 @@ NeuralNetwork<T>::NeuralNetwork(double lrate, uint ninput, const std::vector<uin
 
     for(int i = 1; i < m_nhidden.size(); i++) {
         // add a deep matrix from [i-1] to [i]
-        m_deep.push_back(math::matrix<T>(m_nhidden[i-1], m_nhidden[i]));
-        m_deep.back().foreach([&](T& x) {
-                x = hdist(m_generator);
+	T dbound = pow(m_nhidden[i], -0.5);
+	std::uniform_real_distribution<T> ddist(-dbound, dbound);
+	
+	m_deep.push_back(math::matrix<T>(m_nhidden[i], m_nhidden[i-1]));
+	m_deep.back().foreach([&](T& x) {
+                x = ddist(m_generator);
             });
     }
 
@@ -122,38 +118,23 @@ NeuralNetwork<T>::NeuralNetwork(util::json::object::ptr p)
         throw std::runtime_error("Need at least one hidden layer");
 
     m_wih = math::matrix<T>(m_nhidden.front(), m_ninput);
-    m_who = math::matrix<T>(m_noutput, m_nhidden.back());
-
     m_wih.foreach_index([&](uint r, uint c, T& x) {
             x = p->obj("wih")->get(r*m_ninput + c);
-        });
-    
-    m_who.foreach_index([&](uint r, uint c, T& x) {
-            x = p->obj("who")->get(r*m_nhidden[0] + c);
-        });
-    
-    T hbound = pow(m_nhidden[0], -0.5);
-    std::uniform_real_distribution<T> hdist(-hbound, hbound);
-        
-    m_wih.foreach([&](T& x) {
-            x = hdist(m_generator);
-        });
-        
-    T obound = pow(m_noutput, -0.5);
-    std::uniform_real_distribution<T> odist(-obound, obound);
-        
-    m_who.foreach([&](T& x) {
-            x = odist(m_generator);
         });
 
     for(int i = 1; i < m_nhidden.size(); i++) {
         // add a deep matrix from [i-1] to [i]
-        m_deep.push_back(math::matrix<T>(m_nhidden[i-1], m_nhidden[i]));
-        m_deep.back().foreach([&](T& x) {
-                x = hdist(m_generator);
+	m_deep.push_back(math::matrix<T>(m_nhidden[i], m_nhidden[i-1]));
+	m_deep.back().foreach_index([&](uint r, uint c, T& x) {
+		x = p->obj("deep")->obj(i-1)->get(r*m_nhidden[i-1] + c);
             });
     }
 
+    m_who = math::matrix<T>(m_noutput, m_nhidden.back());
+    m_who.foreach_index([&](uint r, uint c, T& x) {
+            x = p->obj("who")->get(r*m_nhidden.back() + c);
+        });
+    
     // sigmoid function
     m_activation_function = [](math::matrix<T> input) {
         math::matrix<T> output(input.M, input.N);
@@ -166,6 +147,8 @@ NeuralNetwork<T>::NeuralNetwork(util::json::object::ptr p)
     
 template<typename T>
 void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
+    //std::cout << "wih[" << m_wih.M << "," << m_wih.N << "]" << " * " << "inputs[" << inputs.M << "," << inputs.N << "]" << std::endl;
+
     math::matrix<T> hidden_inputs = m_wih * inputs;
     math::matrix<T> hidden_outputs = m_activation_function(hidden_inputs);
 
@@ -176,10 +159,11 @@ void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     std::vector<math::matrix<T>> deep_outputs_cache;
 
     for(auto& deep : m_deep) {
+        deep_inputs_cache.push_back(deep_outputs);
+
         deep_inputs = deep * deep_outputs;
         deep_outputs = m_activation_function(deep_inputs);
 
-        deep_inputs_cache.push_back(deep_inputs);
         deep_outputs_cache.push_back(deep_outputs);
     }
 
@@ -229,9 +213,15 @@ util::json::object::ptr NeuralNetwork<T>::json() {
     util::json::object::ptr p = util::json::object::create();
     
     p->add("ninput", m_ninput);
-    p->add("nhidden", m_nhidden[0]);
     p->add("noutput", m_noutput);
     p->add("lrate", m_lrate);
+
+    util::json::array::ptr nhidden = util::json::array::create();
+    //m_nhidden.foreach([&](T& x) {
+    for(uint x : m_nhidden) {
+	    nhidden->add(x);
+    }
+    p->add("nhidden", nhidden);
     
     util::json::array::ptr wih = util::json::array::create();
     m_wih.foreach([&](T& x) {
@@ -263,5 +253,10 @@ std::default_random_engine& NeuralNetwork<T>::get_generator() {
     return m_generator;
 }
 
+template<typename T>
+void NeuralNetwork<T>::set_rate(double rate) {
+    m_lrate = rate;
+}
+    
 }
 }
