@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<ai::NeuralNetwork<double>> nn;
     
     if(load_file.empty()) {
-	nn.reset(new ai::NeuralNetwork<double>(train_rate, INODES, HNODES, ONODES));
+        nn.reset(new ai::NeuralNetwork<double>(train_rate, INODES, HNODES, ONODES));
     } else {
         std::cout << "Loading json output from " << load_file << std::endl;
 

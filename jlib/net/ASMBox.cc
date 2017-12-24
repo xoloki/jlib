@@ -126,7 +126,7 @@ namespace jlib {
 
             std::list<int> del;
             {
-                sys::auto_lock<Glib::Mutex> lock(m_folders);
+                sys::auto_lock<std::mutex> lock(m_folders);
 
                 folder_type& rep_folder = m_folders.ref()[folder.path];
                 for(folder_data_type::iterator i = rep_folder.data.begin(); i != rep_folder.data.end(); i++) {
@@ -156,7 +156,7 @@ namespace jlib {
             push(MailBoxResponse(MailBoxResponse::STATUS, "Checking folder " + path + " for recent messages"));
             bool change = false;
             {
-                sys::auto_lock<Glib::Mutex> lock(m_folders);
+                sys::auto_lock<std::mutex> lock(m_folders);
                 long mtime;
                 folder_type& rep_folder = m_folders.ref()[folder.path];
                 if((mtime=util::file::mtime(path)) != rep_folder.info.attr.mtime) {
@@ -193,7 +193,7 @@ namespace jlib {
 
                 m_divide.clear();
                 {
-                    sys::auto_lock<Glib::Mutex> lock(m_folders);
+                    sys::auto_lock<std::mutex> lock(m_folders);
                     folder_type& rep_folder = m_folders.ref()[folder.path];
                     rep_folder.info.attr.mtime = util::file::mtime(path);
                     rep_folder.data.clear();
@@ -318,7 +318,7 @@ namespace jlib {
 
             folder_indx_type::iterator i = indx.begin();
             for(; i != indx.end(); i++) {
-                sys::auto_lock<Glib::Mutex> lock(m_folders);
+                sys::auto_lock<std::mutex> lock(m_folders);
                 folder_type& rep_folder = m_folders.ref()[folder.path];
 
                 rep_folder.data[*i].set_flags(flags);
@@ -340,7 +340,7 @@ namespace jlib {
 
             folder_indx_type::iterator i = indx.begin();
             for(; i != indx.end(); i++) {
-                sys::auto_lock<Glib::Mutex> lock(m_folders);
+                sys::auto_lock<std::mutex> lock(m_folders);
                 folder_type& rep_folder = m_folders.ref()[folder.path];
 
                 rep_folder.data[*i].unset_flags(flags);

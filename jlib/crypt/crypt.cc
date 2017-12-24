@@ -24,6 +24,7 @@
 #include <jlib/sys/tfstream.hh>
 
 #include <cstdlib>
+#include <sstream>
 
 namespace jlib {
     namespace crypt {

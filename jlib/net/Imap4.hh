@@ -28,6 +28,7 @@
 #include <jlib/net/Email.hh>
 
 #include <vector>
+#include <mutex>
 #include <map>
 
 namespace jlib {
@@ -584,9 +585,9 @@ namespace jlib {
             std::string m_user, m_pass, m_host, m_delim;
             unsigned int m_port;
             unsigned int m_exists, m_recent, m_unseen;
-            Glib::Mutex m_exists_mutex, m_recent_mutex, m_unseen_mutex;
+            std::mutex m_exists_mutex, m_recent_mutex, m_unseen_mutex;
             int m_num;
-            Glib::Mutex m_num_mutex;
+            std::mutex m_num_mutex;
             int m_width;
             State m_state;
             jlib::util::URL m_url;

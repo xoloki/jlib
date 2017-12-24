@@ -32,6 +32,7 @@
 #include <jlib/util/Regex.hh>
 #include <jlib/util/Date.hh>
 
+#include <mutex>
 #include <sstream>
 #include <stack>
 #include <algorithm>
@@ -464,7 +465,7 @@ namespace jlib {
             struct hostent *h;
             std::pair< std::string, std::vector<std::string> > ret;
 
-            static Glib::Mutex hostex;
+            static std::mutex hostex;
             hostex.lock();
             h = gethostbyname(s.c_str());
 

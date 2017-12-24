@@ -28,7 +28,7 @@ namespace jlib {
         MailBoxRequest::MailBoxRequest(request_type t)
             : type(t)
         {
-            sys::auto_lock<Glib::Mutex> lock(master);
+            sys::auto_lock<std::mutex> lock(master);
             id = master.ref()++;;
         }
 
@@ -36,7 +36,7 @@ namespace jlib {
             : type(t),
               password(p)
         {
-            sys::auto_lock<Glib::Mutex> lock(master);
+            sys::auto_lock<std::mutex> lock(master);
             id = master.ref()++;;
         }
 
@@ -47,7 +47,7 @@ namespace jlib {
               src(s),
               indx(i)
         {
-            sys::auto_lock<Glib::Mutex> lock(master);
+            sys::auto_lock<std::mutex> lock(master);
             id = master.ref()++;;
         }
 
@@ -60,7 +60,7 @@ namespace jlib {
               dst(d),
               indx(i)
         {
-            sys::auto_lock<Glib::Mutex> lock(master);
+            sys::auto_lock<std::mutex> lock(master);
             id = master.ref()++;;
         }
 
@@ -73,7 +73,7 @@ namespace jlib {
               data(e),
               indx(i)
         {
-            sys::auto_lock<Glib::Mutex> lock(master);
+            sys::auto_lock<std::mutex> lock(master);
             id = master.ref()++;;
         }
 
@@ -334,14 +334,14 @@ namespace jlib {
 
 
         void ASMailBox::clear() {
-            sys::auto_lock<Glib::Mutex> lock(m_requests);
+            sys::auto_lock<std::mutex> lock(m_requests);
             while(!m_requests.ref().empty()) {
                 m_requests.ref().pop();
             }
         }
 
         void ASMailBox::clear(MailBoxRequest::request_type type) {
-            sys::auto_lock<Glib::Mutex> lock(m_requests);
+            sys::auto_lock<std::mutex> lock(m_requests);
             std::list<MailBoxRequest> list;
 
             while(!m_requests.ref().empty()) {
@@ -362,7 +362,7 @@ namespace jlib {
         }
 
         void ASMailBox::clear(MailBoxResponse::response_type type) {
-            sys::auto_lock<Glib::Mutex> lock(m_responses);
+            sys::auto_lock<std::mutex> lock(m_responses);
             std::list<MailBoxResponse> list;
 
             while(!m_responses.ref().empty()) {

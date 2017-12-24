@@ -21,8 +21,6 @@
 #ifndef JLIB_SYS_ASSERVENT_HH
 #define JLIB_SYS_ASSERVENT_HH
 
-#include <glibmm/thread.h>
-#include <glibmm/object.h>
 #include <jlib/sys/pipe.hh>
 #include <jlib/sys/sync.hh>
 #include <jlib/sys/auto.hh>
@@ -31,11 +29,11 @@
 #include <string>
 #include <sstream>
 #include <map>
+#include <mutex>
+#include <thread>
 #include <queue>
 
 #include <cstring>
-
-#include <sigc++/sigc++.h>
 
 #include <errno.h>
 
@@ -50,7 +48,7 @@ namespace sys {
  * Request should override operator<() based on priority
  */
 template<typename Request, typename Response>
-class ASServent : public Glib::Object {
+class ASServent {
 public:
     class exception : public std::exception {
     public:
@@ -115,8 +113,8 @@ protected:
     
     pipe m_request_pipe;
     pipe m_response_pipe;
-    Glib::Thread* m_worker;
-    Glib::Mutex m_lock;
+    std::thread* m_worker = nullptr;
+    std::mutex m_lock;
     sys::sync<std::priority_queue<Request> > m_requests;
     sys::sync<std::queue<Response> > m_responses;
 };
@@ -124,8 +122,7 @@ protected:
 template<typename Request, typename Response>
 inline
 ASServent<Request,Response>::ASServent()
-    : m_worker(0),
-      m_request_pipe(false,false),
+    : m_request_pipe(false,false),
       m_response_pipe(false,false)
 {
     
@@ -143,7 +140,7 @@ void
 ASServent<Request,Response>::push(const Request& r) {
     if(getenv("JLIB_SYS_ASSERVENT_DEBUG"))
         std::cerr << "jlib::sys::ASServent::push(Request): enter" << std::endl;
-    auto_lock<Glib::Mutex> lock(m_requests);
+    auto_lock<std::mutex> lock(m_requests);
     m_requests().push(r);
     try {
         if(getenv("JLIB_SYS_ASSERVENT_DEBUG"))
@@ -171,7 +168,7 @@ ASServent<Request,Response>::reset() {
         m_request_pipe.write_int(EXIT);
         m_worker = 0;
     }
-    m_worker = Glib::Thread::create(sigc::mem_fun(this, &jlib::sys::ASServent<Request,Response>::start), false);
+    m_worker = new std::thread([this](){ this->start(); });
 }
     
 template<typename Request, typename Response>
@@ -188,11 +185,11 @@ ASServent<Request,Response>::start() {
                 if(id == NEW_REQUEST) {
                     
                 } else if(id == EXIT) {
-                    throw Glib::Thread::Exit();
+                    std::terminate();
                 }
             }
             
-            auto_lock<Glib::Mutex> lock(m_requests);
+            auto_lock<std::mutex> lock(m_requests);
             while(m_requests().size() > 0) {
                 Request r = m_requests().top();
                 m_requests().pop();
@@ -204,9 +201,6 @@ ASServent<Request,Response>::start() {
                 m_requests.lock();
             }
             
-        } catch(Glib::Thread::Exit& e) {
-            std::cerr << "jlib::sys::ASServent::start(): got Glib::Thread::Exit" << std::endl;
-            throw e;
         } catch(std::exception& e) {
             std::cerr << "jlib::sys::ASServent::start(): got std::exception: " << e.what() << std::endl;
         } catch(...) {
@@ -229,7 +223,7 @@ ASServent<Request,Response>::push(const Response& r) {
     if(getenv("JLIB_SYS_ASSERVENT_DEBUG"))
         std::cerr << "jlib::sys::ASServent::push(Response): enter" << std::endl;
     
-    auto_lock<Glib::Mutex> lock(m_responses);
+    auto_lock<std::mutex> lock(m_responses);
     m_responses().push(r);
     try {
         if(getenv("JLIB_SYS_ASSERVENT_DEBUG"))
@@ -247,7 +241,7 @@ void
 ASServent<Request,Response>::handle() {
     id_type id = m_response_pipe.read_int();
 
-    auto_lock<Glib::Mutex> lock(m_responses);
+    auto_lock<std::mutex> lock(m_responses);
     while(m_responses().size() > 0) {
         Response r = m_responses().front();
         m_responses().pop();
@@ -258,7 +252,6 @@ ASServent<Request,Response>::handle() {
         m_responses.lock();
     }
 }
-
 }
 }
 
