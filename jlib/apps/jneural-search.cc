@@ -109,10 +109,36 @@ int main(int argc, char** argv) {
 
     std::vector<std::tuple<int,math::matrix<T>>> inputs = load_mnist(train_mnist_path);
     std::uniform_int_distribution<int> idist(0, inputs.size()-1);
-    bool finished = false;
+    bool finished = false, first = true;
+    sys::Directory pwd("./");
     
     while(!finished) {
-        std::ostringstream os;
+	if(!first) {
+	    // go backwards finding a layer to increment
+	    bool found = false;
+	    for(int i = hlayers - 1; i >= 0; i--) {
+		if(hidden[i] < hmax) {
+		    hidden[i] += hdiff;
+		    
+		    // now go back forwards and reset to hmin
+		    for(int j = i+1; j < hlayers; j++) {
+			hidden[j] = hmin;
+		    }
+		    
+		    found = true;
+		    break;
+		}
+	    }
+	    
+	    if(!found) {
+		finished = true;
+		continue;
+	    }
+	} else {
+	    first = false;
+	}
+
+	std::ostringstream os;
         os << "deep-search";
         for(auto h : hidden) {
             os << "-" << h << "h";
@@ -123,7 +149,15 @@ int main(int argc, char** argv) {
         output_file = os.str();
             
         std::cout << "Training " << output_file << std::endl;
-            
+
+	try {
+	    if(pwd.is(output_file, sys::REGULAR)) {
+		std::cout << "Exists, skipping" << std::endl;
+		continue;
+	    }
+	} catch(...) {
+	}
+	
         std::unique_ptr<ai::NeuralNetwork<double>> nn;
         nn.reset(new ai::NeuralNetwork<double>(train_rate, INODES, hidden, ONODES));
 
@@ -214,25 +248,6 @@ int main(int argc, char** argv) {
             std::cout << "Got " << ratio * 100 << "% success rate" << std::endl;
 
         }
-
-        // go backwards finding a layer to increment
-        bool found = false;
-        for(int i = hlayers - 1; i >= 0; i--) {
-            if(hidden[i] < hmax) {
-                hidden[i] += hdiff;
-
-                // now go back forwards and reset to hmin
-                for(int j = i+1; j < hlayers; j++) {
-                    hidden[j] = hmin;
-                }
-                
-                found = true;
-                break;
-            }
-        }
-
-        if(!found)
-            finished = true;
     }
     
     return 0;
