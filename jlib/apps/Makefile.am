@@ -1,6 +1,6 @@
 INCLUDES = -I$(top_srcdir)
 
-bin_PROGRAMS = jlib-mail jpoisoned jjoystick jhyper jhardhyper jglxhyper jgluthyper jgltorus jglxbox jjoy2xev jcrypt jnote jneural-zero jneural-alpha
+bin_PROGRAMS = jlib-mail jpoisoned jjoystick jhyper jhardhyper jglxhyper jgluthyper jgltorus jglxbox jjoy2xev jcrypt jnote jneural-zero jneural-alpha jneural-search
 
 dist_pkgdata_DATA = wow-buttons-ps3.map wow-axes-ps3.map wow-buttons-x360.map wow-axes-x360.map 
 
@@ -64,5 +64,9 @@ jneural_zero_LDADD = $(top_builddir)/jlib/util/libjutil.la \
 
 jneural_alpha_SOURCES = jneural-alpha.cc
 jneural_alpha_LDADD = $(top_builddir)/jlib/util/libjutil.la \
+	$(top_builddir)/jlib/sys/libjsys.la
+
+jneural_search_SOURCES = jneural-search.cc
+jneural_search_LDADD = $(top_builddir)/jlib/util/libjutil.la \
 	$(top_builddir)/jlib/sys/libjsys.la
 

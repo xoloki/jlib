@@ -23,9 +23,12 @@
 
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <fstream>
 #include <exception>
 #include <string>
+#include <queue>
+#include <atomic>
 #include <functional>
 
 #include <jlib/sys/auto.hh>
@@ -101,14 +104,73 @@ public:
 
     void lock() { m_lock.lock(); }
     void unlock() { m_lock.unlock(); }
-
+    
+    void wait(std::unique_lock<std::mutex>& lock) {
+        m_cond.wait(lock);
+    }
+    
+    void wait(std::unique_lock<std::mutex>& lock, std::chrono::nanoseconds timeout) {
+        m_cond.wait_for(lock, timeout);
+    }
+    
+    void notify() {
+        m_cond.notify_one();
+    }
+    void notify_all() {
+        m_cond.notify_all();
+    }
+    
 protected:
+    mutable std::condition_variable m_cond;
     mutable std::mutex m_lock;
     mutable T m_val;
 private:
     sync(const sync<T>& copy);
 };
 
+class queue {
+public:
+    queue(int pool_size = std::thread::hardware_concurrency()) {
+        m_exit = false;
+        
+        for(int i = 0; i < pool_size; i++) {
+            m_pool.push_back(std::thread([this](){ start(); }));
+        }
+    }
+
+    ~queue() {
+        m_exit = true;
+        m_queue.notify_all();
+
+        for(auto& thread : m_pool) {
+            thread.join();
+        }
+    }
+    
+    void post(std::function<void()> job) {
+        std::unique_lock<std::mutex> lock(m_queue);
+        m_queue().push(job);
+        m_queue.notify();
+    }
+    
+protected:
+    void start() {
+        while(!m_exit) {
+            std::unique_lock<std::mutex> lock(m_queue);
+            if(!m_queue().empty()) {
+                m_queue().front()();
+                m_queue().pop();
+            } else {
+                m_queue.wait(lock);
+            }
+        }
+    }
+    
+    sync<std::queue<std::function<void()>>> m_queue;
+    std::vector<std::thread> m_pool;
+    std::atomic<bool> m_exit;
+};
+    
 }
 }
 #endif //JLIB_SYS_SYNC_HH

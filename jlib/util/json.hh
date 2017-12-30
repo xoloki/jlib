@@ -37,9 +37,11 @@ public:
 protected:
     json_object* m_obj;
 };
-    
+
 class object {
 public:
+    enum type { type_null, type_boolean, type_double, type_int, type_object, type_array, type_string };
+
     typedef std::shared_ptr<object> ptr;
     typedef std::shared_ptr<array> arrayptr;
     
@@ -61,6 +63,8 @@ public:
     
     ptr obj(std::string key);
     ptr obj(unsigned int x);
+
+    bool is(type t) const;
     
     std::string str(bool pretty = false) const;
     

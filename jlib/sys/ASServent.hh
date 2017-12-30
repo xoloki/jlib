@@ -175,7 +175,8 @@ template<typename Request, typename Response>
 inline
 void 
 ASServent<Request,Response>::start() {
-    while(true) {
+    bool cont = true;
+    while(cont) {
         try {
             while(m_request_pipe.poll()) {
                 if(getenv("JLIB_SYS_ASSERVENT_DEBUG"))
@@ -185,7 +186,8 @@ ASServent<Request,Response>::start() {
                 if(id == NEW_REQUEST) {
                     
                 } else if(id == EXIT) {
-                    std::terminate();
+                    cont = false;
+                    break;
                 }
             }
             

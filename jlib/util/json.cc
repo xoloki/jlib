@@ -158,6 +158,10 @@ std::size_t object::size() const {
     return json_object_array_length(m_obj);
 }
     
+bool object::is(object::type t) const {
+    return json_object_is_type(m_obj, (json_type)(int)t);
+}
+    
 array::ptr array::create() { 
     return ptr(new array());
 }

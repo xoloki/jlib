@@ -13,6 +13,7 @@
 
 #include <functional>
 #include <random>
+#include <mutex>
 #include <fstream>
 #include <tuple>
 
@@ -74,10 +75,12 @@ int main(int argc, char** argv) {
             HNODES.push_back(std::stoi(argv[++i]));
         } else if(arg == "--output-nodes") {
             ONODES = util::int_value(argv[++i]);
-        } else if(arg == "--image-rows") {
+        } else if(arg == "--image-rows" || arg == "-r") {
             R = util::int_value(argv[++i]);
-        } else if(arg == "--image-cols") {
+        } else if(arg == "--image-cols" || arg == "-c") {
             C = util::int_value(argv[++i]);
+        } else {
+            std::cerr << "WARNING: unknown arg '" << arg << "'" << std::endl;
         }
     }
 
@@ -100,7 +103,8 @@ int main(int argc, char** argv) {
     }
 
     std::vector<std::tuple<int,math::matrix<T>>> inputs;
-    
+    std::mutex mutex;
+
     if(!train_path.empty()) {
         std::cout << "Loading handwriting from " << train_path << std::endl;
 	
@@ -159,17 +163,17 @@ int main(int argc, char** argv) {
         target.foreach([](T& x) {
                 x = 0.01;
             });
-	
+        
         std::uniform_int_distribution<int> idist(0, inputs.size()-1);
-	
+        
         for(uint e = 0; e < epochs; e++) {
             std::cout << "Training epoch " << e << ", " << inputs.size() << " inputs" << std::endl;
-	    if(train_decay > 0 && ((e % train_decay) == (train_decay - 1))) {
-		std::cout << "Decay training rate from " << train_rate << " to " << (train_rate / 10.0) << std::endl;
-		train_rate /= 10.0;
-		nn->set_rate(train_rate);
-	    }
-	    
+            if(train_decay > 0 && ((e % train_decay) == (train_decay - 1))) {
+                std::cout << "Decay training rate from " << train_rate << " to " << (train_rate / 10.0) << std::endl;
+                train_rate /= 10.0;
+                nn->set_rate(train_rate);
+            }
+            
             std::cout << "Shuffling inputs... " << std::flush;
             for(int i = 0; i < inputs.size(); i++) {
                 int x = idist(generator);
@@ -178,11 +182,11 @@ int main(int argc, char** argv) {
                 inputs[x] = tmp;
             }
             std::cout << "done" << std::endl;
-	    
+            
             for(auto i : inputs) {
                 int n = std::get<0>(i);
                 math::matrix<T> input = std::get<1>(i);
-		
+                
                 target(n, 0) = 0.99;
 		
                 nn->train(input, target);

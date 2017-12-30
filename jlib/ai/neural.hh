@@ -109,9 +109,17 @@ NeuralNetwork<T>::NeuralNetwork(util::json::object::ptr p)
       m_wih(1, 1),
       m_who(1, 1)
 {
-    std::vector<uint> nhidden;
-    for(int i = 0; i < p->obj("nhidden")->size(); i++) {
-        m_nhidden.push_back(p->obj("nhidden")->get(i));
+    util::json::object::ptr nh = p->obj("nhidden");
+
+    if(nh->is(util::json::object::type_array)) {
+        std::vector<uint> nhidden;
+        for(int i = 0; i < nh->size(); i++) {
+            m_nhidden.push_back(nh->get(i));
+        }
+    } else if(nh->is(util::json::object::type_int)) {
+        m_nhidden.push_back(p->get("nhidden"));
+    } else {
+        throw std::runtime_error("Unknown type of nhidden field: " + nh->str());
     }
           
     if(m_nhidden.empty())
