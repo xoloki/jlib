@@ -111,6 +111,7 @@ int main(int argc, char** argv) {
     std::uniform_int_distribution<int> idist(0, inputs.size()-1);
     bool finished = false, first = true;
     sys::Directory pwd("./");
+    std::multimap<double, std::vector<uint>> results;
     
     while(!finished) {
 	if(!first) {
@@ -258,7 +259,17 @@ int main(int argc, char** argv) {
             double ratio = correct / double(count);
             std::cout << "Got " << ratio * 100 << "% success rate" << std::endl;
 
+	    results.insert(results.begin(), std::make_pair(ratio, hidden));
         }
+    }
+
+    std::cout << "Results" << std::endl;
+    for(auto i = results.begin(); i != results.end(); i++) {
+	std::cout << i->first << ":";
+	for(auto j : i->second) {
+	    std::cout << " " << j;
+	}
+	std::cout << std::endl;
     }
     
     return 0;
