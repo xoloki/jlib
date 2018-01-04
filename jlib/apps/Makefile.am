@@ -1,6 +1,6 @@
-INCLUDES = -I$(top_srcdir)
+INCLUDES = -I$(top_srcdir)  -I/usr/local/cuda/include
 
-bin_PROGRAMS = jlib-mail jpoisoned jjoystick jhyper jhardhyper jglxhyper jgluthyper jgltorus jglxbox jjoy2xev jcrypt jnote jneural-zero jneural-alpha jneural-search
+bin_PROGRAMS = jlib-mail jpoisoned jjoystick jhyper jhardhyper jglxhyper jgluthyper jgltorus jglxbox jjoy2xev jcrypt jnote jneural-zero jneural-alpha jneural-search jcublas
 
 dist_pkgdata_DATA = wow-buttons-ps3.map wow-axes-ps3.map wow-buttons-x360.map wow-axes-x360.map 
 
@@ -70,3 +70,7 @@ jneural_search_SOURCES = jneural-search.cc
 jneural_search_LDADD = $(top_builddir)/jlib/util/libjutil.la \
 	$(top_builddir)/jlib/sys/libjsys.la
 
+jcublas_SOURCES = jcublas.cc
+jcublas_LDADD = $(top_builddir)/jlib/util/libjutil.la \
+	$(top_builddir)/jlib/sys/libjsys.la \
+	-L/usr/local/cuda/lib64 -lcublas -lcudart
