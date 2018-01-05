@@ -54,6 +54,7 @@ protected:
     void set_matrix(math::matrix<T> m, T* ret);
     void gemm(math::matrix<T> a, T* ad, math::matrix<T> b, T* bd, math::matrix<T> c, T* cd);
     void gemm(math::matrix<T> a, math::matrix<T> b, math::matrix<T> c);
+    void gemm(cublasOperation_t tra, cublasOperation_t trb, double alpha, math::matrix<T> a, math::matrix<T> b, double beta, math::matrix<T> c);
     
     void init_cublas();
     
@@ -199,7 +200,7 @@ void NeuralNetwork<T>::init_cublas() {
     md_wih = (T*)cuda_malloc(m_wih.M * m_wih.N * sizeof(T));
     md_inputs = (T*)cuda_malloc(m_ninput * sizeof(T));
     md_hidden_inputs = (T*)cuda_malloc(m_wih.M * 1 * sizeof(T));
-    md_who = (T*)cuda_malloc(m_who.M * m_wih.N * sizeof(T));
+    md_who = (T*)cuda_malloc(m_who.M * m_who.N * sizeof(T));
     md_deep_outputs = (T*)cuda_malloc(m_wih.M * sizeof(T));
     md_final_inputs = (T*)cuda_malloc(m_who.M * 1 * sizeof(T));
 }
@@ -259,19 +260,17 @@ void NeuralNetwork<T>::gemm(math::matrix<T> a, T* ad, math::matrix<T> b, T* bd, 
     if (stat != CUBLAS_STATUS_SUCCESS) {
 	throw std::runtime_error  ("data upload failed");
     }
-
 }
-    
+
 template<typename T>
-void NeuralNetwork<T>::gemm(math::matrix<T> a, math::matrix<T> b, math::matrix<T> c) {
+void NeuralNetwork<T>::gemm(cublasOperation_t tra, cublasOperation_t trb, double alpha, math::matrix<T> a, math::matrix<T> b, double beta, math::matrix<T> c) {
     cublasStatus_t stat;
-    const double alpha = 1, beta = 0;
 
     T* ad = set_matrix(a);
     T* bd = set_matrix(b);
     T* cd = set_matrix(c);
     
-    stat = cublasDgemm (m_handle, CUBLAS_OP_N, CUBLAS_OP_N, c.M, c.N, a.N, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
+    stat = cublasDgemm (m_handle, tra, trb, c.M, c.N, a.N, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
     if (stat != CUBLAS_STATUS_SUCCESS) {
 	throw std::runtime_error ("CUBLAS multiplication failed\n");
     }
@@ -288,12 +287,18 @@ void NeuralNetwork<T>::gemm(math::matrix<T> a, math::matrix<T> b, math::matrix<T
 }
     
 template<typename T>
+void NeuralNetwork<T>::gemm(math::matrix<T> a, math::matrix<T> b, math::matrix<T> c) {
+    gemm(CUBLAS_OP_N, CUBLAS_OP_N, 1, a, b, 0, c);
+}
+    
+template<typename T>
 void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     //std::cout << "wih[" << m_wih.M << "," << m_wih.N << "]" << " * " << "inputs[" << inputs.M << "," << inputs.N << "]" << std::endl;
 
     //math::matrix<T> hidden_inputs = m_wih * inputs;
     math::matrix<T> hidden_inputs(m_wih.M, inputs.N);
     gemm(m_wih, md_wih, inputs, md_inputs, hidden_inputs, md_hidden_inputs);
+    //gemm(m_wih, inputs, hidden_inputs);
     
     math::matrix<T> hidden_outputs = m_activation_function(hidden_inputs);
 
@@ -307,6 +312,7 @@ void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
         deep_inputs_cache.push_back(deep_outputs);
 
         //deep_inputs = deep * deep_outputs;
+	deep_inputs = math::matrix<T>(deep.M, deep_outputs.N);
 	gemm(deep, deep_outputs, deep_inputs);
 	
         deep_outputs = m_activation_function(deep_inputs);
@@ -317,6 +323,7 @@ void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     //math::matrix<T> final_inputs = m_who * deep_outputs;
     math::matrix<T> final_inputs(m_who.M, deep_outputs.N);
     gemm(m_who, md_who, deep_outputs, md_deep_outputs, final_inputs, md_final_inputs);
+    //gemm(m_who, deep_outputs, final_inputs);
     
     math::matrix<T> final_outputs = m_activation_function(final_inputs);
     //std::cout << "final_outputs[" << final_outputs.M << "," << final_outputs.N << "] \n" << final_outputs << std::endl;
@@ -324,7 +331,9 @@ void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     math::matrix<T> output_errors = targets - final_outputs;
     //std::cout << "output_errors[" << output_errors.M << "," << output_errors.N << "] \n" << output_errors << std::endl;
 
-    m_who += m_lrate * (((output_errors ^ final_outputs ^ (1.0 - final_outputs)) * deep_outputs.transpose()));
+    //m_who += m_lrate * (((output_errors ^ final_outputs ^ (1.0 - final_outputs)) * deep_outputs.transpose()));
+    math::matrix<T> tmp = (output_errors ^ final_outputs ^ (1.0 - final_outputs));
+    gemm(CUBLAS_OP_N, CUBLAS_OP_T, m_lrate, tmp, deep_outputs, 1, m_who);
 
     math::matrix<T> deep_errors = output_errors;
     math::matrix<T> deep = m_who;
@@ -344,15 +353,23 @@ void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     
 template<typename T>
 math::matrix<T> NeuralNetwork<T>::query(math::matrix<T> inputs) {
-    math::matrix<T> hidden_inputs = m_wih * inputs;
+    //math::matrix<T> hidden_inputs = m_wih * inputs;
+    math::matrix<T> hidden_inputs(m_wih.M, inputs.N);
+    gemm(m_wih, md_wih, inputs, md_inputs, hidden_inputs, md_hidden_inputs);
+
     math::matrix<T> hidden_outputs = m_activation_function(hidden_inputs);
 
     for(auto& deep : m_deep) {
-        hidden_inputs = deep * hidden_outputs;
+        //hidden_inputs = deep * hidden_outputs;
+	hidden_inputs = math::matrix<T>(deep.M, hidden_outputs.N);
+	gemm(deep, hidden_outputs, hidden_inputs);
         hidden_outputs = m_activation_function(hidden_inputs);
     }
 
-    math::matrix<T> final_inputs = m_who * hidden_outputs;
+    //math::matrix<T> final_inputs = m_who * hidden_outputs;
+    math::matrix<T> final_inputs(m_who.M, hidden_outputs.N);
+    gemm(m_who, md_who, hidden_outputs, md_deep_outputs, final_inputs, md_final_inputs);
+
     math::matrix<T> final_outputs = m_activation_function(final_inputs);
     
     return final_outputs;
