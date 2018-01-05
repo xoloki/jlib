@@ -341,14 +341,22 @@ void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     //for(auto x = m_deep.rbegin(); x != m_deep.rend(); x++) {
     for(int i = m_deep.size() - 1; i >= 0; i--) {
         deep_errors = deep.transpose() * deep_errors;
-        m_deep[i] += m_lrate * (((deep_errors ^ deep_outputs_cache[i] ^ (1.0 - deep_outputs_cache[i])) * deep_inputs_cache[i].transpose()));
+        //m_deep[i] += m_lrate * (((deep_errors ^ deep_outputs_cache[i] ^ (1.0 - deep_outputs_cache[i])) * deep_inputs_cache[i].transpose()));
+	tmp = (deep_errors ^ deep_outputs_cache[i] ^ (1.0 - deep_outputs_cache[i]));
+	gemm(CUBLAS_OP_N, CUBLAS_OP_T, m_lrate, tmp, deep_inputs_cache[i], 1, m_deep[i]);
         deep = m_deep[i];
     }
 
     math::matrix<T> hidden_errors = deep.transpose() * deep_errors;
-    //std::cout << "hidden_errors[" << hidden_errors.M << "," << hidden_errors.N << "] \n" << hidden_errors << std::endl;
+    //math::matrix<T> hidden_errors(deep.transpose().M, deep_errors.N);
+    //gemm(CUBLAS_OP_T, CUBLAS_OP_N, 1, deep, deep_errors, 0, hidden_errors);
     
-    m_wih += m_lrate * ((hidden_errors ^ hidden_outputs ^ (1.0 - hidden_outputs)) * inputs.transpose());
+    //std::cout << "hidden_errors[" << hidden_errors.M << "," << hidden_errors.N << "] \n" << hidden_errors << std::endl;
+
+    //m_wih += m_lrate * ((hidden_errors ^ hidden_outputs ^ (1.0 - hidden_outputs)) * inputs.transpose());
+    tmp = (hidden_errors ^ hidden_outputs ^ (1.0 - hidden_outputs));
+    gemm(CUBLAS_OP_N, CUBLAS_OP_T, m_lrate, tmp, inputs, 1, m_wih);
+    
 }
     
 template<typename T>
