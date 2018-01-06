@@ -35,7 +35,7 @@ struct gemm<float> {
     void operator()(cublasHandle_t m_handle, cublasOperation_t tra, cublasOperation_t trb, float alpha, math::matrix<float> a, const float* ad, math::matrix<float> b, const float* bd, float beta, math::matrix<float> c, float* cd) {
 	cublasStatus_t stat;
 	
-	stat = cublasSgemm (m_handle, CUBLAS_OP_N, CUBLAS_OP_N, c.M, c.N, a.N, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
+	stat = cublasSgemm (m_handle, tra, trb, c.M, c.N, a.N, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
 	if (stat != CUBLAS_STATUS_SUCCESS) {
 	    throw std::runtime_error ("CUBLAS multiplication failed\n");
 	}
@@ -53,7 +53,7 @@ struct gemm<double> {
     void operator()(cublasHandle_t m_handle, cublasOperation_t tra, cublasOperation_t trb, double alpha, math::matrix<double> a, const double* ad, math::matrix<double> b, const double* bd, double beta, math::matrix<double> c, double* cd) {
 	cublasStatus_t stat;
 	
-	stat = cublasDgemm (m_handle, CUBLAS_OP_N, CUBLAS_OP_N, c.M, c.N, a.N, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
+	stat = cublasDgemm (m_handle, tra, trb, c.M, c.N, a.N, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
 	if (stat != CUBLAS_STATUS_SUCCESS) {
 	    throw std::runtime_error ("CUBLAS multiplication failed\n");
 	}
