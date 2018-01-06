@@ -57,6 +57,13 @@ proxy::operator double() {
     return json_object_get_double(m_obj);
 }
     
+proxy::operator float() {
+    if(!json_object_is_type(m_obj, json_type_double))
+	throw type_mismatch();
+    
+    return static_cast<float>(json_object_get_double(m_obj));
+}
+    
 proxy::operator long double() {
     if(!json_object_is_type(m_obj, json_type_double))
 	throw type_mismatch();

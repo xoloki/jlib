@@ -30,6 +30,7 @@ public:
     operator std::size_t();
     operator int();
     operator unsigned int();
+    operator float();
     operator double();
     operator long double();
     operator bool();

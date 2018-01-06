@@ -26,15 +26,56 @@ namespace jlib {
 namespace ai {
 
 template<typename T>
+struct gemm {
+    void operator()(cublasHandle_t m_handle, cublasOperation_t tra, cublasOperation_t trb, T alpha, math::matrix<T> a, const T* da, math::matrix<T> b, const T* db, T beta, math::matrix<T> c, T* dc) {}
+};
+
+template<>
+struct gemm<float> {
+    void operator()(cublasHandle_t m_handle, cublasOperation_t tra, cublasOperation_t trb, float alpha, math::matrix<float> a, const float* ad, math::matrix<float> b, const float* bd, float beta, math::matrix<float> c, float* cd) {
+	cublasStatus_t stat;
+	
+	stat = cublasSgemm (m_handle, CUBLAS_OP_N, CUBLAS_OP_N, c.M, c.N, a.N, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
+	if (stat != CUBLAS_STATUS_SUCCESS) {
+	    throw std::runtime_error ("CUBLAS multiplication failed\n");
+	}
+	
+	math::buffer<float> cb = c;
+	stat = cublasGetMatrix (c.M, c.N, sizeof(float), cd, c.M, cb.data(), c.M);
+	if (stat != CUBLAS_STATUS_SUCCESS) {
+	    throw std::runtime_error  ("data upload failed");
+	}
+    }
+};
+
+template<>
+struct gemm<double> {
+    void operator()(cublasHandle_t m_handle, cublasOperation_t tra, cublasOperation_t trb, double alpha, math::matrix<double> a, const double* ad, math::matrix<double> b, const double* bd, double beta, math::matrix<double> c, double* cd) {
+	cublasStatus_t stat;
+	
+	stat = cublasDgemm (m_handle, CUBLAS_OP_N, CUBLAS_OP_N, c.M, c.N, a.N, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
+	if (stat != CUBLAS_STATUS_SUCCESS) {
+	    throw std::runtime_error ("CUBLAS multiplication failed\n");
+	}
+	
+	math::buffer<double> cb = c;
+	stat = cublasGetMatrix (c.M, c.N, sizeof(double), cd, c.M, cb.data(), c.M);
+	if (stat != CUBLAS_STATUS_SUCCESS) {
+	    throw std::runtime_error  ("data upload failed");
+	}
+    }
+};
+
+template<typename T>
 class NeuralNetwork {
 public:
-    NeuralNetwork(double lrate, uint ninput, const std::vector<uint>& hidden, uint noutput);
+    NeuralNetwork(T lrate, uint ninput, const std::vector<uint>& hidden, uint noutput);
 
     NeuralNetwork(util::json::object::ptr p);
     ~NeuralNetwork();
     
     template<typename... Args>
-    NeuralNetwork(double lrate, uint ninput, uint noutput, Args&&... args)
+    NeuralNetwork(T lrate, uint ninput, uint noutput, Args&&... args)
         : NeuralNetwork(lrate, ninput, std::vector<uint>({args...}), noutput)
     {
     }
@@ -46,7 +87,7 @@ public:
 
     std::default_random_engine& get_generator();
 
-    void set_rate(double rate);
+    void set_rate(T rate);
     
 protected:
     static void* cuda_malloc(std::size_t n);
@@ -54,14 +95,14 @@ protected:
     void set_matrix(math::matrix<T> m, T* ret);
     void gemm(math::matrix<T> a, T* ad, math::matrix<T> b, T* bd, math::matrix<T> c, T* cd);
     void gemm(math::matrix<T> a, math::matrix<T> b, math::matrix<T> c);
-    void gemm(cublasOperation_t tra, cublasOperation_t trb, double alpha, math::matrix<T> a, math::matrix<T> b, double beta, math::matrix<T> c);
+    void gemm(cublasOperation_t tra, cublasOperation_t trb, T alpha, math::matrix<T> a, math::matrix<T> b, T beta, math::matrix<T> c);
     
     void init_cublas();
     
     uint m_ninput;
     std::vector<uint> m_nhidden;
     uint m_noutput;
-    double m_lrate;
+    T m_lrate;
     math::matrix<T> m_wih;
     math::matrix<T> m_who;
     std::vector<math::matrix<T>> m_deep;
@@ -74,10 +115,11 @@ protected:
     T* md_who;
     T* md_deep_outputs;
     T* md_final_inputs;
+    jlib::ai::gemm<T> m_gemm;
 };
 
 template<typename T>
-NeuralNetwork<T>::NeuralNetwork(double lrate, uint ninput, const std::vector<uint>& hidden, uint noutput)
+NeuralNetwork<T>::NeuralNetwork(T lrate, uint ninput, const std::vector<uint>& hidden, uint noutput)
     : m_ninput(ninput),
       m_noutput(noutput),
       m_lrate(lrate),
@@ -243,43 +285,24 @@ void NeuralNetwork<T>::set_matrix(math::matrix<T> m, T* ret) {
     
 template<typename T>
 void NeuralNetwork<T>::gemm(math::matrix<T> a, T* ad, math::matrix<T> b, T* bd, math::matrix<T> c, T* cd) {
-    cublasStatus_t stat;
-    const double alpha = 1, beta = 0;
+    const T alpha = 1, beta = 0;
 
     set_matrix(a, ad);
     set_matrix(b, bd);
     set_matrix(c, cd);
-    
-    stat = cublasDgemm (m_handle, CUBLAS_OP_N, CUBLAS_OP_N, c.M, c.N, a.N, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
-    if (stat != CUBLAS_STATUS_SUCCESS) {
-	throw std::runtime_error ("CUBLAS multiplication failed\n");
-    }
 
-    math::buffer<T> cb = c;
-    stat = cublasGetMatrix (c.M, c.N, sizeof(T), cd, c.M, cb.data(), c.M);
-    if (stat != CUBLAS_STATUS_SUCCESS) {
-	throw std::runtime_error  ("data upload failed");
-    }
+    m_gemm(m_handle, CUBLAS_OP_N, CUBLAS_OP_N, alpha, a, ad, b, bd, beta, c, cd);
 }
 
 template<typename T>
-void NeuralNetwork<T>::gemm(cublasOperation_t tra, cublasOperation_t trb, double alpha, math::matrix<T> a, math::matrix<T> b, double beta, math::matrix<T> c) {
+void NeuralNetwork<T>::gemm(cublasOperation_t tra, cublasOperation_t trb, T alpha, math::matrix<T> a, math::matrix<T> b, T beta, math::matrix<T> c) {
     cublasStatus_t stat;
 
     T* ad = set_matrix(a);
     T* bd = set_matrix(b);
     T* cd = set_matrix(c);
-    
-    stat = cublasDgemm (m_handle, tra, trb, c.M, c.N, a.N, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
-    if (stat != CUBLAS_STATUS_SUCCESS) {
-	throw std::runtime_error ("CUBLAS multiplication failed\n");
-    }
 
-    math::buffer<T> cb = c;
-    stat = cublasGetMatrix (c.M, c.N, sizeof(T), cd, c.M, cb.data(), c.M);
-    if (stat != CUBLAS_STATUS_SUCCESS) {
-	throw std::runtime_error  ("data upload failed");
-    }
+    m_gemm(m_handle, tra, trb, alpha, a, ad, b, bd, beta, c, cd);
 
     cudaFree (ad);
     cudaFree (bd);
@@ -332,7 +355,7 @@ void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     //std::cout << "output_errors[" << output_errors.M << "," << output_errors.N << "] \n" << output_errors << std::endl;
 
     //m_who += m_lrate * (((output_errors ^ final_outputs ^ (1.0 - final_outputs)) * deep_outputs.transpose()));
-    math::matrix<T> tmp = (output_errors ^ final_outputs ^ (1.0 - final_outputs));
+    math::matrix<T> tmp = (output_errors ^ final_outputs ^ ((T)1.0 - final_outputs));
     gemm(CUBLAS_OP_N, CUBLAS_OP_T, m_lrate, tmp, deep_outputs, 1, m_who);
 
     math::matrix<T> deep_errors = output_errors;
@@ -342,7 +365,7 @@ void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     for(int i = m_deep.size() - 1; i >= 0; i--) {
         deep_errors = deep.transpose() * deep_errors;
         //m_deep[i] += m_lrate * (((deep_errors ^ deep_outputs_cache[i] ^ (1.0 - deep_outputs_cache[i])) * deep_inputs_cache[i].transpose()));
-	tmp = (deep_errors ^ deep_outputs_cache[i] ^ (1.0 - deep_outputs_cache[i]));
+	tmp = (deep_errors ^ deep_outputs_cache[i] ^ ((T)1.0 - deep_outputs_cache[i]));
 	gemm(CUBLAS_OP_N, CUBLAS_OP_T, m_lrate, tmp, deep_inputs_cache[i], 1, m_deep[i]);
         deep = m_deep[i];
     }
@@ -354,7 +377,7 @@ void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     //std::cout << "hidden_errors[" << hidden_errors.M << "," << hidden_errors.N << "] \n" << hidden_errors << std::endl;
 
     //m_wih += m_lrate * ((hidden_errors ^ hidden_outputs ^ (1.0 - hidden_outputs)) * inputs.transpose());
-    tmp = (hidden_errors ^ hidden_outputs ^ (1.0 - hidden_outputs));
+    tmp = (hidden_errors ^ hidden_outputs ^ ((T)1.0 - hidden_outputs));
     gemm(CUBLAS_OP_N, CUBLAS_OP_T, m_lrate, tmp, inputs, 1, m_wih);
     
 }
@@ -429,7 +452,7 @@ std::default_random_engine& NeuralNetwork<T>::get_generator() {
 }
 
 template<typename T>
-void NeuralNetwork<T>::set_rate(double rate) {
+void NeuralNetwork<T>::set_rate(T rate) {
     m_lrate = rate;
 }
     
@@ -458,14 +481,14 @@ std::default_random_engine generator;
 using namespace jlib;
 using namespace jlib::util;
 
-typedef double T;
+typedef float T;
 
 math::matrix<T> load(std::string path, uint r, uint c, bool greyscale = true);
 char convert(int n);
 int convert(char c);
 char capitalize(char c);
 
-std::tuple<uint,double> getmax(math::matrix<T> m);
+std::tuple<uint,T> getmax(math::matrix<T> m);
 
 int main(int argc, char** argv) {
     uint R = 90;
@@ -476,7 +499,7 @@ int main(int argc, char** argv) {
     const std::string I = "img";
     uint epochs = 1, train_multi = 1;
     std::string train_path, test_train_path, test_my_path, load_file, output_file, train_mnist_path, test_mnist_path;
-    double train_rate = 0.1;
+    T train_rate = 0.1;
     int train_decay = -1;
     
     for(int i = 1; i < argc; i++) {
@@ -488,7 +511,8 @@ int main(int argc, char** argv) {
         } else if(arg == "--train-multi") {
             train_multi = util::int_value(argv[++i]);
         } else if(arg == "--train-rate") {
-            train_rate = util::double_value(argv[++i]);
+	    std::istringstream is(argv[++i]);
+            is >> train_rate;
         } else if(arg == "--train-decay") {
             train_decay = std::stoi(argv[++i]);
         } else if(arg == "--test-train-path") {
@@ -518,10 +542,10 @@ int main(int argc, char** argv) {
 
     int INODES = R*C;
 
-    std::unique_ptr<ai::NeuralNetwork<double>> nn;
+    std::unique_ptr<ai::NeuralNetwork<T>> nn;
     
     if(load_file.empty()) {
-        nn.reset(new ai::NeuralNetwork<double>(train_rate, INODES, HNODES, ONODES));
+        nn.reset(new ai::NeuralNetwork<T>(train_rate, INODES, HNODES, ONODES));
     } else {
         std::cout << "Loading json output from " << load_file << std::endl;
 
@@ -531,7 +555,7 @@ int main(int argc, char** argv) {
 	
         json::object::ptr o = json::object::create(cache);
 	
-        nn.reset(new ai::NeuralNetwork<double>(o));
+        nn.reset(new ai::NeuralNetwork<T>(o));
     }
 
     std::vector<std::tuple<int,math::matrix<T>>> inputs;
@@ -579,7 +603,7 @@ int main(int argc, char** argv) {
                 //std::cout << "Got " << size << " elements" << std::endl;
 		
                 int label = util::int_value(inlist.front());
-                math::matrix<double> input(size, 1);
+                math::matrix<T> input(size, 1);
 		
                 for(std::size_t i = 0; i < size; i++) {
                     input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
@@ -654,15 +678,15 @@ int main(int argc, char** argv) {
                 //std::cout << "Got " << size << " elements" << std::endl;
       
                 int label = util::int_value(inlist.front());
-                math::matrix<double> input(size, 1);
+                math::matrix<T> input(size, 1);
       
                 for(std::size_t i = 0; i < size; i++) {
                     input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
                 }
 
-                math::matrix<double> output = nn->query(input);
+                math::matrix<T> output = nn->query(input);
 
-                double max = output(0, 0);
+                T max = output(0, 0);
                 uint x = 0;
                 for(uint i = 1; i < output.M; i++) {
                     if(output(i, 0) > max) {
@@ -717,9 +741,9 @@ int main(int argc, char** argv) {
                 //std::cout << "Opening image " << image << std::endl;
 		
                 math::matrix<T> input = load(image, R, C);
-                math::matrix<double> output = nn->query(input);
+                math::matrix<T> output = nn->query(input);
 		
-                double max = output(0, 0);
+                T max = output(0, 0);
                 uint x = 0;
                 for(uint i = 1; i < output.M; i++) {
                     if(output(i, 0) > max) {
@@ -771,10 +795,10 @@ int main(int argc, char** argv) {
                 std::cout << "Parsed label " << n << std::endl;
 	    
                 math::matrix<T> input = load(file, R, C);
-                math::matrix<double> output = nn->query(input);
+                math::matrix<T> output = nn->query(input);
                 auto rmax = getmax(output);
                 int x = std::get<0>(rmax);
-                double max = std::get<1>(rmax);
+                T max = std::get<1>(rmax);
 	    
                 std::cout << "Expected " << convert(n) << " got " << convert(x) << " (" << (100*max) << "%)" << std::endl;
                 count++;
@@ -837,7 +861,7 @@ math::matrix<T> load(std::string path, uint r, uint c, bool greyscale) {
         image.zoom(Magick::Geometry(r, c));
     }
     
-    math::matrix<double> input(r*c, 1);
+    math::matrix<T> input(r*c, 1);
     for(uint y = 0; y < image.rows(); y++) {
         for(uint x = 0; x < image.columns(); x++) {
             Magick::Color color = image.pixelColor(x, y);
@@ -879,8 +903,8 @@ char capitalize(char c) {
     }
 }
 
-std::tuple<uint,double> getmax(math::matrix<T> output) {
-    double max = output(0, 0);
+std::tuple<uint,T> getmax(math::matrix<T> output) {
+    T max = output(0, 0);
     uint x = 0;
     for(uint i = 1; i < output.M; i++) {
         if(output(i, 0) > max) {
