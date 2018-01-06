@@ -61,7 +61,9 @@ struct gemm<double> {
 	math::buffer<double> cb = c;
 	stat = cublasGetMatrix (c.M, c.N, sizeof(double), cd, c.M, cb.data(), c.M);
 	if (stat != CUBLAS_STATUS_SUCCESS) {
-	    throw std::runtime_error  ("data upload failed");
+	    std::ostringstream os;
+	    os << "data upload failed: " << (int)stat;
+	    throw std::runtime_error(os.str());
 	}
     }
 };
@@ -92,7 +94,8 @@ public:
 protected:
     static void* cuda_malloc(std::size_t n);
     static T* set_matrix(math::matrix<T> m);
-    void set_matrix(math::matrix<T> m, T* ret);
+    static void set_matrix(math::matrix<T> m, T* ret);
+    
     void gemm(math::matrix<T> a, T* ad, math::matrix<T> b, T* bd, math::matrix<T> c, T* cd);
     void gemm(math::matrix<T> a, math::matrix<T> b, math::matrix<T> c);
     void gemm(cublasOperation_t tra, cublasOperation_t trb, T alpha, math::matrix<T> a, math::matrix<T> b, T beta, math::matrix<T> c);
@@ -259,17 +262,9 @@ void* NeuralNetwork<T>::cuda_malloc(std::size_t n) {
 
 template<typename T>
 T* NeuralNetwork<T>::set_matrix(math::matrix<T> m) {
-    void* ret = cuda_malloc(m.M * m.N * sizeof(T));
-    math::buffer<T> buffer = m;
-    
-    cublasStatus_t stat = cublasSetMatrix (m.M, m.N, sizeof(T), buffer.data(), m.M, ret, m.M);
-
-    if (stat != CUBLAS_STATUS_SUCCESS) {
-	cudaFree (ret);
-	throw std::runtime_error ("data download failed");
-    }
-
-    return (T*)ret;
+    T* ret = (T*)cuda_malloc(m.M * m.N * sizeof(T));
+    set_matrix(m, ret);
+    return ret;
 }
     
 template<typename T>
@@ -481,7 +476,7 @@ std::default_random_engine generator;
 using namespace jlib;
 using namespace jlib::util;
 
-typedef float T;
+typedef double T;
 
 math::matrix<T> load(std::string path, uint r, uint c, bool greyscale = true);
 char convert(int n);
