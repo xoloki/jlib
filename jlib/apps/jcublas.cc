@@ -361,8 +361,9 @@ void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     //for(auto x = m_deep.rbegin(); x != m_deep.rend(); x++) {
     for(int i = m_deep.size() - 1; i >= 0; i--) {
         //deep_errors = deep.transpose() * deep_errors;
-	math::matrix<T> deep_errors(deep.transpose().M, deep_errors.N);
-	gemm(CUBLAS_OP_T, CUBLAS_OP_N, 1, deep, deep_errors, 0, deep_errors);
+	math::matrix<T> deep_errors_tmp(deep.transpose().M, deep_errors.N);
+	gemm(CUBLAS_OP_T, CUBLAS_OP_N, 1, deep, deep_errors, 0, deep_errors_tmp);
+	deep_errors = deep_errors_tmp;
 	
         //m_deep[i] += m_lrate * (((deep_errors ^ deep_outputs_cache[i] ^ (1.0 - deep_outputs_cache[i])) * deep_inputs_cache[i].transpose()));
 	tmp = (deep_errors ^ deep_outputs_cache[i] ^ ((T)1.0 - deep_outputs_cache[i]));
