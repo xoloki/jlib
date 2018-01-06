@@ -34,8 +34,9 @@ template<>
 struct gemm<float> {
     void operator()(cublasHandle_t m_handle, cublasOperation_t tra, cublasOperation_t trb, float alpha, math::matrix<float> a, const float* ad, math::matrix<float> b, const float* bd, float beta, math::matrix<float> c, float* cd) {
 	cublasStatus_t stat;
+	uint k = (tra == CUBLAS_OP_N ? a.N : a.M);
 	
-	stat = cublasSgemm (m_handle, tra, trb, c.M, c.N, a.N, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
+	stat = cublasSgemm (m_handle, tra, trb, c.M, c.N, k, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
 	if (stat != CUBLAS_STATUS_SUCCESS) {
 	    throw std::runtime_error ("CUBLAS multiplication failed\n");
 	}
@@ -52,8 +53,9 @@ template<>
 struct gemm<double> {
     void operator()(cublasHandle_t m_handle, cublasOperation_t tra, cublasOperation_t trb, double alpha, math::matrix<double> a, const double* ad, math::matrix<double> b, const double* bd, double beta, math::matrix<double> c, double* cd) {
 	cublasStatus_t stat;
+	uint k = (tra == CUBLAS_OP_N ? a.N : a.M);
 	
-	stat = cublasDgemm (m_handle, tra, trb, c.M, c.N, a.N, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
+	stat = cublasDgemm (m_handle, tra, trb, c.M, c.N, k, &alpha, ad, a.M, bd, b.M, &beta, cd, c.M);
 	if (stat != CUBLAS_STATUS_SUCCESS) {
 	    throw std::runtime_error ("CUBLAS multiplication failed\n");
 	}
@@ -358,16 +360,19 @@ void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     
     //for(auto x = m_deep.rbegin(); x != m_deep.rend(); x++) {
     for(int i = m_deep.size() - 1; i >= 0; i--) {
-        deep_errors = deep.transpose() * deep_errors;
+        //deep_errors = deep.transpose() * deep_errors;
+	math::matrix<T> deep_errors(deep.transpose().M, deep_errors.N);
+	gemm(CUBLAS_OP_T, CUBLAS_OP_N, 1, deep, deep_errors, 0, deep_errors);
+	
         //m_deep[i] += m_lrate * (((deep_errors ^ deep_outputs_cache[i] ^ (1.0 - deep_outputs_cache[i])) * deep_inputs_cache[i].transpose()));
 	tmp = (deep_errors ^ deep_outputs_cache[i] ^ ((T)1.0 - deep_outputs_cache[i]));
 	gemm(CUBLAS_OP_N, CUBLAS_OP_T, m_lrate, tmp, deep_inputs_cache[i], 1, m_deep[i]);
         deep = m_deep[i];
     }
 
-    math::matrix<T> hidden_errors = deep.transpose() * deep_errors;
-    //math::matrix<T> hidden_errors(deep.transpose().M, deep_errors.N);
-    //gemm(CUBLAS_OP_T, CUBLAS_OP_N, 1, deep, deep_errors, 0, hidden_errors);
+    //math::matrix<T> hidden_errors = deep.transpose() * deep_errors;
+    math::matrix<T> hidden_errors(deep.transpose().M, deep_errors.N);
+    gemm(CUBLAS_OP_T, CUBLAS_OP_N, 1, deep, deep_errors, 0, hidden_errors);
     
     //std::cout << "hidden_errors[" << hidden_errors.M << "," << hidden_errors.N << "] \n" << hidden_errors << std::endl;
 
@@ -476,7 +481,7 @@ std::default_random_engine generator;
 using namespace jlib;
 using namespace jlib::util;
 
-typedef double T;
+typedef float T;
 
 math::matrix<T> load(std::string path, uint r, uint c, bool greyscale = true);
 char convert(int n);
