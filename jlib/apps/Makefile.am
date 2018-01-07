@@ -1,6 +1,12 @@
 INCLUDES = -I$(top_srcdir)  -I/usr/local/cuda/include
 
-bin_PROGRAMS = jlib-mail jpoisoned jjoystick jhyper jhardhyper jglxhyper jgluthyper jgltorus jglxbox jjoy2xev jcrypt jnote jneural-zero jneural-alpha jneural-search jcublas
+if HAVE_CUDA
+cuda_programs = jcublas
+else
+cuda_programs = 
+endif
+
+bin_PROGRAMS = jlib-mail jpoisoned jjoystick jhyper jhardhyper jglxhyper jgluthyper jgltorus jglxbox jjoy2xev jcrypt jnote jneural-zero jneural-alpha jneural-search $(cuda_programs)
 
 dist_pkgdata_DATA = wow-buttons-ps3.map wow-axes-ps3.map wow-buttons-x360.map wow-axes-x360.map 
 
