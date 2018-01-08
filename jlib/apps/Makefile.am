@@ -79,4 +79,5 @@ jneural_search_LDADD = $(top_builddir)/jlib/util/libjutil.la \
 jcublas_SOURCES = jcublas.cc
 jcublas_LDADD = $(top_builddir)/jlib/util/libjutil.la \
 	$(top_builddir)/jlib/sys/libjsys.la \
+	$(top_builddir)/jlib/cuda/libjcuda.la \
 	-L/usr/local/cuda/lib64 -lcublas -lcudart

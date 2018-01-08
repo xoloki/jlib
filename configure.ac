@@ -167,6 +167,8 @@ if test x$have_gl = xtrue && test x$have_glu = xtrue && test x$have_glut = xtrue
     jlib_libs="-ljgl $jlib_libs"
 fi
 
+AS_IF([test "$have_cuda" = 'true'],[jlib_libs="-ljcuda $jlib_libs"])
+
 jlib_libs="-L$mylibdir $jlib_libs $SIGC_LIBS $GLIBMM_LIBS"
 
 AC_DEFINE_UNQUOTED(JLIB_CFLAGS,"$jlib_cflags",[jlib cflags])
@@ -335,6 +337,7 @@ AC_CONFIG_FILES([Makefile \
     jlib/util/Makefile \
     jlib/x/Makefile \
     jlib/ai/Makefile \
+    jlib/cuda/Makefile \
     jlib/apps/Makefile \
     tests/Makefile \
     jlib/jlib-1.2.pc
