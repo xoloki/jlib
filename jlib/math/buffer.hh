@@ -23,7 +23,8 @@
 
 
 #include <jlib/sys/object.hh>
-#include <glibmm/refptr.h>
+
+#include <memory>
 
 #include <cstring>
 
@@ -33,9 +34,9 @@ namespace math {
 
 
 template<typename T>
-class array : public sys::Object {
+class array {
 public:
-    typedef Glib::RefPtr< array<T> > ptr;
+    typedef std::shared_ptr<array> ptr;
 
     array(unsigned int size);
     virtual ~array();

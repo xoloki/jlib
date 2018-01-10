@@ -31,7 +31,7 @@ public:
     {
     }
 
-    void train(math::matrix<T> inputs, math::matrix<T> targets);
+    math::matrix<T> train(math::matrix<T> inputs, math::matrix<T> targets);
     math::matrix<T> query(math::matrix<T> inputs);
 
     util::json::object::ptr json();
@@ -154,7 +154,7 @@ NeuralNetwork<T>::NeuralNetwork(util::json::object::ptr p)
 }
     
 template<typename T>
-void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
+math::matrix<T> NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     //std::cout << "wih[" << m_wih.M << "," << m_wih.N << "]" << " * " << "inputs[" << inputs.M << "," << inputs.N << "]" << std::endl;
 
     math::matrix<T> hidden_inputs = m_wih * inputs;
@@ -198,6 +198,8 @@ void NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
     //std::cout << "hidden_errors[" << hidden_errors.M << "," << hidden_errors.N << "] \n" << hidden_errors << std::endl;
     
     m_wih += m_lrate * ((hidden_errors ^ hidden_outputs ^ (1.0 - hidden_outputs)) * inputs.transpose());
+
+    return output_errors;
 }
     
 template<typename T>
