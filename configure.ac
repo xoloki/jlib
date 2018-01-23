@@ -128,7 +128,7 @@ AM_PATH_GPGME([0.3.15], CXXFLAGS="$CXXFLAGS $GPGME_CFLAGS";LIBS="$LIBS $GPGME_LI
 AC_ARG_WITH([cuda], AS_HELP_STRING([--with-cuda=/usr/local/cuda], [Use cuda located at the given path, or --without-cuda to disable]), cuda_path=$withval)
 
 AS_IF([test "$cuda_path" = "yes" -o "$cuda_path" = ""], [cuda_path='/usr/local/cuda'])
-AS_IF([test "$cuda_path" != "no"], [have_cuda=true], [have_cuda=false])
+AS_IF([test "$cuda_path" != "no"], AC_CHECK_HEADER([cuda_runtime.h], [have_cuda=true], [have_cuda=false]), [have_cuda=false])
 AS_IF([test "$have_cuda" = 'true'], [LIBS="$LIBS -L"$cuda_path/lib64" -lcublas"])
 
 AM_CONDITIONAL(HAVE_CUDA, test x$have_cuda = xtrue)
