@@ -264,13 +264,25 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "Results" << std::endl;
+    std::string results_file = "deep-results-" + std::to_string(hlayers) + "l.json";
+    json::array::ptr ra = json::array::create();
     for(auto i = results.begin(); i != results.end(); i++) {
+	json::array::ptr rh = json::array::create();
 	std::cout << i->first << ":";
 	for(auto j : i->second) {
 	    std::cout << " " << j;
+	    rh->add(j);
 	}
 	std::cout << std::endl;
+	json::object::ptr o = json::object::create();
+	o->add("rate", i->first);
+	o->add("hidden", rh);
+
+	ra->add(o);
     }
+
+    std::ofstream ofs(results_file);
+    ofs << ra->str();
     
     return 0;
 }
