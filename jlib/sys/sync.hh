@@ -72,9 +72,10 @@ public:
     typedef const value_type& const_reference;
     typedef value_type*       pointer;
     typedef value_type* const const_pointer;
-    
+
     sync() {}
     sync(const_reference val) { set(val); }
+    sync(const sync<T>& copy) : sync() { set(copy.get()); }
     
     reference operator()() { return ref(); }
     const_reference operator()() const { return ref(); }
@@ -100,7 +101,7 @@ public:
     pointer operator->() { return &m_val; }
     const_pointer operator->() const { return &m_val; }
 
-    std::mutex& mutex();
+    std::mutex& mutex() { return m_lock; }
 
     void lock() { m_lock.lock(); }
     void unlock() { m_lock.unlock(); }
@@ -124,8 +125,6 @@ protected:
     mutable std::condition_variable m_cond;
     mutable std::mutex m_lock;
     mutable T m_val;
-private:
-    sync(const sync<T>& copy);
 };
 
 class queue {

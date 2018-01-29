@@ -114,32 +114,32 @@ int main(int argc, char** argv) {
     std::multimap<double, std::vector<uint>> results;
     
     while(!finished) {
-	if(!first) {
-	    // go backwards finding a layer to increment
-	    bool found = false;
-	    for(int i = hlayers - 1; i >= 0; i--) {
-		if(hidden[i] < hmax) {
-		    hidden[i] += hdiff;
+        if(!first) {
+            // go backwards finding a layer to increment
+            bool found = false;
+            for(int i = hlayers - 1; i >= 0; i--) {
+                if(hidden[i] < hmax) {
+                    hidden[i] += hdiff;
 		    
-		    // now go back forwards and reset to hmin
-		    for(int j = i+1; j < hlayers; j++) {
-			hidden[j] = hmin;
-		    }
+                    // now go back forwards and reset to hmin
+                    for(int j = i+1; j < hlayers; j++) {
+                        hidden[j] = hmin;
+                    }
 		    
-		    found = true;
-		    break;
-		}
-	    }
+                    found = true;
+                    break;
+                }
+            }
 	    
-	    if(!found) {
-		finished = true;
-		continue;
-	    }
-	} else {
-	    first = false;
-	}
+            if(!found) {
+                finished = true;
+                continue;
+            }
+        } else {
+            first = false;
+        }
 
-	std::ostringstream os;
+        std::ostringstream os;
         os << "deep-search";
         for(auto h : hidden) {
             os << "-" << h << "h";
@@ -149,71 +149,71 @@ int main(int argc, char** argv) {
         os << ".json";
         output_file = os.str();
             
-	bool exists = false;
-	try {
-	    if(pwd.is(output_file, sys::REGULAR)) {
-		exists = true;
-	    }
-	} catch(...) {
-	}
+        bool exists = false;
+        try {
+            if(pwd.is(output_file, sys::REGULAR)) {
+                exists = true;
+            }
+        } catch(...) {
+        }
 
         std::unique_ptr<ai::NeuralNetwork<double>> nn;
-	if(exists) {
-	    std::cout << "Loading " << output_file << std::endl;
+        if(exists) {
+            std::cout << "Loading " << output_file << std::endl;
 	    
-	    std::string cache;
-	    std::ifstream ifs(output_file);
-	    sys::read(ifs, cache);
+            std::string cache;
+            std::ifstream ifs(output_file);
+            sys::read(ifs, cache);
 	    
-	    json::object::ptr o = json::object::create(cache);
+            json::object::ptr o = json::object::create(cache);
 	    
-	    nn.reset(new ai::NeuralNetwork<double>(o));
-	} else {
-	    std::cout << "Training " << output_file << std::endl;
-	    nn.reset(new ai::NeuralNetwork<double>(train_rate, INODES, hidden, ONODES));
+            nn.reset(new ai::NeuralNetwork<double>(o));
+        } else {
+            std::cout << "Training " << output_file << std::endl;
+            nn.reset(new ai::NeuralNetwork<double>(train_rate, INODES, hidden, ONODES));
 
-	    math::matrix<T> target(ONODES, 1);
-	    target.foreach([](T& x) {
-		    x = 0.01;
-		});
+            math::matrix<T> target(ONODES, 1);
+            target.foreach([](T& x) {
+                    x = 0.01;
+                });
         
-	    for(uint e = 0; e < epochs; e++) {
-		std::cout << "Training epoch " << e << ", " << inputs.size() << " inputs" << std::endl;
-		if(train_decay > 0 && ((e % train_decay) == (train_decay - 1))) {
-		    std::cout << "Decay training rate from " << train_rate << " to " << (train_rate / 10.0) << std::endl;
-		    train_rate /= 10.0;
-		    nn->set_rate(train_rate);
-		}
+            for(uint e = 0; e < epochs; e++) {
+                std::cout << "Training epoch " << e << ", " << inputs.size() << " inputs" << std::endl;
+                if(train_decay > 0 && ((e % train_decay) == (train_decay - 1))) {
+                    std::cout << "Decay training rate from " << train_rate << " to " << (train_rate / 10.0) << std::endl;
+                    train_rate /= 10.0;
+                    nn->set_rate(train_rate);
+                }
             
-		std::cout << "Shuffling inputs... " << std::flush;
-		for(int i = 0; i < inputs.size(); i++) {
-		    int x = idist(generator);
-		    auto tmp = inputs[i];
-		    inputs[i] = inputs[x];
-		    inputs[x] = tmp;
-		}
-		std::cout << "done" << std::endl;
+                std::cout << "Shuffling inputs... " << std::flush;
+                for(int i = 0; i < inputs.size(); i++) {
+                    int x = idist(generator);
+                    auto tmp = inputs[i];
+                    inputs[i] = inputs[x];
+                    inputs[x] = tmp;
+                }
+                std::cout << "done" << std::endl;
             
-		for(auto i : inputs) {
-		    int n = std::get<0>(i);
-		    math::matrix<T> input = std::get<1>(i);
+                for(auto i : inputs) {
+                    int n = std::get<0>(i);
+                    math::matrix<T> input = std::get<1>(i);
                 
-		    target(n, 0) = 0.99;
+                    target(n, 0) = 0.99;
 		
-		    nn->train(input, target);
+                    nn->train(input, target);
 		
-		    target(n, 0) = 0.01;
-		}
-	    }
+                    target(n, 0) = 0.01;
+                }
+            }
 
-	    json::object::ptr o = nn->json();
-	    std::string str = o->str(true);
+            json::object::ptr o = nn->json();
+            std::string str = o->str(true);
             
-	    std::cout << "Writing " << output_file << std::endl;
+            std::cout << "Writing " << output_file << std::endl;
             
-	    std::ofstream ofs(output_file);
-	    ofs << str;
-	}
+            std::ofstream ofs(output_file);
+            ofs << str;
+        }
 
         if(!test_mnist_path.empty()) {
             std::cout << "Opening " << test_mnist_path << std::endl;
@@ -259,26 +259,34 @@ int main(int argc, char** argv) {
             double ratio = correct / double(count);
             std::cout << "Got " << ratio * 100 << "% success rate" << std::endl;
 
-	    results.insert(results.begin(), std::make_pair(ratio, hidden));
+            results.insert(results.begin(), std::make_pair(ratio, hidden));
         }
     }
 
     std::cout << "Results" << std::endl;
-    std::string results_file = "deep-results-" + std::to_string(hlayers) + "l.json";
+
+    std::ostringstream ros;
+    ros << "deep-search-results";
+    ros << "-" << hlayers << "-layers";
+    ros << "-" << train_rate << "r";
+    ros << "-" << epochs << "e";
+    ros << ".json";
+
+    std::string results_file  = ros.str();
     json::array::ptr ra = json::array::create();
     for(auto i = results.begin(); i != results.end(); i++) {
-	json::array::ptr rh = json::array::create();
-	std::cout << i->first << ":";
-	for(auto j : i->second) {
-	    std::cout << " " << j;
-	    rh->add(j);
-	}
-	std::cout << std::endl;
-	json::object::ptr o = json::object::create();
-	o->add("rate", i->first);
-	o->add("hidden", rh);
+        json::array::ptr rh = json::array::create();
+        std::cout << i->first << ":";
+        for(auto j : i->second) {
+            std::cout << " " << j;
+            rh->add(j);
+        }
+        std::cout << std::endl;
+        json::object::ptr o = json::object::create();
+        o->add("rate", i->first);
+        o->add("hidden", rh);
 
-	ra->add(o);
+        ra->add(o);
     }
 
     std::ofstream ofs(results_file);
