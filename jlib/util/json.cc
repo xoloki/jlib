@@ -39,6 +39,13 @@ proxy::operator int() {
     return json_object_get_int(m_obj);
 }
     
+proxy::operator int64_t() {
+    if(!json_object_is_type(m_obj, json_type_int))
+	throw type_mismatch();
+    
+    return json_object_get_int64(m_obj);
+}
+    
 proxy::operator bool() {
     return (m_obj != 0);
 }
@@ -190,6 +197,12 @@ array::array(std::string data)
 	throw std::runtime_error("data did not parse to JSON: '" + data + "'");
 }
     
+array::array(json_object* obj) 
+    : m_obj(obj),
+      m_put(false)
+{
+}
+    
 array::~array() { 
     if(m_put)
         json_object_put(m_obj); 
@@ -227,6 +240,14 @@ void array::add(array::ptr val) {
     
 proxy array::get(unsigned int x) const {
     return proxy(json_object_array_get_idx(m_obj, x));
+}
+
+object::ptr array::obj(unsigned int x) const {
+    return object::ptr(new object(json_object_array_get_idx(m_obj, x), false));
+}
+    
+array::ptr array::arr(unsigned int x) const {
+    return ptr(new array(json_object_array_get_idx(m_obj, x)));
 }
     
 int array::size() const {

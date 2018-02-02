@@ -30,6 +30,7 @@ public:
     operator std::size_t();
     operator int();
     operator unsigned int();
+    operator int64_t();
     operator float();
     operator double();
     operator long double();
@@ -103,6 +104,8 @@ public:
     void add(array::ptr val);
     
     proxy get(unsigned int x) const;
+    object::ptr obj(unsigned int x) const;
+    ptr arr(unsigned int x) const;
     
     std::string str() const;
     
@@ -115,7 +118,7 @@ public:
 private:
     array();
     array(std::string data);
-    array(const object&);
+    array(json_object* obj);
     
     json_object* m_obj;
     bool m_put;
