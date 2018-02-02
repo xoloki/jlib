@@ -19,8 +19,9 @@ proxy::proxy(json_object* obj)
 {}
     
 proxy::operator std::string() {
-    if(!json_object_is_type(m_obj, json_type_string))
-	throw type_mismatch();
+    // always okay to go to string
+    //if(!json_object_is_type(m_obj, json_type_string))
+	//throw type_mismatch();
     
     return json_object_get_string(m_obj);
 }
