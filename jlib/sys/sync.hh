@@ -31,8 +31,6 @@
 #include <atomic>
 #include <functional>
 
-#include <jlib/sys/auto.hh>
-
 namespace jlib {
 namespace sys {
 
@@ -49,7 +47,7 @@ protected:
     
 template<class T>
 void safe_set(T& t, const T& newval, std::mutex& m) {
-    auto_lock<std::mutex> lock(m);
+    std::unique_lock<std::mutex> lock(m);
     
     t = newval;
 }
@@ -57,7 +55,7 @@ void safe_set(T& t, const T& newval, std::mutex& m) {
 template<class T>
 T safe_get(const T& t, std::mutex& m) {
     T ret;
-    auto_lock<std::mutex> lock(m);
+    std::unique_lock<std::mutex> lock(m);
     
     ret = t;
     
@@ -93,6 +91,7 @@ public:
 
     void set(const_reference val) {
         safe_set(m_val, val, m_lock);
+        notify_all();
     }
 
     reference ref() { return m_val; }
