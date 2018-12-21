@@ -20,6 +20,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <cstdlib>
 
 #include <jlib/sys/sys.hh>
 #include <jlib/util/util.hh>
@@ -29,23 +30,30 @@ using namespace jlib;
 int main(int argc, char** argv) {
     try {
 	if(argc < 2) {
-	    std::cout << argv[0] << " file.m3u" << std::endl;
+	    std::cout << argv[0] << " file.m3u [...]" << std::endl;
 	    return 1;
 	}
-	
-        std::string path = argv[1];
-	std::ifstream ifs(path.c_str());
-	std::string mp3;
-	while(ifs) {
-	    sys::getline(ifs, mp3);
-	    if(ifs) {
-		mp3 = util::trim(mp3);
-		std::cout << "Playing " << mp3 << std::endl;
-		std::stringstream ss;
-		ss << "mplayer \"" << mp3 << "\"";
-		std::string cmd = ss.str();
-		std::cout << cmd << std::endl;
-		sys::shell(cmd);
+
+        std::string player = "mplayer";
+	if(::getenv("JM3U_PLAYER")) {
+	    player = ::getenv("JM3U_PLAYER");
+	}
+
+	for(int i = 1; i < argc; i++) {
+	    std::string path = argv[i];
+	    std::ifstream ifs(path.c_str());
+	    while(ifs) {
+		std::string mp3;
+		sys::getline(ifs, mp3);
+		if(ifs) {
+		    mp3 = util::trim(mp3);
+		    std::cout << "Playing " << mp3 << std::endl;
+		    std::stringstream ss;
+		    ss << player << " \"" << mp3 << "\"";
+		    std::string cmd = ss.str();
+		    std::cout << cmd << std::endl;
+		    sys::shell(cmd);
+		}
 	    }
 	}
 
