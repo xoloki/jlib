@@ -6,7 +6,7 @@ else
 cuda_programs = 
 endif
 
-bin_PROGRAMS = jlib-mail jpoisoned jjoystick jhyper jhardhyper jglxhyper jgluthyper jgltorus jglxbox jjoy2xev jcrypt jnote jneural-zero jneural-alpha jneural-search $(cuda_programs)
+bin_PROGRAMS = jlib-mail jpoisoned jjoystick jhyper jhardhyper jglxhyper jgluthyper jgltorus jglxbox jjoy2xev jcrypt jnote jneural-zero jneural-alpha jneural-search $(cuda_programs) jm3u
 
 dist_pkgdata_DATA = wow-buttons-ps3.map wow-axes-ps3.map wow-buttons-x360.map wow-axes-x360.map 
 
@@ -14,6 +14,10 @@ jlib_mail_SOURCES = jlib-mail.cc
 jlib_mail_LDADD = $(top_builddir)/jlib/crypt/libjcrypt.la \
 	$(top_builddir)/jlib/net/libjnet.la \
 	$(top_builddir)/jlib/sys/libjsys.la \
+	$(top_builddir)/jlib/util/libjutil.la 
+
+jm3u_SOURCES = jm3u.cc
+jm3u_LDADD = $(top_builddir)/jlib/sys/libjsys.la \
 	$(top_builddir)/jlib/util/libjutil.la 
 
 jpoisoned_SOURCES = jpoisoned.cc

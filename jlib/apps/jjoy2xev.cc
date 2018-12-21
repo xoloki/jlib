@@ -71,15 +71,25 @@ void init_axis_map(std::istream& in) {
 
         switch(t.size()) {
         case 4:
-            if(t[3] == "T")
+            if(t[3] == "T") {
+		if(DEBUG)
+		    std::cout << "Init trigger on axis " << i << std::endl;
                 trigger.insert(i);
-            else if(t[3] == "D") 
+	    } else if(t[3] == "D") {
+		if(DEBUG)
+		    std::cout << "Init d-pad on axis " << i << std::endl;
                 dpad.insert(i);
+	    }
             
         case 3:
+	    if(DEBUG)
+		std::cout << "Init axis " << i << " " << t[1] << " " << t[2] << std::endl;
+		    
             amap[i] = std::make_pair(code, display.code(t[2]));
             break;
         case 2:
+	    if(DEBUG)
+		std::cout << "Init axis " << i << " " << t[1] << std::endl;
             amap[i] = std::make_pair(code, code);
             break;
         }
@@ -184,7 +194,10 @@ void handle_axis(sys::joystick::event e) {
     int v = e.jse.value;
     bool pressed = !is_dead(v);
     std::map<int,int>::iterator i = current.find(n);
-
+    
+    if(amap.find(n) == amap.end())
+      return;
+    
     //if(!is_trigger(n) && i != current.end() && is_dead(i->second) == is_dead(v) && pressed)
     if(!is_trigger(n) && i != current.end() && is_dead(i->second) == is_dead(v))
     //if(i != current.end() && is_dead(i->second) == is_dead(v))
@@ -215,6 +228,9 @@ void handle_button(sys::joystick::event e) {
     bool pressed = e.jse.value;
     XEvent xev;
 
+    if(bmap.find(e.jse.number) == bmap.end())
+	return;
+    
     xev.type = pressed ? KeyPress : KeyRelease;
     xev.xkey.state = 0;
     xev.xkey.keycode = bmap[e.jse.number];

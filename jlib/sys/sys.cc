@@ -200,7 +200,7 @@ namespace jlib {
             }
         }
 
-        void shell(std::string cmd) throw (std::exception) {
+        void shell(std::string cmd) {
             tfstream stderrstr;
             std::string err;
             cmd = cmd + " 2>"+stderrstr.get_path();
@@ -213,7 +213,7 @@ namespace jlib {
             }
         }
 
-        void shell(std::string cmd, std::string& out, std::string& err) throw(std::exception) {
+        void shell(std::string cmd, std::string& out, std::string& err) {
             tfstream stdoutstr, stderrstr;
             cmd = cmd + " >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
             int ret = system(cmd.c_str());
@@ -229,8 +229,7 @@ namespace jlib {
             }
         }
 
-        void shell(std::string cmd, std::string in, std::string& out, std::string& err, bool in_file) throw(std::exception)
-        {
+        void shell(std::string cmd, std::string in, std::string& out, std::string& err, bool in_file) {
             tfstream stdinstr, stdoutstr, stderrstr;
             if(in_file) {
                 stdinstr.close();
@@ -253,7 +252,7 @@ namespace jlib {
             }
         }
 
-        void secure_shell(std::string cmd, std::string& out, std::string& err) throw(std::exception) {
+        void secure_shell(std::string cmd, std::string& out, std::string& err) {
             stfstream stdoutstr, stderrstr;
             cmd = cmd + " >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
             int ret = system(cmd.c_str());
@@ -268,7 +267,7 @@ namespace jlib {
             }
         }
 
-        void secure_shell(std::string cmd, std::string in, std::string& out, std::string& err, bool in_file) throw(std::exception) {
+        void secure_shell(std::string cmd, std::string in, std::string& out, std::string& err, bool in_file) {
             stfstream stdinstr, stdoutstr, stderrstr;
             if(in_file) {
                 stdinstr.close();

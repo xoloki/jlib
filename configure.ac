@@ -120,7 +120,7 @@ AC_CHECK_HEADERS(sys/soundcard.h,have_oss_audio=true,AC_WARN(unable to find oss 
 
 PKG_PROG_PKG_CONFIG
 
-PKG_CHECK_MODULES(PKGS, [sigc++-2.0 >= 2.0.16 glibmm-2.4 >= 2.4.8 gthread-2.0 >= 2.0.0 ImageMagick++ >= 6.0.0 json >= 0.9], CXXFLAGS="$CXXFLAGS $PKGS_CFLAGS"; LIBS="$LIBS $PKGS_LIBS")
+PKG_CHECK_MODULES(PKGS, [sigc++-2.0 >= 2.0.16 glibmm-2.4 >= 2.4.8 gthread-2.0 >= 2.0.0 ImageMagick++ >= 6.0.0 json-c >= 0.9], CXXFLAGS="$CXXFLAGS $PKGS_CFLAGS"; LIBS="$LIBS $PKGS_LIBS")
 
 #AM_PATH_LIBGCRYPT([1.2.0], CXXFLAGS="$CXXFLAGS $LIBGCRYPT_CFLAGS";LIBS="$LIBS $LIBGCRYPT_LIBS", AC_MSG_ERROR(you need libgcrypt for crypto))
 AM_PATH_GPGME([0.3.15], CXXFLAGS="$CXXFLAGS $GPGME_CFLAGS";LIBS="$LIBS $GPGME_LIBS", AC_MSG_ERROR(you need gpgme for crypto))

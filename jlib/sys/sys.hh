@@ -96,14 +96,14 @@ namespace jlib {
          * if the command fails
          * 
          */
-        void shell(std::string cmd) throw(std::exception);
+        void shell(std::string cmd);
 
         /**
          * run the std::string as a shell command, and throw an exception
          * if the command fails.  return stdout and stderr in the passed
          * strings.
          */
-        void shell(std::string cmd, std::string& out, std::string& err) throw(std::exception);
+        void shell(std::string cmd, std::string& out, std::string& err);
 
         /**
          * run the std::string as a shell command, and throw an exception
@@ -114,7 +114,7 @@ namespace jlib {
          * the shell command using stdin.  The flag input_file tells whether
          * the parameter 'in' is a file path or a plain string.
          */
-        void shell(std::string cmd, std::string in, std::string& out, std::string& err, bool in_file=true) throw(std::exception);
+        void shell(std::string cmd, std::string in, std::string& out, std::string& err, bool in_file=true);
 
         /**
          * run the std::string as a shell command, and throw an exception
@@ -124,7 +124,7 @@ namespace jlib {
          * to keep anyone from recovering the contents.
          *
          */
-        void secure_shell(std::string cmd, std::string& out, std::string& err) throw(std::exception);
+        void secure_shell(std::string cmd, std::string& out, std::string& err);
 
         /**
          * run the std::string as a shell command, and throw an exception
@@ -137,7 +137,7 @@ namespace jlib {
          * the shell command using stdin.  The flag input_file tells whether
          * the parameter 'in' is a file path or a plain string.
          */
-        void secure_shell(std::string cmd, std::string in, std::string& out, std::string& err, bool in_file=false) throw(std::exception);
+        void secure_shell(std::string cmd, std::string in, std::string& out, std::string& err, bool in_file=false);
 
 
     }
