@@ -192,6 +192,11 @@ namespace jlib {
             
             // force uppercase so we can make the subtraction easy
             note[0] = std::toupper(note[0]);
+
+
+            if(note[0] == 'R' && note[1] != '0') {
+                throw std::runtime_error("rest notation is 'R0'");
+            }
             
             m_note = note;
             
