@@ -183,8 +183,29 @@ namespace jlib {
         template< typename charT, typename traitT >
         inline
         void basic_notebuf<charT,traitT>::set_note(std::string note) {
-            m_note = note;
-            
+	    if(!std::isalpha(note[0]) || !std::isdigit(note[1])) {
+		throw std::runtime_error("note " + note + " is not in the correct format, e.g A1");
+	    }
+
+	    // force uppercase so we can make the subtraction easy
+	    note[0] = std::toupper(note[0]);
+
+	    m_note = note;
+
+	    std::cout << std::isalpha(note[0]) << ":" << std::isdigit(note[1]) << std::endl;
+	    
+	    // here is where we do the parsing
+
+	    // the number after the letter tells the octave
+	    int octave = note[1] - '0' - 1;
+
+	    // start at the first base and get to the right octave
+	    double base = 110 * octave;
+
+	    // then step up for the note
+	    int step = note[0] - 'A';
+	    
+	    m_freq = get_freq(step, base);
             this->set_data(this->create_data(this->m_freq));
         }
 
@@ -224,7 +245,7 @@ namespace jlib {
         template< typename charT, typename traitT >
         inline
         void basic_notebuf<charT,traitT>::set_nearest_time(double time) {
-            double cycles = get_freq() * time;
+	    double cycles = get_freq() * time;
             int cycle_round = static_cast<int>(std::ceil(cycles));
             time = cycle_round / get_freq();
 

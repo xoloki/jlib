@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
             isnote = !std::isdigit(argv[1][0]);
 
             std::istringstream i(argv[1]);
-            
+
             if(isnote)
                 i >> note;
             else
@@ -55,6 +55,7 @@ int main(int argc, char** argv) {
     exit(0);
 }
 
+// note denotes the frequency
 void play(std::string note, int format, int channels, double t) {
     jlib::media::notestream ns(note);
     play(ns, format, channels, t);
