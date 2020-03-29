@@ -153,7 +153,6 @@ namespace jlib {
             : basic_databuf<charT,traitT>()
         {
             set_note(note);
-            set_time(1);
         }
         
         template< typename charT, typename traitT >
@@ -179,41 +178,56 @@ namespace jlib {
         std::string basic_notebuf<charT,traitT>::get_note() const {
             return m_note;
         }
-
+        
         template< typename charT, typename traitT >
         inline
         void basic_notebuf<charT,traitT>::set_note(std::string note) {
-	    if(!std::isalpha(note[0]) || !std::isdigit(note[1])) {
-		throw std::runtime_error("note " + note + " is not in the correct format, e.g A1");
-	    }
+            if(!std::isalpha(note[0]) || !std::isdigit(note[1])) {
+                throw std::runtime_error("note '" + note + "' is not in the correct format, e.g 'A1'");
+            }
 
-	    // force uppercase so we can make the subtraction easy
-	    note[0] = std::toupper(note[0]);
+            if(note.size() > 2 && (note[2] != ':' || !std::isdigit(note[3]))) {
+                throw std::runtime_error("note '" + note + "' is not in the correct extended format, e.g A1:2");
+            }
+            
+            // force uppercase so we can make the subtraction easy
+            note[0] = std::toupper(note[0]);
+            
+            m_note = note;
+            
+            std::cout << std::isalpha(note[0]) << ":" << std::isdigit(note[1]) << std::endl;
+            
+            // here is where we do the parsing
+            
+            // the number after the letter tells the octave
+            int octave = note[1] - '0' - 1;
+            
+            // start at the first base and get to the right octave
+            double base = 110 * octave;
+            
+            // then step up for the note
+            int step = note[0] - 'A';
+            
+            m_freq = get_freq(step, base);
 
-	    m_note = note;
+            double time = 1;
 
-	    std::cout << std::isalpha(note[0]) << ":" << std::isdigit(note[1]) << std::endl;
-	    
-	    // here is where we do the parsing
+            // if we have time parse it here
+            if(note.size() > 3) {
+                std::string t = note.substr(3);
+                std::cout << "time string is " << t << std::endl;
+                    
+                time = note[3] - '0';
+            }
 
-	    // the number after the letter tells the octave
-	    int octave = note[1] - '0' - 1;
-
-	    // start at the first base and get to the right octave
-	    double base = 110 * octave;
-
-	    // then step up for the note
-	    int step = note[0] - 'A';
-	    
-	    m_freq = get_freq(step, base);
-            this->set_data(this->create_data(this->m_freq));
+            this->set_time(time);
         }
-
+        
         template< typename charT, typename traitT >
         inline
         void basic_notebuf<charT,traitT>::set_note(double freq) {
             this->m_freq = freq;
-
+            
             this->set_data(this->create_data(this->m_freq));
         }
 

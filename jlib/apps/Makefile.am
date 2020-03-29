@@ -6,7 +6,7 @@ else
 cuda_programs = 
 endif
 
-bin_PROGRAMS = jlib-mail jpoisoned jjoystick jhyper jhardhyper jglxhyper jgluthyper jgltorus jglxbox jjoy2xev jcrypt jnote jneural-zero jneural-alpha jneural-search $(cuda_programs) jm3u
+bin_PROGRAMS = jlib-mail jpoisoned jjoystick jhyper jhardhyper jglxhyper jgluthyper jgltorus jglxbox jjoy2xev jcrypt jnote jneural-zero jneural-alpha jneural-search jmelody $(cuda_programs) jm3u
 
 dist_pkgdata_DATA = wow-buttons-ps3.map wow-axes-ps3.map wow-buttons-x360.map wow-axes-x360.map 
 
@@ -66,6 +66,10 @@ jcrypt_LDADD = $(top_builddir)/jlib/crypt/libjcrypt.la \
 
 jnote_SOURCES = jnote.cc
 jnote_LDADD = $(top_builddir)/jlib/media/libjmedia.la \
+	$(top_builddir)/jlib/sys/libjsys.la
+
+jmelody_SOURCES = jmelody.cc
+jmelody_LDADD = $(top_builddir)/jlib/media/libjmedia.la \
 	$(top_builddir)/jlib/sys/libjsys.la
 
 jneural_zero_SOURCES = jneural-zero.cc
