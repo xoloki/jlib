@@ -195,8 +195,6 @@ namespace jlib {
             
             m_note = note;
             
-            std::cout << std::isalpha(note[0]) << ":" << std::isdigit(note[1]) << std::endl;
-            
             // here is where we do the parsing
             
             // the number after the letter tells the octave
@@ -204,9 +202,13 @@ namespace jlib {
             
             // start at the first base and get to the right octave
             double base = 110 * octave;
-            
+
             // then step up for the note
             int step = note[0] - 'A';
+
+            if(note[0] == 'R') {
+                base = 0;
+            }
             
             m_freq = get_freq(step, base);
 
@@ -215,7 +217,6 @@ namespace jlib {
             // if we have time parse it here
             if(note.size() > 3) {
                 std::string t = note.substr(3);
-                std::cout << "time string is " << t << std::endl;
                     
                 time = note[3] - '0';
             }
