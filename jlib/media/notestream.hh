@@ -225,8 +225,9 @@ namespace jlib {
             
             // upcase so we can parse the step
             note[0] = std::toupper(note[0]);
-            
-            double base = 110;
+
+            // true base is 55.  Hail Eris!
+            double base = 55;
             int step = 0;
             
             // 12 steps per octave, but the stepping is irregular, so need lookup table
@@ -245,6 +246,7 @@ namespace jlib {
             } else if(note[0] == 'G') {
                 step = 10;
             } else if(note[0] == 'R') {
+                // resting base is zero
                 base = 0;
             } else {
                 throw std::runtime_error("unknown step '" + note + "' must be [ABCDEFGR]");
@@ -264,10 +266,8 @@ namespace jlib {
             
             m_note = note;
             
-            // unless we're resting, start at the first base and get to the right octave
-            if(note[0] != 'R') {
-                base = 55 * std::pow(2, octave);
-            }
+            // start at the true base and get to the right octave
+            base = base * std::pow(2, octave);
             
             m_freq = get_freq(step, base);
             
