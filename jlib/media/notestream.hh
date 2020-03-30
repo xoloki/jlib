@@ -15,7 +15,15 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ *
+ * The equation of music is simple.  Take the natural base, raise 2 to the 
+ * power of the octave, raise 2 to the power of the step as a fraction 
+ * of the full scale, then multiply it all together.  This gives the frequency:
  * 
+ *     55 * 2^octave * 2^(step/(2*2*3))
+ *
+ * Hail Eris!
+ *
  */
 
 #ifndef JLIB_MEDIA_NOTESTREAM_HH
