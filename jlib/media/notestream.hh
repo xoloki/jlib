@@ -182,50 +182,92 @@ namespace jlib {
         template< typename charT, typename traitT >
         inline
         void basic_notebuf<charT,traitT>::set_note(std::string note) {
-            if(!std::isalpha(note[0]) || !std::isdigit(note[1])) {
-                throw std::runtime_error("note '" + note + "' is not in the correct format, e.g 'A1'");
-            }
+            // note format is STEP@OCTAVE:TIME
 
-            if(note.size() > 2 && (note[2] != ':' || !std::isdigit(note[3]))) {
-                throw std::runtime_error("note '" + note + "' is not in the correct extended format, e.g A1:2");
+            // assume time is 1 unless specified
+            double time = 1;
+            // assume octave is 3 for bare note
+            int octave = 3;
+
+            // parse out the time string first
+            std::size_t tpos = note.find(":");
+            if(tpos != std::string::npos) {
+                std::string t = note.substr(tpos+1);
+                
+                note = note.substr(0, tpos);
+                
+                std::stringstream ss(t);
+                
+                ss >> time;
             }
             
-            // force uppercase so we can make the subtraction easy
+            // next parse out the octave 
+            std::size_t opos = note.find("@");
+            if(opos != std::string::npos) {
+                std::string o = note.substr(opos+1);
+                note = note.substr(0, opos);
+                
+                std::stringstream ss(o);
+                
+                ss >> octave;
+            }
+            
+            if(note.empty()) {
+                throw std::runtime_error("empty notes are always wrong");
+            }
+            
+            // in all cases first char must be step
+            if(!std::isalpha(note[0])) {
+                throw std::runtime_error("first token must be letter");
+            }
+
             note[0] = std::toupper(note[0]);
+            
+            double base = 110;
+            int step = 0;
 
-
-            if(note[0] == 'R' && note[1] != '0') {
-                throw std::runtime_error("rest notation is 'R0'");
+            // 12 steps per octave, but the stepping is irregular, so need lookup table
+            if(note[0] == 'A') {
+                step = 0;
+            } else if(note[0] == 'B') {
+                step = 2;
+            } else if(note[0] == 'C') {
+                step = 3;
+            } else if(note[0] == 'D') {
+                step = 5;
+            } else if(note[0] == 'E') {
+                step = 7;
+            } else if(note[0] == 'F') {
+                step = 8;
+            } else if(note[0] == 'G') {
+                step = 10;
+            } else if(note[0] == 'R') {
+                base = 0;
+            } else {
+                throw std::runtime_error("unknown note '" + note + "'");
+            }
+            
+            if(note.size() == 2) {
+                if(note[1] != '#' && !note[1] == 'b') {
+                    throw std::runtime_error("two char notes must be either 'Ab' or 'C#'");
+                }
+                
+                if(note[1] == '#') {
+                    step++;
+                } else if(note[1] == 'b') {
+                    step--;
+                }
             }
             
             m_note = note;
             
-            // here is where we do the parsing
-            
-            // the number after the letter tells the octave
-            int octave = note[1] - '0' - 1;
-            
-            // start at the first base and get to the right octave
-            double base = 110 * octave;
-
-            // then step up for the note
-            int step = note[0] - 'A';
-
-            if(note[0] == 'R') {
-                base = 0;
+            // unless we're resting, start at the first base and get to the right octave
+            if(note[0] != 'R') {
+                base = 55 * std::pow(2, octave);
             }
             
             m_freq = get_freq(step, base);
-
-            double time = 1;
-
-            // if we have time parse it here
-            if(note.size() > 3) {
-                std::string t = note.substr(3);
-                    
-                time = note[3] - '0';
-            }
-
+            
             this->set_time(time);
         }
         
