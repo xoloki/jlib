@@ -182,26 +182,25 @@ namespace jlib {
         template< typename charT, typename traitT >
         inline
         void basic_notebuf<charT,traitT>::set_note(std::string note) {
-            // note format is STEP@OCTAVE:TIME
+            // note format is STEP@OCTAVE:BEATS
 
-            // assume time is 1 unless specified
-            double time = 1;
-            // assume octave is 3 for bare note
+            // default to third octave and one beat
             int octave = 3;
-
-            // parse out the time string first
-            std::size_t tpos = note.find(":");
-            if(tpos != std::string::npos) {
-                std::string t = note.substr(tpos+1);
+            double beats = 1;
+            
+            // first parse the beats
+            std::size_t bpos = note.find(":");
+            if(bpos != std::string::npos) {
+                std::string b = note.substr(bpos+1);
                 
-                note = note.substr(0, tpos);
+                note = note.substr(0, bpos);
                 
-                std::stringstream ss(t);
+                std::stringstream ss(b);
                 
-                ss >> time;
+                ss >> beats;
             }
             
-            // next parse out the octave 
+            // next parse the octave 
             std::size_t opos = note.find("@");
             if(opos != std::string::npos) {
                 std::string o = note.substr(opos+1);
@@ -216,16 +215,12 @@ namespace jlib {
                 throw std::runtime_error("empty notes are always wrong");
             }
             
-            // in all cases first char must be step
-            if(!std::isalpha(note[0])) {
-                throw std::runtime_error("first token must be letter");
-            }
-
+            // upcase so we can parse the step
             note[0] = std::toupper(note[0]);
             
             double base = 110;
             int step = 0;
-
+            
             // 12 steps per octave, but the stepping is irregular, so need lookup table
             if(note[0] == 'A') {
                 step = 0;
@@ -244,7 +239,7 @@ namespace jlib {
             } else if(note[0] == 'R') {
                 base = 0;
             } else {
-                throw std::runtime_error("unknown note '" + note + "'");
+                throw std::runtime_error("unknown step '" + note + "' must be [ABCDEFGR]");
             }
             
             if(note.size() == 2) {
@@ -268,7 +263,7 @@ namespace jlib {
             
             m_freq = get_freq(step, base);
             
-            this->set_time(time);
+            this->set_time(beats);
         }
         
         template< typename charT, typename traitT >
