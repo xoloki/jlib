@@ -25,7 +25,30 @@ namespace jlib {
 namespace crypt {
 namespace groth {
 
-void run() {
+class Scalar {
+public:
+    Scalar operator+(const Scalar& x);
+    Scalar operator*(const Scalar& x);
+    Scalar& operator+=(const Scalar& x);
+    Scalar& operator*=(const Scalar& x);
+
+protected:
+    unsigned char m_bytes[crypto_core_ristretto255_SCALARBYTES];
+};
+    
+class Point {
+public:
+    Point operator+(const Point& x);
+    Point operator*(const Scalar& x);
+    Point& operator*=(const Scalar& x);
+
+    
+protected:
+    unsigned char m_bytes[crypto_core_ristretto255_BYTES];
+};
+
+
+void test() {
     unsigned char x[crypto_core_ristretto255_HASHBYTES];
     randombytes_buf(x, sizeof x);
     
