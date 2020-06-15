@@ -141,6 +141,7 @@ namespace jlib {
 
         std::string hex_value(unsigned char c, bool upper=false);
         std::string hex_value(std::string s, bool upper=false);
+        std::string hex_value(const unsigned char* data, std::size_t size, bool upper=false);
         
         /**
          * Remove whitespace from beginning of passed string.

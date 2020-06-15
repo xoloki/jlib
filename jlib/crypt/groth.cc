@@ -18,8 +18,12 @@
  * 
  */
 
+#include <ostream>
+
 #include <sodium.h>
 #include <sodium/crypto_core_ristretto255.h>
+
+#include <jlib/util/util.hh>
 
 namespace jlib {
 namespace crypt {
@@ -32,6 +36,10 @@ public:
     Scalar& operator+=(const Scalar& x);
     Scalar& operator*=(const Scalar& x);
 
+    static Scalar random();
+
+    friend std::ostream& operator<<(std::ostream& out, const Scalar& d);
+    
 protected:
     unsigned char m_bytes[crypto_core_ristretto255_SCALARBYTES];
 };
@@ -47,8 +55,40 @@ protected:
     unsigned char m_bytes[crypto_core_ristretto255_BYTES];
 };
 
+std::ostream& operator<<(std::ostream& out, const Scalar& d) {
+    out << util::hex_value(reinterpret_cast<const unsigned char*>(&d.m_bytes), crypto_core_ristretto255_SCALARBYTES);
 
+    return out;
+}
+    
+Scalar Scalar::random() {
+    Scalar result;
+    
+    crypto_core_ristretto255_scalar_random(reinterpret_cast<unsigned char*>(&result.m_bytes));
+
+    return result;
+}
+
+Scalar Scalar::operator+(const Scalar& x) {
+    Scalar result;
+
+    crypto_core_ristretto255_scalar_add(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes));
+    
+    return result;
+}    
+
+    
+Scalar Scalar::operator*(const Scalar& x) {
+    Scalar result;
+
+    crypto_core_ristretto255_scalar_mul(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes));
+    
+    return result;
+}    
+
+    
 void test() {
+    /*
     unsigned char x[crypto_core_ristretto255_HASHBYTES];
     randombytes_buf(x, sizeof x);
     
@@ -63,6 +103,12 @@ void test() {
     crypto_core_ristretto255_scalar_random(r);
     crypto_scalarmult_ristretto255_base(gr, r);
     crypto_core_ristretto255_add(a, px, gr);
+    */
+    Scalar a = Scalar::random();
+    Scalar b = Scalar::random();
+    Scalar x = a + b;
+
+    std::cout << a << " + " << b << " = " << x << std::endl;
 }
 
 

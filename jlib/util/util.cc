@@ -323,6 +323,16 @@ namespace jlib {
             return ret;
         }
 
+        std::string hex_value(const unsigned char* data, std::size_t size, bool upper) {
+            std::string ret;
+            for(std::size_t i = 0; i < size; i++) {
+                ret += hex_value(data[i]);
+                if(i + 1 < size)
+                    ret += " ";
+            }
+            return ret;
+        }
+
         bool contains(std::string s, std::string t) {
             return (s.size() >= t.size() && (int)s.find(t) != -1);
         }
