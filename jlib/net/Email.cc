@@ -18,8 +18,6 @@
  * 
  */
 
-#include <jlib/crypt/crypt.hh>
-
 #include <jlib/net/net.hh>
 
 #include <jlib/sys/sys.hh>
@@ -188,12 +186,12 @@ namespace jlib {
                 // take ihead and grab the rest of it, but this is probaby faster
                 if(encoding.find("BASE64") != encoding.npos) {
                     if(header_end != m_raw.npos) {
-                        m_data = jlib::crypt::base64::decode(m_raw.substr(header_end));
+                        m_data = jlib::util::base64::decode(m_raw.substr(header_end));
                     }
                 }
                 else if(encoding.find("QUOTED-PRINTABLE") != encoding.npos) {
                     if(header_end != m_raw.npos) {
-                        m_data = jlib::crypt::qp::decode(m_raw.substr(header_end));
+                        m_data = jlib::util::qp::decode(m_raw.substr(header_end));
                     } 
                 }
                 else {

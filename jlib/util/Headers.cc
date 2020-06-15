@@ -18,8 +18,6 @@
  * 
  */
 
-#include <jlib/crypt/crypt.hh>
-
 #include <jlib/sys/sys.hh>
 
 #include <jlib/util/util.hh>
@@ -373,10 +371,10 @@ namespace jlib {
                         dec = enc;
 
                         if(std::toupper(val[m+1]) == 'B') {
-                            dec = jlib::crypt::base64::decode(enc);
+                            dec = base64::decode(enc);
                         }
                         else if(std::toupper(val[m+1]) == 'Q') {
-                            dec = jlib::crypt::qp::decode(enc);
+                            dec = qp::decode(enc);
                         }
                         
                         if(getenv("JLIB_UTIL_HEADERS_DEBUG")) {
@@ -406,9 +404,9 @@ namespace jlib {
                 ret += val.substr(i, (p-i));
                 x = val.find(" ", p);
                 if(x != std::string::npos) {
-                    ret += ("=?" + charset + "?B?" + crypt::base64::encode(val.substr(p, (x-p))) + "?=");
+                    ret += ("=?" + charset + "?B?" + base64::encode(val.substr(p, (x-p))) + "?=");
                 } else {
-                    ret += ("=?" + charset + "?B?" + crypt::base64::encode(val.substr(p)) + "?=");
+                    ret += ("=?" + charset + "?B?" + base64::encode(val.substr(p)) + "?=");
                 }
 
                 i = x;

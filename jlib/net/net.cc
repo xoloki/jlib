@@ -18,8 +18,6 @@
  * 
  */
 
-#include <jlib/crypt/crypt.hh>
-
 #include <jlib/net/net.hh>
 
 #include <jlib/sys/sys.hh>
@@ -84,10 +82,10 @@ namespace jlib {
                                     std::string enc = match[4];
                                     std::string dec;
                                     if(util::upper(match[3]) == "B") {
-                                        dec = crypt::base64::decode(enc);
+                                        dec = util::base64::decode(enc);
                                     }
                                     else if(util::upper(match[3]) == "Q") {
-                                        dec = crypt::qp::decode(enc);
+                                        dec = util::qp::decode(enc);
                                     }
 
                                     m[key] = match[1]+dec+match[5];
@@ -143,10 +141,10 @@ namespace jlib {
                                     std::string enc = match[4];
                                     std::string dec;
                                     if(util::upper(match[3]) == "B") {
-                                        dec = crypt::base64::decode(enc);
+                                        dec = util::base64::decode(enc);
                                     }
                                     else if(util::upper(match[3]) == "Q") {
-                                        dec = crypt::qp::decode(enc);
+                                        dec = util::qp::decode(enc);
                                     }
 
                                     *current = match[1]+dec+match[5];
@@ -424,7 +422,7 @@ namespace jlib {
                 }
                 else if(util::icontains(encoding, "base64")) {
                     //cout << "base64 encoding"<<endl;
-                    data += crypt::base64::encode(email.data());
+                    data += util::base64::encode(email.data());
                     //cout << "data = "<< email.data() << endl;
                 }
                 else {
@@ -848,7 +846,7 @@ namespace jlib {
                 if(!plain)
                     throw exception("No AUTH option");
                 
-                std::string token = crypt::base64::encode(std::string(1, '\0') + user + std::string(1, '\0') + pass);
+                std::string token = util::base64::encode(std::string(1, '\0') + user + std::string(1, '\0') + pass);
                 handshake(stream, "AUTH PLAIN " + token, "235");
 
                 finish(mail, rcpt, data, stream);
@@ -874,7 +872,7 @@ namespace jlib {
                 if(!plain)
                     throw exception("No AUTH option");
                 
-                std::string token = crypt::base64::encode(std::string(1, '\0') + user + std::string(1, '\0') + pass);
+                std::string token = util::base64::encode(std::string(1, '\0') + user + std::string(1, '\0') + pass);
                 handshake(stream, "AUTH PLAIN " + token, "235");
 
                 finish(mail, rcpt, data, stream);

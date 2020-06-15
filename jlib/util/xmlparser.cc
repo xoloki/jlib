@@ -20,8 +20,7 @@
  */
 
 // needed includes
-#include <jlib/crypt/crypt.hh>
-
+#include <jlib/util/util.hh>
 #include <jlib/util/xmlparser.hh>
 
 
@@ -215,8 +214,8 @@ namespace jlib {
                     if (token2.is_literal())
                         throw error(attr_value_expected);
 
-                    std::string key = jlib::crypt::xml::decode(token1.get_generic());
-                    std::string val = jlib::crypt::xml::decode(token2.get_generic());
+                    std::string key = jlib::util::xml::decode(token1.get_generic());
+                    std::string val = jlib::util::xml::decode(token2.get_generic());
                     
                     if(val.length() > 1) {
                         if( (val[0] == '"' && val[val.length()-1] == '"') ||

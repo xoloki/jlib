@@ -46,49 +46,6 @@ namespace jlib {
         };
 
 
-        /**
-         * namespace base64 contains functions that encode and decode base64 encryption
-         */
-        namespace base64 {
-            
-            /**
-             * Decode the std::string into a blob.
-             *
-             * @param s std::string to parse data from
-             * @return decoded data
-             */
-            std::string decode(std::string s);
-            
-            /**
-             * Encode the blob into a string.
-             *
-             * @param s std::string to parse data from
-             * @return encoded data
-             */
-            std::string encode(std::string s);
-
-        }
-        
-        namespace qp {
-            
-            /**
-             * Decode the std::string into a blob.
-             *
-             * @param s std::string to parse data from
-             * @return decoded data
-             */
-            std::string decode(std::string s);
-            
-            /**
-             * Encode the blob into a string.
-             *
-             * @param s std::string to parse data from
-             * @return encoded data
-             */
-            std::string encode(std::string s);
-
-        }
-
         namespace gpg {
 
             class exception : public std::exception {
@@ -216,21 +173,6 @@ namespace jlib {
             std::string encrypt(std::string to, std::string data);
             std::string sign_encrypt(std::string from, std::string to, std::string data, std::string pass);
         }
-
-        namespace uri {
-            std::string encode(std::string s);
-            std::string decode(std::string s);
-        }
-       
-        
-        namespace xml {
-            std::string encode(std::string s);
-            std::string decode(std::string s);
-            std::string recode(std::string s, const std::map<std::string,std::string>& codec);
-        }
-       
-        
-
     }
 }
 

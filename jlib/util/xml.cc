@@ -19,8 +19,6 @@
  * 
  */
 
-#include <jlib/crypt/crypt.hh>
-
 #include <jlib/util/util.hh>
 
 #include <jlib/util/xml.hh>
@@ -144,7 +142,7 @@ namespace jlib {
                 
                 for(;i!=m_attributes.end();i++) {
                     outstream << ' ' << i->first << '='
-                              << '\"' << jlib::crypt::xml::encode(i->second) << '\"';
+                              << '\"' << jlib::util::xml::encode(i->second) << '\"';
                 }
                 
                 switch(m_type) {

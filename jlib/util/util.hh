@@ -280,6 +280,62 @@ namespace jlib {
         void load(std::istream& is, std::map<std::string,std::string>& m, bool clear=true);
         void store(std::ostream& os, std::map<std::string,std::string>& m);
 
+        /**
+         * namespace base64 contains functions that encode and decode base64 encryption
+         */
+        namespace base64 {
+            
+            /**
+             * Decode the std::string into a blob.
+             *
+             * @param s std::string to parse data from
+             * @return decoded data
+             */
+            std::string decode(std::string s);
+            
+            /**
+             * Encode the blob into a string.
+             *
+             * @param s std::string to parse data from
+             * @return encoded data
+             */
+            std::string encode(std::string s);
+
+        }
+        
+        namespace qp {
+            
+            /**
+             * Decode the std::string into a blob.
+             *
+             * @param s std::string to parse data from
+             * @return decoded data
+             */
+            std::string decode(std::string s);
+            
+            /**
+             * Encode the blob into a string.
+             *
+             * @param s std::string to parse data from
+             * @return encoded data
+             */
+            std::string encode(std::string s);
+
+        }
+
+
+        namespace uri {
+            std::string encode(std::string s);
+            std::string decode(std::string s);
+        }
+       
+        
+        namespace xml {
+            std::string encode(std::string s);
+            std::string decode(std::string s);
+            std::string recode(std::string s, const std::map<std::string,std::string>& codec);
+        }
+       
         namespace file {
 
             struct stat getstat(std::string path);
