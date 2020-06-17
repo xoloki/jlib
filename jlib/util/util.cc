@@ -324,11 +324,11 @@ namespace jlib {
             return ret;
         }
 
-        std::string hex_value(const unsigned char* data, std::size_t size, bool upper) {
+        std::string hex_value(const unsigned char* data, std::size_t size, bool upper, bool space) {
             std::string ret;
             for(std::size_t i = 0; i < size; i++) {
                 ret += hex_value(data[i]);
-                if(i + 1 < size)
+                if(space && (i + 1) < size)
                     ret += " ";
             }
             return ret;
