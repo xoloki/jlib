@@ -38,7 +38,10 @@ public:
     static Hash generic(const Point& p);
     static Hash generic(const Scalar& x);
     static Hash generic(const unsigned char* bytes, std::size_t n);
-
+ 
+    friend class Point; 
+    friend class Scalar;
+  
 protected:
     unsigned char m_bytes[crypto_generichash_BYTES];
 };
@@ -68,6 +71,12 @@ protected:
     
 class Point {
 public:
+    static const int HASHBYTES = crypto_core_ristretto255_HASHBYTES;
+
+    Point();
+    Point(const Scalar& scalar);
+    Point(const Hash<HASHBYTES>& hash);
+
     Point operator+(const Point& x) const;
     Point operator*(const Scalar& x) const;
     Point& operator*=(const Scalar& x);

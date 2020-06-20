@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
 
         Point aR = a * R;
         //Point aR = R * a;
-        Point output_address = Hash::generic(aR);
+        Hash<crypto_core_ristretto255_HASHBYTES> Hs = Hash<crypto_core_ristretto255_HASHBYTES>::generic(aR);
     }
 
     
