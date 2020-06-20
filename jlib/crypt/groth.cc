@@ -23,44 +23,13 @@
 #include <sodium.h>
 #include <sodium/crypto_core_ristretto255.h>
 
+#include <jlib/crypt/groth.hh>
 #include <jlib/util/util.hh>
 
 namespace jlib {
 namespace crypt {
 namespace groth {
 
-class Scalar {
-public:
-    Scalar operator+(const Scalar& x);
-    Scalar operator*(const Scalar& x);
-    Scalar& operator+=(const Scalar& x);
-    Scalar& operator*=(const Scalar& x);
-
-    static Scalar random();
-
-    friend std::ostream& operator<<(std::ostream& out, const Scalar& d);
-    
-protected:
-    unsigned char m_bytes[crypto_core_ristretto255_SCALARBYTES];
-};
-    
-class Point {
-public:
-    Point operator+(const Point& x);
-    Point operator*(const Scalar& x);
-    Point& operator*=(const Scalar& x);
-
-    
-protected:
-    unsigned char m_bytes[crypto_core_ristretto255_BYTES];
-};
-
-std::ostream& operator<<(std::ostream& out, const Scalar& d) {
-    out << util::hex_value(reinterpret_cast<const unsigned char*>(&d.m_bytes), crypto_core_ristretto255_SCALARBYTES);
-
-    return out;
-}
-    
 Scalar Scalar::random() {
     Scalar result;
     
@@ -69,49 +38,78 @@ Scalar Scalar::random() {
     return result;
 }
 
-Scalar Scalar::operator+(const Scalar& x) {
+Scalar Scalar::operator+(const Scalar& x) const {
     Scalar result;
 
     crypto_core_ristretto255_scalar_add(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes));
-    
+
     return result;
 }    
 
     
-Scalar Scalar::operator*(const Scalar& x) {
+Scalar Scalar::operator*(const Scalar& x) const {
     Scalar result;
 
     crypto_core_ristretto255_scalar_mul(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes));
-    
+
     return result;
-}    
-
-    
-void test() {
-    /*
-    unsigned char x[crypto_core_ristretto255_HASHBYTES];
-    randombytes_buf(x, sizeof x);
-    
-    // Compute px = p(x), a group element derived from x
-    unsigned char px[crypto_core_ristretto255_BYTES];
-    crypto_core_ristretto255_from_hash(px, x);
-    
-    // Compute a = p(x) * g^r
-    unsigned char r[crypto_core_ristretto255_SCALARBYTES];
-    unsigned char gr[crypto_core_ristretto255_BYTES];
-    unsigned char a[crypto_core_ristretto255_BYTES];
-    crypto_core_ristretto255_scalar_random(r);
-    crypto_scalarmult_ristretto255_base(gr, r);
-    crypto_core_ristretto255_add(a, px, gr);
-    */
-    Scalar a = Scalar::random();
-    Scalar b = Scalar::random();
-    Scalar x = a + b;
-
-    std::cout << a << " + " << b << " = " << x << std::endl;
 }
 
+Point Scalar::operator*(const Point& x) const {
+    return (x * *this);
+}
+    
+Point Point::random() {
+    Point result;
+    Scalar exponent = Scalar::random();
+    
+    int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&exponent.m_bytes));
+    if(e != 0)
+        throw std::runtime_error("crypto_scalarmult_ristretto255_base failed");
 
+    return result;
+}
+
+Point Point::from(const Scalar& x) {
+    Point result;
+    Scalar exponent = Scalar::random();
+    
+    int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&exponent.m_bytes));
+    if(e != 0)
+        throw std::runtime_error("crypto_scalarmult_ristretto255_base failed");
+
+    return result;
+}
+
+Point Point::operator+(const Point& x) const {
+    Point result;
+
+    int e = crypto_core_ristretto255_add(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes));
+    if(e != 0)
+        throw std::runtime_error("crypto_core_ristretto255_add failed");
+    return result;
+}
+
+Point Point::operator*(const Scalar& x) const {
+    Point result;
+
+    int e = crypto_scalarmult_ristretto255(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes), reinterpret_cast<const unsigned char*>(&m_bytes));
+    if(e != 0)
+        throw std::runtime_error("crypto_scalarmult_ristretto255 failed");
+    return result;
+}
+
+std::ostream& operator<<(std::ostream& out, const Scalar& d) {
+    out << util::hex_value(reinterpret_cast<const unsigned char*>(&d.m_bytes), crypto_core_ristretto255_SCALARBYTES);
+
+    return out;
+}
+
+std::ostream& operator<<(std::ostream& out, const Point& d) {
+    out << util::hex_value(reinterpret_cast<const unsigned char*>(&d.m_bytes), crypto_core_ristretto255_BYTES);
+
+    return out;
+}
     
 class BinaryProver {
     

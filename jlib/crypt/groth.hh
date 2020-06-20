@@ -29,14 +29,36 @@ namespace jlib {
 namespace crypt {
 namespace groth {
 
+class Point;
+class Scalar;
+
+template<int N>
+class Hash {
+public:
+    static Hash generic(const Point& p);
+    static Hash generic(const Scalar& x);
+    static Hash generic(const unsigned char* bytes, std::size_t n);
+
+protected:
+    unsigned char m_bytes[crypto_generichash_BYTES];
+};
+
 class Scalar {
 public:
-    Scalar operator+(const Scalar& x);
-    Scalar operator*(const Scalar& x);
+    Scalar operator+(const Scalar& x) const;
+    Scalar operator*(const Scalar& x) const;
+    Point operator*(const Point& x) const;
     Scalar& operator+=(const Scalar& x);
     Scalar& operator*=(const Scalar& x);
 
+    const unsigned char* bytes() const;
+    unsigned char* bytes();
+
     static Scalar random();
+
+    template<int N>
+    friend class Hash;
+    friend class Point;
 
     friend std::ostream& operator<<(std::ostream& out, const Scalar& d);
     
@@ -46,10 +68,20 @@ protected:
     
 class Point {
 public:
-    Point operator+(const Point& x);
-    Point operator*(const Scalar& x);
+    Point operator+(const Point& x) const;
+    Point operator*(const Scalar& x) const;
     Point& operator*=(const Scalar& x);
+    
+    const unsigned char* bytes() const;
+    unsigned char* bytes();
 
+    static Point random();
+    static Point from(const Scalar& x);
+
+    friend std::ostream& operator<<(std::ostream& out, const Point& d);
+
+    template<int N>
+    friend class Hash;
     
 protected:
     unsigned char m_bytes[crypto_core_ristretto255_BYTES];
@@ -57,6 +89,27 @@ protected:
 
 std::ostream& operator<<(std::ostream& out, const Scalar& d);
 
+template<int N>
+Hash<N> Hash<N>::generic(const Point& p) {
+    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(&p.m_bytes), crypto_core_ristretto255_BYTES);
+}
+
+template<int N>
+Hash<N> Hash<N>::generic(const Scalar& x) {
+    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(&x.m_bytes), crypto_core_ristretto255_SCALARBYTES);
+}
+    
+template<int N>
+Hash<N> Hash<N>::generic(const unsigned char* bytes, std::size_t n) {
+    Hash<N> result;
+    
+    crypto_generichash(reinterpret_cast<unsigned char*>(&result.m_bytes), crypto_generichash_BYTES, bytes, n, NULL, 0);
+
+    return result;
+}
+    
+
+    
 }
 }
 }

@@ -39,11 +39,38 @@ int main(int argc, char** argv) {
     crypto_scalarmult_ristretto255_base(gr, r);
     crypto_core_ristretto255_add(a, px, gr);
     */
-    Scalar a = Scalar::random();
-    Scalar b = Scalar::random();
-    Scalar x = a + b;
+    {
+        Scalar x = Scalar::random();
+        Scalar y = Scalar::random();
+        Scalar z = x + y;
+        
+        std::cout << x << " + " << y << " = " << z << std::endl;
+        
+        Point a = Point::random();
+        Point b = Point::random();
+        Point c = a + b;
+        
+        std::cout << a << " + " << b << " = " << c << std::endl;
+    }
 
-    std::cout << a << " + " << b << " = " << x << std::endl;
+    // monero address
+    {
+        Scalar a = Scalar::random();
+        Scalar b = Scalar::random();
 
+        Point A = Point::from(a);
+        Point B = Point::from(b);
+
+        std::cout << "keypair (A, B) (" << a << ", " << b << ")" << std::endl;
+
+        Scalar r = Scalar::random();
+        Point R = Point::from(r);
+
+        Point aR = a * R;
+        //Point aR = R * a;
+        Point output_address = Hash::generic(aR);
+    }
+
+    
     return 0;
 }
