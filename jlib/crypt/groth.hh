@@ -29,6 +29,7 @@ namespace jlib {
 namespace crypt {
 namespace groth {
 
+class BasePoint;
 class Point;
 class Scalar;
 
@@ -48,6 +49,11 @@ protected:
 
 class Scalar {
 public:
+    static const int HASHBYTES = crypto_core_ristretto255_HASHBYTES;
+
+    Scalar();
+    Scalar(const Hash<HASHBYTES>& hash);
+
     Scalar operator+(const Scalar& x) const;
     Scalar operator*(const Scalar& x) const;
     Point operator*(const Point& x) const;
@@ -58,10 +64,13 @@ public:
     unsigned char* bytes();
 
     static Scalar random();
-
+    static Scalar zero();
+    static Scalar one();
+    
     template<int N>
     friend class Hash;
     friend class Point;
+    friend class BasePoint;
 
     friend std::ostream& operator<<(std::ostream& out, const Scalar& d);
     
@@ -91,11 +100,20 @@ public:
 
     template<int N>
     friend class Hash;
+    friend class BasePoint;
     
 protected:
     unsigned char m_bytes[crypto_core_ristretto255_BYTES];
 };
 
+class BasePoint : public Point {
+public:
+    BasePoint();
+
+    Point operator*(const Scalar& x) const;
+};
+
+    
 std::ostream& operator<<(std::ostream& out, const Scalar& d);
 
 template<int N>

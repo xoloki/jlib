@@ -55,6 +55,7 @@ int main(int argc, char** argv) {
 
     // monero address
     {
+        BasePoint G;
         Scalar a = Scalar::random();
         Scalar b = Scalar::random();
 
@@ -67,8 +68,9 @@ int main(int argc, char** argv) {
         Point R = Point::from(r);
 
         Point aR = a * R;
-        //Point aR = R * a;
-        Hash<crypto_core_ristretto255_HASHBYTES> Hs = Hash<crypto_core_ristretto255_HASHBYTES>::generic(aR);
+        Scalar Hs = Hash<Point::HASHBYTES>::generic(aR);
+
+        Point Y = Hs * G  + B;
     }
 
     

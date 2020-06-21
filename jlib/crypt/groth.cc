@@ -30,10 +30,33 @@ namespace jlib {
 namespace crypt {
 namespace groth {
 
+Scalar::Scalar() {
+}
+
+Scalar::Scalar(const Hash<Scalar::HASHBYTES>& hash) {
+    crypto_core_ristretto255_scalar_reduce(reinterpret_cast<unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&hash.m_bytes));
+}
+    
 Scalar Scalar::random() {
     Scalar result;
     
     crypto_core_ristretto255_scalar_random(reinterpret_cast<unsigned char*>(&result.m_bytes));
+
+    return result;
+}
+
+Scalar Scalar::zero() {
+    Scalar result;
+
+    std::memset(reinterpret_cast<unsigned char*>(&result.m_bytes), 0, crypto_core_ristretto255_SCALARBYTES);
+
+    return result;
+}
+
+Scalar Scalar::one() {
+    Scalar result = Scalar::zero();
+
+    result.m_bytes[0] = 0x01;
 
     return result;
 }
@@ -105,6 +128,23 @@ Point Point::operator*(const Scalar& x) const {
     return result;
 }
 
+BasePoint::BasePoint() {
+    Scalar one = Scalar::one();
+
+    int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&one.m_bytes));
+    if(e != 0)
+        throw std::runtime_error("crypto_scalarmult_ristretto255_base failed");
+}
+
+Point BasePoint::operator*(const Scalar& x) const {
+    Point result;
+
+    int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes));
+    if(e != 0)
+        throw std::runtime_error("crypto_scalarmult_ristretto255_base failed");
+    return result;
+}
+    
 std::ostream& operator<<(std::ostream& out, const Scalar& d) {
     out << util::hex_value(reinterpret_cast<const unsigned char*>(&d.m_bytes), crypto_core_ristretto255_SCALARBYTES);
 

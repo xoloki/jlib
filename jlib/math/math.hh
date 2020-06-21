@@ -29,6 +29,10 @@ namespace math {
 
 int choose(int m, int k);
 
+namespace curve {
+    
+}
+    
 }
 }
 
