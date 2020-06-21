@@ -25,12 +25,14 @@ using namespace jlib::crypt::curve;
 int main(int argc, char** argv) {
     // monero
     {
-        /*
         BasePoint G;
 
-        Scalar a = Scalar::random();
-        Scalar b = Scalar::random();
+        Scalar value = Scalar::random();
+        Scalar blind = Scalar::random();
 
+        Commitment c(value, blind);
+        
+        /*
         Point A = a * G;
         Point B = b * G;
 

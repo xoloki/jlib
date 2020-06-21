@@ -155,6 +155,21 @@ bool operator!=(const Scalar& x, const Scalar& y);
 bool operator==(const Point& x, const Point& y);
 bool operator!=(const Point& x, const Point& y);
 
+class Commitment {
+public:
+    Commitment();
+    Commitment(const Scalar& value, const Scalar& blind);
+    
+    const unsigned char* data() const;
+    unsigned char* data();
+
+    static BasePoint G;
+    static Point H;
+
+protected:
+    Point m_data;
+};
+    
 template<int N>
 Hash<N>::Hash() {
     crypto_generichash_init(&m_state, 0, 0, N);

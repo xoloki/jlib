@@ -198,6 +198,19 @@ bool operator==(const Point& x, const Point& y) {
 bool operator!=(const Point& x, const Point& y) {
     return !(x == y);
 }
+
+BasePoint Commitment::G;
+Point Commitment::H = hash<Point::HASHSIZE>(G);
+    
+Commitment::Commitment() {
+}
+    
+Commitment::Commitment(const Scalar& value, const Scalar& blind)
+{
+    m_data = value * G + blind * H;
+}
+
+
     
 }
 }
