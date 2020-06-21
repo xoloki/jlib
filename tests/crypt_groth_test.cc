@@ -20,7 +20,7 @@
 
 #include <jlib/crypt/groth.hh>
 
-using namespace jlib::crypt::groth;
+using namespace jlib::crypt::curve;
 
 int main(int argc, char** argv) {
     /*
