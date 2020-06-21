@@ -61,6 +61,14 @@ Scalar Scalar::one() {
     return result;
 }
 
+const unsigned char* Scalar::bytes() const {
+    return reinterpret_cast<const unsigned char*>(m_bytes);
+}
+    
+unsigned char* Scalar::bytes() {
+    return reinterpret_cast<unsigned char*>(m_bytes);
+}
+    
 Scalar Scalar::operator+(const Scalar& x) const {
     Scalar result;
 
@@ -110,6 +118,13 @@ Point Point::from(const Scalar& x) {
     return Point(x);
 }
 
+const unsigned char* Point::bytes() const {
+    return reinterpret_cast<const unsigned char*>(m_bytes);
+}
+    
+unsigned char* Point::bytes() {
+    return reinterpret_cast<unsigned char*>(m_bytes);
+}
 Point Point::operator+(const Point& x) const {
     Point result;
 

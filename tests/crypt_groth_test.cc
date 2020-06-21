@@ -53,28 +53,27 @@ int main(int argc, char** argv) {
         std::cout << a << " + " << b << " = " << c << std::endl;
     }
 
-    // monero address
+    // monero
     {
         BasePoint G;
+
+        // private key
         Scalar a = Scalar::random();
         Scalar b = Scalar::random();
 
-        //Point A = Point::from(a);
-        //Point B = Point::from(b);
+        // public key
         Point A = a * G;
         Point B = b * G;
-        //Point A(a);
-        //Point B(b);
 
         std::cout << "keypair (A, B) (" << A << ", " << B << ")" << std::endl;
 
-        Scalar r = Scalar::random();
-        Point R = Point::from(r);
+        Scalar s = Scalar::random();
+        Point R = s * G;
 
         Point aR = a * R;
         Scalar Hs = Hash<Point::HASHBYTES>::generic(aR);
 
-        Point Y = Hs * G  + B;
+        Point Y = Hs * G + B;
 
         Scalar x = Hs + b;
 
@@ -82,6 +81,18 @@ int main(int argc, char** argv) {
 
         if(Y != Y1)
             std::cerr << "points don't match" << std::endl;
+
+        // schnorr proof
+        Scalar v = Scalar::random();
+        Point t = v * G;
+
+        Scalar c = hash<Scalar::HASHBYTES>(Y, t);
+        Scalar r = v + c*x;
+
+        Point P = r * G + c * Y;
+
+        if(P != t)
+            std::cerr << "schnorr proof didn't verify" << std::endl;
     }
 
     

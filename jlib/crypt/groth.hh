@@ -36,6 +36,11 @@ class Scalar;
 template<int N>
 class Hash {
 public:
+    Hash();
+
+    void update(const unsigned char* bytes, std::size_t n);
+    void finalize();
+    
     static Hash generic(const Point& p);
     static Hash generic(const Scalar& x);
     static Hash generic(const unsigned char* bytes, std::size_t n);
@@ -45,11 +50,34 @@ public:
   
 protected:
     unsigned char m_bytes[crypto_generichash_BYTES];
+    crypto_generichash_state m_state;
 };
+
+template<int N, typename... Args>
+Hash<N> hash(Args&&... args) {
+    Hash<N> hasher;
+
+    do_hash(hasher, args...);
+    hasher.finalize();
+    
+    return hasher;
+}
+
+template<int N, typename T, typename... Args>
+Hash<N> do_hash(Hash<N>& hasher, const T& t, Args&&... args) {
+        hasher.update(t.bytes(), T::SIZE);
+        do_hash(hasher, args...);
+}
+
+template<int N, typename T>
+Hash<N> do_hash(Hash<N>& hasher, const T& t) {
+    hasher.update(t.bytes(), T::SIZE);
+}
 
 class Scalar {
 public:
     static const int HASHBYTES = crypto_core_ristretto255_HASHBYTES;
+    static const int SIZE = crypto_core_ristretto255_SCALARBYTES;
 
     Scalar();
     Scalar(const Hash<HASHBYTES>& hash);
@@ -82,6 +110,7 @@ protected:
 class Point {
 public:
     static const int HASHBYTES = crypto_core_ristretto255_HASHBYTES;
+    static const int SIZE = crypto_core_ristretto255_BYTES;
 
     Point();
     Point(const Scalar& scalar);
@@ -124,6 +153,21 @@ bool operator!=(const Scalar& x, const Scalar& y);
 bool operator==(const Point& x, const Point& y);
 bool operator!=(const Point& x, const Point& y);
 
+template<int N>
+Hash<N>::Hash() {
+    crypto_generichash_init(&m_state, 0, 0, N);
+}
+
+template<int N>
+void Hash<N>::update(const unsigned char* bytes, std::size_t n) {
+    crypto_generichash_update(&m_state, bytes, n);
+}
+    
+template<int N>
+void Hash<N>::finalize() {
+    crypto_generichash_final(&m_state, reinterpret_cast<unsigned char*>(&m_bytes), N);
+}
+    
 template<int N>
 Hash<N> Hash<N>::generic(const Point& p) {
     return Hash<N>::generic(reinterpret_cast<const unsigned char*>(&p.m_bytes), crypto_core_ristretto255_BYTES);
