@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
         Scalar v = Scalar::random();
         Point t = v * G;
 
-        Scalar c = hash<Scalar::HASHBYTES>(Y, t);
+        Scalar c = hash<Scalar::HASHBYTES>(G, Y, t);
         Scalar r = v - c*x;
 
         Point P = r * G + c * Y;

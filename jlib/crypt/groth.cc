@@ -97,6 +97,10 @@ Point Scalar::operator*(const Point& x) const {
     return (x * *this);
 }
 
+Point Scalar::operator*(const BasePoint& x) const {
+    return (x * *this);
+}
+
 Point::Point() {
 }
     
