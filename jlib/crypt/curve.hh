@@ -38,18 +38,18 @@ class Hash {
 public:
     Hash();
 
-    void update(const unsigned char* bytes, std::size_t n);
+    void update(const unsigned char* data, std::size_t n);
     void finalize();
     
     static Hash generic(const Point& p);
     static Hash generic(const Scalar& x);
-    static Hash generic(const unsigned char* bytes, std::size_t n);
+    static Hash generic(const unsigned char* data, std::size_t n);
  
     friend class Point; 
     friend class Scalar;
   
 protected:
-    unsigned char m_bytes[crypto_generichash_BYTES];
+    unsigned char m_data[crypto_generichash_BYTES];
     crypto_generichash_state m_state;
 };
 
@@ -65,22 +65,22 @@ Hash<N> hash(Args&&... args) {
 
 template<int N, typename T, typename... Args>
 Hash<N> do_hash(Hash<N>& hasher, const T& t, Args&&... args) {
-        hasher.update(t.bytes(), T::SIZE);
-        do_hash(hasher, args...);
+    hasher.update(t.data(), T::SIZE);
+    do_hash(hasher, args...);
 }
 
 template<int N, typename T>
 Hash<N> do_hash(Hash<N>& hasher, const T& t) {
-    hasher.update(t.bytes(), T::SIZE);
+    hasher.update(t.data(), T::SIZE);
 }
 
 class Scalar {
 public:
-    static const int HASHBYTES = crypto_core_ristretto255_HASHBYTES;
+    static const int HASHSIZE = crypto_core_ristretto255_HASHBYTES;
     static const int SIZE = crypto_core_ristretto255_SCALARBYTES;
 
     Scalar();
-    Scalar(const Hash<HASHBYTES>& hash);
+    Scalar(const Hash<HASHSIZE>& hash);
 
     Scalar operator+(const Scalar& x) const;
     Scalar operator-(const Scalar& x) const;
@@ -90,8 +90,8 @@ public:
     Scalar& operator+=(const Scalar& x);
     Scalar& operator*=(const Scalar& x);
 
-    const unsigned char* bytes() const;
-    unsigned char* bytes();
+    const unsigned char* data() const;
+    unsigned char* data();
 
     static Scalar random();
     static Scalar zero();
@@ -106,24 +106,24 @@ public:
     friend bool operator==(const Scalar& x, const Scalar& y);
     
 protected:
-    unsigned char m_bytes[crypto_core_ristretto255_SCALARBYTES];
+    unsigned char m_data[crypto_core_ristretto255_SCALARBYTES];
 };
     
 class Point {
 public:
-    static const int HASHBYTES = crypto_core_ristretto255_HASHBYTES;
+    static const int HASHSIZE = crypto_core_ristretto255_HASHBYTES;
     static const int SIZE = crypto_core_ristretto255_BYTES;
 
     Point();
     Point(const Scalar& scalar);
-    Point(const Hash<HASHBYTES>& hash);
+    Point(const Hash<HASHSIZE>& hash);
 
     Point operator+(const Point& x) const;
     Point operator*(const Scalar& x) const;
     Point& operator*=(const Scalar& x);
     
-    const unsigned char* bytes() const;
-    unsigned char* bytes();
+    const unsigned char* data() const;
+    unsigned char* data();
 
     static Point random();
     static Point from(const Scalar& x);
@@ -136,7 +136,7 @@ public:
     friend class BasePoint;
     
 protected:
-    unsigned char m_bytes[crypto_core_ristretto255_BYTES];
+    unsigned char m_data[crypto_core_ristretto255_BYTES];
 };
 
 class BasePoint : public Point {
@@ -161,30 +161,30 @@ Hash<N>::Hash() {
 }
 
 template<int N>
-void Hash<N>::update(const unsigned char* bytes, std::size_t n) {
-    crypto_generichash_update(&m_state, bytes, n);
+void Hash<N>::update(const unsigned char* data, std::size_t n) {
+    crypto_generichash_update(&m_state, data, n);
 }
     
 template<int N>
 void Hash<N>::finalize() {
-    crypto_generichash_final(&m_state, reinterpret_cast<unsigned char*>(&m_bytes), N);
+    crypto_generichash_final(&m_state, reinterpret_cast<unsigned char*>(&m_data), N);
 }
     
 template<int N>
 Hash<N> Hash<N>::generic(const Point& p) {
-    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(&p.m_bytes), crypto_core_ristretto255_BYTES);
+    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(&p.m_data), crypto_core_ristretto255_BYTES);
 }
 
 template<int N>
 Hash<N> Hash<N>::generic(const Scalar& x) {
-    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(&x.m_bytes), crypto_core_ristretto255_SCALARBYTES);
+    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(&x.m_data), crypto_core_ristretto255_SCALARBYTES);
 }
     
 template<int N>
-Hash<N> Hash<N>::generic(const unsigned char* bytes, std::size_t n) {
+Hash<N> Hash<N>::generic(const unsigned char* data, std::size_t n) {
     Hash<N> result;
     
-    crypto_generichash(reinterpret_cast<unsigned char*>(&result.m_bytes), crypto_generichash_BYTES, bytes, n, NULL, 0);
+    crypto_generichash(reinterpret_cast<unsigned char*>(&result.m_data), crypto_generichash_BYTES, data, n, NULL, 0);
 
     return result;
 }

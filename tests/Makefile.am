@@ -33,6 +33,7 @@ TESTS = \
 	util_headers_angie_test \
 	util_xml_test \
  \
+	crypt_curve_test \
 	crypt_groth_test
 
 #gl_glutmain_test_SOURCES = gl_glutmain_test.cc
@@ -83,6 +84,9 @@ math_test_LDADD = $(top_builddir)/jlib/util/libjutil.la
 
 tensor_test_SOURCES = tensor_test.cc
 tensor_test_LDADD = $(top_builddir)/jlib/util/libjutil.la
+
+crypt_curve_test_SOURCES = crypt_curve_test.cc
+crypt_curve_test_LDADD = $(top_builddir)/jlib/util/libjutil.la $(top_builddir)/jlib/crypt/libjcrypt.la
 
 crypt_groth_test_SOURCES = crypt_groth_test.cc
 crypt_groth_test_LDADD = $(top_builddir)/jlib/util/libjutil.la $(top_builddir)/jlib/crypt/libjcrypt.la

@@ -33,14 +33,14 @@ namespace curve {
 Scalar::Scalar() {
 }
 
-Scalar::Scalar(const Hash<Scalar::HASHBYTES>& hash) {
-    crypto_core_ristretto255_scalar_reduce(reinterpret_cast<unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&hash.m_bytes));
+Scalar::Scalar(const Hash<Scalar::HASHSIZE>& hash) {
+    crypto_core_ristretto255_scalar_reduce(reinterpret_cast<unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&hash.m_data));
 }
     
 Scalar Scalar::random() {
     Scalar result;
     
-    crypto_core_ristretto255_scalar_random(reinterpret_cast<unsigned char*>(&result.m_bytes));
+    crypto_core_ristretto255_scalar_random(reinterpret_cast<unsigned char*>(&result.m_data));
 
     return result;
 }
@@ -48,7 +48,7 @@ Scalar Scalar::random() {
 Scalar Scalar::zero() {
     Scalar result;
 
-    std::memset(reinterpret_cast<unsigned char*>(&result.m_bytes), 0, crypto_core_ristretto255_SCALARBYTES);
+    std::memset(reinterpret_cast<unsigned char*>(&result.m_data), 0, crypto_core_ristretto255_SCALARBYTES);
 
     return result;
 }
@@ -56,23 +56,23 @@ Scalar Scalar::zero() {
 Scalar Scalar::one() {
     Scalar result = Scalar::zero();
 
-    result.m_bytes[0] = 0x01;
+    result.m_data[0] = 0x01;
 
     return result;
 }
 
-const unsigned char* Scalar::bytes() const {
-    return reinterpret_cast<const unsigned char*>(m_bytes);
+const unsigned char* Scalar::data() const {
+    return reinterpret_cast<const unsigned char*>(m_data);
 }
     
-unsigned char* Scalar::bytes() {
-    return reinterpret_cast<unsigned char*>(m_bytes);
+unsigned char* Scalar::data() {
+    return reinterpret_cast<unsigned char*>(m_data);
 }
     
 Scalar Scalar::operator+(const Scalar& x) const {
     Scalar result;
 
-    crypto_core_ristretto255_scalar_add(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes));
+    crypto_core_ristretto255_scalar_add(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&x.m_data));
 
     return result;
 }    
@@ -80,7 +80,7 @@ Scalar Scalar::operator+(const Scalar& x) const {
 Scalar Scalar::operator-(const Scalar& x) const {
     Scalar result;
 
-    crypto_core_ristretto255_scalar_sub(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes));
+    crypto_core_ristretto255_scalar_sub(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&x.m_data));
 
     return result;
 }    
@@ -88,7 +88,7 @@ Scalar Scalar::operator-(const Scalar& x) const {
 Scalar Scalar::operator*(const Scalar& x) const {
     Scalar result;
 
-    crypto_core_ristretto255_scalar_mul(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes));
+    crypto_core_ristretto255_scalar_mul(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&x.m_data));
 
     return result;
 }
@@ -105,20 +105,20 @@ Point::Point() {
 }
     
 Point::Point(const Scalar& scalar) {
-    int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&scalar.m_bytes));
+    int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&scalar.m_data));
     if(e != 0)
         throw std::runtime_error("crypto_scalarmult_ristretto255_base failed");
 }
     
-Point::Point(const Hash<Point::HASHBYTES>& hash) {
-    crypto_core_ristretto255_from_hash(reinterpret_cast<unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&hash.m_bytes));
+Point::Point(const Hash<Point::HASHSIZE>& hash) {
+    crypto_core_ristretto255_from_hash(reinterpret_cast<unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&hash.m_data));
 }
     
 Point Point::random() {
     Point result;
     Scalar exponent = Scalar::random();
     
-    int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&exponent.m_bytes));
+    int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&exponent.m_data));
     if(e != 0)
         throw std::runtime_error("crypto_scalarmult_ristretto255_base failed");
 
@@ -129,17 +129,17 @@ Point Point::from(const Scalar& x) {
     return Point(x);
 }
 
-const unsigned char* Point::bytes() const {
-    return reinterpret_cast<const unsigned char*>(m_bytes);
+const unsigned char* Point::data() const {
+    return reinterpret_cast<const unsigned char*>(m_data);
 }
     
-unsigned char* Point::bytes() {
-    return reinterpret_cast<unsigned char*>(m_bytes);
+unsigned char* Point::data() {
+    return reinterpret_cast<unsigned char*>(m_data);
 }
 Point Point::operator+(const Point& x) const {
     Point result;
 
-    int e = crypto_core_ristretto255_add(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes));
+    int e = crypto_core_ristretto255_add(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&x.m_data));
     if(e != 0)
         throw std::runtime_error("crypto_core_ristretto255_add failed");
     return result;
@@ -148,7 +148,7 @@ Point Point::operator+(const Point& x) const {
 Point Point::operator*(const Scalar& x) const {
     Point result;
 
-    int e = crypto_scalarmult_ristretto255(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes), reinterpret_cast<const unsigned char*>(&m_bytes));
+    int e = crypto_scalarmult_ristretto255(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&x.m_data), reinterpret_cast<const unsigned char*>(&m_data));
     if(e != 0)
         throw std::runtime_error("crypto_scalarmult_ristretto255 failed");
     return result;
@@ -157,7 +157,7 @@ Point Point::operator*(const Scalar& x) const {
 BasePoint::BasePoint() {
     Scalar one = Scalar::one();
 
-    int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&one.m_bytes));
+    int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&one.m_data));
     if(e != 0)
         throw std::runtime_error("crypto_scalarmult_ristretto255_base failed");
 }
@@ -165,26 +165,26 @@ BasePoint::BasePoint() {
 Point BasePoint::operator*(const Scalar& x) const {
     Point result;
 
-    int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes));
+    int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&x.m_data));
     if(e != 0)
         throw std::runtime_error("crypto_scalarmult_ristretto255_base failed");
     return result;
 }
     
 std::ostream& operator<<(std::ostream& out, const Scalar& d) {
-    out << util::hex_value(reinterpret_cast<const unsigned char*>(&d.m_bytes), crypto_core_ristretto255_SCALARBYTES);
+    out << util::hex_value(reinterpret_cast<const unsigned char*>(&d.m_data), crypto_core_ristretto255_SCALARBYTES);
 
     return out;
 }
 
 std::ostream& operator<<(std::ostream& out, const Point& d) {
-    out << util::hex_value(reinterpret_cast<const unsigned char*>(&d.m_bytes), crypto_core_ristretto255_BYTES);
+    out << util::hex_value(reinterpret_cast<const unsigned char*>(&d.m_data), crypto_core_ristretto255_BYTES);
 
     return out;
 }
 
 bool operator==(const Scalar& x, const Scalar& y) {
-    return (std::memcmp(x.m_bytes, y.m_bytes, crypto_core_ristretto255_SCALARBYTES) == 0);
+    return (std::memcmp(x.m_data, y.m_data, crypto_core_ristretto255_SCALARBYTES) == 0);
 }
     
 bool operator!=(const Scalar& x, const Scalar& y) {
@@ -192,26 +192,12 @@ bool operator!=(const Scalar& x, const Scalar& y) {
 }
     
 bool operator==(const Point& x, const Point& y) {
-    return (std::memcmp(x.m_bytes, y.m_bytes, crypto_core_ristretto255_BYTES) == 0);
+    return (std::memcmp(x.m_data, y.m_data, crypto_core_ristretto255_BYTES) == 0);
 }
 
 bool operator!=(const Point& x, const Point& y) {
     return !(x == y);
 }
-    
-class BinaryProver {
-    
-};
-
-class BinaryVerifier {
-
-
-};
-    
-class Proof {
-    
-};
-
     
 }
 }
