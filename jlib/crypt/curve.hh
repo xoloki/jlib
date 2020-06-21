@@ -32,6 +32,7 @@ namespace curve {
 class BasePoint;
 class Point;
 class Scalar;
+class Commitment;
 
 template<int N>
 class Hash {
@@ -134,6 +135,7 @@ public:
     template<int N>
     friend class Hash;
     friend class BasePoint;
+    friend class Commitment;
     
 protected:
     unsigned char m_data[crypto_core_ristretto255_BYTES];
@@ -155,19 +157,13 @@ bool operator!=(const Scalar& x, const Scalar& y);
 bool operator==(const Point& x, const Point& y);
 bool operator!=(const Point& x, const Point& y);
 
-class Commitment {
+class Commitment : public Point {
 public:
     Commitment();
     Commitment(const Scalar& value, const Scalar& blind);
     
-    const unsigned char* data() const;
-    unsigned char* data();
-
     static BasePoint G;
     static Point H;
-
-protected:
-    Point m_data;
 };
     
 template<int N>

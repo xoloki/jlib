@@ -27,10 +27,24 @@ int main(int argc, char** argv) {
     {
         BasePoint G;
 
-        Scalar value = Scalar::random();
-        Scalar blind = Scalar::random();
+        Scalar m = Scalar::random();
+        Scalar r = Scalar::random();
 
-        Commitment c(value, blind);
+        Commitment c(m, r);
+        
+        Scalar a = Scalar::random();
+        Scalar s = Scalar::random();
+        Scalar t = Scalar::random();
+
+        Commitment c_a(a, s);
+        Commitment c_b(a*m, r);
+
+        Scalar x = hash<Scalar::HASHSIZE>(c_a, c_b);
+        
+        Scalar f = m*x + a;
+        Scalar z_a = r*x + s;
+        Scalar z_b = r*(x - f) + t;
+
         
         /*
         Point A = a * G;

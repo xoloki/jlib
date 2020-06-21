@@ -207,11 +207,10 @@ Commitment::Commitment() {
     
 Commitment::Commitment(const Scalar& value, const Scalar& blind)
 {
-    m_data = value * G + blind * H;
+    Point p = value * G + blind * H;
+    static_cast<Point&>(*this) = p;
 }
 
-
-    
 }
 }
 }
