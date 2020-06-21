@@ -59,10 +59,14 @@ int main(int argc, char** argv) {
         Scalar a = Scalar::random();
         Scalar b = Scalar::random();
 
-        Point A = Point::from(a);
-        Point B = Point::from(b);
+        //Point A = Point::from(a);
+        //Point B = Point::from(b);
+        Point A = a * G;
+        Point B = b * G;
+        //Point A(a);
+        //Point B(b);
 
-        std::cout << "keypair (A, B) (" << a << ", " << b << ")" << std::endl;
+        std::cout << "keypair (A, B) (" << A << ", " << B << ")" << std::endl;
 
         Scalar r = Scalar::random();
         Point R = Point::from(r);
@@ -71,6 +75,13 @@ int main(int argc, char** argv) {
         Scalar Hs = Hash<Point::HASHBYTES>::generic(aR);
 
         Point Y = Hs * G  + B;
+
+        Scalar x = Hs + b;
+
+        Point Y1 = x;
+
+        if(Y != Y1)
+            std::cerr << "points don't match" << std::endl;
     }
 
     

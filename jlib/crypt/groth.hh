@@ -73,6 +73,7 @@ public:
     friend class BasePoint;
 
     friend std::ostream& operator<<(std::ostream& out, const Scalar& d);
+    friend bool operator==(const Scalar& x, const Scalar& y);
     
 protected:
     unsigned char m_bytes[crypto_core_ristretto255_SCALARBYTES];
@@ -97,6 +98,7 @@ public:
     static Point from(const Scalar& x);
 
     friend std::ostream& operator<<(std::ostream& out, const Point& d);
+    friend bool operator==(const Point& x, const Point& y);
 
     template<int N>
     friend class Hash;
@@ -115,6 +117,12 @@ public:
 
     
 std::ostream& operator<<(std::ostream& out, const Scalar& d);
+std::ostream& operator<<(std::ostream& out, const Point& d);
+
+bool operator==(const Scalar& x, const Scalar& y);
+bool operator!=(const Scalar& x, const Scalar& y);
+bool operator==(const Point& x, const Point& y);
+bool operator!=(const Point& x, const Point& y);
 
 template<int N>
 Hash<N> Hash<N>::generic(const Point& p) {

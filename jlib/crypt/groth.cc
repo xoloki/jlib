@@ -156,6 +156,22 @@ std::ostream& operator<<(std::ostream& out, const Point& d) {
 
     return out;
 }
+
+bool operator==(const Scalar& x, const Scalar& y) {
+    return (std::memcmp(x.m_bytes, y.m_bytes, crypto_core_ristretto255_SCALARBYTES) == 0);
+}
+    
+bool operator!=(const Scalar& x, const Scalar& y) {
+    return !(x == y);
+}
+    
+bool operator==(const Point& x, const Point& y) {
+    return (std::memcmp(x.m_bytes, y.m_bytes, crypto_core_ristretto255_BYTES) == 0);
+}
+
+bool operator!=(const Point& x, const Point& y) {
+    return !(x == y);
+}
     
 class BinaryProver {
     
