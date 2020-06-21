@@ -77,7 +77,14 @@ Scalar Scalar::operator+(const Scalar& x) const {
     return result;
 }    
 
-    
+Scalar Scalar::operator-(const Scalar& x) const {
+    Scalar result;
+
+    crypto_core_ristretto255_scalar_sub(reinterpret_cast<unsigned char*>(&result.m_bytes), reinterpret_cast<const unsigned char*>(&m_bytes), reinterpret_cast<const unsigned char*>(&x.m_bytes));
+
+    return result;
+}    
+
 Scalar Scalar::operator*(const Scalar& x) const {
     Scalar result;
 

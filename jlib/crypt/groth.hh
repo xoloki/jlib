@@ -83,6 +83,7 @@ public:
     Scalar(const Hash<HASHBYTES>& hash);
 
     Scalar operator+(const Scalar& x) const;
+    Scalar operator-(const Scalar& x) const;
     Scalar operator*(const Scalar& x) const;
     Point operator*(const Point& x) const;
     Scalar& operator+=(const Scalar& x);
