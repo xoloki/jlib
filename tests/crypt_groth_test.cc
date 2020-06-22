@@ -21,13 +21,14 @@
 #include <jlib/crypt/groth.hh>
 
 using namespace jlib::crypt::curve;
+using namespace jlib::crypt::groth;
 
 int main(int argc, char** argv) {
-    // monero
+    // once manually
     {
         BasePoint G;
 
-        Scalar m = Scalar::random();
+        Scalar m = Scalar::one();
         Scalar r = Scalar::random();
 
         Commitment c(m, r);
@@ -37,7 +38,7 @@ int main(int argc, char** argv) {
         Scalar t = Scalar::random();
 
         Commitment c_a(a, s);
-        Commitment c_b(a*m, r);
+        Commitment c_b(a*m, t);
 
         Scalar x = hash<Scalar::HASHSIZE>(c_a, c_b);
         
@@ -55,11 +56,26 @@ int main(int argc, char** argv) {
         Point czzb = Commitment(Scalar::zero(), z_b);
         
         if(cxca != cfza || cxfcb != czzb) {
-            std::cerr << "groth proof didn't verify" << std::endl;
+            std::cerr << "manual groth proof didn't verify: cxca != cfza || cxfcb != czzb" << std::endl
+                      << cxca << std::endl
+                      << cfza << std::endl
+                      << cxfcb << std::endl
+                      << czzb << std::endl;
             return -1;
         }
     }
 
+    // once with the functions
+    {
+        Scalar m = Scalar::one();
+        Scalar r = Scalar::random();
+
+        BinaryProof proof = prove(m, r);
+
+        if(!verify(proof)) {
+            std::cerr << "groth BinaryProof didn't verify" << std::endl;
+        }
+    }
     
     return 0;
 }

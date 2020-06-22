@@ -18,6 +18,9 @@
  * 
  */
 
+#ifndef JLIB_CRYPT_GROTH_HH
+#define JLIB_CRYPT_GROTH_HH
+
 #include <ostream>
 
 #include <sodium.h>
@@ -30,19 +33,21 @@ namespace jlib {
 namespace crypt {
 namespace groth {
 
-class BinaryProver {
-    
+struct BinaryProof {
+    curve::Commitment c;
+    curve::Commitment c_a;
+    curve::Commitment c_b;
+    curve::Scalar f;
+    curve::Scalar z_a;
+    curve::Scalar z_b;
 };
-
-class BinaryVerifier {
-
-
-};
     
-class Proof {
-    
-};
+BinaryProof prove(const curve::Scalar& m, const curve::Scalar& r);
+
+bool verify(const BinaryProof& proof);
     
 }
 }
 }
+
+#endif
