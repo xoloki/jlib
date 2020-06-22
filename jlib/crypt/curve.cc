@@ -207,8 +207,13 @@ Commitment::Commitment() {
     
 Commitment::Commitment(const Scalar& value, const Scalar& blind)
 {
-    Point p = value * G + blind * H;
-    static_cast<Point&>(*this) = p;
+    if(value == Scalar::zero()) {
+        Point p = blind * H;
+        static_cast<Point&>(*this) = p;
+    } else {
+        Point p = value * G + blind * H;
+        static_cast<Point&>(*this) = p;
+    }
 }
 
 }

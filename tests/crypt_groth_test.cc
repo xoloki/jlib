@@ -45,23 +45,19 @@ int main(int argc, char** argv) {
         Scalar z_a = r*x + s;
         Scalar z_b = r*(x - f) + t;
 
+        // proof is valid iff
+        // c^x*c_a = Comm(f;z_a)
+        // c^(x-f)*c_b = Comm(0;z_b)
+        Point cxca = x * c + c_a;
+        Point cfza = Commitment(f, z_a);
+
+        Point cxfcb = (x-f)*c + c_b;
+        Point czzb = Commitment(Scalar::zero(), z_b);
         
-        /*
-        Point A = a * G;
-        Point B = b * G;
-
-        std::cout << "keypair (A, B) (" << A << ", " << B << ")" << std::endl;
-
-        Scalar s = Scalar::random();
-        Point R = s * G;
-
-        Point aR = a * R;
-        Scalar Hs = Hash<Point::HASHBYTES>::generic(aR);
-
-        Point Y = Hs * G + B;
-        if(P != t)
-            std::cerr << "schnorr proof didn't verify" << std::endl;
-        */
+        if(cxca != cfza || cxfcb != czzb) {
+            std::cerr << "groth proof didn't verify" << std::endl;
+            return -1;
+        }
     }
 
     
