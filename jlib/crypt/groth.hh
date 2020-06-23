@@ -33,6 +33,7 @@ namespace jlib {
 namespace crypt {
 namespace groth {
 
+// a BinaryProof is a proof that the commitment c opens to either 0 or 1
 struct BinaryProof {
     curve::Commitment c;
     curve::Commitment c_a;
@@ -45,7 +46,23 @@ struct BinaryProof {
 BinaryProof prove(const curve::Scalar& m, const curve::Scalar& r);
 
 bool verify(const BinaryProof& proof);
+
+// a ZeroProof is a proof that one of the many commitments opens to zero
+struct ZeroProof {
+    std::vector<curve::Commitment> c;
+    std::vector<curve::Commitment> c_l;
+    std::vector<curve::Commitment> c_a;
+    std::vector<curve::Commitment> c_b;
+    std::vector<curve::Commitment> c_d;
+    std::vector<curve::Scalar> f;
+    std::vector<curve::Scalar> z_a;
+    std::vector<curve::Scalar> z_b;
+};
     
+ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const curve::Scalar& r);
+
+bool verify(const ZeroProof& proof);
+
 }
 }
 }

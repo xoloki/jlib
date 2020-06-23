@@ -39,11 +39,15 @@ class Hash {
 public:
     Hash();
 
+    void update(const Point& p);
+    void update(const Scalar& x);
+    void update(const Commitment& c);
     void update(const unsigned char* data, std::size_t n);
     void finalize();
     
     static Hash generic(const Point& p);
     static Hash generic(const Scalar& x);
+    static Hash generic(const Commitment& x);
     static Hash generic(const unsigned char* data, std::size_t n);
  
     friend class Point; 
@@ -172,6 +176,21 @@ Hash<N>::Hash() {
 }
 
 template<int N>
+void Hash<N>::update(const Point& p) {
+    crypto_generichash_update(&m_state, p.data(), Point::SIZE);
+}
+    
+template<int N>
+void Hash<N>::update(const Scalar& x) {
+    crypto_generichash_update(&m_state, x.data(), Scalar::SIZE);
+}
+    
+template<int N>
+void Hash<N>::update(const Commitment& c) {
+    crypto_generichash_update(&m_state, c.data(), Point::SIZE);
+}
+    
+template<int N>
 void Hash<N>::update(const unsigned char* data, std::size_t n) {
     crypto_generichash_update(&m_state, data, n);
 }
@@ -183,14 +202,19 @@ void Hash<N>::finalize() {
     
 template<int N>
 Hash<N> Hash<N>::generic(const Point& p) {
-    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(&p.m_data), crypto_core_ristretto255_BYTES);
+    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(&p.m_data), Point::SIZE);
 }
 
 template<int N>
 Hash<N> Hash<N>::generic(const Scalar& x) {
-    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(&x.m_data), crypto_core_ristretto255_SCALARBYTES);
+    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(&x.m_data), Scalar::SIZE);
 }
-    
+
+template<int N>
+Hash<N> Hash<N>::generic(const Commitment& c) {
+    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(c.data()), Point::SIZE);
+}
+
 template<int N>
 Hash<N> Hash<N>::generic(const unsigned char* data, std::size_t n) {
     Hash<N> result;

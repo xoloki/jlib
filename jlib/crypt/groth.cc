@@ -60,6 +60,20 @@ bool verify(const BinaryProof& proof) {
     
     return (cxca == cfza && cxfcb == czzb);
 }
+
+ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const curve::Scalar& r) {
+    return ZeroProof();
+}
+    
+bool verify(const ZeroProof& proof) {
+    curve::Hash<curve::Scalar::HASHSIZE> xhash;
+    for(curve::Commitment c : proof.c)
+        xhash.update(c);
+                     
+    curve::Scalar x = xhash;
+
+    return false;
+}
     
 }
 }

@@ -65,15 +65,24 @@ int main(int argc, char** argv) {
         }
     }
 
-    // once with the functions
+    // again with the functions
     {
-        Scalar m = Scalar::one();
+        Scalar m = Scalar::random();
+        Scalar m0 = Scalar::zero();
+        Scalar m1 = Scalar::one();
         Scalar r = Scalar::random();
 
         BinaryProof proof = prove(m, r);
-
-        if(!verify(proof)) {
-            std::cerr << "groth BinaryProof didn't verify" << std::endl;
+        if(verify(proof)) {
+            std::cerr << "groth BinaryProof with random m shouldn't verify" << std::endl;
+        }
+        BinaryProof proof0 = prove(m0, r);
+        if(verify(proof0)) {
+            std::cerr << "groth BinaryProof with m=0 should verify" << std::endl;
+        }
+        BinaryProof proof1 = prove(m1, r);
+        if(verify(proof1)) {
+            std::cerr << "groth BinaryProof with m=1 should verify" << std::endl;
         }
     }
     
