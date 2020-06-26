@@ -44,6 +44,8 @@ std::vector<curve::Scalar> expand(const std::vector<curve::Scalar>& x, const std
             p[k] += x[i] + y[j];
         }
     }
+
+    return p;
 }
         
     
@@ -123,23 +125,39 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
 
     // now that we have aj we can expand f_j,i_j to get p_i(x)
     // treat a polynomial as a vector of scalars representing the coefficients
-    std::vector<std::vector<curve::Scalar>> p;
+    std::vector<std::vector<curve::Scalar>> p_x;
     for(std::size_t i = 0; i < N; i++) {
-        std::vector<curve::Scalar> p_i;
+        std::vector<curve::Scalar> p_i_x;
         std::bitset<sizeof(i)> i_j(i);
         // expand the polynomial by multiplying by each f_j,i_j
         for(int j = 0; j < n; j++) {
             std::vector<curve::Scalar> f_j_i_j = i_j[j] ?
-                l_j[j] ? std::vector<curve::Scalar>{ curve::Scalar::one(), aj[j] } : std::vector<curve::Scalar> { aj[j] } :
-            l_j[j] ? std::vector<curve::Scalar>{ curve::Scalar::one(), -aj[j] } : std::vector<curve::Scalar> { -aj[j] };
-                
+                (l_j[j] ? std::vector<curve::Scalar>{ curve::Scalar::one(), aj[j] } : std::vector<curve::Scalar> { curve::Scalar::zero(), aj[j] }) :
+                (!l_j[j] ? std::vector<curve::Scalar>{ curve::Scalar::one(), -aj[j] } : std::vector<curve::Scalar> { curve::Scalar::zero(), -aj[j] });
+
+            p_i_x = expand(p_i_x, f_j_i_j);
         }
 
-        p.push_back(p_i);
+        p_x.push_back(p_i_x);
+    }
+
+    // now that we have all p_i(x) we can finally calculate c_d
+    for(int j = 0; j < n; j++) {
+        curve::Point c_d_k = proof.c[0] * p_x[0][j];
+        for(std::size_t i = 1; i < N; i++) {
+            c_d_k += proof.c[i] * p_x[i][j];
+        }
+
+        proof.c_d.push_back(c_d_k);
     }
     
+    
     curve::Hash<curve::Scalar::HASHSIZE> xhash;
-    for(curve::Commitment i : c)
+    for(curve::Commitment i : proof.c)
+        xhash.update(i);
+    for(curve::Commitment i : proof.c_a)
+        xhash.update(i);
+    for(curve::Commitment i : proof.c_b)
         xhash.update(i);
     xhash.finalize();
     
@@ -152,6 +170,10 @@ bool verify(const ZeroProof& proof) {
     curve::Hash<curve::Scalar::HASHSIZE> xhash;
     for(curve::Commitment c : proof.c)
         xhash.update(c);
+    for(curve::Commitment i : proof.c_a)
+        xhash.update(i);
+    for(curve::Commitment i : proof.c_b)
+        xhash.update(i);
     xhash.finalize();
                      
     curve::Scalar x = xhash;

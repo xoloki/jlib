@@ -126,6 +126,7 @@ public:
 
     Point operator+(const Point& x) const;
     Point operator*(const Scalar& x) const;
+    Point& operator+=(const Point& x);
     Point& operator*=(const Scalar& x);
     
     const unsigned char* data() const;

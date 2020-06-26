@@ -158,6 +158,7 @@ const unsigned char* Point::data() const {
 unsigned char* Point::data() {
     return reinterpret_cast<unsigned char*>(m_data);
 }
+
 Point Point::operator+(const Point& x) const {
     Point result;
 
@@ -174,6 +175,18 @@ Point Point::operator*(const Scalar& x) const {
     if(e != 0)
         throw std::runtime_error("crypto_scalarmult_ristretto255 failed");
     return result;
+}
+
+Point& Point::operator+=(const Point& x) {
+    Point result;
+
+    int e = crypto_core_ristretto255_add(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&x.m_data));
+    if(e != 0)
+        throw std::runtime_error("crypto_core_ristretto255_add failed");
+
+    *this = result;
+    
+    return *this;
 }
 
 BasePoint::BasePoint() {

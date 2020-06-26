@@ -53,7 +53,7 @@ struct ZeroProof {
     std::vector<curve::Commitment> c_l;
     std::vector<curve::Commitment> c_a;
     std::vector<curve::Commitment> c_b;
-    std::vector<curve::Commitment> c_d;
+    std::vector<curve::Point> c_d;
     std::vector<curve::Scalar> f;
     std::vector<curve::Scalar> z_a;
     std::vector<curve::Scalar> z_b;
