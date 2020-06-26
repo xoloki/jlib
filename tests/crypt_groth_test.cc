@@ -24,48 +24,6 @@ using namespace jlib::crypt::curve;
 using namespace jlib::crypt::groth;
 
 int main(int argc, char** argv) {
-    // once manually
-    {
-        BasePoint G;
-
-        Scalar m = Scalar::one();
-        Scalar r = Scalar::random();
-
-        Commitment c(m, r);
-        
-        Scalar a = Scalar::random();
-        Scalar s = Scalar::random();
-        Scalar t = Scalar::random();
-
-        Commitment c_a(a, s);
-        Commitment c_b(a*m, t);
-
-        Scalar x = hash<Scalar::HASHSIZE>(c_a, c_b);
-        
-        Scalar f = m*x + a;
-        Scalar z_a = r*x + s;
-        Scalar z_b = r*(x - f) + t;
-
-        // proof is valid iff
-        // c^x*c_a = Comm(f;z_a)
-        // c^(x-f)*c_b = Comm(0;z_b)
-        Point cxca = x * c + c_a;
-        Point cfza = Commitment(f, z_a);
-
-        Point cxfcb = (x-f)*c + c_b;
-        Point czzb = Commitment(Scalar::zero(), z_b);
-        
-        if(cxca != cfza || cxfcb != czzb) {
-            std::cerr << "manual groth proof didn't verify: cxca != cfza || cxfcb != czzb" << std::endl
-                      << cxca << std::endl
-                      << cfza << std::endl
-                      << cxfcb << std::endl
-                      << czzb << std::endl;
-            return -1;
-        }
-    }
-
-    // again with the functions
     {
         Scalar m = Scalar::random();
         Scalar m0 = Scalar::zero();
@@ -75,14 +33,41 @@ int main(int argc, char** argv) {
         BinaryProof proof = prove(m, r);
         if(verify(proof)) {
             std::cerr << "groth BinaryProof with random m shouldn't verify" << std::endl;
+            return -1;
         }
         BinaryProof proof0 = prove(m0, r);
-        if(verify(proof0)) {
+        if(!verify(proof0)) {
             std::cerr << "groth BinaryProof with m=0 should verify" << std::endl;
+            return -1;
         }
         BinaryProof proof1 = prove(m1, r);
-        if(verify(proof1)) {
+        if(!verify(proof1)) {
             std::cerr << "groth BinaryProof with m=1 should verify" << std::endl;
+            return -1;
+        }
+    }
+
+    {
+        std::vector<Commitment> cs;
+        Scalar m = Scalar::random();
+        Scalar r = Scalar::random();
+        Commitment c(m, r);
+ 
+        cs.push_back(c)
+;
+        // not quite a power of 2
+        for(int i = 0; i < 1022; i++) {
+            Scalar a = Scalar::random();
+            Scalar b = Scalar::random();
+            Commitment comm(a, b);
+            
+            cs.push_back(comm);
+        }
+        
+        ZeroProof proof = prove(cs, 0, r);
+        if(!verify(proof)) {
+            std::cerr << "groth ZeroProof didn't verify" << std::endl;
+            return -1;
         }
     }
     

@@ -92,6 +92,7 @@ public:
     Scalar operator*(const Scalar& x) const;
     Point operator*(const Point& x) const;
     Point operator*(const BasePoint& x) const;
+    Scalar& operator-();
     Scalar& operator+=(const Scalar& x);
     Scalar& operator*=(const Scalar& x);
 

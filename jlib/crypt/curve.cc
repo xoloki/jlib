@@ -101,6 +101,28 @@ Point Scalar::operator*(const BasePoint& x) const {
     return (x * *this);
 }
 
+Scalar& Scalar::operator-() {
+    Scalar result;
+
+    crypto_core_ristretto255_scalar_negate(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data));
+
+    *this = result;
+
+    return *this;
+}
+
+Scalar& Scalar::operator+=(const Scalar& x) {
+    Scalar result;
+
+    crypto_core_ristretto255_scalar_add(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&x.m_data));
+
+    *this = result;
+
+    return *this;
+}    
+
+
+    
 Point::Point() {
 }
     

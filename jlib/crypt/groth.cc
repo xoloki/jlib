@@ -18,6 +18,8 @@
  * 
  */
 
+#include <bitset>
+#include <cmath>
 #include <ostream>
 
 #include <sodium.h>
@@ -30,6 +32,21 @@ namespace jlib {
 namespace crypt {
 namespace groth {
 
+std::vector<curve::Scalar> expand(const std::vector<curve::Scalar>& x, const std::vector<curve::Scalar>& y) {
+    if(x.empty()) return y;
+    if(y.empty()) return x;
+
+    std::vector<curve::Scalar> p(x.size() + y.size() -1, curve::Scalar::zero());
+
+    for(int i = 0; i < x.size(); i++) {
+        for(int j = 0; j < y.size(); j++) {
+            int k = i + j;
+            p[k] += x[i] + y[j];
+        }
+    }
+}
+        
+    
 BinaryProof prove(const curve::Scalar& m, const curve::Scalar& r) {
     curve::Commitment c(m, r);
     
@@ -62,13 +79,80 @@ bool verify(const BinaryProof& proof) {
 }
 
 ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const curve::Scalar& r) {
-    return ZeroProof();
+
+    ZeroProof proof;
+
+    proof.c = c;
+    
+    // find the closest power of 2 to c's size
+    double lg = std::log2(c.size());
+    double lg_ceil = std::ceil(lg);
+    std::size_t n = lg_ceil;
+    std::size_t size = std::pow(2, n);
+    
+    // expand c if necessary
+    if(size > c.size()) {
+        proof.c.resize(size, c.back());
+    }
+
+    // wait till we resize before setting N
+    const std::size_t N = proof.c.size();
+    
+    // split l into n bits
+    std::bitset<sizeof(l)> l_j(l);
+
+    std::vector<curve::Scalar> rj, aj, sj, tj, rhoj;
+    
+    for(int j = 0; j < n; j++) {
+        rj.push_back(curve::Scalar::random());
+        aj.push_back(curve::Scalar::random());
+        sj.push_back(curve::Scalar::random());
+        tj.push_back(curve::Scalar::random());
+        rhoj.push_back(curve::Scalar::random());
+
+        curve::Scalar ljj = l_j[j] ? curve::Scalar::one() : curve::Scalar::zero();
+        
+        proof.c_l.push_back(curve::Commitment(ljj, rj.back()));
+        proof.c_a.push_back(curve::Commitment(aj.back(), sj.back()));
+
+        curve::Scalar cbj = l_j[j] ? aj.back() : curve::Scalar::zero();
+        
+        proof.c_b.push_back(curve::Commitment(cbj, sj.back()));
+        //proof.c_d.push_back(curve::Commitment(a.back(), s.back()));
+    }
+
+    // now that we have aj we can expand f_j,i_j to get p_i(x)
+    // treat a polynomial as a vector of scalars representing the coefficients
+    std::vector<std::vector<curve::Scalar>> p;
+    for(std::size_t i = 0; i < N; i++) {
+        std::vector<curve::Scalar> p_i;
+        std::bitset<sizeof(i)> i_j(i);
+        // expand the polynomial by multiplying by each f_j,i_j
+        for(int j = 0; j < n; j++) {
+            std::vector<curve::Scalar> f_j_i_j = i_j[j] ?
+                l_j[j] ? std::vector<curve::Scalar>{ curve::Scalar::one(), aj[j] } : std::vector<curve::Scalar> { aj[j] } :
+            l_j[j] ? std::vector<curve::Scalar>{ curve::Scalar::one(), -aj[j] } : std::vector<curve::Scalar> { -aj[j] };
+                
+        }
+
+        p.push_back(p_i);
+    }
+    
+    curve::Hash<curve::Scalar::HASHSIZE> xhash;
+    for(curve::Commitment i : c)
+        xhash.update(i);
+    xhash.finalize();
+    
+    curve::Scalar x = xhash;
+
+    return proof;
 }
     
 bool verify(const ZeroProof& proof) {
     curve::Hash<curve::Scalar::HASHSIZE> xhash;
     for(curve::Commitment c : proof.c)
         xhash.update(c);
+    xhash.finalize();
                      
     curve::Scalar x = xhash;
 
