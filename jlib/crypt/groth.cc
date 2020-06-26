@@ -159,6 +159,8 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
         xhash.update(i);
     for(curve::Commitment i : proof.c_b)
         xhash.update(i);
+    for(curve::Point i : proof.c_d)
+        xhash.update(i);
     xhash.finalize();
     
     curve::Scalar x = xhash;
@@ -173,6 +175,8 @@ bool verify(const ZeroProof& proof) {
     for(curve::Commitment i : proof.c_a)
         xhash.update(i);
     for(curve::Commitment i : proof.c_b)
+        xhash.update(i);
+    for(curve::Point i : proof.c_d)
         xhash.update(i);
     xhash.finalize();
                      
