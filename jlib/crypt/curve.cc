@@ -93,6 +93,16 @@ Scalar Scalar::operator*(const Scalar& x) const {
     return result;
 }
 
+Scalar Scalar::operator^(int k) const { 
+    curve::Scalar a_k = curve::Scalar::one();
+
+    for(int i = 0; i < k; i++) {
+        a_k *= (*this);
+    }
+
+    return a_k;
+}
+    
 Point Scalar::operator*(const Point& x) const {
     return (x * *this);
 }
@@ -115,6 +125,16 @@ Scalar& Scalar::operator+=(const Scalar& x) {
     Scalar result;
 
     crypto_core_ristretto255_scalar_add(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&x.m_data));
+
+    *this = result;
+
+    return *this;
+}    
+
+Scalar& Scalar::operator-=(const Scalar& x) {
+    Scalar result;
+
+    crypto_core_ristretto255_scalar_sub(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&x.m_data));
 
     *this = result;
 

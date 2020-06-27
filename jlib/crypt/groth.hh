@@ -57,6 +57,7 @@ struct ZeroProof {
     std::vector<curve::Scalar> f;
     std::vector<curve::Scalar> z_a;
     std::vector<curve::Scalar> z_b;
+    curve::Scalar z_d;
 };
     
 ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const curve::Scalar& r);
