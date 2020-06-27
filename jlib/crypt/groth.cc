@@ -119,8 +119,7 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
 
         curve::Scalar cbj = l_j[j] ? aj.back() : curve::Scalar::zero();
         
-        proof.c_b.push_back(curve::Commitment(cbj, sj.back()));
-        //proof.c_d.push_back(curve::Commitment(a.back(), s.back()));
+        proof.c_b.push_back(curve::Commitment(cbj, tj.back()));
     }
 
     // now that we have aj we can expand f_j,i_j to get p_i(x)
@@ -165,6 +164,18 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     
     curve::Scalar x = xhash;
 
+    for(int j = 0; j < n; j++) {
+        curve::Scalar f_j = l_j[j] ?
+            (x + aj[j]) : aj[j];
+        proof.f.push_back(f_j);
+
+        curve::Scalar z_a = rj[j] * x + sj[j];
+        proof.z_a.push_back(z_a);
+
+        curve::Scalar z_b = rj[j] * (x - f_j) + tj[j];
+        proof.z_b.push_back(z_b);
+    }
+    
     return proof;
 }
     
@@ -181,8 +192,20 @@ bool verify(const ZeroProof& proof) {
     xhash.finalize();
                      
     curve::Scalar x = xhash;
-
-    return false;
+    const std::size_t n = proof.c_a.size();
+    
+    for(int j = 0; j < n; j++) {
+        curve::Point cxca = x * proof.c_l[j] + proof.c_a[j];
+        curve::Point cfza = curve::Commitment(proof.f[j], proof.z_a[j]);
+        
+        curve::Point cxfcb = (x-proof.f[j])*proof.c_l[j] + proof.c_b[j];
+        curve::Point czzb = curve::Commitment(curve::Scalar::zero(), proof.z_b[j]);
+        
+        if(!(cxca == cfza && cxfcb == czzb))
+            return false;
+    }
+    
+    return true;
 }
     
 }
