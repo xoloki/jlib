@@ -121,8 +121,16 @@ Scalar& Scalar::operator+=(const Scalar& x) {
     return *this;
 }    
 
+Scalar& Scalar::operator*=(const Scalar& x) {
+    Scalar result;
 
-    
+    crypto_core_ristretto255_scalar_mul(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&x.m_data));
+
+    *this = result;
+
+    return *this;
+}    
+
 Point::Point() {
 }
     

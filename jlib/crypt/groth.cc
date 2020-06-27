@@ -201,8 +201,24 @@ bool verify(const ZeroProof& proof) {
         curve::Point cxfcb = (x-proof.f[j])*proof.c_l[j] + proof.c_b[j];
         curve::Point czzb = curve::Commitment(curve::Scalar::zero(), proof.z_b[j]);
         
-        if(!(cxca == cfza && cxfcb == czzb))
+        if(!(cxca == cfza && cxfcb == czzb)) {
+            std::cerr << "groth zeroproof failed to verify because bit proof " << j << " failed" << std::endl;
             return false;
+        }
+    }
+
+    // first calculate the c_d_k^x^k product
+    curve::Scalar x_k = curve::Scalar::one();
+    curve::Point c_d_k_x_k_0 = proof.c_d[0] * (-x_k);
+    curve::Point P_c_d_k_x_k = c_d_k_x_k_0;
+    for(int k = 1; k < n; k++) {
+        x_k = curve::Scalar::one();
+        for(int ik = 0; ik < k; ik++) {
+            x_k *= x;
+        }
+        curve::Point c_d_k_x_k = proof.c_d[k] * (-x_k);
+
+        P_c_d_k_x_k += c_d_k_x_k;
     }
     
     return true;
