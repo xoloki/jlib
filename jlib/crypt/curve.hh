@@ -85,6 +85,7 @@ public:
     static const int SIZE = crypto_core_ristretto255_SCALARBYTES;
 
     Scalar();
+    Scalar(std::size_t x);
     Scalar(const Hash<HASHSIZE>& hash);
 
     Scalar operator+(const Scalar& x) const;

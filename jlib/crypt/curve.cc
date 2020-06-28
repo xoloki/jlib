@@ -33,6 +33,10 @@ namespace curve {
 Scalar::Scalar() {
 }
 
+Scalar::Scalar(std::size_t x) {
+    std::memset(reinterpret_cast<unsigned char*>(&m_data), 0, crypto_core_ristretto255_SCALARBYTES);
+}
+
 Scalar::Scalar(const Hash<Scalar::HASHSIZE>& hash) {
     crypto_core_ristretto255_scalar_reduce(reinterpret_cast<unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&hash.m_data));
 }

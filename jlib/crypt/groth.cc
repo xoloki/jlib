@@ -26,29 +26,13 @@
 #include <sodium/crypto_core_ristretto255.h>
 
 #include <jlib/crypt/groth.hh>
+#include <jlib/math/polynomial.hh>
 #include <jlib/util/util.hh>
 
 namespace jlib {
 namespace crypt {
 namespace groth {
 
-std::vector<curve::Scalar> expand(const std::vector<curve::Scalar>& x, const std::vector<curve::Scalar>& y) {
-    if(x.empty()) return y;
-    if(y.empty()) return x;
-
-    std::vector<curve::Scalar> p(x.size() + y.size() -1, curve::Scalar::zero());
-
-    for(int i = 0; i < x.size(); i++) {
-        for(int j = 0; j < y.size(); j++) {
-            int k = i + j;
-            p[k] += x[i] + y[j];
-        }
-    }
-
-    return p;
-}
-        
-    
 BinaryProof prove(const curve::Scalar& m, const curve::Scalar& r) {
     curve::Commitment c(m, r);
     
@@ -91,6 +75,8 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     double lg_ceil = std::ceil(lg);
     std::size_t n = lg_ceil;
     std::size_t size = std::pow(2, n);
+
+    std::cout << "proving one of " << c.size() << " commitments is zero, log2 of size is " << lg_ceil << "(" << lg << ")" << std::endl;
     
     // expand c if necessary
     if(size > c.size()) {
@@ -103,38 +89,38 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     // split l into n bits
     std::bitset<sizeof(l)> l_j(l);
 
-    std::vector<curve::Scalar> rj, aj, sj, tj, rho;
+    std::vector<curve::Scalar> r_j, a, s, t, rho;
     
     for(int j = 0; j < n; j++) {
-        rj.push_back(curve::Scalar::random());
-        aj.push_back(curve::Scalar::random());
-        sj.push_back(curve::Scalar::random());
-        tj.push_back(curve::Scalar::random());
+        r_j.push_back(curve::Scalar::random());
+        a.push_back(curve::Scalar::random());
+        s.push_back(curve::Scalar::random());
+        t.push_back(curve::Scalar::random());
         rho.push_back(curve::Scalar::random());
 
         curve::Scalar ljj = l_j[j] ? curve::Scalar::one() : curve::Scalar::zero();
         
-        proof.c_l.push_back(curve::Commitment(ljj, rj.back()));
-        proof.c_a.push_back(curve::Commitment(aj.back(), sj.back()));
+        proof.c_l.push_back(curve::Commitment(ljj, r_j.back()));
+        proof.c_a.push_back(curve::Commitment(a.back(), s.back()));
 
-        curve::Scalar cbj = l_j[j] ? aj.back() : curve::Scalar::zero();
+        curve::Scalar cbj = l_j[j] ? a.back() : curve::Scalar::zero();
         
-        proof.c_b.push_back(curve::Commitment(cbj, tj.back()));
+        proof.c_b.push_back(curve::Commitment(cbj, t.back()));
     }
 
-    // now that we have aj we can expand f_j,i_j to get p_i(x)
+    // now that we have a we can expand f_j,i_j to get p_i(x)
     // treat a polynomial as a vector of scalars representing the coefficients
-    std::vector<std::vector<curve::Scalar>> p_x;
+    std::vector<math::Polynomial<curve::Scalar>> p_x;
     for(std::size_t i = 0; i < N; i++) {
-        std::vector<curve::Scalar> p_i_x;
+        math::Polynomial<curve::Scalar> p_i_x;
         std::bitset<sizeof(i)> i_j(i);
         // expand the polynomial by multiplying by each f_j,i_j
         for(int j = 0; j < n; j++) {
-            std::vector<curve::Scalar> f_j_i_j = i_j[j] ?
-                (l_j[j] ? std::vector<curve::Scalar>{ curve::Scalar::one(), aj[j] } : std::vector<curve::Scalar> { curve::Scalar::zero(), aj[j] }) :
-                (!l_j[j] ? std::vector<curve::Scalar>{ curve::Scalar::one(), -aj[j] } : std::vector<curve::Scalar> { curve::Scalar::zero(), -aj[j] });
+            math::Polynomial<curve::Scalar> f_j_i_j = i_j[j] ?
+                (l_j[j] ? std::vector<curve::Scalar>{ curve::Scalar::one(), a[j] } : std::vector<curve::Scalar> { curve::Scalar::zero(), a[j] }) :
+                (!l_j[j] ? std::vector<curve::Scalar>{ curve::Scalar::one(), -a[j] } : std::vector<curve::Scalar> { curve::Scalar::zero(), -a[j] });
 
-            p_i_x = expand(p_i_x, f_j_i_j);
+            p_i_x = p_i_x * f_j_i_j;
         }
 
         p_x.push_back(p_i_x);
@@ -166,13 +152,13 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     
     for(int j = 0; j < n; j++) {
         curve::Scalar f_j = l_j[j] ?
-            (x + aj[j]) : aj[j];
+            (x + a[j]) : a[j];
         proof.f.push_back(f_j);
 
-        curve::Scalar z_a = rj[j] * x + sj[j];
+        curve::Scalar z_a = r_j[j] * x + s[j];
         proof.z_a.push_back(z_a);
 
-        curve::Scalar z_b = rj[j] * (x - f_j) + tj[j];
+        curve::Scalar z_b = r_j[j] * (x - f_j) + t[j];
         proof.z_b.push_back(z_b);
 
     }
@@ -250,8 +236,8 @@ bool verify(const ZeroProof& proof) {
     }
 
     if(P_c_i_f_j_i_j + P_c_d_k_x_k != c0zd) {
-            std::cerr << "groth zeroproof failed to verify because product part failed" << std::endl;
-            return false;
+        std::cerr << "groth zeroproof failed to verify because product part failed" << std::endl;
+        return false;
     }
     
     return true;
