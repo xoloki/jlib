@@ -123,6 +123,8 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
             p_i_x = p_i_x * f_j_i_j;
         }
 
+        std::cout << "p[" << i << "](x) = " << p_i_x << std::endl;
+        
         p_x.push_back(p_i_x);
     }
 

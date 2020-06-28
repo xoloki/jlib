@@ -23,11 +23,13 @@
 #include <string>
 
 #include <jlib/math/math.hh>
+#include <jlib/math/polynomial.hh>
 #include <jlib/util/util.hh>
 
 using jlib::math::matrix;
 using jlib::math::cuboid;
 using jlib::math::vertex;
+using jlib::math::Polynomial;
 using jlib::util::tokenize;
 using jlib::util::int_value;
 using jlib::util::double_value;
@@ -129,7 +131,49 @@ int main(int argc, char** argv) {
 
 	std::cout << reg << std::endl;
 	std::cout << trans << std::endl;
-	
+
+    Polynomial<int> x = std::vector<int>{ 1, 1 };
+    Polynomial<int> y = std::vector<int>{ 1, 1 };
+    Polynomial<int> z = x * y;
+    Polynomial<int> zz = z * x;
+    Polynomial<int> zzz = zz * x;
+
+    std::cout << "(" << x << ") * (" << y << ") = " << z << std::endl;
+    std::cout << "(" << z << ") * (" << x << ") = " << zz << std::endl;
+    std::cout << "(" << zz << ") * (" << x << ") = " << zzz << std::endl;
+
+    if(z != Polynomial<int>(std::vector<int>{1, 2, 1})) {
+        std::cerr << "first binomial expansion failed" << std::endl;
+        return 1;
+    }
+    
+    if(zz != Polynomial<int>(std::vector<int>{1, 3, 3, 1})) {
+        std::cerr << "second binomial expansion failed" << std::endl;
+        return 1;
+    }
+
+    // now try something more complicated
+    Polynomial<int> a = std::vector<int>{ -1, 0, 2 };
+    Polynomial<int> b = std::vector<int>{ -6, 0, -1 };
+    Polynomial<int> c = a * b;
+    
+    std::cout << "(" << a << ") * (" << b << ") = " << c << std::endl;
+    if(c != Polynomial<int>(std::vector<int>{6, 0, -11, 0, -2})) {
+        std::cerr << "weird expansion failed" << std::endl;
+        return 1;
+    }
+    
+    Polynomial<int> a1 = std::vector<int>{ -1, 2, 1 };
+    Polynomial<int> b1 = std::vector<int>{ 6, -3, 2 };
+    Polynomial<int> c1 = a1 * b1;
+    
+    std::cout << "(" << a1 << ") * (" << b1 << ") = " << c1 << std::endl;
+    if(c1 != Polynomial<int>(std::vector<int>{-6, 15, -2, 1, 2})) {
+        std::cerr << "super weird expansion failed" << std::endl;
+        return 1;
+    }
+    
+    
     } catch (matrix<int>::mismatch) {
         std::cerr << "matrices are mismatched" << std::endl;
         return 1;

@@ -1,6 +1,6 @@
 /* -*- mode: C++ c-basic-offset: 4 -*-
  * 
- * Copyright (c) 1999 Joe Yandle <joey@divisionbyzero.com>
+ * Copyright (c) 2020 Joe Yandle <dragon@dancingdragon.net>
  * 
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -50,6 +50,13 @@ public:
     Polynomial<T> operator+(const Polynomial& p);
     Polynomial<T> operator*(const Polynomial& p);
 
+    template<typename U>
+    friend std::ostream& operator<<(std::ostream& out, const Polynomial<U>& p);
+    
+    template<typename U>
+    friend bool operator==(const Polynomial<U>& a, const Polynomial<U>& b);
+    template<typename U>
+    friend bool operator!=(const Polynomial<U>& a, const Polynomial<U>& b);
     
 protected:
     std::vector<T> m_params;
@@ -58,6 +65,12 @@ protected:
 template<typename T>    
 std::ostream& operator<<(std::ostream& out, const Polynomial<T>& p);
 
+template<typename T>
+bool operator==(const Polynomial<T>& a, const Polynomial<T>& b);
+
+template<typename T>
+bool operator!=(const Polynomial<T>& a, const Polynomial<T>& b);
+    
 template<typename T>
 Polynomial<T>::Polynomial() {}
 
@@ -74,7 +87,10 @@ T& Polynomial<T>::operator[](int i) {
 
 template<typename T>
 const T& Polynomial<T>::operator[](int i) const {
-    return m_params[i];
+    if(i < m_params.size())
+        return m_params[i];
+    else
+        return 0;
 }
 
 template<typename T>
@@ -100,20 +116,60 @@ Polynomial<T> Polynomial<T>::operator*(const Polynomial<T>& p) {
     for(int i = 0; i < x.size(); i++) {
         for(int j = 0; j < y.size(); j++) {
             int k = i + j;
-            z[k] += x[i] + y[j];
+            z[k] += x[i] * y[j];
         }
     }
 
+    // reduce by removing trailing zeroes
+    while(!z.empty() && z.back() == T(0))
+        z.pop_back();
+    
     return Polynomial<T>(z);
 }
 
 template<typename T>    
 std::ostream& operator<<(std::ostream& out, const Polynomial<T>& p) {
+    for(int i = 0; i < p.m_params.size(); i++) {
+        //int k = (p.m_params.size() - 1) - i;
+        if(p.m_params[i] == T(0))
+            continue;
 
+        if(i == 0) 
+            out << p.m_params[i];
+        else if(p.m_params[i] == -T(1))
+            out << "-";
+        else if(p.m_params[i] != T(1))
+            out << p.m_params[i];
+
+        if(i > 0 && p.m_params[i] != T(1) && p.m_params[i] != -T(1)) {
+            out << " ";
+        }
+            
+        if(i > 1) {
+            out << "x^" << i;
+        }
+        else if(i == 1) {
+            out << "x";
+        }
+
+        if(i < (p.m_params.size() - 1)) {
+            out << " + ";
+        }
+    }
 
     return out;
 }
 
+template<typename T>
+bool operator==(const Polynomial<T>& a, const Polynomial<T>& b) {
+    return (a.m_params == b.m_params);
+}
+
+template<typename T>
+bool operator!=(const Polynomial<T>& a, const Polynomial<T>& b) {
+    return !(a == b);
+}
+    
 }
 }
 

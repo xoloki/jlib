@@ -35,6 +35,11 @@ Scalar::Scalar() {
 
 Scalar::Scalar(std::size_t x) {
     std::memset(reinterpret_cast<unsigned char*>(&m_data), 0, crypto_core_ristretto255_SCALARBYTES);
+
+    for(int i = 0; i < sizeof(x); i++) {
+        char* px = reinterpret_cast<char*>(&x);
+        m_data[i] = px[i];
+    }
 }
 
 Scalar::Scalar(const Hash<Scalar::HASHSIZE>& hash) {
