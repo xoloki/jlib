@@ -120,14 +120,12 @@ Point Scalar::operator*(const BasePoint& x) const {
     return (x * *this);
 }
 
-Scalar& Scalar::operator-() {
+Scalar Scalar::operator-() const {
     Scalar result;
 
     crypto_core_ristretto255_scalar_negate(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data));
 
-    *this = result;
-
-    return *this;
+    return result;
 }
 
 Scalar& Scalar::operator+=(const Scalar& x) {
@@ -173,13 +171,18 @@ Point::Point(const Hash<Point::HASHSIZE>& hash) {
     crypto_core_ristretto255_from_hash(reinterpret_cast<unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&hash.m_data));
 }
     
+Point Point::zero() {
+    Point result;
+
+    std::memset(reinterpret_cast<unsigned char*>(&result.m_data), 0, crypto_core_ristretto255_BYTES);
+
+    return result;
+}
+
 Point Point::random() {
     Point result;
-    Scalar exponent = Scalar::random();
     
-    int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&exponent.m_data));
-    if(e != 0)
-        throw std::runtime_error("crypto_scalarmult_ristretto255_base failed");
+    crypto_core_ristretto255_random(reinterpret_cast<unsigned char*>(&result.m_data));
 
     return result;
 }
@@ -205,12 +208,26 @@ Point Point::operator+(const Point& x) const {
     return result;
 }
 
+Point Point::operator-(const Point& x) const {
+    Point result;
+
+    int e = crypto_core_ristretto255_sub(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&x.m_data));
+    if(e != 0)
+        throw std::runtime_error("crypto_core_ristretto255_sub failed");
+    return result;
+}
+
 Point Point::operator*(const Scalar& x) const {
     Point result;
 
     int e = crypto_scalarmult_ristretto255(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&x.m_data), reinterpret_cast<const unsigned char*>(&m_data));
+
+    if(e == -1 && x == Scalar::zero())
+        return Point::zero();
+
     if(e != 0)
         throw std::runtime_error("crypto_scalarmult_ristretto255 failed");
+    
     return result;
 }
 
@@ -238,6 +255,9 @@ Point BasePoint::operator*(const Scalar& x) const {
     Point result;
 
     int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&x.m_data));
+    if(e == -1 && x == Scalar::zero())
+        return Point::zero();
+
     if(e != 0)
         throw std::runtime_error("crypto_scalarmult_ristretto255_base failed");
     return result;
@@ -277,15 +297,17 @@ Point Commitment::H = hash<Point::HASHSIZE>(G);
 Commitment::Commitment() {
 }
     
-Commitment::Commitment(const Scalar& value, const Scalar& blind)
+Commitment::Commitment(const Scalar& value)
+    : Commitment(value, Scalar::random())
 {
-    if(value == Scalar::zero()) {
-        Point p = blind * H;
-        static_cast<Point&>(*this) = p;
-    } else {
-        Point p = value * G + blind * H;
-        static_cast<Point&>(*this) = p;
-    }
+}
+
+Commitment::Commitment(const Scalar& value, const Scalar& blind)
+    : m_value(value),
+      m_blind(blind)
+{
+    Point p = value * G + blind * H;
+    static_cast<Point&>(*this) = p;
 }
 
 }

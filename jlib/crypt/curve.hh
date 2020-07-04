@@ -94,7 +94,7 @@ public:
     Scalar operator^(int k) const;
     Point operator*(const Point& x) const;
     Point operator*(const BasePoint& x) const;
-    Scalar& operator-();
+    Scalar operator-() const;
     Scalar& operator+=(const Scalar& x);
     Scalar& operator-=(const Scalar& x);
     Scalar& operator*=(const Scalar& x);
@@ -128,6 +128,7 @@ public:
     Point(const Hash<HASHSIZE>& hash);
 
     Point operator+(const Point& x) const;
+    Point operator-(const Point& x) const;
     Point operator*(const Scalar& x) const;
     Point& operator+=(const Point& x);
     Point& operator*=(const Scalar& x);
@@ -135,6 +136,7 @@ public:
     const unsigned char* data() const;
     unsigned char* data();
 
+    static Point zero();
     static Point random();
     static Point from(const Scalar& x);
 
@@ -169,10 +171,18 @@ bool operator!=(const Point& x, const Point& y);
 class Commitment : public Point {
 public:
     Commitment();
+    Commitment(const Scalar& value);
     Commitment(const Scalar& value, const Scalar& blind);
     
+    const Scalar& value() const;
+    const Scalar& blind() const;
+
     static BasePoint G;
     static Point H;
+
+protected:
+    Scalar m_value;
+    Scalar m_blind;
 };
     
 template<int N>
