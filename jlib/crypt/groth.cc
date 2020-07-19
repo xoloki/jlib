@@ -1,6 +1,6 @@
 /* -*- mode: C++ c-basic-offset: 4 -*-
  * 
- * Copyright (c) 1999 Joey Yandle <dragon@dancingdragon.net>
+ * Copyright (c) 2020 Joey Yandle <dragon@dancingdragon.net>
  * 
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -90,7 +90,9 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     std::bitset<sizeof(l)> l_j(l);
 
     std::vector<curve::Scalar> r_j, a, s, t, rho;
-    
+
+    // in the proof, j goes from 1 to n, while k goes from 0 to (n-1)
+    // because this is code not math we always go from 0 to (n-1)
     for(int j = 0; j < n; j++) {
         r_j.push_back(curve::Scalar::random());
         a.push_back(curve::Scalar::random());
@@ -109,7 +111,7 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     }
 
     // now that we have a we can expand f_j,i_j to get p_i(x)
-    // treat a polynomial as a vector of scalars representing the coefficients
+    // section 2.3 of groth paper, equation (1)
     std::vector<math::Polynomial<curve::Scalar>> p_x;
     for(std::size_t i = 0; i < N; i++) {
         math::Polynomial<curve::Scalar> p_i_x;
@@ -138,7 +140,6 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
         proof.c_d.push_back(c_d_k);
     }
     
-    
     curve::Hash<curve::Scalar::HASHSIZE> xhash;
     for(curve::Commitment i : proof.c)
         xhash.update(i);
@@ -151,6 +152,8 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     xhash.finalize();
     
     curve::Scalar x = xhash;
+
+    std::cout << "proof hash is " << x << std::endl;
     
     for(int j = 0; j < n; j++) {
         curve::Scalar f_j = l_j[j] ?
@@ -189,6 +192,8 @@ bool verify(const ZeroProof& proof) {
     const std::size_t n = proof.c_a.size();
     const std::size_t N = proof.c.size();
     
+    std::cout << "verify hash is " << x << std::endl;
+
     for(int j = 0; j < n; j++) {
         curve::Point cxca = x * proof.c_l[j] + proof.c_a[j];
         curve::Point cfza = curve::Commitment(proof.f[j], proof.z_a[j]);

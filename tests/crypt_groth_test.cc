@@ -49,12 +49,12 @@ int main(int argc, char** argv) {
 
     {
         std::vector<Commitment> cs;
-        Scalar m = Scalar::random();
+        Scalar m = Scalar::zero();
         Scalar r = Scalar::random();
         Commitment c(m, r);
  
-        cs.push_back(c)
-;
+        cs.push_back(c);
+        
         // not quite a power of 2
         for(int i = 0; i < 1022; i++) {
             Scalar a = Scalar::random();

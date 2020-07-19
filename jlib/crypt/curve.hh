@@ -18,6 +18,9 @@
  * 
  */
 
+#ifndef JLIB_CRYPT_CURVE_HH
+#define JLIB_CRYPT_CURVE_HH
+
 #include <ostream>
 
 #include <sodium.h>
@@ -244,3 +247,5 @@ Hash<N> Hash<N>::generic(const unsigned char* data, std::size_t n) {
 }
 }
 }
+
+#endif
