@@ -119,8 +119,8 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
         // expand the polynomial by multiplying by each f_j,i_j
         for(int j = 0; j < n; j++) {
             math::Polynomial<curve::Scalar> f_j_i_j = i_j[j] ?
-                (l_j[j] ? std::vector<curve::Scalar>{ curve::Scalar::one(), a[j] } : std::vector<curve::Scalar> { curve::Scalar::zero(), a[j] }) :
-                (!l_j[j] ? std::vector<curve::Scalar>{ curve::Scalar::one(), -a[j] } : std::vector<curve::Scalar> { curve::Scalar::zero(), -a[j] });
+                (l_j[j] ? std::vector<curve::Scalar>{ a[j], curve::Scalar::one() } : std::vector<curve::Scalar> { a[j] }) :
+                (!l_j[j] ? std::vector<curve::Scalar>{ -a[j], curve::Scalar::one() } : std::vector<curve::Scalar> { -a[j] });
 
             p_i_x = p_i_x * f_j_i_j;
         }
@@ -132,9 +132,11 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
 
     // now that we have all p_i(x) we can finally calculate c_d
     for(int j = 0; j < n; j++) {
-        curve::Point c_d_k = proof.c[0] * p_x[0][j];
+        curve::Point c_0_rho_0 = curve::Commitment(0, rho[0]);
+        curve::Point c_d_k = proof.c[0] * p_x[0][j] + c_0_rho_0;
         for(std::size_t i = 1; i < N; i++) {
-            c_d_k += proof.c[i] * p_x[i][j];
+            curve::Point c_0_rho_k = curve::Commitment(0, rho[j]);
+            c_d_k += proof.c[i] * p_x[i][j] + c_0_rho_k;
         }
 
         proof.c_d.push_back(c_d_k);
