@@ -116,8 +116,8 @@ AC_CHECK_HEADERS(openssl/ssl.h,have_ssl=true,AC_WARN(unable to find openssl, not
 
 AC_CHECK_HEADERS(sys/soundcard.h,have_oss_audio=true,AC_WARN(unable to find oss audio, not compiling oss code))
 
-AC_CHECK_HEADERS(sodium.h,,AC_MSG_ERROR(you need the sodium.h header))
-AC_CHECK_HEADERS(sodium/crypto_core_ristretto255.h,,AC_MSG_ERROR(you need the sodium ristretto header))
+AC_CHECK_HEADERS(sodium.h,have_sodium=true,AC_WARN(you need the sodium.h header for elliptic curve crypto))
+AC_CHECK_HEADERS(sodium/crypto_core_ristretto255.h,have_sodium_ristretto=true,AC_WARN(you need the sodium ristretto header for elliptic curve crypto))
 
 #PKG_CHECK_MODULES(SIGC, sigc++-2.0 >= 2.0.16, CXXFLAGS="$CXXFLAGS $SIGC_CFLAGS";LIBS="$LIBS $SIGC_LIBS", AC_MSG_ERROR(cannot find sigc++-2.0))
 
@@ -142,6 +142,7 @@ AM_CONDITIONAL(HAVE_GLU, test x$have_glu = xtrue)
 AM_CONDITIONAL(HAVE_GLUT, test x$have_glut = xtrue)
 AM_CONDITIONAL(HAVE_SSL, test x$have_ssl = xtrue)
 AM_CONDITIONAL(HAVE_OSS_AUDIO, test x$have_oss_audio = xtrue)
+AM_CONDITIONAL(HAVE_SODIUM, test x$have_sodium = xtrue -a x$have_sodium_ristretto = xtrue)
 
 LIBS="$LIBS -lssl -lcrypto -lsodium"
 

@@ -11,6 +11,13 @@ else
 MEDIA_TESTS = 
 endif
 
+if HAVE_SODIUM
+CURVE_TESTS = crypt_curve_test crypt_schnorr_test crypt_groth_test
+else
+CURVE_TESTS = 
+endif
+
+
 TESTS = \
 	math_test \
 	tensor_test \
@@ -33,9 +40,7 @@ TESTS = \
 	util_headers_angie_test \
 	util_xml_test \
  \
-	crypt_curve_test \
-	crypt_schnorr_test \
-	crypt_groth_test
+	$(CURVE_TESTS)
 
 #gl_glutmain_test_SOURCES = gl_glutmain_test.cc
 #gl_glutmain_single_test_SOURCES = gl_glutmain_single_test.cc
