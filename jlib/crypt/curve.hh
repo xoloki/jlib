@@ -62,25 +62,13 @@ protected:
 };
 
 template<int N, typename... Args>
-Hash<N> hash(Args&&... args) {
-    Hash<N> hasher;
-
-    do_hash(hasher, args...);
-    hasher.finalize();
-    
-    return hasher;
-}
+Hash<N> hash(Args&&... args);
 
 template<int N, typename T, typename... Args>
-Hash<N> do_hash(Hash<N>& hasher, const T& t, Args&&... args) {
-    hasher.update(t.data(), T::SIZE);
-    do_hash(hasher, args...);
-}
+Hash<N> do_hash(Hash<N>& hasher, const T& t, Args&&... args);
 
 template<int N, typename T>
-Hash<N> do_hash(Hash<N>& hasher, const T& t) {
-    hasher.update(t.data(), T::SIZE);
-}
+Hash<N> do_hash(Hash<N>& hasher, const T& t);
 
 class Scalar {
 public:
@@ -242,8 +230,27 @@ Hash<N> Hash<N>::generic(const unsigned char* data, std::size_t n) {
     return result;
 }
     
+template<int N, typename... Args>
+Hash<N> hash(Args&&... args) {
+    Hash<N> hasher;
 
+    do_hash(hasher, args...);
+    hasher.finalize();
     
+    return hasher;
+}
+
+template<int N, typename T, typename... Args>
+Hash<N> do_hash(Hash<N>& hasher, const T& t, Args&&... args) {
+    hasher.update(t.data(), T::SIZE);
+    do_hash(hasher, args...);
+}
+
+template<int N, typename T>
+Hash<N> do_hash(Hash<N>& hasher, const T& t) {
+    hasher.update(t.data(), T::SIZE);
+}
+
 }
 }
 }

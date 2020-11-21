@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
         std::cout << a << " + " << b << " = " << c << std::endl;
 
         if(c != a) {
-            std::cerr << "Adding 0 to a Scalar doesn't give us the Scalar back" << std::endl;
+            std::cerr << "Adding zero to a Scalar one doesn't give us Scalar one" << std::endl;
             return -1;
         }
 
@@ -47,16 +47,54 @@ int main(int argc, char** argv) {
         }
     }
     {
+        Scalar a = Scalar::random();
+        Scalar b = Scalar::one();
+        Scalar c = a * b;
+
+        std::cout << a << " * " << b << " = " << c << std::endl;
+
+        if(c != a) {
+            std::cerr << "Mutiplying a Scalar by one doesn't give us the Scalar back" << std::endl;
+            return -1;
+        }
+    }
+    {
+        Scalar a = Scalar::random();
+        Scalar a2 = a^4;
+        Scalar c = a * a * a * a;
+
+        std::cout << a << " * " << a << " = " << c << std::endl;
+        std::cout << a << "^4 " << " = " << a2 << std::endl;
+
+        if(c != a2) {
+            std::cerr << "Squaring Scalar doesn't give us the same as multiplying the Scalar by itself" << std::endl;
+            return -1;
+        }
+    }
+    {
+        Scalar a = Scalar::random();
+        Scalar an2 = a^(-2);
+        Scalar c = (a * a)^(-1);
+
+        std::cout << a << " * " << a << " = " << c << std::endl;
+        std::cout << a << "^(-2) " << " = " << an2 << std::endl;
+
+        if(c != an2) {
+            std::cerr << "Raising a Scalar to -2 doesn't give us the same as multiplying the Scalar by itself then inverting" << std::endl;
+            return -1;
+        }
+    }
+    {
         Scalar x = Scalar::random();
         Scalar y = Scalar::random();
         Scalar z = x + y;
-        
+
         std::cout << x << " + " << y << " = " << z << std::endl;
-        
+
         Point a = Point::random();
         Point b = Point::random();
         Point c = a + b;
-        
+
         std::cout << a << " + " << b << " = " << c << std::endl;
     }
 
@@ -117,6 +155,6 @@ int main(int argc, char** argv) {
             return -1;
         }
     }
-    
+
     return 0;
 }

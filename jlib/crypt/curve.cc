@@ -103,13 +103,27 @@ Scalar Scalar::operator*(const Scalar& x) const {
 }
 
 Scalar Scalar::operator^(int k) const { 
+    if(k == -1) {
+        Scalar result;
+        
+        crypto_core_ristretto255_scalar_invert(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data));
+        
+        return result;
+    }
+
     curve::Scalar a_k = curve::Scalar::one();
 
-    for(int i = 0; i < k; i++) {
+    unsigned int j = std::abs(k);
+    
+    for(unsigned int i = 0; i < j; i++) {
         a_k *= (*this);
     }
 
-    return a_k;
+    if(static_cast<int>(j) != k) {
+        return a_k^(-1);
+    } else {
+        return a_k;
+    }
 }
     
 Point Scalar::operator*(const Point& x) const {

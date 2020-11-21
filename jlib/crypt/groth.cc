@@ -65,11 +65,10 @@ bool verify(const BinaryProof& proof) {
 }
 
 ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const curve::Scalar& r) {
-
     ZeroProof proof;
 
     proof.c = c;
-    
+
     // find the closest power of 2 to c's size
     double lg = std::log2(c.size());
     double lg_ceil = std::ceil(lg);
@@ -132,16 +131,18 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
 
     // now that we have all p_i(x) we can finally calculate c_d
     for(int j = 0; j < n; j++) {
-        curve::Point c_0_rho_0 = curve::Commitment(0, rho[0]);
-        curve::Point c_d_k = proof.c[0] * p_x[0][j] + c_0_rho_0;
+        curve::Point c_0_rho_k = curve::Commitment(0, rho[j]);
+
+        curve::Point c_d_k = proof.c[0] * p_x[0][j];
         for(std::size_t i = 1; i < N; i++) {
-            curve::Point c_0_rho_k = curve::Commitment(0, rho[j]);
-            c_d_k += (proof.c[i] * p_x[i][j] + c_0_rho_k);
+            c_d_k += (proof.c[i] * p_x[i][j]);
         }
+
+        c_d_k += c_0_rho_k;
 
         proof.c_d.push_back(c_d_k);
     }
-    
+
     curve::Hash<curve::Scalar::HASHSIZE> xhash;
     for(curve::Commitment i : proof.c)
         xhash.update(i);
@@ -167,13 +168,27 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
 
         curve::Scalar z_b = r_j[j] * (x - f_j) + t[j];
         proof.z_b.push_back(z_b);
-
     }
 
     proof.z_d = r * x^n;
     for(int k = 0; k < n; k++) {
         proof.z_d -= (rho[k] * x^k);
     }
+
+    // test to see if the proof elements verify in the reduced form
+    curve::Point c0zd = curve::Commitment(curve::Scalar::zero(), proof.z_d);
+
+    curve::Point c0rxn = curve::Commitment(curve::Scalar::zero(), r*(x^n));
+
+    curve::Point P_c0rhok_xnk = curve::Commitment(curve::Scalar::zero(), rho[0]);
+    for(int k = 1; k < n; k++) {
+        P_c0rhok_xnk += curve::Commitment(curve::Scalar::zero(), rho[k]*(x^(-k)));
+    }
+
+    std::cout << "c0zd = " << c0zd << std::endl;
+    std::cout << "c0rxn = " << c0rxn << std::endl;
+    std::cout << "P_c0rhok_xnk = " << P_c0rhok_xnk << std::endl;
+    std::cout << "c0rxn + P_c0rhok_xnk = " << (c0rxn + P_c0rhok_xnk) << std::endl;
     
     return proof;
 }
@@ -222,8 +237,8 @@ bool verify(const ZeroProof& proof) {
     curve::Point c0zd = curve::Commitment(curve::Scalar::zero(), proof.z_d);
 
     // calculate f_j,i_j starting with i=0
-    curve::Scalar P_f_j_i_j_0 = curve::Scalar::one();
-    for(int j = 0; j < n; j++) {
+    curve::Scalar P_f_j_i_j_0 = x - proof.f[0];
+    for(int j = 1; j < n; j++) {
         // f_j,i_j is always f_j,0 when i=0
         curve::Scalar f_j_i_j = x - proof.f[j];
 
@@ -235,17 +250,20 @@ bool verify(const ZeroProof& proof) {
         std::bitset<sizeof(i)> i_j(i);
         curve::Scalar P_f_j_i_j = curve::Scalar::one();
         for(int j = 0; j < n; j++) {
-            // f_j,i_j is always f_j,0 when i=0
-            curve::Scalar f_j_i_j = i_j[j] ? proof.f[j] : x - proof.f[j];
-            
+            curve::Scalar f_j_i_j = i_j[j] ? proof.f[j] : (x - proof.f[j]);
             P_f_j_i_j *= f_j_i_j;
         }
-        
+
         P_c_i_f_j_i_j += (proof.c[i] * P_f_j_i_j);
     }
 
     if((P_c_i_f_j_i_j + P_c_d_k_x_k) != c0zd) {
         std::cerr << "groth zeroproof failed to verify because product part failed" << std::endl;
+        std::cerr << "P_c_i_f_j_i_j = \n" << P_c_i_f_j_i_j << std::endl;
+        std::cerr << "P_c_d_k_x_k = \n" << P_c_d_k_x_k << std::endl;
+        std::cerr << "P_c_i_f_j_i_j + P_c_d_k_x_k = \n" << (P_c_d_k_x_k + P_c_i_f_j_i_j) << std::endl;
+        std::cerr << "c0zd = \n" << c0zd << std::endl;
+
         return false;
     }
     

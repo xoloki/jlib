@@ -46,10 +46,33 @@ int main(int argc, char** argv) {
             return -1;
         }
     }
-
     {
         std::vector<Commitment> cs;
         Scalar m = Scalar::zero();
+        Scalar r = Scalar::random();
+        Commitment c(m, r);
+
+        cs.push_back(c);
+
+        // not quite a power of 2
+        for(int i = 0; i < 15; i++) {
+            Scalar a = Scalar::random();
+            Scalar b = Scalar::random();
+            Commitment comm(a, b);
+
+            cs.push_back(comm);
+        }
+
+        ZeroProof proof = prove(cs, 0, r);
+        if(!verify(proof)) {
+            std::cerr << "groth ZeroProof didn't verify" << std::endl;
+            return -1;
+        }
+    }
+
+    {
+        std::vector<Commitment> cs;
+        Scalar m = Scalar::one();
         Scalar r = Scalar::random();
         Commitment c(m, r);
  
@@ -65,11 +88,12 @@ int main(int argc, char** argv) {
         }
         
         ZeroProof proof = prove(cs, 0, r);
-        if(!verify(proof)) {
-            std::cerr << "groth ZeroProof didn't verify" << std::endl;
+        if(verify(proof)) {
+            std::cerr << "groth ZeroProof verified when it shouldn't" << std::endl;
             return -1;
         }
     }
+
     
     return 0;
 }
