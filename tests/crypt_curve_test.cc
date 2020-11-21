@@ -85,6 +85,16 @@ int main(int argc, char** argv) {
         }
     }
     {
+        Scalar a = Scalar::random();
+        Scalar an1 = a^(-1);
+        Scalar b = a * an1;
+
+        if(b != Scalar::one()) {
+            std::cerr << "Multiplying a Scalar by its multiplicative inverse does not give one" << std::endl;
+            return -1;
+        }
+    }
+    {
         Scalar x = Scalar::random();
         Scalar y = Scalar::random();
         Scalar z = x + y;
@@ -97,7 +107,39 @@ int main(int argc, char** argv) {
 
         std::cout << a << " + " << b << " = " << c << std::endl;
     }
+    {
+        Scalar x = Scalar::random();
+        Scalar y = Scalar::random();
+        Commitment c(x, y);
 
+        std::cout << "c = " << c << std::endl;
+
+        Point c1 = x * Commitment::G + y * Commitment::H;
+
+        std::cout << "c1 = " << c1 << std::endl;
+
+        if(c != c1) {
+            std::cerr << "Manually doing commitment returns different result from ctor" << std::endl;
+            return -1;
+        }
+
+        Commitment c0y(Scalar::zero(), y);
+        Point cy0 = y * Commitment::H;
+
+        if(c0y != cy0) {
+            std::cerr << "Manually doing commitment to zero returns different result from ctor" << std::endl;
+            return -1;
+        }
+
+        Commitment c0x(x, Scalar::zero());
+        Point cx0 = x * Commitment::G;
+
+        if(c0x != cx0) {
+            std::cerr << "Manually doing commitment to blinding zero returns different result from ctor" << std::endl;
+            return -1;
+        }
+
+    }
     // monero
     {
         BasePoint G;

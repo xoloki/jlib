@@ -182,13 +182,15 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
 
     curve::Point P_c0rhok_xnk = curve::Commitment(curve::Scalar::zero(), rho[0]);
     for(int k = 1; k < n; k++) {
-        P_c0rhok_xnk += curve::Commitment(curve::Scalar::zero(), rho[k]*(x^(-k)));
+        P_c0rhok_xnk += curve::Commitment(curve::Scalar::zero(), rho[k]*(x^(k)));
     }
+
+    //P_c0rhok_xnk = (-curve::Scalar::one()) * P_c0rhok_xnk;
 
     std::cout << "c0zd = " << c0zd << std::endl;
     std::cout << "c0rxn = " << c0rxn << std::endl;
     std::cout << "P_c0rhok_xnk = " << P_c0rhok_xnk << std::endl;
-    std::cout << "c0rxn + P_c0rhok_xnk = " << (c0rxn + P_c0rhok_xnk) << std::endl;
+    std::cout << "c0rxn - P_c0rhok_xnk = " << (c0rxn - P_c0rhok_xnk) << std::endl;
     
     return proof;
 }
