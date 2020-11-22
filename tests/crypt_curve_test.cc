@@ -60,11 +60,11 @@ int main(int argc, char** argv) {
     }
     {
         Scalar a = Scalar::random();
-        Scalar a2 = a^4;
-        Scalar c = a * a * a * a;
+        Scalar a2 = a^2;
+        Scalar c = a * a;
 
         std::cout << a << " * " << a << " = " << c << std::endl;
-        std::cout << a << "^4 " << " = " << a2 << std::endl;
+        std::cout << a << "^2 " << " = " << a2 << std::endl;
 
         if(c != a2) {
             std::cerr << "Squaring Scalar doesn't give us the same as multiplying the Scalar by itself" << std::endl;
@@ -76,11 +76,23 @@ int main(int argc, char** argv) {
         Scalar an2 = a^(-2);
         Scalar c = (a * a)^(-1);
 
-        std::cout << a << " * " << a << " = " << c << std::endl;
+        std::cout << "(" << a << " * " << a << ")^(-1) = " << c << std::endl;
         std::cout << a << "^(-2) " << " = " << an2 << std::endl;
 
         if(c != an2) {
-            std::cerr << "Raising a Scalar to -2 doesn't give us the same as multiplying the Scalar by itself then inverting" << std::endl;
+            std::cerr << "Raising a Scalar to -2 doesn't give us the same as squaring the Scalar then inverting" << std::endl;
+            return -1;
+        }
+    }
+    {
+        Scalar a = Scalar::random();
+        Scalar a0 = a^0;
+        Scalar c = Scalar::one();
+
+        std::cout << a << "^0 = " << a0 << std::endl;
+
+        if(c != a0) {
+            std::cerr << "Raising a Scalar to 0 doesn't give us scalar one" << std::endl;
             return -1;
         }
     }
@@ -100,12 +112,6 @@ int main(int argc, char** argv) {
         Scalar z = x + y;
 
         std::cout << x << " + " << y << " = " << z << std::endl;
-
-        Point a = Point::random();
-        Point b = Point::random();
-        Point c = a + b;
-
-        std::cout << a << " + " << b << " = " << c << std::endl;
     }
     {
         Scalar x = Scalar::random();
