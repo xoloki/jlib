@@ -121,59 +121,83 @@ int main(int argc, char** argv) {
         
         cuboid<double> square(2);
 
-	matrix<int> reg(3, 1);
+        matrix<int> reg(3, 1);
 
-	reg(0, 0) = 0;
-	reg(1, 0) = 1;
-	reg(2, 0) = 2;
+        reg(0, 0) = 0;
+        reg(1, 0) = 1;
+        reg(2, 0) = 2;
 	
-	matrix<int> trans = reg.transpose();
+        matrix<int> trans = reg.transpose();
 
-	std::cout << reg << std::endl;
-	std::cout << trans << std::endl;
+        std::cout << reg << std::endl;
+        std::cout << trans << std::endl;
 
-    Polynomial<int> x = std::vector<int>{ 1, 1 };
-    Polynomial<int> y = std::vector<int>{ 1, 1 };
-    Polynomial<int> z = x * y;
-    Polynomial<int> zz = z * x;
-    Polynomial<int> zzz = zz * x;
+        Polynomial<int> x = std::vector<int>{ 1, 1 };
+        Polynomial<int> y = std::vector<int>{ 1, 1 };
+        Polynomial<int> z = x * y;
+        Polynomial<int> zz = z * x;
+        Polynomial<int> zzz = zz * x;
 
-    std::cout << "(" << x << ") * (" << y << ") = " << z << std::endl;
-    std::cout << "(" << z << ") * (" << x << ") = " << zz << std::endl;
-    std::cout << "(" << zz << ") * (" << x << ") = " << zzz << std::endl;
+        std::cout << "(" << x << ") * (" << y << ") = " << z << std::endl;
+        std::cout << "(" << z << ") * (" << x << ") = " << zz << std::endl;
+        std::cout << "(" << zz << ") * (" << x << ") = " << zzz << std::endl;
 
-    if(z != Polynomial<int>(std::vector<int>{1, 2, 1})) {
-        std::cerr << "first binomial expansion failed" << std::endl;
-        return 1;
-    }
+        if(z != Polynomial<int>(std::vector<int>{1, 2, 1})) {
+            std::cerr << "first binomial expansion failed" << std::endl;
+            return 1;
+        }
     
-    if(zz != Polynomial<int>(std::vector<int>{1, 3, 3, 1})) {
-        std::cerr << "second binomial expansion failed" << std::endl;
-        return 1;
-    }
+        if(zz != Polynomial<int>(std::vector<int>{1, 3, 3, 1})) {
+            std::cerr << "second binomial expansion failed" << std::endl;
+            return 1;
+        }
 
-    // now try something more complicated
-    Polynomial<int> a = std::vector<int>{ -1, 0, 2 };
-    Polynomial<int> b = std::vector<int>{ -6, 0, -1 };
-    Polynomial<int> c = a * b;
+        // now try something more complicated
+        Polynomial<int> a = std::vector<int>{ -1, 0, 2 };
+        Polynomial<int> b = std::vector<int>{ -6, 0, -1 };
+        Polynomial<int> c = a * b;
     
-    std::cout << "(" << a << ") * (" << b << ") = " << c << std::endl;
-    if(c != Polynomial<int>(std::vector<int>{6, 0, -11, 0, -2})) {
-        std::cerr << "weird expansion failed" << std::endl;
-        return 1;
-    }
+        std::cout << "(" << a << ") * (" << b << ") = " << c << std::endl;
+        if(c != Polynomial<int>(std::vector<int>{6, 0, -11, 0, -2})) {
+            std::cerr << "weird expansion failed" << std::endl;
+            return 1;
+        }
     
-    Polynomial<int> a1 = std::vector<int>{ -1, 2, 1 };
-    Polynomial<int> b1 = std::vector<int>{ 6, -3, 2 };
-    Polynomial<int> c1 = a1 * b1;
+        Polynomial<int> a1 = std::vector<int>{ -1, 2, 1 };
+        Polynomial<int> b1 = std::vector<int>{ 6, -3, 2 };
+        Polynomial<int> c1 = a1 * b1;
     
-    std::cout << "(" << a1 << ") * (" << b1 << ") = " << c1 << std::endl;
-    if(c1 != Polynomial<int>(std::vector<int>{-6, 15, -2, 1, 2})) {
-        std::cerr << "super weird expansion failed" << std::endl;
-        return 1;
-    }
-    
-    
+        std::cout << "(" << a1 << ") * (" << b1 << ") = " << c1 << std::endl;
+        if(c1 != Polynomial<int>(std::vector<int>{-6, 15, -2, 1, 2})) {
+            std::cerr << "super weird expansion failed" << std::endl;
+            return 1;
+        }
+        
+        int eval0 = a1(0);
+        if(eval0 != -1) {
+            std::cerr << "(" << a1 << ")(0) = " << eval0 << " not -1" << std::endl;
+            return 1;
+        }
+        
+        int eval1 = a1(1);
+        if(eval1 != 2) {
+            std::cerr << "(" << a1 << ")(1) = " << eval1 << " not -1" << std::endl;
+            return 1;
+        }
+
+        int eval2 = a1(2);
+        if(eval2 != 7) {
+            std::cerr << "(" << a1 << ")(2) = " << eval2 << " not -1" << std::endl;
+            return 1;
+        }
+
+        int eval3 = a1(3);
+        if(eval3 != 14) {
+            std::cerr << "(" << a1 << ")(3) = " << eval3 << " not -1" << std::endl;
+            return 1;
+        }
+
+
     } catch (matrix<int>::mismatch) {
         std::cerr << "matrices are mismatched" << std::endl;
         return 1;

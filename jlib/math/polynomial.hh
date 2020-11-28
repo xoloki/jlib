@@ -47,6 +47,8 @@ public:
     T& operator[](int i);
     const T& operator[](int i) const;
 
+    T operator()(const T& x) const;
+
     Polynomial<T> operator+(const Polynomial& p);
     Polynomial<T> operator*(const Polynomial& p);
 
@@ -79,10 +81,13 @@ Polynomial<T>::Polynomial(const std::vector<T>& params)
     : m_params(params)
 {
 }
-    
+
 template<typename T>
 T& Polynomial<T>::operator[](int i) {
-    return m_params[i];
+    if(i >= m_params.size())
+        m_params.resize(i+1);
+        
+    return m_params.at(i);
 }
 
 template<typename T>
@@ -94,12 +99,25 @@ const T& Polynomial<T>::operator[](int i) const {
 }
 
 template<typename T>
+T Polynomial<T>::operator()(const T& x) const {
+    T sum = 0;
+    for(int i = 0; i < m_params.size(); i++) {
+        sum += (m_params[i] * std::pow(x, i));
+    }
+    return sum;
+}
+
+template<typename T>
 Polynomial<T> Polynomial<T>::operator+(const Polynomial<T>& p) {
     const std::vector<T>& x = m_params;
     const std::vector<T>& y = p.m_params;
     
     std::vector<T> z(std::max(x.size(), y.size()), T(0));
 
+    for(int i = 0; i < z.size(); i++) {
+        z[i] = (*this)[i] + p[i];
+    }
+    
     return Polynomial<T>(z);
 }
 

@@ -133,8 +133,8 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     for(int j = 0; j < n; j++) {
         curve::Point c_0_rho_k = curve::Commitment(0, rho[j]);
 
-        curve::Point c_d_k = proof.c[0] * p_x[0][j];
-        for(std::size_t i = 1; i < N; i++) {
+        curve::Point c_d_k = curve::Point::zero(); //proof.c[0] * p_x[0][j];
+        for(std::size_t i = 0; i < N; i++) {
             c_d_k += (proof.c[i] * p_x[i][j]);
         }
 
