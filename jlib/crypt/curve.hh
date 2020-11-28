@@ -75,6 +75,12 @@ public:
     static const int HASHSIZE = crypto_core_ristretto255_HASHBYTES;
     static const int SIZE = crypto_core_ristretto255_SCALARBYTES;
 
+    struct Power {
+        static Scalar pow(const Scalar& x, const int& y) {
+            return (x^y);
+        }
+    };
+    
     Scalar();
     Scalar(std::size_t x);
     Scalar(const Hash<HASHSIZE>& hash);

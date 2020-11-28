@@ -64,6 +64,8 @@ bool verify(const BinaryProof& proof) {
     return (cxca == cfza && cxfcb == czzb);
 }
 
+typedef math::Polynomial<curve::Scalar, curve::Scalar::Power> Polynomial;
+    
 ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const curve::Scalar& r) {
     ZeroProof proof;
 
@@ -111,22 +113,22 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
 
     // now that we have a we can expand f_j,i_j to get p_i(x)
     // section 2.3 of groth paper, equation (1)
-    std::vector<math::Polynomial<curve::Scalar>> p_x;
+    std::vector<Polynomial> p_x;
     for(std::size_t i = 0; i < N; i++) {
-        math::Polynomial<curve::Scalar> p_i_x;
+        Polynomial p_i_x;
         std::bitset<64> i_j(i);
         // expand the polynomial by multiplying by each f_j,i_j
         for(int j = 0; j < n; j++) {
-            math::Polynomial<curve::Scalar> f_j_i_j = i_j[j] ?
+            Polynomial f_j_i_j = i_j[j] ?
                 (l_j[j] ? std::vector<curve::Scalar>{ a[j], curve::Scalar::one() } : std::vector<curve::Scalar> { a[j] }) :
                 (!l_j[j] ? std::vector<curve::Scalar>{ -a[j], curve::Scalar::one() } : std::vector<curve::Scalar> { -a[j] });
 
-            p_i_x = p_i_x * f_j_i_j;
+            p_i_x = (p_i_x * f_j_i_j);
         }
 
-        std::cout << "p[" << i << "](x) = " << p_i_x << std::endl;
-        
         p_x.push_back(p_i_x);
+
+        std::cout << "p[" << i << "](x) = " << p_x[i] << std::endl;
     }
 
     // now that we have all p_i(x) we can finally calculate c_d
@@ -135,7 +137,8 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
 
         curve::Point c_d_k = curve::Point::zero(); //proof.c[0] * p_x[0][j];
         for(std::size_t i = 0; i < N; i++) {
-            c_d_k += (proof.c[i] * p_x[i][j]);
+            curve::Scalar p_x_i_j = p_x[i][j];
+            c_d_k += (proof.c[i] * p_x_i_j);
         }
 
         c_d_k += c_0_rho_k;
@@ -157,6 +160,10 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     curve::Scalar x = xhash;
 
     std::cout << "proof hash is " << x << std::endl;
+
+    for(int i = 0; i < N; i++) {
+        std::cout << "p[" << i << "](" << x << ") = " << p_x[i](x) << std::endl;
+    }
     
     for(int j = 0; j < n; j++) {
         curve::Scalar f_j = l_j[j] ?
@@ -271,14 +278,16 @@ bool verify(const ZeroProof& proof) {
     curve::Point P_c_i_f_j_i_j = curve::Point::zero();//proof.c[0] * P_f_j_i_j_0;
     for(int i = 0; i < N; i++) {
         std::bitset<64> i_j(i);
-        std::cout << "at i = " << i << ": i_j = " << i_j << std::endl;
+        //std::cout << "at i = " << i << ": i_j = " << i_j << std::endl;
         curve::Scalar P_f_j_i_j = curve::Scalar::one();
         for(int j = 0; j < n; j++) {
             curve::Scalar f_j_i_j = i_j[j] ? proof.f[j] : (x - proof.f[j]);
-            std::cout << "i_j[" << j << "] = " << i_j[j] << std::endl;
+            //std::cout << "i_j[" << j << "] = " << i_j[j] << std::endl;
             P_f_j_i_j *= f_j_i_j;
         }
         
+        std::cout << "P_f_j_i_j[" << i << "] = " << P_f_j_i_j << std::endl;
+
         P_c_i_f_j_i_j += (proof.c[i] * P_f_j_i_j);
     }
 

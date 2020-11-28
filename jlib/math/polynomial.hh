@@ -37,78 +37,97 @@
 namespace jlib {
 namespace math {
 
-// represent a polynomial by a vec of its parameters
 template<typename T>
+struct Power {
+    static T pow(const T& x, const T& y) {
+        return std::pow(x, y);
+    }
+};
+    
+// represent a polynomial by a vec of its parameters
+template<typename T, typename P = Power<T>>
 class Polynomial {
 public:
     Polynomial();
     Polynomial(const std::vector<T>& params);
 
-    T& operator[](int i);
-    const T& operator[](int i) const;
+    //T& operator[](int i);
+    //const T& operator[](int i) const;
+    T operator[](int i) const;
 
     T operator()(const T& x) const;
 
-    Polynomial<T> operator+(const Polynomial& p);
-    Polynomial<T> operator*(const Polynomial& p);
+    Polynomial<T,P> operator+(const Polynomial& p);
+    Polynomial<T,P> operator*(const Polynomial& p);
 
-    template<typename U>
-    friend std::ostream& operator<<(std::ostream& out, const Polynomial<U>& p);
+    template<typename U, typename Q>
+    friend std::ostream& operator<<(std::ostream& out, const Polynomial<U,Q>& p);
     
-    template<typename U>
-    friend bool operator==(const Polynomial<U>& a, const Polynomial<U>& b);
-    template<typename U>
-    friend bool operator!=(const Polynomial<U>& a, const Polynomial<U>& b);
+    template<typename U, typename Q>
+    friend bool operator==(const Polynomial<U,Q>& a, const Polynomial<U,Q>& b);
+    template<typename U, typename Q>
+    friend bool operator!=(const Polynomial<U,Q>& a, const Polynomial<U,Q>& b);
     
 protected:
     std::vector<T> m_params;
 };
 
-template<typename T>    
-std::ostream& operator<<(std::ostream& out, const Polynomial<T>& p);
+template<typename T, typename P>    
+std::ostream& operator<<(std::ostream& out, const Polynomial<T,P>& p);
 
-template<typename T>
-bool operator==(const Polynomial<T>& a, const Polynomial<T>& b);
+template<typename T, typename P>
+bool operator==(const Polynomial<T,P>& a, const Polynomial<T,P>& b);
 
-template<typename T>
-bool operator!=(const Polynomial<T>& a, const Polynomial<T>& b);
+template<typename T, typename P>
+bool operator!=(const Polynomial<T,P>& a, const Polynomial<T,P>& b);
     
-template<typename T>
-Polynomial<T>::Polynomial() {}
+template<typename T, typename P>
+Polynomial<T,P>::Polynomial() {}
 
-template<typename T>
-Polynomial<T>::Polynomial(const std::vector<T>& params)
+template<typename T, typename P>
+Polynomial<T,P>::Polynomial(const std::vector<T>& params)
     : m_params(params)
 {
 }
-
-template<typename T>
-T& Polynomial<T>::operator[](int i) {
-    if(i >= m_params.size())
+    /*
+template<typename T, typename P>
+T& Polynomial<T,P>::operator[](int i) {
+    if(i >= m_params.size()) {
+        std::cout << *this << std::endl;
+        std::cout << "asking for index " << i << " resize to " << (i+1) << std::endl;
         m_params.resize(i+1);
+        std::cout << *this << std::endl;
+    }
         
     return m_params.at(i);
 }
-
-template<typename T>
-const T& Polynomial<T>::operator[](int i) const {
+    */
+template<typename T, typename P>
+//const T& Polynomial<T,P>::operator[](int i) const {
+T Polynomial<T,P>::operator[](int i) const {
     if(i < m_params.size())
         return m_params[i];
     else
         return 0;
 }
 
-template<typename T>
-T Polynomial<T>::operator()(const T& x) const {
+template<typename T, typename P>
+T Polynomial<T,P>::operator()(const T& x) const {
     T sum = 0;
     for(int i = 0; i < m_params.size(); i++) {
-        sum += (m_params[i] * std::pow(x, i));
+        //std::cout << "m_params[" << i << "] = " << m_params[i] << std::endl;
+        if(i > 0)
+            sum += (m_params[i] * P::pow(x, i));
+        else 
+            sum += (m_params[i]);
+
+        //std::cout << "sum = " << sum << std::endl;
     }
     return sum;
 }
 
-template<typename T>
-Polynomial<T> Polynomial<T>::operator+(const Polynomial<T>& p) {
+template<typename T, typename P>
+Polynomial<T,P> Polynomial<T,P>::operator+(const Polynomial<T,P>& p) {
     const std::vector<T>& x = m_params;
     const std::vector<T>& y = p.m_params;
     
@@ -121,8 +140,8 @@ Polynomial<T> Polynomial<T>::operator+(const Polynomial<T>& p) {
     return Polynomial<T>(z);
 }
 
-template<typename T>
-Polynomial<T> Polynomial<T>::operator*(const Polynomial<T>& p) {
+template<typename T, typename P>
+Polynomial<T,P> Polynomial<T,P>::operator*(const Polynomial<T,P>& p) {
     const std::vector<T>& x = m_params;
     const std::vector<T>& y = p.m_params;
     
@@ -142,11 +161,11 @@ Polynomial<T> Polynomial<T>::operator*(const Polynomial<T>& p) {
     while(!z.empty() && z.back() == T(0))
         z.pop_back();
     
-    return Polynomial<T>(z);
+    return Polynomial<T,P>(z);
 }
 
-template<typename T>    
-std::ostream& operator<<(std::ostream& out, const Polynomial<T>& p) {
+template<typename T, typename P>
+std::ostream& operator<<(std::ostream& out, const Polynomial<T,P>& p) {
     for(int i = 0; i < p.m_params.size(); i++) {
         //int k = (p.m_params.size() - 1) - i;
         if(p.m_params[i] == T(0))
@@ -178,13 +197,13 @@ std::ostream& operator<<(std::ostream& out, const Polynomial<T>& p) {
     return out;
 }
 
-template<typename T>
-bool operator==(const Polynomial<T>& a, const Polynomial<T>& b) {
+template<typename T, typename P>
+bool operator==(const Polynomial<T,P>& a, const Polynomial<T,P>& b) {
     return (a.m_params == b.m_params);
 }
 
-template<typename T>
-bool operator!=(const Polynomial<T>& a, const Polynomial<T>& b) {
+template<typename T, typename P>
+bool operator!=(const Polynomial<T,P>& a, const Polynomial<T,P>& b) {
     return !(a == b);
 }
     
