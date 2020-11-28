@@ -86,7 +86,7 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     const std::size_t N = proof.c.size();
     
     // split l into n bits
-    std::bitset<sizeof(l)> l_j(l);
+    std::bitset<64> l_j(l);
 
     std::vector<curve::Scalar> r_j, a, s, t, rho;
 
@@ -114,7 +114,7 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     std::vector<math::Polynomial<curve::Scalar>> p_x;
     for(std::size_t i = 0; i < N; i++) {
         math::Polynomial<curve::Scalar> p_i_x;
-        std::bitset<sizeof(i)> i_j(i);
+        std::bitset<64> i_j(i);
         // expand the polynomial by multiplying by each f_j,i_j
         for(int j = 0; j < n; j++) {
             math::Polynomial<curve::Scalar> f_j_i_j = i_j[j] ?
@@ -170,27 +170,48 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
         proof.z_b.push_back(z_b);
     }
 
-    proof.z_d = r * x^n;
+    proof.z_d = r * (x^n);
     for(int k = 0; k < n; k++) {
-        proof.z_d -= (rho[k] * x^k);
+        proof.z_d -= (rho[k] * (x^k));
     }
 
+    // if instead of subtracting each, can we make the sum then subtract once?
+    curve::Scalar z_d = r * (x^n);
+    curve::Scalar S_rhok_xk = curve::Scalar::zero();
+    for(int k = 0; k < n; k++) {
+        S_rhok_xk += (rho[k] * (x^k));
+    }
+    z_d -= S_rhok_xk;
+    
+    std::cout << "proof.z_d = " << proof.z_d << std::endl;
+    std::cout << "z_d = " << z_d << std::endl;
+    std::cout << "rx^n - S_rhok_xk = " << (r*(x^n) - S_rhok_xk) << std::endl;
+
+    
     // test to see if the proof elements verify in the reduced form
-    curve::Point c0zd = curve::Commitment(curve::Scalar::zero(), proof.z_d);
+    curve::Point c0zd = curve::Commitment(curve::Scalar::zero(), z_d);
 
     curve::Point c0rxn = curve::Commitment(curve::Scalar::zero(), r*(x^n));
 
-    curve::Point P_c0rhok_xnk = curve::Commitment(curve::Scalar::zero(), rho[0]);
+    curve::Point P_c0rhok_xk = curve::Commitment(curve::Scalar::zero(), rho[0]);
     for(int k = 1; k < n; k++) {
-        P_c0rhok_xnk += curve::Commitment(curve::Scalar::zero(), rho[k]*(x^(k)));
+        P_c0rhok_xk += curve::Commitment(curve::Scalar::zero(), rho[k]*(x^(k)));
     }
 
     //P_c0rhok_xnk = (-curve::Scalar::one()) * P_c0rhok_xnk;
 
+    curve::Point c0_S_rhok_xk = curve::Commitment(0, S_rhok_xk);
+    
     std::cout << "c0zd = " << c0zd << std::endl;
     std::cout << "c0rxn = " << c0rxn << std::endl;
-    std::cout << "P_c0rhok_xnk = " << P_c0rhok_xnk << std::endl;
-    std::cout << "c0rxn - P_c0rhok_xnk = " << (c0rxn - P_c0rhok_xnk) << std::endl;
+    std::cout << "S_rhok_xk = " << S_rhok_xk << std::endl;
+    std::cout << "c0_S_rhok_xk = " << c0_S_rhok_xk << std::endl;
+    std::cout << "S_rhok_xk * H = " << S_rhok_xk * curve::Commitment::H << std::endl;
+    std::cout << "P_c0rhok_xk = " << P_c0rhok_xk << std::endl;
+    std::cout << "c0rxn - P_c0rhok_xk = " << (c0rxn - P_c0rhok_xk) << std::endl;
+    std::cout << "c0rxn - c0_S_rhok_xk = " << (c0rxn - c0_S_rhok_xk) << std::endl;
+    std::cout << "c0_rxn__S_rhok_xk = " << curve::Commitment(0, ((r*(x^n)) - S_rhok_xk)) << std::endl;
+    std::cout << "cS0_rxn__S_rhok_xk = " << curve::Commitment(curve::Scalar::zero(), ((r*(x^n)) - S_rhok_xk)) << std::endl;
     
     return proof;
 }
@@ -227,17 +248,17 @@ bool verify(const ZeroProof& proof) {
     }
 
     // first calculate the c_d_k^-x^k product
-    curve::Scalar x_k_0 = curve::Scalar::one();
-    curve::Point c_d_k_x_k_0 = proof.c_d[0] * (-x_k_0);
-    curve::Point P_c_d_k_x_k = c_d_k_x_k_0;
-    for(int k = 1; k < n; k++) {
+    //curve::Scalar x_k_0 = curve::Scalar::one();
+    //curve::Point c_d_k_x_k_0 = proof.c_d[0] * (-x_k_0);
+    curve::Point P_c_d_k_x_k = curve::Point::zero();//c_d_k_x_k_0;
+    for(int k = 0; k < n; k++) {
         curve::Point c_d_k_x_k = proof.c_d[k] * (-(x^k));
 
         P_c_d_k_x_k += c_d_k_x_k;
     }
 
     curve::Point c0zd = curve::Commitment(curve::Scalar::zero(), proof.z_d);
-
+    /*
     // calculate f_j,i_j starting with i=0
     curve::Scalar P_f_j_i_j_0 = x - proof.f[0];
     for(int j = 1; j < n; j++) {
@@ -246,16 +267,18 @@ bool verify(const ZeroProof& proof) {
 
         P_f_j_i_j_0 *= f_j_i_j;
     }
-
-    curve::Point P_c_i_f_j_i_j = proof.c[0] * P_f_j_i_j_0;
-    for(int i = 1; i < N; i++) {
-        std::bitset<sizeof(i)> i_j(i);
+    */
+    curve::Point P_c_i_f_j_i_j = curve::Point::zero();//proof.c[0] * P_f_j_i_j_0;
+    for(int i = 0; i < N; i++) {
+        std::bitset<64> i_j(i);
+        std::cout << "at i = " << i << ": i_j = " << i_j << std::endl;
         curve::Scalar P_f_j_i_j = curve::Scalar::one();
         for(int j = 0; j < n; j++) {
             curve::Scalar f_j_i_j = i_j[j] ? proof.f[j] : (x - proof.f[j]);
+            std::cout << "i_j[" << j << "] = " << i_j[j] << std::endl;
             P_f_j_i_j *= f_j_i_j;
         }
-
+        
         P_c_i_f_j_i_j += (proof.c[i] * P_f_j_i_j);
     }
 

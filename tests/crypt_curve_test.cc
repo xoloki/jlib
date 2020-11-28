@@ -23,6 +23,7 @@
 using namespace jlib::crypt::curve;
 
 int main(int argc, char** argv) {
+    // scalar and point addition
     {
         Scalar a = Scalar::one();
         Scalar b = Scalar::zero();
@@ -35,6 +36,20 @@ int main(int argc, char** argv) {
             return -1;
         }
 
+        Scalar d = Scalar::zero();
+        for(int i = 0; i < 23; i++) {
+            d += Scalar::one();
+        }
+
+        Scalar e = Scalar(23);
+        std::cout << "Scalar(23) = " << e << std::endl;
+        
+        if(d != e) {
+            std::cerr << "Adding a Scalar 23X doesn't give us Scalar(23)" << std::endl;
+            return -1;
+        }
+        
+        
         Point z = Point::zero();
         Point p = Point::random();
         Point s = z + p;
@@ -43,6 +58,58 @@ int main(int argc, char** argv) {
 
         if(p != s) {
             std::cerr << "Adding a zero point to a random point doesn't give us the random point back" << std::endl;
+            return -1;
+        }
+    }
+    // scalar and point subtraction
+    {
+        Scalar a = Scalar::one();
+        Scalar b = Scalar::zero();
+        Scalar c = a - b;
+
+        std::cout << a << " - " << b << " = " << c << std::endl;
+
+        if(c != a) {
+            std::cerr << "Subtracting zero from a Scalar one doesn't give us Scalar one" << std::endl;
+            return -1;
+        }
+
+        Point z = Point::zero();
+        Point p = Point::random();
+        Point s = p - z;
+
+        std::cout << p << " - " << z << " = " << s << std::endl;
+
+        if(p != s) {
+            std::cerr << "Subtracing a zero point from a random point doesn't give us the random point back" << std::endl;
+            return -1;
+        }
+
+        Scalar d = Scalar::random();
+        Scalar e = d - b;
+        Scalar f = d; f -= b;
+
+        if(e != f) {
+            std::cerr << "Scalar::operator-= with zero does not give the same result as operator- " << std::endl;
+            return -1;
+        }
+
+        Scalar g = d - Scalar(23);
+        Scalar h = d; h -= (Scalar(23));
+
+        if(g != h) {
+            std::cerr << "Scalar::operator-= Scalar(23) does not give the same result as operator- " << std::endl;
+            return -1;
+        }
+
+        Scalar g1 = Scalar(23) - d;
+        Scalar h1 = Scalar(23); h1 -= d;
+
+        std::cout << "g1 = " << g1 << std::endl;
+        std::cout << "h1 = " << h1 << std::endl;
+
+        if(g1 != h1) {
+            std::cerr << "Scalar(23)::operator-= random scalar does not give the same result as operator- " << std::endl;
             return -1;
         }
     }
@@ -145,6 +212,28 @@ int main(int argc, char** argv) {
             return -1;
         }
 
+    }
+    // does a curve commitment raised to a power behave?
+    {
+        Scalar x = Scalar::random();
+        Scalar y = Scalar::random();
+        int k = 23;
+        Scalar z = Scalar::one();
+        for(int i = 0; i < k; i++) {
+            z += Scalar::one();
+        }
+        
+        Commitment c(x, y);
+
+        // raising a commitment to a power is the same as multiplying the curve elements by the power
+
+        Point d = z * c;
+        Commitment e(z*x, z*y);
+
+        if(d != e) {
+            std::cerr << "Multiplying a commitment by a scalar gives a different result from multiplying the factors by the scalar" << std::endl;
+            return -1;
+        }
     }
     // monero
     {
