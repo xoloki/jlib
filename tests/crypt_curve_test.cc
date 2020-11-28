@@ -153,6 +153,16 @@ int main(int argc, char** argv) {
     }
     {
         Scalar a = Scalar::random();
+        Scalar na_2 = (-a)^2;
+        Scalar n_a2 = -(a^2);
+
+        if(na_2 != n_a2) {
+            std::cerr << "Negating a Scalar to then raising to a power doesn't give us the same as raising the Scalar then inverting" << std::endl;
+            //return -1;
+        }
+    }
+    {
+        Scalar a = Scalar::random();
         Scalar a0 = a^0;
         Scalar c = Scalar::one();
 

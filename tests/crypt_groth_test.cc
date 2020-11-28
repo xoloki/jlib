@@ -55,7 +55,7 @@ int main(int argc, char** argv) {
         cs.push_back(c);
 
         // not quite a power of 2
-        for(int i = 0; i < 15; i++) {
+        for(int i = 0; i < 1023; i++) {
             Scalar a = Scalar::random();
             Scalar b = Scalar::random();
             Commitment comm(a, b);

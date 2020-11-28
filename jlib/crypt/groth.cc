@@ -128,7 +128,7 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
 
         p_x.push_back(p_i_x);
 
-        std::cout << "p[" << i << "](x) = " << p_x[i] << std::endl;
+        //std::cout << "p[" << i << "](x) = " << p_x[i] << std::endl;
     }
 
     // now that we have all p_i(x) we can finally calculate c_d
@@ -159,10 +159,10 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     
     curve::Scalar x = xhash;
 
-    std::cout << "proof hash is " << x << std::endl;
+    //std::cout << "proof hash is " << x << std::endl;
 
     for(int i = 0; i < N; i++) {
-        std::cout << "p[" << i << "](" << x << ") = " << p_x[i](x) << std::endl;
+        //std::cout << "p[" << i << "](" << x << ") = " << p_x[i](x) << std::endl;
     }
     
     for(int j = 0; j < n; j++) {
@@ -182,6 +182,7 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
         proof.z_d -= (rho[k] * (x^k));
     }
 
+    /*
     // if instead of subtracting each, can we make the sum then subtract once?
     curve::Scalar z_d = r * (x^n);
     curve::Scalar S_rhok_xk = curve::Scalar::zero();
@@ -190,9 +191,9 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     }
     z_d -= S_rhok_xk;
     
-    std::cout << "proof.z_d = " << proof.z_d << std::endl;
-    std::cout << "z_d = " << z_d << std::endl;
-    std::cout << "rx^n - S_rhok_xk = " << (r*(x^n) - S_rhok_xk) << std::endl;
+    //std::cout << "proof.z_d = " << proof.z_d << std::endl;
+    //std::cout << "z_d = " << z_d << std::endl;
+    //std::cout << "rx^n - S_rhok_xk = " << (r*(x^n) - S_rhok_xk) << std::endl;
 
     
     // test to see if the proof elements verify in the reduced form
@@ -208,7 +209,6 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     //P_c0rhok_xnk = (-curve::Scalar::one()) * P_c0rhok_xnk;
 
     curve::Point c0_S_rhok_xk = curve::Commitment(0, S_rhok_xk);
-    
     std::cout << "c0zd = " << c0zd << std::endl;
     std::cout << "c0rxn = " << c0rxn << std::endl;
     std::cout << "S_rhok_xk = " << S_rhok_xk << std::endl;
@@ -219,7 +219,7 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     std::cout << "c0rxn - c0_S_rhok_xk = " << (c0rxn - c0_S_rhok_xk) << std::endl;
     std::cout << "c0_rxn__S_rhok_xk = " << curve::Commitment(0, ((r*(x^n)) - S_rhok_xk)) << std::endl;
     std::cout << "cS0_rxn__S_rhok_xk = " << curve::Commitment(curve::Scalar::zero(), ((r*(x^n)) - S_rhok_xk)) << std::endl;
-    
+    */
     return proof;
 }
     
@@ -239,7 +239,7 @@ bool verify(const ZeroProof& proof) {
     const std::size_t n = proof.c_a.size();
     const std::size_t N = proof.c.size();
     
-    std::cout << "verify hash is " << x << std::endl;
+    //std::cout << "verify hash is " << x << std::endl;
 
     for(int j = 0; j < n; j++) {
         curve::Point cxca = x * proof.c_l[j] + proof.c_a[j];
@@ -260,6 +260,7 @@ bool verify(const ZeroProof& proof) {
     curve::Point P_c_d_k_x_k = curve::Point::zero();//c_d_k_x_k_0;
     for(int k = 0; k < n; k++) {
         curve::Point c_d_k_x_k = proof.c_d[k] * (-(x^k));
+        //curve::Point c_d_k_x_k = (proof.c_d[k] * ((-x)^k));
 
         P_c_d_k_x_k += c_d_k_x_k;
     }
@@ -286,18 +287,19 @@ bool verify(const ZeroProof& proof) {
             P_f_j_i_j *= f_j_i_j;
         }
         
-        std::cout << "P_f_j_i_j[" << i << "] = " << P_f_j_i_j << std::endl;
+        //std::cout << "P_f_j_i_j[" << i << "] = " << P_f_j_i_j << std::endl;
 
         P_c_i_f_j_i_j += (proof.c[i] * P_f_j_i_j);
     }
 
     if((P_c_i_f_j_i_j + P_c_d_k_x_k) != c0zd) {
         std::cerr << "groth zeroproof failed to verify because product part failed" << std::endl;
+        /*
         std::cerr << "P_c_i_f_j_i_j = \n" << P_c_i_f_j_i_j << std::endl;
         std::cerr << "P_c_d_k_x_k = \n" << P_c_d_k_x_k << std::endl;
         std::cerr << "P_c_i_f_j_i_j + P_c_d_k_x_k = \n" << (P_c_d_k_x_k + P_c_i_f_j_i_j) << std::endl;
         std::cerr << "c0zd = \n" << c0zd << std::endl;
-
+        */
         return false;
     }
     
