@@ -57,5 +57,18 @@ int main(int argc, char** argv) {
         return -1;
     } 
 
+    GeneralProof<3> proof3;
+    Scalar x3[3];
+    x3[0] = Scalar::random();
+    x3[1] = Scalar::random();
+    x3[2] = Scalar::random();
+    y = x3[0] * proof3.g + x3[1] * proof3.h[0] + x3[2] * proof3.h[1];
+    proof3 = prove<3>(y, x3)
+;
+    if(!verify(proof3)) {
+        std::cerr << "schnorr proof<3> didn't verify" << std::endl;
+        return -1;
+    } 
+    
     return 0;
 }
