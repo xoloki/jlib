@@ -44,6 +44,32 @@ bool verify(const Proof& proof) {
     return (p == proof.t);
 }
 
+DoubleProof prove(const curve::Point& y, const curve::Scalar& s, const curve::Scalar& t) {
+    DoubleProof proof;
+
+    proof.y = y;
+    
+    curve::Scalar s0 = curve::Scalar::random();
+    curve::Scalar t0 = curve::Scalar::random();
+
+    proof.u = (proof.g * s0) + (proof.h * t0);
+
+    curve::Scalar c = curve::hash<curve::Scalar::HASHSIZE>(proof.y, proof.u);
+
+    proof.s = (s0 - (c * s));
+    proof.t = (t0 - (c * t));
+    
+    return proof;
+}
+
+bool verify(const DoubleProof& proof) {
+    curve::Scalar c = curve::hash<curve::Scalar::HASHSIZE>(proof.y, proof.u);
+
+    curve::Point u = (proof.y * c) + (proof.g * proof.s) + (proof.h * proof.t);
+
+    return (u == proof.u);
+}
+
 }
 }
 }

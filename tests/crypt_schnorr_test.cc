@@ -33,6 +33,29 @@ int main(int argc, char** argv) {
         std::cerr << "schnorr proof didn't verify" << std::endl;
         return -1;
     } 
+
+    DoubleProof dp;
+    Scalar s = Scalar::random();
+    Scalar t = Scalar::random();
+    y = dp.g * s + dp.h * t;
+    dp = prove(y, s, t);
+
+    if(!verify(dp)) {
+        std::cerr << "schnorr DoubleProof didn't verify" << std::endl;
+        return -1;
+    } 
     
+    
+    Scalar x2[2];
+    x2[0] = Scalar::random();
+    x2[1] = Scalar::random();
+    y = x2[0] * G + x2[1] * Commitment::H;
+    GeneralProof<2> proof2 = prove<2>(y, x2);
+
+    if(!verify(proof2)) {
+        std::cerr << "schnorr proof<2> didn't verify" << std::endl;
+        return -1;
+    } 
+
     return 0;
 }

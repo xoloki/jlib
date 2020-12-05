@@ -93,17 +93,19 @@ Polynomial<T,P>::Polynomial(const std::vector<T>& params)
 template<typename T, typename P>
 T& Polynomial<T,P>::operator[](int i) {
     if(i >= m_params.size()) {
-        std::cout << *this << std::endl;
-        std::cout << "asking for index " << i << " resize to " << (i+1) << std::endl;
-        m_params.resize(i+1);
-        std::cout << *this << std::endl;
+        //std::cout << *this << std::endl;
+        //std::cout << "asking for index " << i << " resize to " << (i+1) << std::endl;
+        m_params.resize(i+1, T(0));
+        //std::cout << *this << std::endl;
     }
         
     return m_params.at(i);
 }
     */
+    
 template<typename T, typename P>
 //const T& Polynomial<T,P>::operator[](int i) const {
+//    static T zero(0);
 T Polynomial<T,P>::operator[](int i) const {
     if(i < m_params.size())
         return m_params[i];

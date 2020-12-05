@@ -20,6 +20,8 @@
 
 #include <jlib/crypt/groth.hh>
 
+#include <chrono>
+
 using namespace jlib::crypt::curve;
 using namespace jlib::crypt::groth;
 
@@ -51,11 +53,19 @@ int main(int argc, char** argv) {
         Scalar m = Scalar::zero();
         Scalar r = Scalar::random();
         Commitment c(m, r);
+        int count = 2048;
 
+        if(argc > 1) {
+            count = std::stoi(argv[1]);
+        }
+        
+        cs.push_back(c);
         cs.push_back(c);
 
+        count -= 2;
+        
         // not quite a power of 2
-        for(int i = 0; i < 1023; i++) {
+        for(int i = 0; i < count; i++) {
             Scalar a = Scalar::random();
             Scalar b = Scalar::random();
             Commitment comm(a, b);
@@ -63,8 +73,21 @@ int main(int argc, char** argv) {
             cs.push_back(comm);
         }
 
-        ZeroProof proof = prove(cs, 0, r);
-        if(!verify(proof)) {
+        auto proof_start = std::chrono::high_resolution_clock::now();
+        ZeroProof proof = prove(cs, 1, r);
+        auto proof_stop = std::chrono::high_resolution_clock::now();
+        
+        std::chrono::milliseconds proof_time = std::chrono::duration_cast<std::chrono::milliseconds>(proof_stop - proof_start);
+
+        std::cout << "ZeroProof prove took " << proof_time.count() << "ms" << std::endl;
+            
+        
+        auto verify_start = std::chrono::high_resolution_clock::now();
+        bool success = verify(proof);
+        auto verify_stop = std::chrono::high_resolution_clock::now();
+        std::chrono::milliseconds verify_time = std::chrono::duration_cast<std::chrono::milliseconds>(verify_stop - verify_start);
+        std::cout << "ZeroProof verify took " << verify_time.count() << "ms" << std::endl;
+        if(!success) {
             std::cerr << "groth ZeroProof didn't verify" << std::endl;
             return -1;
         }

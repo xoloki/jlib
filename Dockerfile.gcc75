@@ -9,12 +9,12 @@ FROM gcc:7.5
 # Set the file maintainer
 MAINTAINER Joey Yandle
 
-RUN apt-get update
-RUN apt-get install -y wget pkg-config libsigc++-2.0-dev libglibmm-2.4-dev libgpgme11-dev libx11-dev freeglut3-dev libmagick++-dev libjson-c-dev
+RUN apt update
+RUN apt upgrade -y
+RUN apt install -y wget pkg-config libsigc++-2.0-dev libglibmm-2.4-dev libgpgme11-dev libx11-dev freeglut3-dev libmagick++-dev libjson-c-dev gdb vim
 
-RUN wget https://download.libsodium.org/libsodium/releases/libsodium-1.0.18.tar.gz
-
+RUN wget --secure-protocol=TLSv1_2 https://download.libsodium.org/libsodium/releases/libsodium-1.0.18.tar.gz
 RUN tar xvzf libsodium-1.0.18.tar.gz
-RUN cd libsodium-1.0.18 && ./configure --prefix=/usr && make -j16 && make install
+RUN cd libsodium-1.0.18 && ./configure --enable-opt --prefix=/usr && make -j16 && make install
 
 ENTRYPOINT /bin/bash
