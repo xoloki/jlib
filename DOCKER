@@ -1,16 +1,17 @@
 To build using docker, first install latest docker. Then do the following:
 
 # symlink the desired dockerfile
-ln -s Dockerfile.gcc49 Dockerfile
+rm -f Dockerfile
+ln -s Dockerfile.gcc75 Dockerfile
 
 # build the container
-sudo docker build -t jlib-build:gcc49 .
+sudo docker build -t jlib-build:gcc75 .
 
 # run the container
-sudo docker run -tiv `pwd`:/src/jlib jlib-build:gcc49
+sudo docker run -tiv `pwd`:`pwd` jlib-build:gcc75
 
 # from inside the container
-cd /src/jlib
+cd `pwd`
 
 # configure
 mkdir build-gcc49
