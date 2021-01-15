@@ -6,7 +6,13 @@ else
 cuda_programs = 
 endif
 
-bin_PROGRAMS = jlib-mail jpoisoned jjoystick jhyper jhardhyper jglxhyper jgluthyper jgltorus jglxbox jjoy2xev jcrypt jnote jneural-zero jneural-alpha jneural-search jmelody $(cuda_programs) jm3u
+if HAVE_SODIUM
+curve_apps = jcurve
+else
+curve_apps =
+endif
+
+bin_PROGRAMS = jlib-mail jpoisoned jjoystick jhyper jhardhyper jglxhyper jgluthyper jgltorus jglxbox jjoy2xev jcrypt jnote jneural-zero jneural-alpha jneural-search jmelody $(cuda_programs) jm3u $(curve_apps)
 
 dist_pkgdata_DATA = wow-buttons-ps3.map wow-axes-ps3.map wow-buttons-x360.map wow-axes-x360.map 
 
@@ -89,3 +95,8 @@ jcublas_LDADD = $(top_builddir)/jlib/util/libjutil.la \
 	$(top_builddir)/jlib/sys/libjsys.la \
 	$(top_builddir)/jlib/cuda/libjcuda.la \
 	-L/usr/local/cuda/lib64 -lcublas -lcudart
+
+jcurve_SOURCES = jcurve.cc
+jcurve_LDADD = $(top_builddir)/jlib/crypt/libjcrypt.la \
+	$(top_builddir)/jlib/util/libjutil.la \
+	$(top_builddir)/jlib/sys/libjsys.la
