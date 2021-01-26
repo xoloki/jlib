@@ -16,6 +16,8 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  * 
+ * TODO make it pretty.  turn on translucency alpha.  each vertex gets a color, and should be drawn as a glowing blob that is bigger than the edges.  the edges should blend the colors of the verticies in the line between them.  if am using HSV colors then i can just add the hues (letting them overflow) to get the color of the blended line.  make the lines thicker than they are currently, but the verticies should be larger.  change the brightness of the vertex/edge based on whats closer in 3d space.  this will require stopping at 3 dimensions to do this assay.
+ * EVENTUALLY, MOVE THIS INTO VR
  */
 
 #ifndef JLIB_APPS_HYPER_HH
