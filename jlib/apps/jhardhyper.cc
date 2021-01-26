@@ -16,6 +16,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  * 
+ * XXX TODO fix this by printing the matrix contents out in a machine readable format.  correct for the different column layout, then get the same results from jhyper.  be rotating in all planes from the beginning. at some point the two modelview matricies will diverge, use this as a debugger to find out when/where it broke
  */
 
 #include <iostream>
