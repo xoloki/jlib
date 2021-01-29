@@ -4,7 +4,7 @@ lib_LTLIBRARIES = libjnet.la
 libjnet_la_SOURCES = Email.cc MailBox.cc Imap4Box.cc Pop3.cc MBox.cc \
 					 Imap4.cc Imap4Fetch.cc net.cc MFolder.cc Imap4Folder.cc \
 					 MailFolder.cc ASMailBox.cc ASImapBox.cc ASMBox.cc 
-libjnet_la_LDFLAGS = -version-info $(LIBJ_SO_VERSION) -release $(JLIB_RELEASE) -no-undefined
+libjnet_la_LDFLAGS = -version-info $(LIBJ_SO_VERSION) -release $(JLIB_RELEASE) -no-undefined -lpthread
 libjnet_la_LIBADD = $(top_builddir)/jlib/sys/libjsys.la \
                      $(top_builddir)/jlib/util/libjutil.la \
                      $(top_builddir)/jlib/crypt/libjcrypt.la

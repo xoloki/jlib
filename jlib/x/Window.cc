@@ -28,8 +28,7 @@
 
 namespace jlib {
 namespace x {
-        
-	
+
 Window::Window()
     : m_timeout(1000),
       m_auto_flush(false)
