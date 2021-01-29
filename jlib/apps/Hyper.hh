@@ -102,12 +102,8 @@ void HyperPlot<T,Plot>::initialize(uint n) {
     r2 = (n < 8 ? 3 : (1.1 * std::sqrt(static_cast<T>(n))));
 
     switch(shape) {
-    case CUBOID: {
-        break;
-    } 
-    case PYRAMOID: {
-        break;
-    } 
+    case CUBOID: break;
+    case PYRAMOID: break;
     case STAROID: {
         switch(n) {
         case 1:
@@ -122,9 +118,7 @@ void HyperPlot<T,Plot>::initialize(uint n) {
             break;
         }
     }
-    case SPHEROID: {
-        break;
-    } 
+    case SPHEROID: break;
     }
 
     initialize_glazzies(n);
