@@ -91,6 +91,13 @@ protected:
     T m_camera = 0;
     T m_radius = 0;
 
+    /**
+     * Discard the measured framing so the next frame re-measures.  Needed
+     * whenever the projection changes shape -- a different mode or a
+     * different D both change how big the result comes out.
+     */
+    void reframe() { m_camera = 0; m_radius = 0; }
+
     virtual void change(uint n);
 };
 
@@ -99,8 +106,7 @@ inline
 void HPlot<T>::change(uint n) {
     // D is about to change, so the projected extent will too -- and it shrinks
     // by roughly half for every dimension added.  Re-measure from scratch.
-    m_camera = 0;
-    m_radius = 0;
+    reframe();
 
     glfw::Plot<T>::change(n);
 }
@@ -109,8 +115,21 @@ template<typename T>
 inline
 HPlot<T>::HPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
     : glfw::Plot<T>(n, c, w, h)
-{    
-
+{
+    // Always perspective, and there is no key to change it.
+    //
+    // This app exists to split the work: reduce N->3 in software and let the
+    // hardware do 3->2.  That makes the other two modes either meaningless or
+    // dishonest here.  Mixed is defined by leaving the inner reduction steps
+    // affine, and the inner step is GL's, not ours.  Orthographic looks right
+    // at D=4 -- the single software step skips its divide -- but GL still
+    // applies perspective underneath, so it is not really orthographic at all,
+    // which becomes obvious above D=4.
+    //
+    // jglfwhyper is where the projection modes are demonstrated: it reduces
+    // all the way to 2-D in software, so a mode there means what it says.
+    // This one is where solid rendering will go.
+    this->set_projection_mode(math::Plot<T>::projection_mode::perspective);
 }
 
 template<typename T>
@@ -239,13 +258,24 @@ math::vertex<T> HPlot<T>::transform(const math::vertex<T>& vertex) const {
     //ret.normalize();
     //ret.change(ret.D - 1);
 
-    // keep projecting until we get to two dimensions
+    // Reduce to three dimensions and hand those to GL.
+    //
+    // Which steps divide is the projection mode: every one for perspective,
+    // none for orthographic, and only the outermost for mixed.
+    typedef typename math::Plot<T>::projection_mode mode;
+    const mode m = this->get_projection_mode();
+
     for(int d = math::Plot<T>::D; d > 3; d--) {
         math::matrix<T> p = math::matrix<T>::project(d, math::Plot<T>::clip);
         math::vertex<T> v(d);
         v = ret;
         ret = p * v();
-        ret.normalize();
+
+        const bool outermost = (d == static_cast<int>(math::Plot<T>::D));
+        if(m == mode::perspective || (m == mode::mixed && outermost)) {
+            ret.normalize();
+        }
+
         ret.change(d-1);
     }
 
@@ -426,7 +456,7 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
 
         r = nr;
         initialize_rotation(this->D);
-    }
+        }
 }
 
 template<typename T, typename Plot>

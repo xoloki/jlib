@@ -24,6 +24,9 @@
 #include <jlib/math/math.hh>
 #include <jlib/math/dump.hh>
 
+#include <cmath>
+#include <iostream>
+
 #include <vector>
 #include <stack>
 
@@ -36,6 +39,38 @@ template<typename T>
 class Plot {
 public:
     enum STACK { MODELVIEW, PROJECTION };
+
+    /**
+     * How each step of the N->target reduction divides.
+     *
+     * project() builds an N-dimensional frustum whose last axis is depth, and
+     * whose homogeneous coordinate is w = -x_{d-1}.  Whether that divide is
+     * actually performed at a given step is a rendering choice, not a
+     * correctness one:
+     *
+     *   perspective   divide at every step.  Physically what a camera in N
+     *                 dimensions would see, and the most convincing.  It also
+     *                 destroys parallelism, which is what makes the cell
+     *                 structure hard to read.
+     *
+     *   orthographic  divide at none.  Parallel edges stay parallel, so the
+     *                 combinatorial structure reads directly off the screen.
+     *                 The standard choice for explaining an n-cube.
+     *
+     *   mixed         divide on the outermost step only.  The nesting from the
+     *                 highest dimension shows as perspective, everything below
+     *                 it stays orthographic -- so an inner and outer cube are
+     *                 visibly the same cube offset in w, rather than merely
+     *                 two cubes.  Legible and still shows the dimension you
+     *                 care about.  This is jlib's long-standing behaviour and
+     *                 the default.
+     *
+     * mixed was not chosen originally: it was the accidental result of
+     * normalize() dividing by the wrong index after the first step.  It turned
+     * out to be the most useful of the three for explaining these objects, so
+     * it is now a named mode rather than a bug.
+     */
+    enum class projection_mode { perspective, orthographic, mixed };
 
     typedef typename std::list< object<T> >::iterator objref;
 
@@ -56,6 +91,14 @@ public:
 
     void setClip(std::vector< std::pair<T,T> > c);
 
+    projection_mode get_projection_mode() const;
+    void set_projection_mode(projection_mode m);
+
+    /**
+     * perspective -> orthographic -> mixed -> perspective.
+     */
+    projection_mode cycle_projection_mode();
+
     uint D;
 
     virtual void change(uint n);
@@ -65,6 +108,24 @@ public:
 protected:
     bool visible(math::vertex<T> vertex) const;
     virtual math::vertex<T> transform(const math::vertex<T>& v) const;
+
+    projection_mode m_projection;
+
+    /**
+     * Largest projected radius seen so far, used to scale map() to the window.
+     *
+     * The scale used to be fixed to the clip width, which only framed the
+     * figure correctly for one projection mode and one D.  Every reduction
+     * step divides by w, so perspective at D=5 lands around 0.03 where mixed
+     * lands around 0.5 -- more than an order of magnitude, with nothing
+     * compensating, so the figure shrank to a dot.
+     *
+     * Tracked as a running maximum, since the extent on any one frame is not
+     * the largest the figure reaches as it turns.  Growing only means it
+     * settles within a turn or two and cannot pump.  mutable because
+     * transform() is const.
+     */
+    mutable T m_radius;
 
     std::vector< std::pair<T,T> > clip;
     std::list< object<T> > objects;
@@ -79,7 +140,9 @@ protected:
 template<typename T>
 inline
 Plot<T>::Plot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
-    : D(n),
+    : m_projection(projection_mode::mixed),
+      m_radius(0),
+      D(n),
       clip(c),
       width(w),
       height(h)
@@ -143,10 +206,21 @@ template<typename T>
 inline
 std::pair<uint,uint> Plot<T>::map(const math::vertex<T>& v) {
     std::pair<uint,uint> ret;
-    T cw = clip[0].second - clip[0].first;
-    T ch = clip[1].second - clip[1].first;
-    T mw = width / cw;
-    T mh = height / ch;
+
+    // Scale to whatever the projection actually produced rather than to the
+    // clip width, so every mode and every D frame the same.  0.45 of the
+    // smaller side leaves a margin for the corners, which swing wider than
+    // the radius measured on any one frame.
+    T mw, mh;
+    if(m_radius > 0) {
+        const T fit = 0.45 * ((width < height) ? width : height) / m_radius;
+        mw = fit;
+        mh = fit;
+    }
+    else {
+        mw = width / (clip[0].second - clip[0].first);
+        mh = height / (clip[1].second - clip[1].first);
+    }
 
     int cx = width / 2;
     int cy = height / 2;
@@ -177,20 +251,78 @@ math::vertex<T> Plot<T>::transform(const math::vertex<T>& vertex) const {
     math::vertex<T> ret(D);
 
     ret = (projection.top() * modelview.top() * vertex());
-    ret.normalize();
 
-    // keep projecting until we get to two dimensions
+    // The outermost step: divided unless the mode is fully orthographic.
+    if(m_projection != projection_mode::orthographic) {
+        ret.normalize();
+    }
+
+    // Shrink to match the step just taken, so the next normalize() divides by
+    // the new homogeneous coordinate rather than by the 1 this one left
+    // behind.  Only in perspective: leaving it out is precisely what makes
+    // every later step affine, which is what mixed is.
+    if(m_projection == projection_mode::perspective) {
+        ret.change(D - 1);
+    }
+
+    // Every step below it.  Note ret.change(d-1) after the divide: normalize()
+    // divides by the vertex's own index D, and without shrinking the vertex to
+    // match the step, that index still holds the 1 left by the previous step --
+    // so the divide silently became a no-op.  That is what made every step
+    // after the first orthographic by accident, which is now MIXED.
     for(int d = (D - 1); d > 2; d--) {
         math::matrix<T> p = math::matrix<T>::project(d, clip);
         math::vertex<T> v(d);
         v = ret;
         ret = p * v();
-        ret.normalize();
+
+        if(m_projection == projection_mode::perspective) {
+            ret.normalize();
+            ret.change(d - 1);
+        }
     }
+
+    // Feeds map()'s framing; see m_radius.
+    const T r = std::sqrt(ret[0] * ret[0] + ret[1] * ret[1]);
+    if(r > m_radius)
+        m_radius = r;
 
     dump::vertex("base", vertex, ret);
 
     return ret;
+}
+
+template<typename T>
+inline
+typename Plot<T>::projection_mode Plot<T>::get_projection_mode() const {
+    return m_projection;
+}
+
+template<typename T>
+inline
+void Plot<T>::set_projection_mode(projection_mode m) {
+    m_projection = m;
+}
+
+template<typename T>
+inline
+typename Plot<T>::projection_mode Plot<T>::cycle_projection_mode() {
+    switch(m_projection) {
+    case projection_mode::perspective:  m_projection = projection_mode::orthographic; break;
+    case projection_mode::orthographic: m_projection = projection_mode::mixed;        break;
+    case projection_mode::mixed:        m_projection = projection_mode::perspective;  break;
+    }
+
+    // The extent changes with the mode -- orthographic is more than an order
+    // of magnitude larger than perspective -- so re-measure the framing.
+    m_radius = 0;
+
+    std::cerr << "projection: "
+              << (m_projection == projection_mode::perspective  ? "perspective"  :
+                  m_projection == projection_mode::orthographic ? "orthographic" : "mixed")
+              << std::endl;
+
+    return m_projection;
 }
 
 template<typename T>
@@ -259,6 +391,7 @@ template<typename T>
 inline
 void Plot<T>::change(uint n) {
     D = n;
+    m_radius = 0;
     while(modelview.size()) {
         modelview.pop();
     }
