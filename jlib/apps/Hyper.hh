@@ -257,6 +257,17 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
         shape = static_cast<Shape>(x);
     
         initialize(this->D);
+    } else if(key == 'p') {
+        // Cycle the projection: perspective -> orthographic -> mixed.
+        //
+        // Not a debug switch.  Perspective is what an N-dimensional camera
+        // would see, but it destroys parallelism, and parallel edges are
+        // exactly what makes an n-cube's structure readable.  Orthographic
+        // keeps them.  Mixed divides on the outermost step only, so the
+        // nesting from the highest dimension still shows while everything
+        // below it stays parallel -- which is why it is the default.
+        this->cycle_projection_mode();
+        this->first = true;
 /*
     } else if(key == 'y' || key == 'h') {
         T x = (key == 't' ? 0.1 : -0.1);
