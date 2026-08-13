@@ -22,7 +22,6 @@
 #define JLIB_NET_IMAP4_HH
 
 #include <jlib/sys/socketstream.hh>
-#include <glibmm/thread.h>
 
 #include <jlib/util/URL.hh>
 #include <jlib/net/Email.hh>
@@ -90,8 +89,8 @@ namespace jlib {
             
             bool is_secure();
 
-            jlib::sys::socketstream* connect() throw(std::exception);
-            void disconnect(jlib::sys::socketstream& sock) throw(std::exception);
+            jlib::sys::socketstream* connect();
+            void disconnect(jlib::sys::socketstream& sock);
 
             // 6.1.    Client Commands - Any State
             /**
@@ -132,7 +131,7 @@ namespace jlib {
              *
              * @throw imap4_exception if an exception occurs while doing i/o
              */
-            void logout(jlib::sys::socketstream& sock) throw(std::exception);
+            void logout(jlib::sys::socketstream& sock);
 
 
             // 6.2.    Client Commands - Non-Authenticated State
@@ -153,7 +152,7 @@ namespace jlib {
              *
              * @throw imap4_exception if an exception occurs while doing i/o
              */
-            void login(jlib::sys::socketstream& sock, std::string user="", std::string pass="") throw(std::exception);
+            void login(jlib::sys::socketstream& sock, std::string user="", std::string pass="");
             
 
             // 6.3.    Client Commands - Authenticated State
@@ -495,8 +494,8 @@ namespace jlib {
              * @param which which email we're retrieving
              * @throw imap4_exception if an exception occurs while doing i/o
              */
-            std::string retrieve(int which, std::string mailbox="INBOX") throw(std::exception);
-            std::string retrieve(jlib::sys::socketstream& sock, int which, std::string mailbox="INBOX") throw(std::exception);
+            std::string retrieve(int which, std::string mailbox="INBOX");
+            std::string retrieve(jlib::sys::socketstream& sock, int which, std::string mailbox="INBOX");
             
             /**
              * Retrieve the text of specified email
@@ -504,8 +503,8 @@ namespace jlib {
              * @param which which email we're retrieving
              * @throw std::exception if an exception occurs while doing i/o
              */
-            std::string retrieve_headers(unsigned int which, std::string mailbox,unsigned int& size) throw(std::exception);
-            std::string retrieve_headers(jlib::sys::socketstream& sock, unsigned int which, std::string mailbox,unsigned int& size) throw(std::exception);
+            std::string retrieve_headers(unsigned int which, std::string mailbox,unsigned int& size);
+            std::string retrieve_headers(jlib::sys::socketstream& sock, unsigned int which, std::string mailbox,unsigned int& size);
             
             /**
              * Remove this email from it's server
@@ -513,9 +512,9 @@ namespace jlib {
              * @param which which email we're removing
              * @throw std::exception if an exception occurs while doing i/o
              */
-            void remove(int which, std::string mailbox="INBOX") throw(std::exception);
+            void remove(int which, std::string mailbox="INBOX");
             
-            std::vector<std::string> handshake(jlib::sys::socketstream& sock, std::string data) throw(std::exception);
+            std::vector<std::string> handshake(jlib::sys::socketstream& sock, std::string data);
             
             bool unseen(jlib::sys::socketstream& sock,int i);
 

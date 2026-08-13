@@ -21,7 +21,7 @@
 #ifndef JLIB_GL_BUFFERS_H
 #define JLIB_GL_BUFFERS_H
 
-#include <GL/gl.h>
+#include <jlib/gl/opengl.hh>
 
 namespace jlib {
 namespace gl {

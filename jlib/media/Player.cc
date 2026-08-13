@@ -71,7 +71,11 @@ namespace jlib {
 
         
         Player::~Player() {
-            
+            // The worker touches m_dsp and m_stream, both members of Player.
+            // Leaving this empty meant those were destroyed -- closing the
+            // audio device -- while the worker was potentially still inside
+            // play_slot(), because ~Servent only runs after ~Player returns.
+            stop();
         }
             
         
@@ -90,21 +94,27 @@ namespace jlib {
 
 
         void Player::init() {
-            map(PLAY, sigc::mem_fun(*this,&jlib::media::Player::play_signal));
-            map(PAUSE, sigc::mem_fun(*this,&jlib::media::Player::pause_signal));
-            map(STOP, sigc::mem_fun(*this,&jlib::media::Player::stop_signal));
-            map(REWIND, sigc::mem_fun(*this,&jlib::media::Player::rewind_signal));
-            map(FFWD, sigc::mem_fun(*this,&jlib::media::Player::ffwd_signal));
-            map(RELOAD, sigc::mem_fun(*this,&jlib::media::Player::reload_signal));
+            map(PLAY, [this](auto&&... a) { return this->play_signal(a...); });
+            map(PAUSE, [this](auto&&... a) { return this->pause_signal(a...); });
+            map(STOP, [this](auto&&... a) { return this->stop_signal(a...); });
+            map(REWIND, [this](auto&&... a) { return this->rewind_signal(a...); });
+            map(FFWD, [this](auto&&... a) { return this->ffwd_signal(a...); });
+            map(RELOAD, [this](auto&&... a) { return this->reload_signal(a...); });
 
-            add(std::make_pair(sigc::mem_fun(*this,&jlib::media::Player::is_playing),
-                               sigc::mem_fun(*this,&jlib::media::Player::play_slot)));
+            // Built as the pair's own type rather than with std::make_pair,
+            // which would deduce the two lambda types and leave no conversion
+            // to pair<function<bool()>, function<void()>>.
+            add(condition_list_type::value_type([this]() { return is_playing(); },
+                                                [this]() { play_slot(); }));
 
             run();
         }
 
         
-		void Player::kill() { throw Glib::Thread::Exit();/*m_worker.kill();*/ }
+		// This used to throw Glib::Thread::Exit() on the *calling* thread,
+		// which never touched the worker at all.  Servent::stop() asks the
+		// worker to exit and joins it.
+		void Player::kill() { stop(); }
 
         void Player::play() { exec(Player::PLAY); }
         void Player::pause() { exec(Player::PAUSE); }

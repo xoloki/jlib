@@ -22,7 +22,6 @@
 #define JLIB_SYS_SSLSTREAM_HH
 
 #include <jlib/sys/socketstream.hh>
-#include <glibmm/thread.h>
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>

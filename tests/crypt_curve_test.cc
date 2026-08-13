@@ -20,9 +20,17 @@
 
 #include <jlib/crypt/groth.hh>
 
+#include <iostream>
+
 using namespace jlib::crypt::curve;
 
 int main(int argc, char** argv) {
+    // libsodium requires this before any other call into it.
+    if(sodium_init() < 0) {
+        std::cerr << "sodium_init() failed" << std::endl;
+        return -1;
+    }
+
     // scalar and point addition
     {
         Scalar a = Scalar::one();
@@ -197,7 +205,7 @@ int main(int argc, char** argv) {
 
         std::cout << "c = " << c << std::endl;
 
-        Point c1 = x * Commitment::G + y * Commitment::H;
+        Point c1 = x * Commitment::G() + y * Commitment::H();
 
         std::cout << "c1 = " << c1 << std::endl;
 
@@ -207,7 +215,7 @@ int main(int argc, char** argv) {
         }
 
         Commitment c0y(Scalar::zero(), y);
-        Point cy0 = y * Commitment::H;
+        Point cy0 = y * Commitment::H();
 
         if(c0y != cy0) {
             std::cerr << "Manually doing commitment to zero returns different result from ctor" << std::endl;
@@ -215,7 +223,7 @@ int main(int argc, char** argv) {
         }
 
         Commitment c0x(x, Scalar::zero());
-        Point cx0 = x * Commitment::G;
+        Point cx0 = x * Commitment::G();
 
         if(c0x != cx0) {
             std::cerr << "Manually doing commitment to blinding zero returns different result from ctor" << std::endl;
@@ -297,7 +305,7 @@ int main(int argc, char** argv) {
         Point s = c3 - c1 - c2;
         Scalar z = s3 - s1 - s2;
 
-        if(s != Commitment(0, z) || s != (Commitment::H * z)) {
+        if(s != Commitment(0, z) || s != (Commitment::H() * z)) {
             std::cerr << "balance proof didn't verify" << std::endl;
             return -1;
         }

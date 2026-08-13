@@ -22,6 +22,8 @@
 #include <jlib/sys/tfstream.hh>
 
 #include <map>
+#include <mutex>
+#include <thread>
 
 #include <cstdlib>
 #include <cstring>
@@ -31,9 +33,31 @@ const int SZ = 1024;
 
 namespace jlib {
     namespace sys {
-        
-        static std::map<std::string,pthread_mutex_t*> g_mutex;
-        
+
+        namespace {
+
+            // The named-mutex registry used to be a std::map of raw
+            // pthread_mutex_t* mutated without synchronization from lock() and
+            // locked() -- a data race in an API whose whole purpose is to be
+            // called from several threads.  The mutexes were also never freed.
+            // std::map guarantees reference stability, so handing back a
+            // reference after dropping the registry lock is safe.
+            std::mutex g_registry_lock;
+            std::map<std::string, std::mutex> g_registry;
+
+            std::mutex& named_mutex(const std::string& s) {
+                std::lock_guard<std::mutex> guard(g_registry_lock);
+                return g_registry[s];
+            }
+
+            std::mutex* find_named_mutex(const std::string& s) {
+                std::lock_guard<std::mutex> guard(g_registry_lock);
+                std::map<std::string, std::mutex>::iterator i = g_registry.find(s);
+                return i == g_registry.end() ? nullptr : &i->second;
+            }
+
+        }
+
         void getline(std::istream& is, std::string& s) {
             std::getline(is,s);
             s.erase(s.find_last_not_of("\r")+1);
@@ -87,73 +111,47 @@ namespace jlib {
             }
         }
 
-        typedef struct _slot_string {
-            sigc::slot0<void> slot;
-            std::string mutex;
-        } slot_string;
-
-        void thread_callback(void* data) {
-            if(std::getenv("JLIB_SYS_DEBUG"))
-                std::cout << "entering jlib::sys::thread_callback()"<<std::endl;
-            if(std::getenv("JLIB_SYS_DEBUG"))
-                std::cout << "slot_string* ss = reinterpret_cast<slot_string*>(data)"<<std::endl;
-            slot_string* ss = reinterpret_cast<slot_string*>(data);
-            //sigc::slot0<void>* ss = reinterpret_cast<sigc::slot0<void>*>(data);
-
-            if(ss->mutex != "") {
-                if(std::getenv("JLIB_SYS_DEBUG"))
-                    std::cout << "lock(\""<<ss->mutex<<"\")"<<std::endl;
-                lock(ss->mutex);
-            }
-
-            if(std::getenv("JLIB_SYS_DEBUG"))
-                std::cout << "ss->slot()"<<std::endl;
-            try {
-                ss->slot();
-            }
-            catch(std::exception& e) {
-                std::cerr << "exception while running s->call() in jlib::sys::thread_callback" << std::endl
-                     << e.what() << std::endl;
-            }
-            catch(...) {
-                std::cerr << "unknown exception while running s->call() in jlib::sys::thread_callback" << std::endl;
-            }
-
-            if(ss->mutex != "") {
-                if(std::getenv("JLIB_SYS_DEBUG"))
-                    std::cout << "unlock(\""<<ss->mutex<<"\")"<<std::endl;
-                unlock(ss->mutex);
-            }
-            
-            if(std::getenv("JLIB_SYS_DEBUG"))
-                std::cout << "delete ss"<<std::endl;
-            delete ss;
-            if(std::getenv("JLIB_SYS_DEBUG"))
-                std::cout << "leaving jlib::sys::thread_callback()"<<std::endl;
-            pthread_exit(0);
-        }
-
-        
-
-        void thread(const sigc::slot0<void>& slt, std::string s) {
+        // This used to hand pthread_create a void(void*) function reinterpret_cast
+        // to void*(*)(void*) and call through it, which is undefined behaviour,
+        // and hand-managed the slot with new/delete.  std::thread does both
+        // correctly and needs neither.
+        void thread(const std::function<void()>& slt, std::string s) {
             if(std::getenv("JLIB_SYS_DEBUG"))
                 std::cout << "entering jlib::sys::thread()"<<std::endl;
 
-            if(std::getenv("JLIB_SYS_DEBUG"))
-                std::cout << "creating slot_string*"<<std::endl;
-            slot_string* ss = new slot_string;
-            //sigc::slot0<void>* ss = new sigc::slot0<void>(slt);
-            //ss->slot = new sigc::slot0<void>(slt);
-            ss->slot = slt;
-            ss->mutex = s;
-            
-            pthread_t thread;
-            if(std::getenv("JLIB_SYS_DEBUG"))
-                std::cout << "calling pthread_create()"<<std::endl;
-            pthread_create(&thread, 0, reinterpret_cast<void * (*)(void *)>(&thread_callback), reinterpret_cast<void*>(ss));
-            if(std::getenv("JLIB_SYS_DEBUG"))
-                std::cout << "calling pthread_detach()"<<std::endl;
-            pthread_detach(thread);
+            std::thread worker([slt, mutex = std::move(s)]() {
+                if(std::getenv("JLIB_SYS_DEBUG"))
+                    std::cout << "entering jlib::sys::thread worker"<<std::endl;
+
+                if(mutex != "") {
+                    if(std::getenv("JLIB_SYS_DEBUG"))
+                        std::cout << "lock(\""<<mutex<<"\")"<<std::endl;
+                    lock(mutex);
+                }
+
+                try {
+                    slt();
+                }
+                catch(std::exception& e) {
+                    std::cerr << "exception while running slot in jlib::sys::thread" << std::endl
+                         << e.what() << std::endl;
+                }
+                catch(...) {
+                    std::cerr << "unknown exception while running slot in jlib::sys::thread" << std::endl;
+                }
+
+                if(mutex != "") {
+                    if(std::getenv("JLIB_SYS_DEBUG"))
+                        std::cout << "unlock(\""<<mutex<<"\")"<<std::endl;
+                    unlock(mutex);
+                }
+
+                if(std::getenv("JLIB_SYS_DEBUG"))
+                    std::cout << "leaving jlib::sys::thread worker"<<std::endl;
+            });
+
+            worker.detach();
+
             if(std::getenv("JLIB_SYS_DEBUG"))
                 std::cout << "leaving jlib::sys::thread()"<<std::endl;
         }
@@ -161,14 +159,7 @@ namespace jlib {
         void lock(std::string s) {
             if(std::getenv("JLIB_SYS_DEBUG"))
                 std::cout << "entering jlib::sys::lock(\""<<s<<"\")"<<std::endl;
-            if(g_mutex.find(s) == g_mutex.end()) {
-                if(std::getenv("JLIB_SYS_DEBUG"))
-                    std::cout << "didn't find mutex, creating it now" << std::endl;
-                g_mutex[s] = new pthread_mutex_t;
-                pthread_mutex_init(g_mutex[s], NULL);
-            }
-            if(pthread_mutex_lock(g_mutex[s]))
-                std::cerr << "error locking g_mutex[\""<<s<<"\"]"<<std::endl;
+            named_mutex(s).lock();
             if(std::getenv("JLIB_SYS_DEBUG"))
                 std::cout << "leaving jlib::sys::lock(\""<<s<<"\")"<<std::endl;
         }
@@ -176,28 +167,24 @@ namespace jlib {
         void unlock(std::string s) {
             if(std::getenv("JLIB_SYS_DEBUG"))
                 std::cout << "entering jlib::sys::unlock(\""<<s<<"\")"<<std::endl;
-            if(g_mutex.find(s) != g_mutex.end()) {
+            // As before, unlocking a name that was never locked is a no-op
+            // rather than an error.
+            if(std::mutex* m = find_named_mutex(s)) {
                 if(std::getenv("JLIB_SYS_DEBUG"))
                     std::cout << "found mutex, unlocking"<<std::endl;
-                if(pthread_mutex_unlock(g_mutex[s]))
-                    std::cerr << "error unlocking g_mutex[\""<<s<<"\"]"<<std::endl;
+                m->unlock();
             }
             if(std::getenv("JLIB_SYS_DEBUG"))
                 std::cout << "leaving jlib::sys::unlock(\""<<s<<"\")"<<std::endl;
         }
 
         bool locked(std::string s) {
-            if(g_mutex.find(s) == g_mutex.end()) {
-                g_mutex[s] = new pthread_mutex_t;
-                pthread_mutex_init(g_mutex[s], NULL);
-            }
-            if(pthread_mutex_trylock(g_mutex[s])) {
-                return true;
-            }
-            else {
-                pthread_mutex_unlock(g_mutex[s]);
+            std::mutex& m = named_mutex(s);
+            if(m.try_lock()) {
+                m.unlock();
                 return false;
             }
+            return true;
         }
 
         void shell(std::string cmd) {

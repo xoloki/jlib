@@ -28,7 +28,6 @@
 #include <sstream>
 #include <cstring>
 
-#include <sigc++/sigc++.h>
 
 #include <errno.h>
 #include <unistd.h>
@@ -47,7 +46,7 @@ namespace jlib {
                 virtual ~exception() throw() {}
                 virtual const char* what() const throw() { return m_msg.c_str(); }
                 
-                static void throw_errno(std::string msg) {
+                [[noreturn]] static void throw_errno(std::string msg) {
                     std::ostringstream o;
                     o << ((msg!="")?(msg+": "):"") << strerror(errno);
                     throw exception(o.str());

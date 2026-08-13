@@ -23,7 +23,7 @@
 
 
 #include <jlib/sys/object.hh>
-#include <glibmm/refptr.h>
+#include <memory>
 
 #include <cstring>
 
@@ -33,7 +33,7 @@ namespace ai {
 
 class Action : public sys::Object {
 public:
-    typedef Glib::RefPtr<Action> ptr;
+    typedef std::shared_ptr<Action> ptr;
 
     Action();
     virtual ~Action();

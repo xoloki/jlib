@@ -42,9 +42,9 @@ public:
     {
         set_timeout(m_timeout);
 
-        key_press.connect(sigc::mem_fun(this, &XPlot::key_pressed));
-        button_press.connect(sigc::mem_fun(this, &XPlot::button_pressed));
-        timeout.connect(sigc::mem_fun(this, &XPlot::on_timeout));
+        key_press.connect([this](auto&&... a) { return this->key_pressed(a...); });
+        button_press.connect([this](auto&&... a) { return this->button_pressed(a...); });
+        timeout.connect([this](auto&&... a) { return this->on_timeout(a...); });
     }
 
     void draw() {

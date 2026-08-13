@@ -1,10 +1,25 @@
 Source: jlib
-Section: unknown
-Priority: extra
-Maintainer: Joey Yandle <dragon@dancingdragon.net>
-Build-Depends: debhelper (>= 7), autotools-dev
-Standards-Version: 3.8.0
-Homepage: 
+Section: libs
+Priority: optional
+Maintainer: Joey Yandle <xoloki@gmail.com>
+Build-Depends: debhelper (>= 12),
+               autoconf,
+               automake,
+               autoconf-archive,
+               libtool,
+               pkg-config,
+               libjson-c-dev,
+               libgpgme-dev,
+               libssl-dev,
+               libsodium-dev,
+               portaudio19-dev,
+               libglfw3-dev,
+               libx11-dev,
+               libxext-dev,
+               libgl-dev,
+               libglu1-mesa-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/xoloki/jlib
 
 Package: jlib
 Architecture: any
@@ -14,5 +29,6 @@ Description: C++ cornucopia
 
 Package: jlib-doc
 Architecture: all
+Depends: ${misc:Depends}
 Description: documentation for jlib
  C++ libraries for crypto, net, media, gl, sys

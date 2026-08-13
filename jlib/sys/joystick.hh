@@ -21,9 +21,7 @@
 #ifndef JLIB_SYS_JOYSTICK_HH
 #define JLIB_SYS_JOYSTICK_HH
 
-#include <glibmm/thread.h>
 
-#include <sigc++/slot.h>
 
 #include <iostream>
 #include <sstream>

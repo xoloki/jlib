@@ -21,7 +21,7 @@
 #ifndef JLIB_MEDIA_PLAYER_HH
 #define JLIB_MEDIA_PLAYER_HH
 
-#include <sigc++/sigc++.h>
+#include <jlib/sys/signal.hh>
 
 #include <jlib/sys/sync.hh>
 #include <jlib/sys/Servent.hh>

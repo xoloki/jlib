@@ -19,8 +19,8 @@
  */
 
 #include <jlib/glu/textures.hh>
-#include <GL/glu.h>
-#include <GL/gl.h>
+#include <jlib/gl/opengl.hh>
+#include <jlib/gl/opengl.hh>
 
 const int RES     = 128;
 const int DEPTH   = 4;

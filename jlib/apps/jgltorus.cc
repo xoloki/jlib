@@ -25,9 +25,8 @@
 
 #include <cstdlib>
 
-#include <GL/gl.h>
-#include <GL/glu.h>
-#include <GL/glut.h>
+#include <jlib/gl/opengl.hh>
+#include <jlib/glut/glut.hh>
 
 #include <unistd.h>
 
@@ -83,20 +82,20 @@ void make_color(GLfloat* vals, int i);
 
 int main(int argc, char** argv) {
     try {
-        glut::Main::keyboard.connect(sigc::ptr_fun(&on_keyboard));
-        glut::Main::special.connect(sigc::ptr_fun(&on_special));
-        glut::Main::mouse.connect(sigc::ptr_fun(&on_mouse));
-        glut::Main::idle.connect(sigc::ptr_fun(&on_idle));
+        glut::Main::keyboard.connect(&on_keyboard);
+        glut::Main::special.connect(&on_special);
+        glut::Main::mouse.connect(&on_mouse);
+        glut::Main::idle.connect(&on_idle);
 
-        //glut::Main::init_buffers.connect(sigc::ptr_fun(&glut::Main::transparent_init_buffers));
-        //glut::Main::init_lights.connect(sigc::ptr_fun(&glut::Main::transparent_init_lights));
-        glut::Main::init_buffers.connect(sigc::ptr_fun(&glut::Main::default_init_buffers));
-        glut::Main::init_lights.connect(sigc::ptr_fun(&glut::Main::default_init_lights));
-        glut::Main::init_textures.connect(sigc::ptr_fun(&glut::Main::default_init_textures));
-        glut::Main::make_textures.connect(sigc::ptr_fun(&glut::Main::make_checkered_texture));
+        //glut::Main::init_buffers.connect(&glut::Main::transparent_init_buffers);
+        //glut::Main::init_lights.connect(&glut::Main::transparent_init_lights);
+        glut::Main::init_buffers.connect(&glut::Main::default_init_buffers);
+        glut::Main::init_lights.connect(&glut::Main::default_init_lights);
+        glut::Main::init_textures.connect(&glut::Main::default_init_textures);
+        glut::Main::make_textures.connect(&glut::Main::make_checkered_texture);
 
-        glut::Main::reshape.connect(sigc::ptr_fun(&on_reshape));
-        glut::Main::display.connect(sigc::ptr_fun(&on_display));
+        glut::Main::reshape.connect(&on_reshape);
+        glut::Main::display.connect(&on_display);
 
         glut::Main::init(argc, argv);
         glut::Main::run();

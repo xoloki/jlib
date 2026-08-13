@@ -53,7 +53,7 @@ Plot<T>::Plot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h)
 {    
     set_auto_flush(false);
 
-    configure_notify.connect(sigc::mem_fun(this, &Plot::on_configure));
+    configure_notify.connect([this](auto&&... a) { return this->on_configure(a...); });
 }
 
 

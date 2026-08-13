@@ -1,22 +1,28 @@
 # Process this file with autoconf to produce a configure script.-*- autoconf -*-
+AC_PREREQ([2.69])
 AC_INIT([jlib], [1.2.0], [xoloki@gmail.com])
-AC_CONFIG_SRCDIR([config.h.in])
 
-AM_CONFIG_HEADER([config.h])
-AM_INIT_AUTOMAKE([foreign])
+AC_CONFIG_SRCDIR([jlib/sys/sys.hh])
+AC_CONFIG_MACRO_DIRS([m4])
+AC_CONFIG_HEADERS([config.h])
+
+AM_INIT_AUTOMAKE([foreign subdir-objects])
+AM_SILENT_RULES([yes])
+
+AC_CANONICAL_HOST
 
 JLIB_MAJOR_VERSION=1
 JLIB_MINOR_VERSION=2
 JLIB_MICRO_VERSION=0
 
-AC_DEFINE_UNQUOTED(JLIB_MAJOR_VERSION, $JLIB_MAJOR_VERSION, jlib major version)
-AC_DEFINE_UNQUOTED(JLIB_MINOR_VERSION, $JLIB_MINOR_VERSION, jlib minor version)
-AC_DEFINE_UNQUOTED(JLIB_MICRO_VERSION, $JLIB_MICRO_VERSION, jlib micro version)
+AC_DEFINE_UNQUOTED([JLIB_MAJOR_VERSION], [$JLIB_MAJOR_VERSION], [jlib major version])
+AC_DEFINE_UNQUOTED([JLIB_MINOR_VERSION], [$JLIB_MINOR_VERSION], [jlib minor version])
+AC_DEFINE_UNQUOTED([JLIB_MICRO_VERSION], [$JLIB_MICRO_VERSION], [jlib micro version])
 
 # +1 : ? : +1  == new interface that does not break old one
 # +1 : ? : 0   == new interface that breaks old one
 #  ? : ? : 0   == no new interfaces, but breaks apps
-#  ? :+1 : ?   == just some internal changes, nothing breaks but might work 
+#  ? :+1 : ?   == just some internal changes, nothing breaks but might work
 #                 better
 # CURRENT : REVISION : AGE
 libj_so_version="6:6:1"
@@ -24,327 +30,284 @@ libj_so_version="6:6:1"
 jlib_version="$JLIB_MAJOR_VERSION.$JLIB_MINOR_VERSION.$JLIB_MICRO_VERSION"
 jlib_release="$JLIB_MAJOR_VERSION.$JLIB_MINOR_VERSION"
 
+AC_SUBST([JLIB_VERSION], [$jlib_version])
+AC_SUBST([JLIB_RELEASE], [$jlib_release])
+AC_SUBST([LIBJ_SO_VERSION], [$libj_so_version])
 
-AC_SUBST(JLIB_VERSION, $jlib_version)
-AC_SUBST(JLIB_RELEASE, $jlib_release)
-AC_SUBST(LIBJ_SO_VERSION, $libj_so_version)
+dnl ------------------------------------------------------------------
+dnl Toolchain
+dnl ------------------------------------------------------------------
 
-#AC_CANONICAL_TARGET
-#AC_CANONICAL_SYSTEM
-
-AC_PROG_LN_S
-AM_PROG_LIBTOOL
 AC_PROG_CXX
+AM_PROG_AR
+LT_INIT
+AC_LANG([C++])
 
-dnl Checks for programs.
+dnl Select strict C++20.  This is done directly rather than through
+dnl AX_CXX_COMPILE_STDCXX because that macro's ext/noext argument handling
+dnl differs between autoconf-archive releases (serial 23 drives the MSVC
+dnl -std:c++NN spelling from its "ext" branch), and because an explicit probe
+dnl keeps bootstrapping independent of autoconf-archive being installed.
+dnl Strict c++20 is deliberate: it rejects GNU extensions, which is what we
+dnl want from a portability cleanup targeting both clang and gcc.
+AC_MSG_CHECKING([whether $CXX accepts -std=c++20])
+jlib_save_CXX="$CXX"
+CXX="$CXX -std=c++20"
+AC_COMPILE_IFELSE(
+  [AC_LANG_PROGRAM([[#include <version>
+                     #include <string>]],
+                   [[static_assert(__cplusplus >= 202002L);
+                     std::string s = "c++20";]])],
+  [AC_MSG_RESULT([yes])
+   jlib_cxx_std="-std=c++20"],
+  [CXX="$jlib_save_CXX"
+   AC_MSG_RESULT([no])
+   AC_MSG_ERROR([a C++20 compiler is required (clang 15+ or gcc 11+)])])
 
-dnl Checks for libraries.
+AX_PTHREAD([], [AC_MSG_ERROR([a working pthread implementation is required])])
+LIBS="$PTHREAD_LIBS $LIBS"
+CXXFLAGS="$CXXFLAGS $PTHREAD_CFLAGS"
 
-dnl Checks for typedefs, structures, and compiler characteristics.
-AC_C_CONST
+dnl ------------------------------------------------------------------
+dnl Host platform
+dnl ------------------------------------------------------------------
 
-dnl Checks for library functions.
-#AC_CHECK_FUNCS(socket strstr)
+case $host_os in
+  darwin*) jlib_darwin=yes ;;
+  *)       jlib_darwin=no  ;;
+esac
+AM_CONDITIONAL([DARWIN], [test "x$jlib_darwin" = xyes])
 
-#ac_cpp="$CXX -E"
+dnl ------------------------------------------------------------------
+dnl System headers
+dnl
+dnl The C++ standard library headers this used to probe for are all
+dnl mandated by C++20 and no longer worth checking.  Only the POSIX and
+dnl platform headers that actually gate behaviour remain.
+dnl ------------------------------------------------------------------
 
-dnl Checking for C++ features
-AC_LANG_CPLUSPLUS
+AC_CHECK_HEADERS([arpa/inet.h netinet/in.h netdb.h sys/socket.h sys/ioctl.h \
+                  sys/types.h sys/time.h sys/stat.h unistd.h fcntl.h \
+                  dirent.h paths.h pthread.h regex.h], [],
+                 [AC_MSG_ERROR([required POSIX header $ac_header not found])])
 
-dnl Checks for header files.
-AC_HEADER_STDC
+AC_MSG_CHECKING([whether <paths.h> defines _PATH_MAILDIR])
+AC_COMPILE_IFELSE(
+  [AC_LANG_PROGRAM([[#include <paths.h>]],
+                   [[const char* SYS_MAIL_DIR = _PATH_MAILDIR;]])],
+  [AC_MSG_RESULT([yes])],
+  [AC_MSG_RESULT([no])
+   AC_DEFINE_UNQUOTED([_PATH_MAILDIR], ["/var/spool/mail"],
+                      [fill in missing system maildir path])])
 
-AC_CHECK_HEADERS(string,,AC_MSG_ERROR(you need the c++ string header))
-
-AC_CHECK_HEADERS(iomanip,,AC_MSG_ERROR(you need the c++ iomanip header))
-
-AC_CHECK_HEADERS(iostream,,AC_MSG_ERROR(you need the c++iostream header))
-AC_CHECK_HEADERS(fstream,,AC_MSG_ERROR(you need the c++ fstream header))
-AC_CHECK_HEADERS(sstream,,AC_MSG_ERROR(you need the c++ sstream header))
-
-AC_CHECK_HEADERS(vector,,AC_MSG_ERROR(you need the c++ vector header))
-AC_CHECK_HEADERS(map,,AC_MSG_ERROR(you need the c++ map header))
-AC_CHECK_HEADERS(set,,AC_MSG_ERROR(you need the c++ set header))
-AC_CHECK_HEADERS(stack,,AC_MSG_ERROR(you need the c++ stack header))
-AC_CHECK_HEADERS(list,,AC_MSG_ERROR(you need the c++ list header))
-
-AC_CHECK_HEADERS(exception,,AC_MSG_ERROR(you need the c++ exception header))
-AC_CHECK_HEADERS(algorithm,,AC_MSG_ERROR(you need the c++ algorithm header))
-AC_CHECK_HEADERS(functional,,AC_MSG_ERROR(you need the c++ functional header))
-AC_CHECK_HEADERS(memory,,AC_MSG_ERROR(you need the c++ memory header))
-
-AC_CHECK_HEADERS(bits/char_traits.h,,AC_MSG_ERROR(you need the c++ bits/char_traits.h header))
-
-#AC_CHECK_HEADERS(map,,AC_MSG_ERROR(you need the c++ map header))
-
-AC_CHECK_HEADERS(cctype,,AC_MSG_ERROR(you need the c++ cctype header))
-AC_CHECK_HEADERS(cstdio,,AC_MSG_ERROR(you need the c++ cstdio header))
-AC_CHECK_HEADERS(cstdarg,,AC_MSG_ERROR(you need the c++ cstdarg header))
-AC_CHECK_HEADERS(ctime,,AC_MSG_ERROR(you need the c++ ctime header))
-AC_CHECK_HEADERS(cmath,,AC_MSG_ERROR(you need the c++ cmath header))
-
-AC_CHECK_HEADERS(arpa/inet.h,,AC_MSG_ERROR(you need the arpa/inet.h header))
-AC_CHECK_HEADERS(netinet/in.h,,AC_MSG_ERROR(you need the netinet/in.h header))
-AC_CHECK_HEADERS(netdb.h,,AC_MSG_ERROR(you need the netdb.h header))
-
-AC_CHECK_HEADERS(sys/types.h,,AC_MSG_ERROR(you need the sys/types.h header))
-AC_CHECK_HEADERS(sys/time.h,,AC_MSG_ERROR(you need the sys/time.h header))
-AC_CHECK_HEADERS(sys/stat.h,,AC_MSG_ERROR(you need the sys/stat.h header))
-AC_CHECK_HEADERS(sys/socket.h,,AC_MSG_ERROR(you need the sys/socket.h header))
-AC_CHECK_HEADERS(sys/ioctl.h,,AC_MSG_ERROR(you need the sys/ioctl.h header))
-
-AC_CHECK_HEADERS(openssl/ssl.h,,AC_MSG_ERROR(you need the openssl/ssl.h header))
-
-AC_CHECK_HEADERS(paths.h,,AC_MSG_ERROR(you need the paths.h header))
-AC_CHECK_HEADERS(unistd.h,,AC_MSG_ERROR(you need the unistd.h header))
-AC_CHECK_HEADERS(fcntl.h,,AC_MSG_ERROR(you need the fcntl.h header))
-AC_CHECK_HEADERS(dirent.h,,AC_MSG_ERROR(you need the dirent.h header))
-AC_CHECK_HEADERS(errno.h,,AC_MSG_ERROR(you need the errno.h header))
-AC_CHECK_HEADERS(signal.h,,AC_MSG_ERROR(you need the signal.h header))
-AC_CHECK_HEADERS(pthread.h,,AC_MSG_ERROR(you need the pthread.h header))
-AC_CHECK_HEADERS(regex.h,,AC_MSG_ERROR(you need the regex.h header))
-
-AC_CHECK_HEADERS(X11/Xlib.h,have_x=true,AC_WARN(unable to find Xlib header: not compiling jlib::x code))
-AC_CHECK_HEADERS(X11/Xutil.h,,AC_WARN(unable to find Xlib util header: not compiling jlib::x code))
-
-AC_CHECK_HEADERS(GL/gl.h,have_gl=true,AC_WARN(unable to find OpenGL header: not compiling gl code))
-AC_CHECK_HEADERS(GL/glx.h,have_glx=true,AC_WARN(unable to find OpenGL X header: not compiling glx code))
-AC_CHECK_HEADERS(GL/glu.h,have_glu=true,AC_WARN(unable to find OpenGL utility header: not compiling glu code))
-AC_CHECK_HEADERS(GL/glut.h,have_glut=true,AC_WARN(unable to find OpenGL GL utility toolkit header: not compiling glut code))
-
-AC_CHECK_HEADERS(openssl/ssl.h,have_ssl=true,AC_WARN(unable to find openssl, not compiling ssl code))
-
-AC_CHECK_HEADERS(sys/soundcard.h,have_oss_audio=true,AC_WARN(unable to find oss audio, not compiling oss code))
-
-AC_CHECK_HEADERS(sodium.h,have_sodium=true,AC_WARN(you need the sodium.h header for elliptic curve crypto))
-AC_CHECK_HEADERS(sodium/crypto_core_ristretto255.h,have_sodium_ristretto=true,AC_WARN(you need the sodium ristretto header for elliptic curve crypto))
-
-#PKG_CHECK_MODULES(SIGC, sigc++-2.0 >= 2.0.16, CXXFLAGS="$CXXFLAGS $SIGC_CFLAGS";LIBS="$LIBS $SIGC_LIBS", AC_MSG_ERROR(cannot find sigc++-2.0))
+dnl ------------------------------------------------------------------
+dnl Required dependencies
+dnl ------------------------------------------------------------------
 
 PKG_PROG_PKG_CONFIG
 
-PKG_CHECK_MODULES(PKGS, [sigc++-2.0 >= 2.0.16 glibmm-2.4 >= 2.4.8 gthread-2.0 >= 2.0.0 ImageMagick++ >= 6.0.0 json-c >= 0.9], CXXFLAGS="$CXXFLAGS $PKGS_CFLAGS"; LIBS="$LIBS $PKGS_LIBS")
+PKG_CHECK_MODULES([JSONC],   [json-c >= 0.9])
+PKG_CHECK_MODULES([GPGME],   [gpgme >= 1.0])
+PKG_CHECK_MODULES([OPENSSL], [openssl >= 1.1])
 
-#AM_PATH_LIBGCRYPT([1.2.0], CXXFLAGS="$CXXFLAGS $LIBGCRYPT_CFLAGS";LIBS="$LIBS $LIBGCRYPT_LIBS", AC_MSG_ERROR(you need libgcrypt for crypto))
-AM_PATH_GPGME([0.3.15], CXXFLAGS="$CXXFLAGS $GPGME_CFLAGS";LIBS="$LIBS $GPGME_LIBS", AC_MSG_ERROR(you need gpgme for crypto))
+dnl jlib/crypt/crypt.hh calls gpg_strerror/gpg_strsource inline, so every
+dnl consumer links libgpg-error directly.  gpgme.pc only lists it under
+dnl Requires.private, which pkg-config expands for static linking alone.
+PKG_CHECK_MODULES([GPGERROR], [gpg-error])
 
-AC_ARG_WITH([cuda], AS_HELP_STRING([--with-cuda=/usr/local/cuda], [Use cuda located at the given path, or --without-cuda to disable]), cuda_path=$withval)
+dnl ------------------------------------------------------------------
+dnl Optional dependencies
+dnl ------------------------------------------------------------------
 
-AS_IF([test "$cuda_path" = "yes" -o "$cuda_path" = ""], [cuda_path='/usr/local/cuda'])
-AS_IF([test "$cuda_path" != "no"], AC_CHECK_HEADER([cuda_runtime.h], [have_cuda=true], [have_cuda=false]), [have_cuda=false])
-AS_IF([test "$have_cuda" = 'true'], [LIBS="$LIBS -L"$cuda_path/lib64" -lcublas"])
+dnl libsodium, and specifically a build with the ristretto255 primitives,
+dnl gates the elliptic curve code in jlib/crypt.
+have_sodium=no
+have_ristretto=no
+PKG_CHECK_MODULES([SODIUM], [libsodium >= 1.0.18], [have_sodium=yes], [have_sodium=no])
+AS_IF([test "x$have_sodium" = xyes],
+  [jlib_save_CPPFLAGS="$CPPFLAGS"
+   CPPFLAGS="$CPPFLAGS $SODIUM_CFLAGS"
+   AC_CHECK_HEADER([sodium/crypto_core_ristretto255.h],
+                   [have_ristretto=yes], [have_ristretto=no])
+   CPPFLAGS="$jlib_save_CPPFLAGS"])
+AS_IF([test "x$have_sodium" = xyes && test "x$have_ristretto" = xno],
+      [AC_MSG_WARN([libsodium lacks ristretto255: not building elliptic curve code])])
+AM_CONDITIONAL([HAVE_SODIUM],
+               [test "x$have_sodium" = xyes && test "x$have_ristretto" = xyes])
 
-AM_CONDITIONAL(HAVE_CUDA, test x$have_cuda = xtrue)
-AM_CONDITIONAL(HAVE_X, test x$have_x = xtrue)
-AM_CONDITIONAL(HAVE_GL, test x$have_gl = xtrue)
-AM_CONDITIONAL(HAVE_GLX, test x$have_glx = xtrue)
-AM_CONDITIONAL(HAVE_GLU, test x$have_glu = xtrue)
-AM_CONDITIONAL(HAVE_GLUT, test x$have_glut = xtrue)
-AM_CONDITIONAL(HAVE_SSL, test x$have_ssl = xtrue)
-AM_CONDITIONAL(HAVE_OSS_AUDIO, test x$have_oss_audio = xtrue)
-AM_CONDITIONAL(HAVE_SODIUM, test x$have_sodium = xtrue -a x$have_sodium_ristretto = xtrue)
+dnl PortAudio replaces the OSS backend in jlib/media.
+PKG_CHECK_MODULES([PORTAUDIO], [portaudio-2.0 >= 19],
+                  [have_portaudio=yes], [have_portaudio=no])
+AM_CONDITIONAL([HAVE_PORTAUDIO], [test "x$have_portaudio" = xyes])
 
-LIBS="$LIBS -lssl -lcrypto -lsodium"
+dnl GLFW replaces GLUT as the portable windowing backend.
+PKG_CHECK_MODULES([GLFW], [glfw3 >= 3.3], [have_glfw=yes], [have_glfw=no])
+AM_CONDITIONAL([HAVE_GLFW], [test "x$have_glfw" = xyes])
 
-if test "x$prefix" = "xNONE"; then
-    myprefix="/usr/local"
-else
-    myprefix="$prefix"
-fi
+dnl ImageMagick++ is only used by the jneural image classifiers.  IM7
+dnl renamed the module, so try the new spelling before the old one.
+PKG_CHECK_MODULES([MAGICK], [Magick++-7.Q16HDRI], [have_magick=yes],
+  [PKG_CHECK_MODULES([MAGICK], [Magick++-6.Q16], [have_magick=yes],
+    [PKG_CHECK_MODULES([MAGICK], [ImageMagick++ >= 6.0.0],
+                       [have_magick=yes], [have_magick=no])])])
+AM_CONDITIONAL([HAVE_MAGICK], [test "x$have_magick" = xyes])
 
-myexec_prefix=$myprefix
-myincludedir="$myprefix/include";
-mylibdir="$myexec_prefix/lib";
-
-jlib_cflags="-I$myincludedir/jlib-1.2 $SIGC_CFLAGS $GLIBMM_CFLAGS"
-jlib_libs="-ljcrypt -ljnet -ljsys -ljutil"
-
-if test x$have_oss_audio = xtrue; then 
-   jlib_libs="-ljmedia $jlib_libs"
-fi
-
-if test x$have_x = xtrue; then
-    jlib_libs="-ljx $jlib_libs"
-fi
-
-if test x$have_gl = xtrue && test x$have_glu = xtrue && test x$have_glut = xtrue; then
-    jlib_libs="-ljgl $jlib_libs"
-fi
-
-AS_IF([test "$have_cuda" = 'true'],[jlib_libs="-ljcuda $jlib_libs"])
-
-jlib_libs="-L$mylibdir $jlib_libs $SIGC_LIBS $GLIBMM_LIBS"
-
-AC_DEFINE_UNQUOTED(JLIB_CFLAGS,"$jlib_cflags",[jlib cflags])
-AC_DEFINE_UNQUOTED(JLIB_LIBS,"$jlib_libs",[jlib libs])
-
-AC_SUBST(JLIB_CFLAGS, $jlib_cflags)
-AC_SUBST(JLIB_LIBS, $jlib_libs)
-
-dnl Checking for _PATH_MAILDIR
-AC_MSG_CHECKING(if <paths.h> defines _PATH_MAILDIR)
-AC_TRY_COMPILE(
-[
-#include <paths.h>
-],[
-const char* SYS_MAIL_DIR = _PATH_MAILDIR;
-],[
-    ac_paths_path_maildir=yes
-],[
-    ac_paths_path_maildir=no
-    AC_DEFINE_UNQUOTED(_PATH_MAILDIR,"/var/spool/mail",[fill in missing system maildir path])
-])
-AC_MSG_RESULT([$ac_paths_path_maildir])
-
-
-dnl Checking for C++ features
-AC_MSG_CHECKING(if C++ compiler supports bool (required))
-AC_TRY_COMPILE(
-[
-],[
-    bool b=true;
-    bool b1=false;
-],[
-    ac_bool=yes
-],[
-    config_error=yes
-    AC_WARN(bool type is not supported by your compiler)
-])
-AC_MSG_RESULT([$ac_bool])
-
-AC_MSG_CHECKING(if C++ compiler supports std::string (required))
-AC_TRY_COMPILE(
-[
-#include <string>
-],[
-    std::string foo = "foo";
-],[
-    ac_std_string=yes
-],[
-    config_error=yes
-    AC_WARN(std::string type is not supported by your compiler)
-])
-AC_MSG_RESULT([$ac_std_string])
-
-AC_MSG_CHECKING(if C++ compiler supports std::stringstream (required))
-AC_TRY_RUN(
-[
-#include <sstream>
-#include <iostream>
-
-int main() {
-    std::istringstream i("abcdef");
-    std::ostringstream o;
-    o << "abcdef";
-    
-    if(o.str() != "abcdef")
-        return 1;
-
-    o.seekp(0, std::ios_base::beg);
-    o << "ghi";
-
-    o.seekp(0, std::ios_base::end);
-    o << "jkl";
-
-
-    if(o.str() != "ghidefjkl")
-        return 1;
-
-    char c;
-    i >> c;
-
-    if(c != 'a')
-        return 1;
-
-    i.seekg(3,std::ios_base::beg);
-    i >> c;
-
-    if(c != 'd')
-        return 1;
-
-    return 0;
-}
-
-],[
-    ac_std_stringstream=yes
-],[
-    config_error=yes
-    AC_WARN(std::stringstream type is not supported by your compiler)
-])
-AC_MSG_RESULT([$ac_std_stringstream])
-
-AC_MSG_CHECKING(if C++ compiler supports specialized member template functions (required))
-AC_TRY_RUN(
-[
-#include <string>
-#include <sstream>
-
-class foo {
-public:
-  template <class T> T get(std::string s);
-};
-template <class T> 
-inline
-T foo::get(std::string s) {
-    std::istringstream i(s);
-    T ret;
-    i >> ret;
-    return ret;
-}
-
-template <> 
-inline
-std::string foo::get<std::string>(std::string s) {
-    return "foo";
-}
-
-int main() {
-    foo f;
-    int i = f.get<int>("1");
-    std::string s = f.get<std::string>("s");
-    if(i == 1 && s == "foo") return 0;
-    else return 1;
-}
-
-],[
-    ac_member_templates=yes
-],[
-    ac_member_templates=no
-    config_error=yes
-])
-AC_MSG_RESULT([$ac_member_templates])
-
+dnl ------------------------------------------------------------------
+dnl Windowing and graphics
 dnl
-dnl check if the previous C++ tests went OK
-dnl
-AC_MSG_CHECKING(if C++ environment provides all required features)
-if test "x$config_error" = xyes ; then
-  AC_MSG_RESULT([no])
-  AC_WARN(********************************************)
-  AC_WARN(*** You need gcc >= 3.0 from gcc.gnu.org ***)
-  AC_WARN(********************************************)
-  AC_MSG_ERROR(Config error - exiting ...)
-fi
-AC_MSG_RESULT([yes])
+dnl X11 and GLX are Linux-only here; macOS gets OpenGL through a
+dnl framework and has no GLX at all.
+dnl ------------------------------------------------------------------
 
-AC_CONFIG_FILES([Makefile \
-    jlib/Makefile \
-    jlib/crypt/Makefile \
-    jlib/gl/Makefile \
-    jlib/glu/Makefile \
-    jlib/glut/Makefile \
-    jlib/glx/Makefile \
-    jlib/math/Makefile \
-    jlib/media/Makefile \
-    jlib/net/Makefile \
-    jlib/sys/Makefile \
-    jlib/util/Makefile \
-    jlib/x/Makefile \
-    jlib/ai/Makefile \
-    jlib/cuda/Makefile \
-    jlib/apps/Makefile \
-    tests/Makefile \
+have_x=no
+have_gl=no
+have_glu=no
+have_glx=no
+have_glut=no
+
+AS_IF([test "x$jlib_darwin" = xyes],
+  [dnl Apple ships GL and GLU inside OpenGL.framework, and GLUT separately.
+   dnl Both are deprecated but present and functional; jlib's rendering is
+   dnl fixed-function 1.1/1.2, which needs the legacy 2.1 context they give.
+   have_gl=yes
+   have_glu=yes
+   have_glut=yes
+   GL_CFLAGS=""
+   GL_LIBS="-framework OpenGL"
+   GLU_CFLAGS=""
+   GLU_LIBS="-framework OpenGL"
+   GLUT_CFLAGS=""
+   GLUT_LIBS="-framework GLUT"
+   AC_SUBST([GL_CFLAGS])
+   AC_SUBST([GL_LIBS])
+   AC_SUBST([GLU_CFLAGS])
+   AC_SUBST([GLU_LIBS])
+   AC_SUBST([GLUT_CFLAGS])
+   AC_SUBST([GLUT_LIBS])],
+  [PKG_CHECK_MODULES([X11],  [x11 xext], [have_x=yes],   [have_x=no])
+   PKG_CHECK_MODULES([GL],   [gl],       [have_gl=yes],  [have_gl=no])
+   PKG_CHECK_MODULES([GLU],  [glu],      [have_glu=yes], [have_glu=no])
+   PKG_CHECK_MODULES([GLUT], [glut],     [have_glut=yes],[have_glut=no])
+   dnl GLX lives inside libGL and needs an X connection.
+   AS_IF([test "x$have_gl" = xyes && test "x$have_x" = xyes],
+         [have_glx=yes], [have_glx=no])])
+
+AM_CONDITIONAL([HAVE_X],    [test "x$have_x"    = xyes])
+AM_CONDITIONAL([HAVE_GL],   [test "x$have_gl"   = xyes])
+AM_CONDITIONAL([HAVE_GLU],  [test "x$have_glu"  = xyes])
+AM_CONDITIONAL([HAVE_GLX],  [test "x$have_glx"  = xyes])
+AM_CONDITIONAL([HAVE_GLUT], [test "x$have_glut" = xyes])
+
+dnl ------------------------------------------------------------------
+dnl OSS audio (legacy; superseded by PortAudio)
+dnl ------------------------------------------------------------------
+
+AC_CHECK_HEADERS([sys/soundcard.h], [have_oss_audio=yes], [have_oss_audio=no])
+AM_CONDITIONAL([HAVE_OSS_AUDIO], [test "x$have_oss_audio" = xyes])
+
+dnl ------------------------------------------------------------------
+dnl Linux joystick API, used by jlib/sys/joystick.hh
+dnl ------------------------------------------------------------------
+
+AC_CHECK_HEADERS([linux/joystick.h], [have_joystick=yes], [have_joystick=no])
+AM_CONDITIONAL([HAVE_JOYSTICK], [test "x$have_joystick" = xyes])
+
+dnl ------------------------------------------------------------------
+dnl CUDA
+dnl ------------------------------------------------------------------
+
+AC_ARG_WITH([cuda],
+  [AS_HELP_STRING([--with-cuda=/usr/local/cuda],
+                  [Use cuda located at the given path, or --without-cuda to disable])],
+  [cuda_path=$withval], [cuda_path=yes])
+
+AS_IF([test "x$cuda_path" = xyes], [cuda_path='/usr/local/cuda'])
+
+have_cuda=no
+AS_IF([test "x$cuda_path" != xno],
+  [jlib_save_CPPFLAGS="$CPPFLAGS"
+   CPPFLAGS="$CPPFLAGS -I$cuda_path/include"
+   AC_CHECK_HEADER([cuda_runtime.h], [have_cuda=yes], [have_cuda=no])
+   CPPFLAGS="$jlib_save_CPPFLAGS"])
+
+AS_IF([test "x$have_cuda" = xyes],
+  [CUDA_CFLAGS="-I$cuda_path/include"
+   CUDA_LIBS="-L$cuda_path/lib64 -lcublas -lcudart"],
+  [CUDA_CFLAGS=""
+   CUDA_LIBS=""])
+AC_SUBST([CUDA_CFLAGS])
+AC_SUBST([CUDA_LIBS])
+AM_CONDITIONAL([HAVE_CUDA], [test "x$have_cuda" = xyes])
+
+dnl ------------------------------------------------------------------
+dnl Installed pkg-config file
+dnl ------------------------------------------------------------------
+
+dnl This must list only libraries that are actually built.  jlib/glfw does not
+dnl exist yet (phase 4), and jlib/media is still gated on OSS (phase 3).
+jlib_libs="-ljai -ljnet -ljcrypt -ljutil -ljsys"
+AS_IF([test "x$have_oss_audio" = xyes], [jlib_libs="-ljmedia $jlib_libs"])
+AS_IF([test "x$have_x"    = xyes], [jlib_libs="-ljx $jlib_libs"])
+AS_IF([test "x$have_glx"  = xyes], [jlib_libs="-ljglx $jlib_libs"])
+AS_IF([test "x$have_glut" = xyes], [jlib_libs="-ljglut $jlib_libs"])
+AS_IF([test "x$have_glu"  = xyes], [jlib_libs="-ljglu $jlib_libs"])
+AS_IF([test "x$have_gl"   = xyes], [jlib_libs="-ljgl $jlib_libs"])
+AS_IF([test "x$have_cuda" = xyes], [jlib_libs="-ljcuda $jlib_libs"])
+
+AC_SUBST([JLIB_PC_CFLAGS], ["-I\${includedir}/jlib-$jlib_release"])
+AC_SUBST([JLIB_PC_LIBS],   ["-L\${libdir} $jlib_libs"])
+
+AC_CONFIG_FILES([Makefile
+    jlib/Makefile
+    jlib/crypt/Makefile
+    jlib/gl/Makefile
+    jlib/glu/Makefile
+    jlib/glut/Makefile
+    jlib/glx/Makefile
+    jlib/math/Makefile
+    jlib/media/Makefile
+    jlib/net/Makefile
+    jlib/sys/Makefile
+    jlib/util/Makefile
+    jlib/x/Makefile
+    jlib/ai/Makefile
+    jlib/cuda/Makefile
+    jlib/apps/Makefile
+    tests/Makefile
     jlib/jlib-1.2.pc
 ])
 
 AC_OUTPUT
+
+AC_MSG_NOTICE([
+
+  jlib $jlib_version
+
+    host ................. $host
+    C++ standard ......... C++20 ($CXX)
+
+  required
+    json-c ............... yes
+    gpgme ................ yes
+    openssl .............. yes
+
+  optional
+    libsodium/ristretto .. $have_sodium/$have_ristretto
+    portaudio ............ $have_portaudio
+    glfw ................. $have_glfw
+    ImageMagick++ ........ $have_magick
+    cuda ................. $have_cuda
+
+  windowing
+    x11 .................. $have_x
+    opengl ............... $have_gl
+    glu .................. $have_glu
+    glx .................. $have_glx
+    glut ................. $have_glut
+
+  platform
+    linux joystick ....... $have_joystick
+
+  legacy
+    oss audio ............ $have_oss_audio
+])

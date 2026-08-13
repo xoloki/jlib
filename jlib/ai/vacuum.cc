@@ -56,8 +56,8 @@ Percept::map Environment::perceive(Agent::ptr agent) {
 }
 
 void Environment::act(Agent::ptr agent, Action::ptr a) {
-    Move::ptr move = Move::ptr::cast_dynamic(a);
-    Clean::ptr clean = Clean::ptr::cast_dynamic(a);
+    Move::ptr move = std::dynamic_pointer_cast<Move>(a);
+    Clean::ptr clean = std::dynamic_pointer_cast<Clean>(a);
 
     if(move) {
         mLocations[agent] = move->loc;

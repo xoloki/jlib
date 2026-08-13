@@ -31,10 +31,10 @@ public:
     GLUTPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
         : HyperPlot<T, PlotType>(n, c, w, h)
     {
-        glut::Main::keyboard.connect(sigc::mem_fun(this, &HyperPlot<T,PlotType>::key_pressed));
-        glut::Main::mouse.connect(sigc::mem_fun(this, &HyperPlot<T,PlotType>::button_pressed));
+        glut::Main::keyboard.connect([this](auto&&... a) { return this->key_pressed(a...); });
+        glut::Main::mouse.connect([this](auto&&... a) { return this->button_pressed(a...); });
         glut::Main::idle.clear();
-        glut::Main::idle.connect(sigc::mem_fun(this, &GLUTPlot::on_timeout));
+        glut::Main::idle.connect([this](auto&&... a) { return this->on_timeout(a...); });
     }
 
     void set_color(const triple<T>& color) {

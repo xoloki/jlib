@@ -73,7 +73,10 @@ namespace jlib {
         }
         
         bool pipe::poll(event_type event_mask, int wait) {
-            static struct pollfd fds;
+            // This was a function-local static, shared by every thread calling
+            // poll() -- and Servent calls it from both its worker and from
+            // exec() on the caller's thread.
+            struct pollfd fds;
             if(event_mask == IN)
                 fds.fd = m_pipe[0];
             else if(event_mask == OUT)

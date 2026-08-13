@@ -21,7 +21,7 @@
 #ifndef JLIB_CRYPT_CRYPT_HH
 #define JLIB_CRYPT_CRYPT_HH
 
-#include <glibmm/refptr.h>
+#include <memory>
 
 #include <jlib/sys/object.hh>
 
@@ -73,7 +73,7 @@ namespace jlib {
 
             class data : public sys::Object {
             public:
-                typedef Glib::RefPtr<data> ptr;
+                typedef std::shared_ptr<data> ptr;
 
                 static ptr create(const char* data, size_t n, bool copy = true);
                 static ptr create(std::string data);
@@ -86,9 +86,16 @@ namespace jlib {
                 data(std::string file, bool copy);
                 data();
 
+            public:
+                // std::shared_ptr forms its deleter outside this class, so the
+                // destructor has to be reachable from there.  It was protected
+                // only because Glib::RefPtr deleted from inside the object via
+                // unreference(); the protected constructors above are what
+                // actually keep construction funnelled through create().  key
+                // and ctx below already expose theirs, and the sys::Object base
+                // has a public virtual destructor regardless.
                 ~data();
 
-            public:
                 void set_encoding(gpgme_data_encoding_t e);
                 gpgme_data_encoding_t get_encoding();
 
@@ -106,7 +113,7 @@ namespace jlib {
 
             class key : public sys::Object {
             public:
-                typedef Glib::RefPtr<key> ptr;
+                typedef std::shared_ptr<key> ptr;
                 typedef std::list<ptr> list;
 
                 key();
@@ -125,7 +132,7 @@ namespace jlib {
 
             class ctx : public sys::Object {
             public:
-                typedef Glib::RefPtr<ctx> ptr;
+                typedef std::shared_ptr<ctx> ptr;
 
                 ctx();
                 ~ctx();

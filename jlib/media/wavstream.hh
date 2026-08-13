@@ -26,7 +26,6 @@
 #include <string>
 #include <cstring>
 
-#include <bits/char_traits.h>
 
 #include <errno.h>
 

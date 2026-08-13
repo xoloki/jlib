@@ -27,7 +27,7 @@
 #include <jlib/util/util.hh>
 #include <jlib/util/URL.hh>
 
-#include <sigc++/sigc++.h>
+#include <jlib/sys/signal.hh>
 
 #include <string>
 #include <vector>
@@ -44,7 +44,7 @@ namespace jlib {
         
         class ConsoleMain : public sys::Object {
         public:
-            void push(std::string cmd, sigc::slot1<void,std::string> slot) {
+            void push(std::string cmd, std::function<void(std::string)> slot) {
                 m_handlers.insert(std::make_pair(cmd,slot));
             }
 
@@ -53,7 +53,7 @@ namespace jlib {
                 while(true) {
                     std::cout << prompt() << std::flush;
                     std::getline(std::cin,buf);
-                    std::map<std::string,sigc::slot1<void,std::string> >::iterator i;
+                    std::map<std::string,std::function<void(std::string)> >::iterator i;
                     for(i=m_handlers.begin();i!=m_handlers.end();i++) {
                         if(buf.find(i->first) == 0) {
                             std::string cmd = jlib::util::trim(buf.substr(i->first.length()));
@@ -77,7 +77,7 @@ namespace jlib {
             }
 
         protected:
-            std::map<std::string, sigc::slot1<void,std::string> > m_handlers;
+            std::map<std::string, std::function<void(std::string)> > m_handlers;
             std::string m_base;
             std::string m_tag;
             
@@ -98,10 +98,10 @@ namespace jlib {
                 m_tag = "> ";
                 m_folder = 0;
  
-                push("open", sigc::mem_fun(*this,&jlib::app::MailClient::open));
-                push("scan", sigc::mem_fun(*this,&jlib::app::MailClient::scan));
-                push("print", sigc::mem_fun(*this,&jlib::app::MailClient::print));
-                push("read", sigc::mem_fun(*this,&jlib::app::MailClient::read));                
+                push("open", [this](auto&&... a) { return this->open(a...); });
+                push("scan", [this](auto&&... a) { return this->scan(a...); });
+                push("print", [this](auto&&... a) { return this->print(a...); });
+                push("read", [this](auto&&... a) { return this->read(a...); });                
             }
 
             void scan(std::string) {

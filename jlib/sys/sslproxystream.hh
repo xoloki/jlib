@@ -22,7 +22,6 @@
 #define JLIB_SYS_SSLPROXYSTREAM_HH
 
 #include <jlib/sys/proxystream.hh>
-#include <glibmm/thread.h>
 
 #include <openssl/ssl.h>
 
@@ -43,8 +42,7 @@ namespace jlib {
             static const unsigned int BUF_SIZE = 1024;
 
             basic_sslproxybuf(std::string host, unsigned int port, 
-                              std::string phost, u_int pport) 
-                throw(std::exception)
+                              std::string phost, u_int pport)
                 : basic_proxybuf<charT,traitT>(host,port,phost,pport)
             {
                 open_ssl();
@@ -124,32 +122,16 @@ namespace jlib {
             }
 
         protected:
-            void open_ssl() throw(std::exception) {
-                static bool s_init = false;
-                static Glib::Mutex s_init_mutex;
-                static Glib::Mutex s_ctx_mutex;
-                static SSL_CTX* s_ctx = 0;
-
-                //std::cerr << "locking OpenSSL init mutex" << std::endl;
-                s_init_mutex.lock();
-                if(!s_init) {
-                    //std::cerr << "initializing OpenSSL" << std::endl;
-                    s_init = true;
-                    SSL_load_error_strings();
-                    SSL_library_init();
-                }
-                //std::cerr << "unlocking OpenSSL init mutex" << std::endl;
-                s_init_mutex.unlock();
+            void open_ssl() {
+                // OpenSSL 1.1 initializes itself on first use: SSL_library_init
+                // and SSL_load_error_strings became no-ops there and are gone in
+                // 3.0.  A function-local static is initialized exactly once and
+                // thread-safely as of C++11, which retires both of the
+                // hand-rolled mutexes this used to need.  SSLv23_client_method
+                // is the deprecated spelling of TLS_client_method.
+                static SSL_CTX* s_ctx = SSL_CTX_new(TLS_client_method());
 
                 int err;
-                
-                //std::cerr << "locking OpenSSL ctx mutex" << std::endl;
-                s_ctx_mutex.lock();
-                if(s_ctx == 0) {
-                    s_ctx = SSL_CTX_new(SSLv23_client_method());
-                }
-                s_ctx_mutex.unlock();
-                //std::cerr << "unlocking OpenSSL mutex" << std::endl;
 
                 if(s_ctx == 0) {
                     std::cerr <<"exception in jlib::sys::sslproxystream::open_ssl()"<<std::endl;

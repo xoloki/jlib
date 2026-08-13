@@ -19,19 +19,19 @@
  * XXX TODO fix this by printing the matrix contents out in a machine readable format.  correct for the different column layout, then get the same results from jhyper.  be rotating in all planes from the beginning. at some point the two modelview matricies will diverge, use this as a debugger to find out when/where it broke
  */
 
+#include <chrono>
 #include <iostream>
+#include <thread>
 
 #include <cstdlib>
 
 #include <unistd.h>
 
-#include <glibmm/thread.h>
-#include <glibmm/timer.h>
 
 #include <jlib/math/math.hh>
 #include <jlib/math/Plot.hh>
 #include <jlib/glut/main.hh>
-#include <GL/glut.h>
+#include <jlib/glut/glut.hh>
 
 #include <vector>
 #include <stack>
@@ -67,14 +67,14 @@ Plot<T>::Plot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h)
     //m_win = glutCreateWindow("jlib::glut::Plot");
     //glutReshapeWindow(w, h);
     
-    glut::Main::init_buffers.connect(sigc::ptr_fun(&glut::Main::default_init_buffers));
-    glut::Main::init_lights.connect(sigc::ptr_fun(&glut::Main::default_init_lights));
-    glut::Main::init_textures.connect(sigc::ptr_fun(&glut::Main::default_init_textures));
-    //glut::Main::make_textures.connect(sigc::ptr_fun(&glut::Main::make_checkered_texture));
+    glut::Main::init_buffers.connect(&glut::Main::default_init_buffers);
+    glut::Main::init_lights.connect(&glut::Main::default_init_lights);
+    glut::Main::init_textures.connect(&glut::Main::default_init_textures);
+    //glut::Main::make_textures.connect(&glut::Main::make_checkered_texture);
     
-    glut::Main::reshape.connect(sigc::mem_fun(this, &Plot<T>::on_reshape));
-    glut::Main::display.connect(sigc::mem_fun(this, &Plot<T>::on_display));
-    glut::Main::idle.connect(sigc::mem_fun(this, &Plot<T>::on_idle));
+    glut::Main::reshape.connect([this](auto&&... a) { return this->on_reshape(a...); });
+    glut::Main::display.connect([this](auto&&... a) { return this->on_display(a...); });
+    glut::Main::idle.connect([this](auto&&... a) { return this->on_idle(a...); });
 }
 
 
@@ -501,10 +501,10 @@ public:
     HardPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
         : HyperPlot<T, PlotType>(n, c, w, h)
     {
-        glut::Main::keyboard.connect(sigc::mem_fun(this, &HyperPlot<T,PlotType>::key_pressed));
-        glut::Main::mouse.connect(sigc::mem_fun(this, &HyperPlot<T,PlotType>::button_pressed));
+        glut::Main::keyboard.connect([this](auto&&... a) { return this->key_pressed(a...); });
+        glut::Main::mouse.connect([this](auto&&... a) { return this->button_pressed(a...); });
         glut::Main::idle.clear();
-        glut::Main::idle.connect(sigc::mem_fun(this, &HardPlot::on_timeout));
+        glut::Main::idle.connect([this](auto&&... a) { return this->on_timeout(a...); });
     }
 
     void on_timeout() {
@@ -513,7 +513,7 @@ public:
         
 
         if(waiting)
-            Glib::usleep(100000);
+            std::this_thread::sleep_for(std::chrono::microseconds(100000));
         else
             PlotType::on_idle();
     }

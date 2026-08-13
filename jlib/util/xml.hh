@@ -31,7 +31,7 @@
 #include <exception>
 
 #include <jlib/sys/object.hh>
-#include <glibmm/refptr.h>
+#include <memory>
 
 namespace jlib {
     namespace util {
@@ -95,9 +95,9 @@ namespace jlib {
             //!  node
             class node : public sys::Object {
             public:
-                typedef Glib::RefPtr<node> ptr;
-                typedef const Glib::RefPtr<node> const_ptr;
-                typedef Glib::RefPtr<const node> ptr_const;
+                typedef std::shared_ptr<node> ptr;
+                typedef const std::shared_ptr<node> const_ptr;
+                typedef std::shared_ptr<const node> ptr_const;
                 typedef std::map<std::string, std::string> attributes;
                 typedef std::list<ptr> list;
 

@@ -31,19 +31,37 @@
 namespace jlib {
     namespace sys {
 
-        Servent::Servent() 
-            : m_worker(0),
-              m_bunny(true)
+        Servent::Servent()
+            : m_bunny(true)
         {
         }
 
         Servent::~Servent() {
-            exec(Servent::EXIT);
-            while(m_bunny) Glib::Thread::yield();
+            // Backstop only.  By the time this runs the derived part of the
+            // object is already destroyed, so subclasses owning anything the
+            // worker touches must call stop() from their own destructor.
+            stop();
         }
-        
-        void Servent::map(id_type command, sigc::slot<void> slot) {
-            auto_lock<Glib::Mutex> lock(m_lock);
+
+        void Servent::stop() {
+            if(!m_worker.joinable())
+                return;
+
+            try {
+                exec(Servent::EXIT);
+            }
+            catch(std::exception& e) {
+                // The command pipe may already be unwritable; fall back to
+                // asking the loop to exit directly.
+                std::cerr << "jlib::sys::Servent::stop(): " << e.what() << std::endl;
+                m_bunny = false;
+            }
+
+            m_worker.join();
+        }
+
+        void Servent::map(id_type command, std::function<void()> slot) {
+            std::lock_guard<std::mutex> lock(m_lock);
 
             command_map_type::iterator i = m_commands.find(command);
             if(i == m_commands.end()) {
@@ -57,7 +75,7 @@ namespace jlib {
         }
 
         void Servent::add(condition_list_type::value_type condition) {
-            auto_lock<Glib::Mutex> lock(m_lock);
+            std::lock_guard<std::mutex> lock(m_lock);
             m_conditions.push_back(condition);
         }
 
@@ -70,7 +88,10 @@ namespace jlib {
         }
         
         void Servent::run() {
-            m_worker = Glib::Thread::create(sigc::mem_fun(this, &jlib::sys::Servent::start), false);
+            if(m_worker.joinable())
+                throw exception("run(): worker is already running");
+
+            m_worker = std::thread([this]() { start(); });
         }
         
         void Servent::start() {
@@ -89,7 +110,7 @@ namespace jlib {
                         if(std::getenv("JLIB_SYS_SERVENT_DEBUG"))
                             std::cerr << "jlib::sys::Servent::start(): read command: " 
                                       << command << std::endl;
-                        auto_lock<Glib::Mutex> lock(m_lock);
+                        std::lock_guard<std::mutex> lock(m_lock);
                         command_map_type::iterator i = m_commands.find(command);
                         if(i == m_commands.end()) {
                             throw exception("start(): cannot find signal for passed command");
@@ -98,7 +119,7 @@ namespace jlib {
                         i->second();
                     }
 
-                    auto_lock<Glib::Mutex> lock(m_lock);
+                    std::lock_guard<std::mutex> lock(m_lock);
                     if(std::getenv("JLIB_SYS_SERVENT_DEBUG"))
                         std::cerr << "jlib::sys::Servent::start(): checking through: " 
                                   << m_conditions.size() << " conditions" << std::endl;

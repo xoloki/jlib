@@ -54,7 +54,7 @@ namespace jlib {
         
         std::list<std::string> Pop3::retrieve() {
             std::list<std::string> buf;
-            std::auto_ptr<jlib::sys::socketstream> sock(connect());
+            std::unique_ptr<jlib::sys::socketstream> sock(connect());
 
             //std::string buf = retrieve(sock,which);
 

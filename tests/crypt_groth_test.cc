@@ -20,12 +20,20 @@
 
 #include <jlib/crypt/groth.hh>
 
+#include <iostream>
+
 #include <chrono>
 
 using namespace jlib::crypt::curve;
 using namespace jlib::crypt::groth;
 
 int main(int argc, char** argv) {
+    // libsodium requires this before any other call into it.
+    if(sodium_init() < 0) {
+        std::cerr << "sodium_init() failed" << std::endl;
+        return -1;
+    }
+
     {
         Scalar m = Scalar::random();
         Scalar m0 = Scalar::zero();

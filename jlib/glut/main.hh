@@ -21,7 +21,7 @@
 #ifndef JLIB_GLUT_MAIN_HH
 #define JLIB_GLUT_MAIN_HH
 
-#include <sigc++/sigc++.h>
+#include <jlib/sys/signal.hh>
 #include <string>
 
 namespace jlib {
@@ -36,18 +36,18 @@ public:
     
     static void run();
     
-    static sigc::signal0<void> init_buffers;
-    static sigc::signal0<void> init_lights;
-    static sigc::signal0<void> init_textures;
+    static sys::signal<void()> init_buffers;
+    static sys::signal<void()> init_lights;
+    static sys::signal<void()> init_textures;
     
-    static sigc::signal0<std::string> make_textures;
+    static sys::signal<std::string()> make_textures;
     
-    static sigc::signal0<void> display;
-    static sigc::signal2<void,int,int> reshape;
-    static sigc::signal3<void,unsigned char,int,int> keyboard;
-    static sigc::signal3<void,int,int,int> special;
-    static sigc::signal4<void,int,int,int,int> mouse;
-    static sigc::signal0<void> idle;
+    static sys::signal<void()> display;
+    static sys::signal<void(int,int)> reshape;
+    static sys::signal<void(unsigned char,int,int)> keyboard;
+    static sys::signal<void(int,int,int)> special;
+    static sys::signal<void(int,int,int,int)> mouse;
+    static sys::signal<void()> idle;
     
     static void on_display();
     static void on_reshape(int,int);

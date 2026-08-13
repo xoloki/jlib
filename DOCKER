@@ -1,22 +1,31 @@
-To build using docker, first install latest docker. Then do the following:
+Building jlib on Linux via Docker
+=================================
 
-# symlink the desired dockerfile
-rm -f Dockerfile
-ln -s Dockerfile.gcc75 Dockerfile
+The source is copied into the image and compiled during the image build, not
+bind-mounted.  On macOS a bind mount crosses the VM's filesystem
+virtualization layer, which makes C++ compilation dramatically slower.
 
-# build the container
-sudo docker build -t jlib-build:gcc75 .
+    # build the toolchain image and compile jlib inside it
+    docker build -t jlib-build .
 
-# run the container
-sudo docker run -tiv `pwd`:`pwd` jlib-build:gcc75
+    # drop into a shell on the built tree
+    docker run --rm -ti jlib-build
 
-# from inside the container
-cd `pwd`
+Inside the container the build lives at /src/jlib/build:
 
-# configure
-mkdir build-gcc49
-cd build-gcc49
-../configure
+    cd /src/jlib/build
+    make check
+    make -j"$(nproc)"
 
-# build
-make -j6
+configure prints a feature summary saying which optional modules were enabled
+and which were skipped for want of a dependency.  On Linux it should report
+x11, glx and the joystick API as present; on macOS those are absent and the
+GL/GLU/GLUT frameworks are used instead.
+
+Dependencies install in their own layer, so editing source re-runs only the
+autogen/configure/make steps.  A .dockerignore keeps the host's build trees
+and generated autotools output out of the image so the container always
+bootstraps for its own platform.
+
+Note: the crypt_groth_test allocates heavily.  If it is killed with exit 137
+the container hit its memory ceiling -- raise the Docker VM's RAM allocation.

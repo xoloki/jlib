@@ -24,7 +24,7 @@
 #include <jlib/math/math.hh>
 #include <jlib/math/Plot.hh>
 #include <jlib/glut/main.hh>
-#include <GL/glut.h>
+#include <jlib/glut/glut.hh>
 
 #include <vector>
 #include <stack>
@@ -60,14 +60,14 @@ Plot<T>::Plot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h)
     //m_win = glutCreateWindow("jlib::glut::Plot");
     //glutReshapeWindow(w, h);
     
-    glut::Main::init_buffers.connect(sigc::ptr_fun(&glut::Main::default_init_buffers));
-    glut::Main::init_lights.connect(sigc::ptr_fun(&glut::Main::default_init_lights));
-    glut::Main::init_textures.connect(sigc::ptr_fun(&glut::Main::default_init_textures));
-    //glut::Main::make_textures.connect(sigc::ptr_fun(&glut::Main::make_checkered_texture));
+    glut::Main::init_buffers.connect(&glut::Main::default_init_buffers);
+    glut::Main::init_lights.connect(&glut::Main::default_init_lights);
+    glut::Main::init_textures.connect(&glut::Main::default_init_textures);
+    //glut::Main::make_textures.connect(&glut::Main::make_checkered_texture);
     
-    glut::Main::reshape.connect(sigc::mem_fun(this, &Plot<T>::on_reshape));
-    glut::Main::display.connect(sigc::mem_fun(this, &Plot<T>::on_display));
-    glut::Main::idle.connect(sigc::mem_fun(this, &Plot<T>::on_idle));
+    glut::Main::reshape.connect([this](auto&&... a) { return this->on_reshape(a...); });
+    glut::Main::display.connect([this](auto&&... a) { return this->on_display(a...); });
+    glut::Main::idle.connect([this](auto&&... a) { return this->on_idle(a...); });
 }
 
 

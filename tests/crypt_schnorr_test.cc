@@ -20,10 +20,18 @@
 
 #include <jlib/crypt/schnorr.hh>
 
+#include <iostream>
+
 using namespace jlib::crypt::schnorr;
 using namespace jlib::crypt::curve;
 
 int main(int argc, char** argv) {
+    // libsodium requires this before any other call into it.
+    if(sodium_init() < 0) {
+        std::cerr << "sodium_init() failed" << std::endl;
+        return -1;
+    }
+
     BasePoint G;
     Scalar x = Scalar::random();
     Point y = x * G;
@@ -49,7 +57,7 @@ int main(int argc, char** argv) {
     Scalar x2[2];
     x2[0] = Scalar::random();
     x2[1] = Scalar::random();
-    y = x2[0] * G + x2[1] * Commitment::H;
+    y = x2[0] * G + x2[1] * Commitment::H();
     GeneralProof<2> proof2 = prove<2>(y, x2);
 
     if(!verify(proof2)) {

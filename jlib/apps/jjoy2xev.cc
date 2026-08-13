@@ -35,7 +35,7 @@
 
 #include <jlib/util/util.hh>
 
-#include <bits/char_traits.h>
+#include <string>
 
 const bool DEBUG = getenv("JJOY2XEV_DEBUG");
 

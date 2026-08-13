@@ -26,6 +26,12 @@ using namespace jlib::crypt;
 
 
 int main(int argc, char** argv) {
+    // libsodium requires this before any other call into it.
+    if(sodium_init() < 0) {
+        std::cerr << "sodium_init() failed" << std::endl;
+        return -1;
+    }
+
     try {
         
     }
