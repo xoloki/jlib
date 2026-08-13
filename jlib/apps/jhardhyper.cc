@@ -20,6 +20,7 @@
  */
 
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <thread>
 
@@ -30,6 +31,7 @@
 
 #include <jlib/math/math.hh>
 #include <jlib/math/Plot.hh>
+#include <jlib/math/dump.hh>
 #include <jlib/glfw/Plot.hh>
 
 #include <vector>
@@ -46,6 +48,8 @@ using namespace jlib;
 using namespace jlib::math;
 
 typedef GLdouble T;
+
+const long double PI = 3.14159265358979323846264338;
 
 
 
@@ -68,7 +72,38 @@ protected:
     // glut::Main::default_reshape used gluPerspective(80, aspect, 0.1, 50),
     // which is what glu::projection::perspective sets up.
     virtual void on_configure(int width, int height);
+
+    /**
+     * Distance to put the GL camera at, worked out from how big the object
+     * actually came out.
+     *
+     * It cannot be a constant.  Every reduction step divides by w, so the
+     * projected object shrinks by roughly half per step: a 4-cube lands at
+     * half-extent 0.5 and a 5-cube at about 0.25, while a fixed camera stays
+     * put -- so the figure receded as D went up.
+     *
+     * Tracked as a running maximum rather than measured once.  The extent at
+     * frame zero is not the largest the figure reaches as it turns, so a
+     * one-shot measurement frames it too tightly and the corners clip.  Only
+     * ever moving back means it settles within a turn or two and never
+     * breathes.  change() resets it, so the e and d keys re-frame.
+     */
+    T m_camera = 0;
+    T m_radius = 0;
+
+    virtual void change(uint n);
 };
+
+template<typename T>
+inline
+void HPlot<T>::change(uint n) {
+    // D is about to change, so the projected extent will too -- and it shrinks
+    // by roughly half for every dimension added.  Re-measure from scratch.
+    m_camera = 0;
+    m_radius = 0;
+
+    glfw::Plot<T>::change(n);
+}
 
 template<typename T>
 inline
@@ -85,7 +120,6 @@ void HPlot<T>::on_configure(int width, int height) {
     this->height = height;
 
     glu::projection::perspective(width, height);
-    glLoadIdentity();
 
     this->draw();
 }
@@ -131,6 +165,48 @@ void HPlot<T>::draw() {
             transformed.insert(std::make_pair(v1, tv1));
         }
 
+        // Frame the object: far enough back that the outermost vertex sits
+        // inside the field, growing the distance if a later rotation reaches
+        // further than anything seen so far.
+        T radius = 0;
+        typename std::map<math::vertex<T>, math::vertex<T> >::iterator t;
+        for(t = transformed.begin(); t != transformed.end(); t++) {
+            const math::vertex<T>& v = t->second;
+            T r2 = 0;
+            for(uint k = 0; k < 3 && k < v.D; k++)
+                r2 += v[k] * v[k];
+            if(r2 > radius) radius = r2;
+        }
+        radius = std::sqrt(radius);
+
+        if(radius > m_radius)
+            m_radius = radius;
+
+        // Scale the figure to a fixed size rather than moving the camera to
+        // meet it.
+        //
+        // Chasing it with the camera works until about D=7: each reduction
+        // step divides by w, so by then the object is down to a radius of
+        // ~0.06, the camera closes to ~0.12, and the near half of the figure
+        // crosses gluPerspective's near plane at 0.1 and clips.  Normalizing
+        // instead keeps the camera at a comfortable distance for every D, and
+        // has the object appear the same size throughout.
+        const T scale = (m_radius > 0) ? (1.0 / m_radius) : 1.0;
+
+        // 80 degree vertical field, so a half-angle of 40; 0.6 leaves room for
+        // the corners, which swing wider than the radius on any one frame.
+        const T half_field = std::tan(40.0 * PI / 180.0);
+        m_camera = 1.0 / (0.6 * half_field);
+
+        // The 3-D camera, set here rather than through the N-D lookAt so it
+        // is not scaled by the perspective divide.  See initialize_glazzies.
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+        gluLookAt(0, 0, m_camera,
+                  0, 0, 0,
+                  0, 1, 0);
+        glScaled(scale, scale, scale);
+
         for(uint j = 0; j < object.size(); j++) {
             math::vertex<T>& v1 = object[j];
             math::vertex<T>& tv1 = transformed.find(v1)->second;
@@ -149,6 +225,8 @@ void HPlot<T>::draw() {
     }
 
 	this->flush();
+
+    math::dump::frame_done();
 }
 
 template<typename T>
@@ -171,12 +249,12 @@ math::vertex<T> HPlot<T>::transform(const math::vertex<T>& vertex) const {
         ret.change(d-1);
     }
 
+    math::dump::vertex("hard", vertex, ret);
+
     return ret;
 }
 
 typedef HPlot<T> PlotType;
-
-const long double PI = 3.14159265358979323846264338;
 
 template<class O>
 struct triple {
@@ -223,7 +301,7 @@ template<typename T, typename Plot>
 inline
 HyperPlot<T,Plot>::HyperPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
     : Plot(n, c, w, h),
-      r(n - 1),
+      r(n),
       first(true),
       rotate(matrix<T>::identity(n+1)),
       back_rotate(matrix<T>::identity(n+1)),
@@ -238,7 +316,14 @@ HyperPlot<T,Plot>::HyperPlot(uint n, std::vector< std::pair<T,T> > c, uint w, ui
 template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::initialize(uint n) {
-    r = n - 1;
+    // Rotate in every plane, including those touching the highest axis.
+    //
+    // This defaulted to n-1, so a 4-cube's planes were only ever (0,1), (0,2)
+    // and (1,2): nothing rotated through the fourth dimension, the two nested
+    // cubes tumbled rigidly together, and the figure never everted -- which is
+    // the entire thing a hypercube viewer exists to show.  The f key still
+    // lowers it if you want the shell on its own.
+    r = n;
 
     initialize_glazzies(n);
     this->setClip(clip);
@@ -301,19 +386,14 @@ void HyperPlot<T,Plot>::draw_line(math::vertex<T> p1, math::vertex<T> p2) {
     glColor3fv(fcolors);
     glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, fcolors);
 
-    if(p1[p1.D] != 1)
-        std::cout << "draw_line: p1[p1.D] = " << p1[p1.D] << std::endl;
-    if(p2[p2.D] != 1)
-        std::cout << "draw_line: p2[p2.D] = " << p2[p2.D] << std::endl;
-
+    // This used to print every coordinate of every vertex on every frame,
+    // which made the app unusably slow.  JLIB_PLOT_DUMP captures one frame to
+    // a file instead; see jlib/math/dump.hh.
     math::vertex<T> mid(p2.D);
-    std::cout << std::fixed;
     for(unsigned int i = 0; i < mid.D; i++) {
         mid[i] = (p1[i] + p2[i]) / 2;
-        std::cout << std::setw(5) << std::setprecision(2) << p1[i] << " "  << std::setw(5) << std::setprecision(2)<< p2[i] << " "  << std::setw(5) << std::setprecision(2)<< mid[i] << std::endl;
-    } 
-    std::cout << std::endl;
-   
+    }
+
     Plot::draw_line(p1, mid);
     //Plot::draw_line(p1, p2);
 }
@@ -392,10 +472,13 @@ void HyperPlot<T,Plot>::initialize_rotation(uint n) {
 template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::initialize_glazzies(uint n) {
+    const T r2 = 3;
+    const T r22 = r2 / 2;
+
     clip.clear();
-    clip.push_back(std::make_pair(-3, 3));
-    clip.push_back(std::make_pair(-3, 3));
-    
+    clip.push_back(std::make_pair(-r22, r22));
+    clip.push_back(std::make_pair(-r22, r22));
+
     eye.change(n);
     eye[0] = 0;
     eye[1] = 0;
@@ -408,10 +491,38 @@ void HyperPlot<T,Plot>::initialize_glazzies(uint n) {
     center[0] = 0;
     center[1] = 0;
 
-    for(uint i = 2; i < n; i++) {
-        clip.push_back(std::make_pair(-3, 3));
-        i == 2 ? eye[i] = 3 : eye[i] = 0;
-        //eye[i] = 2.5;
+    // Axis 2 is not projected away here: this reduction stops at three
+    // dimensions and hands x, y, z to OpenGL.  So its clip entry is only ever
+    // a frustum extent, and its eye offset exists to put the object in front
+    // of the GL camera, which sits at the origin looking down -z.
+    // Axis 2 gets NO eye offset, unlike the axes above it.
+    //
+    // This reduction stops at three dimensions and hands x, y, z to OpenGL,
+    // which applies its own perspective.  Putting the 3-D camera distance
+    // into the N-D lookAt means it is applied *before* the 4-D divide and
+    // scaled by it -- and then GL divides x,y by that already-divided z, so
+    // the w cancels out exactly and the 4-D perspective has no effect on
+    // apparent size.  The inner and outer cubes come out identical.
+    //
+    // The 3-D camera belongs in GL, after the reduction; see on_configure.
+    if(n > 2) {
+        clip.push_back(std::make_pair(-r22, r22));
+        eye[2] = 0;
+        up[2] = 0;
+        center[2] = 0;
+    }
+
+    // Every axis above the third *is* projected away, and each needs a
+    // frustum wholly in front of the eye.
+    //
+    // This used to push (-3, 3) -- a negative near plane -- and leave eye[i]
+    // at 0 for every axis but the second.  project() yields w = -x_{d-1}, so
+    // a hypercube spanning +-1 about an eye of 0 gives w = -+1: the
+    // perspective divide then flips sign for half the vertices and mirrors
+    // them through the origin, with the two halves straddling the camera.
+    for(uint i = 3; i < n; i++) {
+        clip.push_back(std::make_pair(r22, 3*r22));
+        eye[i] = r2;
         up[i] = 0;
         center[i] = 0;
     }

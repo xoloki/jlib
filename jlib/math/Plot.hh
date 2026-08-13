@@ -22,6 +22,7 @@
 #define JLIB_MATH_PLOT_HH
 
 #include <jlib/math/math.hh>
+#include <jlib/math/dump.hh>
 
 #include <vector>
 #include <stack>
@@ -133,6 +134,8 @@ void Plot<T>::draw() {
             }
         }
     }
+
+    dump::frame_done();
 }
 
 
@@ -184,6 +187,8 @@ math::vertex<T> Plot<T>::transform(const math::vertex<T>& vertex) const {
         ret = p * v();
         ret.normalize();
     }
+
+    dump::vertex("base", vertex, ret);
 
     return ret;
 }

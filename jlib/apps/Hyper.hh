@@ -82,7 +82,7 @@ template<typename T, typename Plot>
 inline
 HyperPlot<T,Plot>::HyperPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
     : Plot(n, c, w, h),
-      r(n - 1),
+      r(n),
       first(true),
       rotate(matrix<T>::identity(n+1)),
       back_rotate(matrix<T>::identity(n+1)),
@@ -98,7 +98,14 @@ HyperPlot<T,Plot>::HyperPlot(uint n, std::vector< std::pair<T,T> > c, uint w, ui
 template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::initialize(uint n) {
-    r = n - 1;
+    // Rotate in every plane, including those touching the highest axis.
+    //
+    // This defaulted to n-1, so a 4-cube's planes were only ever (0,1), (0,2)
+    // and (1,2): nothing rotated through the fourth dimension, the two nested
+    // cubes tumbled rigidly together, and the figure never everted -- which is
+    // the entire thing a hypercube viewer exists to show.  The f key still
+    // lowers it if you want the shell on its own.
+    r = n;
     r2 = (n < 8 ? 3 : (1.1 * std::sqrt(static_cast<T>(n))));
 
     switch(shape) {
