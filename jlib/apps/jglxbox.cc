@@ -30,7 +30,6 @@
 #include <cstdlib>
 
 #include <jlib/gl/opengl.hh>
-#include <jlib/glut/glut.hh>
 
 #include <unistd.h>
 

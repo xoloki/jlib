@@ -18,23 +18,39 @@
  * 
  */
 
-#include <jlib/glut/Plot.hh>
+#include <jlib/glfw/Plot.hh>
 #include "Hyper.hh"
 #include <iostream>
 #include <unistd.h>
 
 typedef double T;
-typedef jlib::glut::Plot<T> PlotType;
+typedef jlib::glfw::Plot<T> PlotType;
 
-class GLUTPlot : public HyperPlot<T, PlotType> {
+class GLFWPlot : public HyperPlot<T, PlotType> {
 public:
-    GLUTPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
+    GLFWPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
         : HyperPlot<T, PlotType>(n, c, w, h)
     {
-        glut::Main::keyboard.connect([this](auto&&... a) { return this->key_pressed(a...); });
-        glut::Main::mouse.connect([this](auto&&... a) { return this->button_pressed(a...); });
-        glut::Main::idle.clear();
-        glut::Main::idle.connect([this](auto&&... a) { return this->on_timeout(a...); });
+        // Per-object signals, the same surface jhyper binds on x::Window.
+        // glut::Main could only publish process-global statics, because
+        // glutMainLoop() never returned and owned the dispatch itself.
+        key_press.connect([this](auto&&... a) { return this->key_pressed(a...); });
+        button_press.connect([this](auto&&... a) { return this->button_pressed(a...); });
+        timeout.connect([this](auto&&... a) { return this->on_timeout(a...); });
+    }
+
+    // GLFW reports typed text, as X does; HyperPlot wants a single char.
+    void key_pressed(std::string key, int x, int y) {
+        if(key.empty())
+            return;
+
+        HyperPlot<T, PlotType>::key_pressed(key[0], x, y);
+    }
+
+    // x::Window and glfw::Window report (button, x, y); HyperPlot expects a
+    // state argument in the middle, as GLUT supplied.
+    void button_pressed(int button, int x, int y) {
+        HyperPlot<T, PlotType>::button_pressed(button, 0, x, y);
     }
 
     void set_color(const triple<T>& color) {
@@ -46,8 +62,8 @@ public:
 
     void on_timeout() {
         HyperPlot<T, PlotType>::on_timeout();
-        
-        PlotType::on_idle();
+
+        this->draw();
     }
 };
 
@@ -58,11 +74,9 @@ int main(int argc, char** argv) {
     }
 
     try {
-        glut::Main::init(argc, argv, true, true, false);
+        GLFWPlot plot(D, std::vector< std::pair<T,T> >(), 700, 700);
 
-        GLUTPlot plot(D, std::vector< std::pair<T,T> >(), 700, 700);
-        
-        glut::Main::run();
+        plot.run();
     }
     catch(std::exception& e) {
         std::cerr << e.what() << std::endl;

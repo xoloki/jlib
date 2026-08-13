@@ -19,14 +19,18 @@
  */
 
 #include <jlib/math/math.hh>
-#include <jlib/glut/main.hh>
+#include <jlib/glfw/Window.hh>
 
 #include <iostream>
 
 #include <cstdlib>
 
 #include <jlib/gl/opengl.hh>
-#include <jlib/glut/glut.hh>
+#include <jlib/gl/shapes.hh>
+#include <jlib/gl/buffers.hh>
+#include <jlib/gl/lights.hh>
+#include <jlib/glu/textures.hh>
+#include <jlib/glu/projection.hh>
 
 #include <unistd.h>
 
@@ -71,9 +75,10 @@ const GLdouble H = 2.3;
 
 bool paused = false;
 
-void on_keyboard(unsigned char key, int x, int y);
-void on_special(int key, int x, int y);
-void on_mouse(int button, int state, int x, int y);
+jlib::glfw::Window* g_window = 0;
+
+void on_keyboard(std::string key, int x, int y);
+void on_mouse(int button, int x, int y);
 void on_idle();
 void on_display();
 void on_reshape(int w, int h);
@@ -82,23 +87,23 @@ void make_color(GLfloat* vals, int i);
 
 int main(int argc, char** argv) {
     try {
-        glut::Main::keyboard.connect(&on_keyboard);
-        glut::Main::special.connect(&on_special);
-        glut::Main::mouse.connect(&on_mouse);
-        glut::Main::idle.connect(&on_idle);
+        glfw::Window window("jlib GL torus", 700, 700);
+        g_window = &window;
 
-        //glut::Main::init_buffers.connect(&glut::Main::transparent_init_buffers);
-        //glut::Main::init_lights.connect(&glut::Main::transparent_init_lights);
-        glut::Main::init_buffers.connect(&glut::Main::default_init_buffers);
-        glut::Main::init_lights.connect(&glut::Main::default_init_lights);
-        glut::Main::init_textures.connect(&glut::Main::default_init_textures);
-        glut::Main::make_textures.connect(&glut::Main::make_checkered_texture);
+        window.key_press.connect(&on_keyboard);
+        window.button_press.connect(&on_mouse);
+        window.configure_notify.connect(&on_reshape);
+        window.timeout.connect(&on_idle);
 
-        glut::Main::reshape.connect(&on_reshape);
-        glut::Main::display.connect(&on_display);
+        // Directly, not through a signal someone must already have connected
+        // to: glut::Main emitted these before anything had a chance to.
+        gl::buffers::init(false, true, true);
+        gl::lights::init(false);
+        glu::textures::init(glu::textures::make_checker2d());
 
-        glut::Main::init(argc, argv);
-        glut::Main::run();
+        on_reshape(window.get_width(), window.get_height());
+
+        window.run();
     }
     catch(std::exception& e) {
         std::cerr << e.what() << std::endl;
@@ -112,7 +117,8 @@ int main(int argc, char** argv) {
 }
 
 void on_reshape(int w, int h) {
-    glut::Main::default_reshape(w, h);
+    glViewport(0, 0, w, h);
+    glu::projection::perspective(w, h);
 
 	glLoadIdentity();
 	gluLookAt(eyex, eyey, eyez, centerx, centery, centerz, upx, upy, upz);
@@ -140,12 +146,12 @@ void on_display() {
         glRotatef(inner_y_rad * 180 / PI, 0, 1, 0);
         glRotatef(inner_z_rad * 180 / PI, 0, 0, 1);
 
-        glutSolidTorus(inner, outer, sides, rings);
+        gl::shapes::torus(inner, outer, sides, rings);
 
         glPopMatrix();
     }
 
-	glutSwapBuffers();    
+	g_window->flush();
 }
 
 void make_color(GLfloat* vals, int i) {
@@ -157,26 +163,19 @@ void make_color(GLfloat* vals, int i) {
     vals[3] = 0.7;
 }
 
-void on_mouse(int button, int state, int x, int y) {
+void on_mouse(int button, int x, int y) {
     
 }
 
-void on_special(int key, int x, int y) {
-    switch(key) {
-    case GLUT_KEY_UP: 
-        N++; break;
-    case GLUT_KEY_DOWN: 
-        if(N > 2) N--; break;
-    default: break;
-        //std::cerr << "on_special: unknown key %d" << std::endl;
-    }
-    glutPostRedisplay();
-}
+void on_keyboard(std::string k, int x, int y) {
+    if(k.empty())
+        return;
 
-void on_keyboard(unsigned char key,int x,int y) {
-    if(key == 'q') {
+    const std::string key = k;
+
+    if(key == "q") {
         std::exit(0);
-    } else if(key == ' ') {
+    } else if(key == " ") {
         paused = !paused;
     }
 }
@@ -191,7 +190,7 @@ void on_idle() {
         increment(color_rad, color_inc);
     }
 
-    glutPostRedisplay();
+    on_display();
 }
 
 void increment(GLdouble& rad, const GLdouble& inc) {

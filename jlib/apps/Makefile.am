@@ -38,8 +38,8 @@ if HAVE_GLX
 glx_programs = jglxhyper jglxbox
 endif
 
-if HAVE_GLUT
-glut_programs = jgluthyper jhardhyper jgltorus
+if HAVE_GLFW
+glfw_programs = jglfwhyper jgltorus jhardhyper
 endif
 
 bin_PROGRAMS = jlib-mail jcrypt jm3u \
@@ -51,7 +51,7 @@ bin_PROGRAMS = jlib-mail jcrypt jm3u \
 	$(xjoy_programs) \
 	$(joy_programs) \
 	$(glx_programs) \
-	$(glut_programs)
+	$(glfw_programs)
 
 dist_pkgdata_DATA = wow-buttons-ps3.map wow-axes-ps3.map \
                     wow-buttons-x360.map wow-axes-x360.map \
@@ -68,7 +68,6 @@ JX_LA      = $(top_builddir)/jlib/x/libjx.la
 JGL_LA     = $(top_builddir)/jlib/gl/libjgl.la
 JGLU_LA    = $(top_builddir)/jlib/glu/libjglu.la
 JGLX_LA    = $(top_builddir)/jlib/glx/libjglx.la
-JGLUT_LA   = $(top_builddir)/jlib/glut/libjglut.la
 JMEDIA_LA  = $(top_builddir)/jlib/media/libjmedia.la
 JCUDA_LA   = $(top_builddir)/jlib/cuda/libjcuda.la
 
@@ -125,11 +124,16 @@ jglxhyper_LDADD   = $(JGLX_LA) $(JX_LA) $(JUTIL_LA) $(GLU_LIBS) $(GL_LIBS)
 jglxbox_SOURCES = jglxbox.cc
 jglxbox_LDADD   = $(JGLX_LA) $(JGLU_LA) $(JGL_LA) $(JX_LA) $(GLU_LIBS) $(GL_LIBS)
 
-jgluthyper_SOURCES = jgluthyper.cc
-jgluthyper_LDADD   = $(JGLUT_LA) $(GLUT_LIBS) $(GLU_LIBS) $(GL_LIBS)
+JGLFW_LA   = $(top_builddir)/jlib/glfw/libjglfw.la
 
-jhardhyper_SOURCES = jhardhyper.cc
-jhardhyper_LDADD   = $(JGLUT_LA) $(GLUT_LIBS) $(GLU_LIBS) $(GL_LIBS)
+jglfwhyper_SOURCES  = jglfwhyper.cc
+jglfwhyper_CPPFLAGS = $(AM_CPPFLAGS) $(GLFW_CFLAGS)
+jglfwhyper_LDADD    = $(JGLFW_LA) $(JGLU_LA) $(JGL_LA) $(GLFW_LIBS) $(GLU_LIBS) $(GL_LIBS)
 
-jgltorus_SOURCES = jgltorus.cc
-jgltorus_LDADD   = $(JGLUT_LA) $(GLUT_LIBS) $(GLU_LIBS) $(GL_LIBS)
+jhardhyper_SOURCES  = jhardhyper.cc
+jhardhyper_CPPFLAGS = $(AM_CPPFLAGS) $(GLFW_CFLAGS)
+jhardhyper_LDADD    = $(JGLFW_LA) $(JGLU_LA) $(JGL_LA) $(GLFW_LIBS) $(GLU_LIBS) $(GL_LIBS)
+
+jgltorus_SOURCES  = jgltorus.cc
+jgltorus_CPPFLAGS = $(AM_CPPFLAGS) $(GLFW_CFLAGS)
+jgltorus_LDADD    = $(JGLFW_LA) $(JGLU_LA) $(JGL_LA) $(GLFW_LIBS) $(GLU_LIBS) $(GL_LIBS)

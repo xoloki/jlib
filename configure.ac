@@ -171,31 +171,25 @@ have_x=no
 have_gl=no
 have_glu=no
 have_glx=no
-have_glut=no
 
 AS_IF([test "x$jlib_darwin" = xyes],
-  [dnl Apple ships GL and GLU inside OpenGL.framework, and GLUT separately.
-   dnl Both are deprecated but present and functional; jlib's rendering is
-   dnl fixed-function 1.1/1.2, which needs the legacy 2.1 context they give.
+  [dnl Apple ships GL and GLU inside OpenGL.framework.  Both are deprecated
+   dnl but present and functional; jlib.s rendering is fixed-function
+   dnl 1.1/1.2, which needs the legacy 2.1 context they give.
    have_gl=yes
    have_glu=yes
-   have_glut=yes
    GL_CFLAGS=""
    GL_LIBS="-framework OpenGL"
    GLU_CFLAGS=""
    GLU_LIBS="-framework OpenGL"
-   GLUT_CFLAGS=""
-   GLUT_LIBS="-framework GLUT"
    AC_SUBST([GL_CFLAGS])
    AC_SUBST([GL_LIBS])
    AC_SUBST([GLU_CFLAGS])
    AC_SUBST([GLU_LIBS])
-   AC_SUBST([GLUT_CFLAGS])
-   AC_SUBST([GLUT_LIBS])],
+],
   [PKG_CHECK_MODULES([X11],  [x11 xext], [have_x=yes],   [have_x=no])
    PKG_CHECK_MODULES([GL],   [gl],       [have_gl=yes],  [have_gl=no])
    PKG_CHECK_MODULES([GLU],  [glu],      [have_glu=yes], [have_glu=no])
-   PKG_CHECK_MODULES([GLUT], [glut],     [have_glut=yes],[have_glut=no])
    dnl GLX lives inside libGL and needs an X connection.
    AS_IF([test "x$have_gl" = xyes && test "x$have_x" = xyes],
          [have_glx=yes], [have_glx=no])])
@@ -204,7 +198,6 @@ AM_CONDITIONAL([HAVE_X],    [test "x$have_x"    = xyes])
 AM_CONDITIONAL([HAVE_GL],   [test "x$have_gl"   = xyes])
 AM_CONDITIONAL([HAVE_GLU],  [test "x$have_glu"  = xyes])
 AM_CONDITIONAL([HAVE_GLX],  [test "x$have_glx"  = xyes])
-AM_CONDITIONAL([HAVE_GLUT], [test "x$have_glut" = xyes])
 
 dnl ------------------------------------------------------------------
 dnl OSS audio (legacy; superseded by PortAudio)
@@ -257,7 +250,7 @@ jlib_libs="-ljai -ljnet -ljcrypt -ljutil -ljsys"
 AS_IF([test "x$have_oss_audio" = xyes], [jlib_libs="-ljmedia $jlib_libs"])
 AS_IF([test "x$have_x"    = xyes], [jlib_libs="-ljx $jlib_libs"])
 AS_IF([test "x$have_glx"  = xyes], [jlib_libs="-ljglx $jlib_libs"])
-AS_IF([test "x$have_glut" = xyes], [jlib_libs="-ljglut $jlib_libs"])
+AS_IF([test "x$have_glfw" = xyes], [jlib_libs="-ljglfw $jlib_libs"])
 AS_IF([test "x$have_glu"  = xyes], [jlib_libs="-ljglu $jlib_libs"])
 AS_IF([test "x$have_gl"   = xyes], [jlib_libs="-ljgl $jlib_libs"])
 AS_IF([test "x$have_cuda" = xyes], [jlib_libs="-ljcuda $jlib_libs"])
@@ -270,8 +263,8 @@ AC_CONFIG_FILES([Makefile
     jlib/crypt/Makefile
     jlib/gl/Makefile
     jlib/glu/Makefile
-    jlib/glut/Makefile
     jlib/glx/Makefile
+    jlib/glfw/Makefile
     jlib/math/Makefile
     jlib/media/Makefile
     jlib/net/Makefile
@@ -311,7 +304,6 @@ AC_MSG_NOTICE([
     opengl ............... $have_gl
     glu .................. $have_glu
     glx .................. $have_glx
-    glut ................. $have_glut
 
   platform
     linux joystick ....... $have_joystick
