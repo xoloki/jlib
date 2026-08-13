@@ -29,7 +29,6 @@
 
 
 #include <errno.h>
-#include <sys/soundcard.h>
 #include <sys/types.h>
 #include <netinet/in.h>
 

@@ -16,11 +16,17 @@ const long double 	PI = 3.14159265358979323846264338;
 
 
 int main(int argc, char** argv) {
+    // No output device (headless container): automake reads 77 as SKIP.
+    if(!jlib::media::PortAudioSink::have_output_device()) {
+        std::cerr << "no audio output device, skipping" << std::endl;
+        return 77;
+    }
+
     using namespace jlib::media;
 
     try {
         notestream note(220.0);
-        note.set_format(AFMT_U8);
+        note.set_format(Type::PCM_U8);
         note.set_channels(2);
         note.set_time(1);
 

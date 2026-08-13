@@ -4,7 +4,7 @@
 #include <cmath>
 
 #include <jlib/media/notestream.hh>
-#include <jlib/media/Dsp.hh>
+#include <jlib/media/PortAudioSink.hh>
 
 #include <jlib/sys/sys.hh>
 
@@ -67,7 +67,7 @@ void play(double freq, int format, int channels, double t) {
 }
 
 void play(jlib::media::notestream& ns, int format, int channels, double t) {
-    jlib::media::Dsp dsp;
+    jlib::media::PortAudioSink dsp;
 
     ns.set_format(format);
     ns.set_channels(channels);

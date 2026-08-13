@@ -24,6 +24,7 @@
 #include <iostream>
 #include <exception>
 #include <string>
+#include <vector>
 #include <cstring>
 
 
@@ -334,17 +335,20 @@ namespace jlib {
         basic_datastream<charT,traitT>* 
         basic_datastream<charT,traitT>::create_scaled(basic_stream<charT,traitT>* s) {
             int n = s->get_length() / (s->get_bits_per_sample()/8);
-            Type::scaled samples[n];
-            memset(samples,0,n*sizeof(Type::scaled));
+
+            // This was a variable-length array, so an audio file's length --
+            // attacker-controlled, or merely large -- decided how much stack
+            // to take.  VLAs are also a compiler extension, not C++.
+            std::vector<Type::scaled> samples(n, 0);
             s->rewind();
 
             for(int i=0;i<n;i++) {
                 samples[i] = s->get_scaled();
             }
-            
 
-            basic_datastream<charT,traitT>* r = 
-                new basic_datastream<charT,traitT>(std::string(reinterpret_cast<char*>(samples),
+
+            basic_datastream<charT,traitT>* r =
+                new basic_datastream<charT,traitT>(std::string(reinterpret_cast<char*>(samples.data()),
                                                                n*sizeof(Type::scaled)));
             r->set(*s);
             r->set_format(Type::PCM_FLOAT32);

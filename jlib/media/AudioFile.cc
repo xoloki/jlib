@@ -19,12 +19,12 @@
  */
 
 #include <jlib/media/AudioFile.hh>
+#include <jlib/media/Type.hh>
 
 #include <jlib/util/util.hh>
 
 #include <jlib/sys/sys.hh>
 
-#include <sys/soundcard.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
@@ -127,38 +127,16 @@ namespace jlib {
         int AudioFile::get(int p) const {
             int i=0;
 
-            if(m_format == AFMT_S8) {
-
+            // Only linear PCM is decoded; the compressed formats are
+            // recognized purely so they can be rejected.  The branches for the
+            // linear formats were all empty -- the actual work is below -- and
+            // OSS's MU_LAW, A_LAW and IMA_ADPCM have no Type::PCM_ equivalent,
+            // so those comparisons could never have matched.
+            if(m_format == Type::PCM_MPEG) {
+                throw exception("can't handle non-pcm format PCM_MPEG");
             }
-            else if(m_format == AFMT_U8) {
-
-            }
-            else if(m_format == AFMT_S16_LE) {
-
-            }
-            else if(m_format == AFMT_S16_BE) {
-
-            }
-            else if(m_format == AFMT_U16_LE) {
-
-            }
-            else if(m_format == AFMT_U16_BE) {
-
-            }
-            else if(m_format == AFMT_MU_LAW) {
-                throw exception("can't handle non-pcm format AFMT_MU_LAW");
-            }
-            else if(m_format == AFMT_A_LAW) {
-                throw exception("can't handle non-pcm format AFMT_A_LAW");
-            }
-            else if(m_format == AFMT_IMA_ADPCM) {
-                throw exception("can't handle non-pcm format AFMT_IMA_ADPCM");
-            }
-            else if(m_format == AFMT_MPEG) {
-                throw exception("can't handle non-pcm format AFMT_MPEG");
-            }
-            else if(m_format == AFMT_AC3) {
-                throw exception("can't handle non-pcm format AFMT_AC3");
+            else if(m_format == Type::PCM_AC3) {
+                throw exception("can't handle non-pcm format PCM_AC3");
             }
 
             if(m_bits_per_sample == 8)

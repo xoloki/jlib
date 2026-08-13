@@ -31,13 +31,14 @@
 
 #include <iostream>
 #include <exception>
+#include <sstream>
 #include <string>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
 
 #include <errno.h>
-#include <sys/soundcard.h>
 #include <sys/types.h>
 #include <netinet/in.h>
 
@@ -345,9 +346,31 @@ namespace jlib {
                 std::cerr << "channels         " << this->get_channels() << std::endl;
             }
 
+            // A note lasts get_time() seconds whatever its frequency, so
+            // freq*time is hardly ever a whole number of cycles: the waveform
+            // stops wherever it happens to be and drops straight to silence.
+            // At 443.7Hz for one second that last sample is -20287 out of a
+            // 21823 peak -- a 93% full-scale step, which is a click, and a
+            // melody is a train of them.
+            //
+            // Ramp the first and last few milliseconds instead.  That is
+            // short enough to be inaudible as a volume change and long
+            // enough to remove the discontinuity at any frequency, without
+            // altering the note's duration the way set_nearest_time() would.
+            const int fade = std::min(samples / 2,
+                                      static_cast<int>(this->get_samples_per_sec() * 0.005));
+
             for(int i=0;i<samples;i++) {
-                
-                int64_t sample = (int64_t)((vol*amp*sin(freq*this->get_time()*(2*pi)*(i/double(samples)))));
+
+                double envelope = 1.0;
+                if(fade > 0) {
+                    if(i < fade)
+                        envelope = 0.5 * (1.0 - cos(pi * i / fade));
+                    else if(i >= samples - fade)
+                        envelope = 0.5 * (1.0 - cos(pi * (samples - 1 - i) / fade));
+                }
+
+                int64_t sample = (int64_t)((envelope*vol*amp*sin(freq*this->get_time()*(2*pi)*(i/double(samples)))));
                 u_int64_t usample = sample+amp;
                 
                 
@@ -358,17 +381,17 @@ namespace jlib {
                     //char_type& c = data[(bytes_per_sample*this->get_channels()*i)+j*bytes_per_sample];
                     //char_type& d = data[(bytes_per_sample*this->get_channels()*i)+j*bytes_per_sample+1];
 
-                    if(this->get_format() == AFMT_U8) {
+                    if(this->get_format() == Type::PCM_U8) {
                         u_char s = (usample) & 0x00ff;
                         jlib::util::byte_copy(data,&s,1,p0);
                     }
-                    else if(this->get_format() == AFMT_S8) {
+                    else if(this->get_format() == Type::PCM_S8) {
                         if(sample > (pow(2,8)-1) || sample < (-pow(2,8)))
-                            throw exception("sample out of bounds at AFMT_S8");
+                            throw exception("sample out of bounds at Type::PCM_S8");
                         char s = sample;
                         jlib::util::byte_copy(data,&s,1,p0);
                     }
-                    else if(this->get_format() == AFMT_U16_LE) {
+                    else if(this->get_format() == Type::PCM_U16_LE) {
                         u_int16_t u = htons(usample);
                         char* v = reinterpret_cast<char*>(&u);
 
@@ -377,7 +400,7 @@ namespace jlib {
                         //c = (s & 0x00ff);
                         //d = (s & 0xff00) >> 8;
                     }
-                    else if(this->get_format() == AFMT_U16_BE) {
+                    else if(this->get_format() == Type::PCM_U16_BE) {
                         u_int16_t u = htons(usample);
                         char* v = reinterpret_cast<char*>(&u);
 
@@ -386,7 +409,7 @@ namespace jlib {
                         //c = (s & 0xff00) >> 8;
                         //d = (s & 0x00ff);
                     }
-                    else if(this->get_format() == AFMT_S16_LE) {
+                    else if(this->get_format() == Type::PCM_S16_LE) {
                         int16_t s = sample;
                         u_int16_t u = htons(static_cast<u_int16_t>(s));
                         char* v = reinterpret_cast<char*>(&u);
@@ -407,7 +430,7 @@ namespace jlib {
                         //c = (s & 0x00ff);
                         //d = (s & 0xff00) >> 8;
                     }
-                    else if(this->get_format() == AFMT_S16_BE) {
+                    else if(this->get_format() == Type::PCM_S16_BE) {
                         int16_t s = sample;
                         u_int16_t u = htons(s);
                         char* v = reinterpret_cast<char*>(&u);

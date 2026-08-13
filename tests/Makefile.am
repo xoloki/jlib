@@ -1,7 +1,7 @@
 # Public jlib headers include <gpgme.h>, <sodium.h>, <openssl/*.h> and
 # <json.h> directly, so anything compiling against them needs those -I flags.
 AM_CPPFLAGS = -I$(top_srcdir) \
-	$(GPGME_CFLAGS) $(GPGERROR_CFLAGS) $(SODIUM_CFLAGS) $(OPENSSL_CFLAGS) $(JSONC_CFLAGS)
+	$(GPGME_CFLAGS) $(GPGERROR_CFLAGS) $(SODIUM_CFLAGS) $(OPENSSL_CFLAGS) $(JSONC_CFLAGS) $(PORTAUDIO_CFLAGS)
 
 JSYS_LA   = $(top_builddir)/jlib/sys/libjsys.la
 JUTIL_LA  = $(top_builddir)/jlib/util/libjutil.la
@@ -10,9 +10,9 @@ JNET_LA   = $(top_builddir)/jlib/net/libjnet.la
 JMEDIA_LA = $(top_builddir)/jlib/media/libjmedia.la
 JX_LA     = $(top_builddir)/jlib/x/libjx.la
 
-# TODO(phase 3): the media tests are built but never run.  Once the PortAudio
-# backend lands they should move into TESTS.
-if HAVE_OSS_AUDIO
+# These play real audio, so they skip themselves when the host has no output
+# device rather than failing on a headless machine.
+if HAVE_PORTAUDIO
 MEDIA_TESTS = media_datastream_test \
               media_notestream_test \
               media_player_test \
@@ -51,9 +51,10 @@ TESTS = \
 	util_xml_test \
  \
 	$(X_TESTS) \
+	$(MEDIA_TESTS) \
 	$(CURVE_TESTS)
 
-check_PROGRAMS = $(TESTS) $(MEDIA_TESTS)
+check_PROGRAMS = $(TESTS)
 
 media_datastream_test_SOURCES = media_datastream_test.cc
 media_datastream_test_LDADD   = $(JMEDIA_LA)
@@ -62,7 +63,7 @@ media_notestream_test_LDADD   = $(JMEDIA_LA)
 media_player_test_SOURCES     = media_player_test.cc
 media_player_test_LDADD       = $(JMEDIA_LA)
 media_wavfile_test_SOURCES    = media_wavfile_test.cc
-media_wavfile_test_LDADD      = $(JMEDIA_LA)
+media_wavfile_test_LDADD      = $(JMEDIA_LA) $(JSYS_LA)
 
 net_extract_address_test_SOURCES        = net_extract_address_test.cc
 net_extract_address_test_LDADD          = $(JNET_LA)

@@ -4,7 +4,7 @@
 #include <cmath>
 
 #include <jlib/media/notestream.hh>
-#include <jlib/media/Dsp.hh>
+#include <jlib/media/PortAudioSink.hh>
 
 #include <jlib/sys/sys.hh>
 
@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
 }
 
 void play(std::vector<std::string> song, int format, int channels) {
-    jlib::media::Dsp dsp;
+    jlib::media::PortAudioSink dsp;
 
     for(auto s : song) {
         jlib::media::notestream note(s);

@@ -5,7 +5,7 @@
 #include <cmath>
 
 #include <jlib/media/notestream.hh>
-#include <jlib/media/Dsp.hh>
+#include <jlib/media/PortAudioSink.hh>
 
 #include <jlib/sys/sys.hh>
 
@@ -14,6 +14,12 @@ const long double 	PI = 3.14159265358979323846264338;
 void play(double freq, int format, int channels, std::string tag, bool out=true);
 
 int main(int argc, char** argv) {
+    // No output device (headless container): automake reads 77 as SKIP.
+    if(!jlib::media::PortAudioSink::have_output_device()) {
+        std::cerr << "no audio output device, skipping" << std::endl;
+        return 77;
+    }
+
 
     try {
         using namespace jlib::media;
@@ -54,7 +60,7 @@ int main(int argc, char** argv) {
 }
 
 void play(double freq, int format, int channels, std::string tag, bool out) {
-    jlib::media::Dsp dsp;
+    jlib::media::PortAudioSink dsp;
 
     jlib::media::notestream note(freq);
     note.set_format(format);
