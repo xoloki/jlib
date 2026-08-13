@@ -15,6 +15,7 @@
 
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <set>
 
 using namespace jlib::math;
@@ -75,6 +76,51 @@ int main() {
                 if(a[k] >= c.size()) ++oob;
         }
         check("out-of-range indices", oob, 0);
+
+        // faces: C(n,2) * 2^(n-2)
+        const long faces = (static_cast<long>(n) * (n - 1) / 2) * (1L << (n - 2));
+        check("faces", c.get_faces().size(), faces);
+
+        long wrong_size = 0, face_oob = 0;
+        std::map<std::pair<uint,uint>, long> sides;
+        for(uint f = 0; f < c.get_faces().size(); f++) {
+            const std::vector<uint>& face = c.get_faces()[f];
+
+            if(face.size() != 4) ++wrong_size;
+
+            for(uint k = 0; k < face.size(); k++) {
+                if(face[k] >= c.size()) ++face_oob;
+
+                // consecutive corners, wrapping -- a face is a loop
+                const uint x = face[k];
+                const uint y = face[(k + 1) % face.size()];
+                sides[x < y ? std::make_pair(x, y) : std::make_pair(y, x)]++;
+            }
+        }
+        check("faces that are not quads", wrong_size, 0);
+        check("out-of-range face indices", face_oob, 0);
+
+        // Every side of every face must be a real edge of the cube.  This is
+        // what catches a bowtie: 00,10,01,11 traverses two diagonals, which
+        // are not edges.
+        std::set<std::pair<uint,uint> > real;
+        for(uint e = 0; e < c.get_edges().size(); e++)
+            real.insert(c.get_edges()[e]);
+
+        long not_an_edge = 0;
+        for(std::map<std::pair<uint,uint>, long>::iterator u = sides.begin();
+            u != sides.end(); u++)
+            if(real.find(u->first) == real.end()) ++not_an_edge;
+        check("face sides that are not edges", not_an_edge, 0);
+
+        // and every edge lies in exactly n-1 faces: fix the edge's axis, and
+        // any one of the remaining n-1 axes completes a face
+        long wrong_share = 0;
+        for(std::map<std::pair<uint,uint>, long>::iterator u = sides.begin();
+            u != sides.end(); u++)
+            if(u->second != static_cast<long>(n) - 1) ++wrong_share;
+        check("edges used by wrong face count", wrong_share, 0);
+        check("edges covered by faces", sides.size(), edges);
 
         std::cout << "\n";
     }
