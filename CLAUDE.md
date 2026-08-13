@@ -16,29 +16,32 @@ Each subdirectory of `jlib/` is one automake-built libtool library named
 
 | Dir | Library | What it is |
 | --- | --- | --- |
-| `jlib/sys` | `libjsys` | The foundation. iostream-based wrappers over OS facilities: `socketstream`, `sslstream`/`tlsstream`, `proxystream`, `sslproxystream`, `serialstream`, `pstream` (subprocess), `tfstream` (temp file). Plus `Servent`/`ASServent` (threaded worker + command queue), `sync<T>` (mutex-wrapped value, C++11), `pipe`, `Directory`, `joystick`, `Object` (a `sigc::trackable`). |
+| `jlib/sys` | `libjsys` | The foundation. iostream-based wrappers over OS facilities: `socketstream`, `sslstream`/`tlsstream`, `proxystream`, `sslproxystream`, `serialstream`, `pstream` (subprocess), `tfstream` (temp file). Plus `Servent`/`ASServent` (threaded worker + command queue), `sync<T>` (mutex-wrapped value, C++11), `pipe`, `Directory`, `joystick`, `Object` (a polymorphic base), `signal<R(Args...)>`. |
 | `jlib/util` | `libjutil` | String/format grab bag: `util.hh` (tokenize, trim, chop, base64/qp/URI codecs, byte `get`/`set`), `Regex` (POSIX `regex.h`), `Date` (RFC-822 etc.), `Headers` (MIME header folding), `MimeType`, `URL`, `Timer`, a hand-rolled XML tokenizer/parser/DOM (`xml.hh`, `xmlparser.hh`, `xmltokenizer.hh`), and `json.hh` (a C++ facade over json-c). |
 | `jlib/crypt` | `libjcrypt` | `crypt.hh` wraps GPGME (OpenPGP encrypt/sign/verify). The `curve`/`schnorr`/`groth` trio is the recent work: ristretto255 `Scalar`/`Point`/`Commitment` over libsodium, Schnorr proofs (single, double, `GeneralProof<N>`), and Groth binary/zero-argument proofs. Built only when libsodium *with* ristretto headers is present. |
 | `jlib/net` | `libjnet` | Email client stack: `Email` (MIME parsing), `MailBox`/`MBox`/`Imap4Box`, `Pop3`, `Imap4`, `MailFolder`, plus `AS*` async variants layered on `sys::ASServent`. `net.cc` has the address-extraction logic the `net_extract_address_*` tests cover. |
-| `jlib/media` | `libjmedia` | OSS audio (`/dev/dsp`). `Player` (a `Servent`), `AudioFile`/`WavFile`, `PlayList`, `Dsp`, and streambuf-based `datastream`/`wavstream`/`notestream`/`audiofilestream`. `Type.hh` is a template-specialization table over PCM sample formats. Requires `sys/soundcard.h`, so it does not build on modern Linux or macOS. |
+| `jlib/media` | `libjmedia` | Audio via PortAudio. `AudioSink` is the device interface and `PortAudioSink` the implementation; `Player` (a `Servent`), `AudioFile`/`WavFile`, `PlayList`, and streambuf-based `datastream`/`wavstream`/`notestream`/`audiofilestream`. `Type.hh` is a template-specialization table over PCM sample formats. `Dsp` is the retired OSS backend, kept but not built. |
 | `jlib/math` | `libjmath` | Header-only despite being a `lib_LTLIBRARIES` (its `_SOURCES` are all `.hh`). `matrix`, `vertex`, `tensor`, `buffer`, `polynomial` (templated on a Power type so it can hold curve `Scalar`s), and `Plot<T>` — the abstract plotting base. |
 | `jlib/x` | `libjx` | Raw Xlib: `Display`, `Window`, and an X11 `Plot`. |
-| `jlib/gl`, `glu`, `glut`, `glx` | `libjgl`, … | Thin OpenGL layers: lights/buffers, textures/projection, GLUT main loop, GLX window. `glx/Plot.hh` and `glut/Plot.hh` are backends for `math::Plot<T>`. |
+| `jlib/gl`, `glu`, `glx`, `glfw` | `libjgl`, … | Thin OpenGL layers: lights/buffers/shapes, textures/projection, a GLX window (Linux only), and a GLFW window that works everywhere. `glx/Plot.hh` and `glfw/Plot.hh` are backends for `math::Plot<T>`. |
 | `jlib/ai` | `libjai` | Norvig-style agent scaffolding (`Agent`, `Environment`, `Percept`, `Action`, `vacuum`) plus `neural.hh`, a templated feed-forward net. |
 | `jlib/cuda` | `libjcuda` | cuBLAS `gemm` and a CUDA port of `neural.hh`. Built only with `--with-cuda`. |
 | `jlib/bio` | — | Not in `SUBDIRS`, has no `Makefile.am`, and does not compile (duplicate `class Homo`, undeclared base `Homini`). A sketch, not code. |
 
-Dependency direction: `sys` ← `util` ← `crypt` ← `net`; `x` ← `gl` ← `glu` ←
-`glx`/`glut`. Nothing depends on `math`, `ai`, or `cuda`.
+Dependency direction: `sys` ← `util` ← `crypt` ← `net`; `gl` ← `glu` ←
+`glx`/`glfw`, with `glx` additionally on `x`. Nothing depends on `math`, `ai`,
+or `cuda`.
 
 ### Apps (`jlib/apps/`)
 
 - `jlib-mail` — the flagship: a command-line mail client over `net` + `crypt`.
 - `jcrypt` — GPGME encrypt/decrypt filter. `jcurve` — ristretto/proof driver.
-- `jhyper`, `jglxhyper`, `jgluthyper`, `jhardhyper` — the 4-D hypercube/torus
-  visualizations. Shared logic is in `Hyper.hh` (`HyperPlot<T, Plot>`, templated
-  on the plot backend so the same code renders under X11, GLX, or GLUT).
-  `jgltorus`, `jglxbox` are simpler GL demos.
+- `jhyper`, `jglxhyper`, `jglfwhyper`, `jhardhyper` — the 4-D hypercube/torus
+  visualizations, named for their backend. Shared logic is in `Hyper.hh`
+  (`HyperPlot<T, Plot>`, templated on the plot backend so the same code renders
+  under X11 raster, GLX, or GLFW). `jhardhyper` still carries a forked copy of
+  `HyperPlot` because it reduces N→3 rather than N→2. `jgltorus`, `jglxbox` are
+  simpler GL demos.
 - `jneural-zero`, `jneural-alpha`, `jneural-search` — neural net experiments
   (`-alpha` does image classification via ImageMagick++/MNIST).
 - `jjoystick`, `jjoy2xev` — Linux joystick → X events, with `*-{axes,buttons}-*.map`
@@ -51,27 +54,31 @@ Dependency direction: `sys` ← `util` ← `crypt` ← `net`; `x` ← `gl` ← `
 GNU autotools, out-of-tree builds expected:
 
 ```sh
-autoreconf -i          # or: libtoolize && aclocal && autoheader && automake -a && autoconf
+./autogen.sh
 mkdir build && cd build
 ../configure
 make -j8
 make check
 ```
 
-`configure` hard-requires libsigc++-2.0, glibmm-2.4, gthread-2.0, ImageMagick++,
-json-c, gpgme, and openssl. X11, GL/GLU/GLUT, OSS audio, libsodium+ristretto, and
-CUDA are all optional and gate their modules via `AM_CONDITIONAL`.
+Builds clean on macOS (Apple clang, arm64) and modern Linux (gcc 13). C++20 is
+required and selected by an explicit probe in `configure.ac`, which also sets
+`-Werror=return-type` — a missing return is undefined behaviour that gcc turns
+into a crash at -O2, and it is never intentional.
 
-That dependency set no longer resolves on a current distro or on macOS, so the
-supported path is Docker — see `DOCKER`. `Dockerfile` is a symlink to one of
-`Dockerfile.gcc{49,5,61,75,10}`; `gcc75` (Ubuntu 18.04) is the default and the one
-that actually builds. Building the image runs `configure` + `make` inside it; the
-usual workflow is then to bind-mount the source tree and build again in the
-container.
+`configure` requires json-c, gpgme, gpg-error and openssl. libsodium+ristretto,
+PortAudio, GLFW, ImageMagick++, X11, GL/GLU and CUDA are optional and gate their
+modules via `AM_CONDITIONAL`; configure prints a summary of what it found.
+libsigc++ and glibmm are gone — `sys/signal.hh` and `std::` replaced them.
+
+`Dockerfile` builds an Ubuntu 24.04 image and compiles jlib inside it; the source
+is copied in rather than bind-mounted, because a bind mount on macOS crosses the
+VM's filesystem layer and is dramatically slower. See `DOCKER`.
 
 Tests are plain `main()` programs registered in `TESTS` — no framework. They
-`std::cerr` a message and return non-zero on failure. Media and curve tests are
-conditionally included; `x_window_test` is unconditional and needs a display.
+`std::cerr` a message and return non-zero on failure. Exit 77 means SKIP, which
+is how tests needing a display or an audio device report a headless machine.
+The media tests are silent unless passed `--play` or `--play-all`.
 
 ## Conventions
 
@@ -95,12 +102,16 @@ conditionally included; `x_window_test` is unconditional and needs a display.
 
 ## State of things
 
-Active work since ~2020 is almost entirely in `crypt` (curve/schnorr/groth) and
-the `math::polynomial` support behind it; the last commit before that was 2021,
-and 2025 touched only the Dockerfile. Most of the rest of the library is
-essentially frozen 2000s-era code.
+Between 2020 and 2021 the active work was `crypt` (curve/schnorr/groth) and the
+`math::polynomial` support behind it. In 2026 the library was ported to build on
+macOS and modern Linux: autotools modernized to C++20, libsigc++ and glibmm
+replaced with `std::`, OSS replaced with PortAudio, GLUT replaced with GLFW, and
+a number of latent bugs fixed along the way.
 
-`TODO.md` records the standing intentions: migrate off libsigc++ to `std::function`
-(starting with `jlib-mail.cc`), and verify certificates in the SSL code —
-`sys/sslstream.hh` sets `SSL_VERIFY_PEER` and loads `/etc/ssl/certs`, but never
-checks the hostname against the peer certificate.
+Both `TODO.md` items are done — libsigc++ is gone, and `sys/sslstream.hh` now
+uses the system trust store and verifies the hostname with `SSL_set1_host`.
+
+Remaining work is tracked in GitHub issues, labelled by phase. The headline goal
+is rendering 4D+ objects as solid 3D geometry: `math::Plot<T>` still reduces all
+the way to 2D on the CPU (`phase-5-4d`), and `math::object<T>` has no faces at
+all, only a 1-skeleton (`phase-6-solids`).

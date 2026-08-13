@@ -4,7 +4,7 @@ else
 cuda_subdirs =
 endif
 
-SUBDIRS = sys util crypt media net math x gl glu glx glut ai $(cuda_subdirs) apps
+SUBDIRS = sys util crypt media net math x gl glu glx glfw ai $(cuda_subdirs) apps
 EXTRA_DIST = jlib-1.2.pc.in
 
 pkgconfigdir		= $(libdir)/pkgconfig

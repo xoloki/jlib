@@ -30,112 +30,17 @@
 
 #include <jlib/math/math.hh>
 #include <jlib/math/Plot.hh>
-#include <jlib/glut/main.hh>
-#include <jlib/glut/glut.hh>
+#include <jlib/glfw/Plot.hh>
 
 #include <vector>
 #include <stack>
 
 
-namespace jlib {
-namespace glut {
+// The file-local copy of jlib::glut::Plot<T> that used to sit here -- ~100
+// lines duplicated from jlib/glut/Plot.hh -- is replaced by glfw::Plot<T>.
+// What remains forked is HyperPlot below, which exists only because the
+// shared Hyper.hh reduces all the way to 2D; see issue #20.
 
-        
-template<typename T>
-class Plot : public math::Plot<T> {
-public:
-    Plot(uint n, std::vector< std::pair<T,T> > c, uint w=400, uint h=400);
-
-    virtual void draw();
-    virtual void draw_point(std::pair<uint,uint> p);
-    virtual void draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2);
-
-protected:
-    void on_reshape(int width, int height);
-    void on_display();
-    void on_idle();
-
-    int m_win;
-};
-
-
-template<typename T>
-inline
-Plot<T>::Plot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
-    : math::Plot<T>(n, c, w, h)
-{    
-    //m_win = glutCreateWindow("jlib::glut::Plot");
-    //glutReshapeWindow(w, h);
-    
-    glut::Main::init_buffers.connect(&glut::Main::default_init_buffers);
-    glut::Main::init_lights.connect(&glut::Main::default_init_lights);
-    glut::Main::init_textures.connect(&glut::Main::default_init_textures);
-    //glut::Main::make_textures.connect(&glut::Main::make_checkered_texture);
-    
-    glut::Main::reshape.connect([this](auto&&... a) { return this->on_reshape(a...); });
-    glut::Main::display.connect([this](auto&&... a) { return this->on_display(a...); });
-    glut::Main::idle.connect([this](auto&&... a) { return this->on_idle(a...); });
-}
-
-
-template<typename T>
-inline
-void Plot<T>::draw_point(std::pair<uint,uint> p) {
-//     glBegin(GL_POINTS);
-//     glVertex2i(p.first, p.second);
-//     glEnd();
-}
-
-
-template<typename T>
-inline
-void Plot<T>::draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2) {
-    //Window::draw_line(p1, p2);
-    glBegin(GL_LINES);
-    glVertex2i(p1.first, p1.second);
-    glVertex2i(p2.first, p2.second);
-    glEnd();
-}
-
-
-template<typename T>
-void
-inline Plot<T>::draw() {
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    math::Plot<T>::draw();
-
-	glutSwapBuffers();    
-}
-
-template<typename T>
-void
-inline Plot<T>::on_reshape(int width, int height) {
-    this->width = width;
-    this->height = height;
-
-    glut::Main::default_reshape(width, height);
-
-	glLoadIdentity();
-	//gluLookAt(0, 0, 3, 0, 0, 0, 0, 1, 0);
-
-    glutPostRedisplay();
-}
-
-template<typename T>
-void
-inline Plot<T>::on_display() {
-    draw();
-}
-
-template<typename T>
-void
-inline Plot<T>::on_idle() {
-    glutPostRedisplay();
-}
-
-}
-}
 
 using namespace jlib;
 using namespace jlib::math;
@@ -146,7 +51,7 @@ typedef GLdouble T;
 
 
 template<typename T>
-class HPlot : public glut::Plot<T> {
+class HPlot : public glfw::Plot<T> {
 public:
     HPlot(uint n, std::vector< std::pair<T,T> > c, uint w=400, uint h=400);
 
@@ -158,14 +63,31 @@ public:
 protected:
     virtual math::vertex<T> transform(const math::vertex<T>& v) const;
 
+    // This one reduces N->3 and hands GL real 3-D coordinates, so it needs a
+    // perspective projection rather than the base's pixel-space ortho2d.
+    // glut::Main::default_reshape used gluPerspective(80, aspect, 0.1, 50),
+    // which is what glu::projection::perspective sets up.
+    virtual void on_configure(int width, int height);
 };
 
 template<typename T>
 inline
 HPlot<T>::HPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
-    : glut::Plot<T>(n, c, w, h)
+    : glfw::Plot<T>(n, c, w, h)
 {    
 
+}
+
+template<typename T>
+inline
+void HPlot<T>::on_configure(int width, int height) {
+    this->width = width;
+    this->height = height;
+
+    glu::projection::perspective(width, height);
+    glLoadIdentity();
+
+    this->draw();
 }
 
 template<typename T>
@@ -226,7 +148,7 @@ void HPlot<T>::draw() {
         }
     }
 
-	glutSwapBuffers();    
+	this->flush();
 }
 
 template<typename T>
@@ -501,21 +423,31 @@ public:
     HardPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
         : HyperPlot<T, PlotType>(n, c, w, h)
     {
-        glut::Main::keyboard.connect([this](auto&&... a) { return this->key_pressed(a...); });
-        glut::Main::mouse.connect([this](auto&&... a) { return this->button_pressed(a...); });
-        glut::Main::idle.clear();
-        glut::Main::idle.connect([this](auto&&... a) { return this->on_timeout(a...); });
+        // Per-object signals, the same surface jhyper and jglfwhyper bind.
+        key_press.connect([this](auto&&... a) { return this->key_pressed(a...); });
+        button_press.connect([this](auto&&... a) { return this->button_pressed(a...); });
+        timeout.connect([this](auto&&... a) { return this->on_timeout(a...); });
     }
 
     void on_timeout() {
         HyperPlot<T, PlotType>::on_timeout();
 
-        
-
         if(waiting)
             std::this_thread::sleep_for(std::chrono::microseconds(100000));
         else
-            PlotType::on_idle();
+            this->draw();
+    }
+
+    // GLFW reports typed text, as X does; HyperPlot wants a single char.
+    void key_pressed(std::string key, int x, int y) {
+        if(key.empty())
+            return;
+
+        HyperPlot<T, PlotType>::key_pressed(key[0], x, y);
+    }
+
+    void button_pressed(int button, int x, int y) {
+        HyperPlot<T, PlotType>::button_pressed(button, 0, x, y);
     }
 };
 
@@ -526,11 +458,9 @@ int main(int argc, char** argv) {
     }
 
     try {
-        glut::Main::init(argc, argv, true, true, true);
-
         HardPlot plot(D, std::vector< std::pair<T,T> >(), 700, 700);
-        
-        glut::Main::run();
+
+        plot.run();
     }
     catch(std::exception& e) {
         std::cerr << e.what() << std::endl;

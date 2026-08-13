@@ -10,7 +10,9 @@ Move all inline code to bottom of header.
 
 CODE
 ----
-Start moving away from libsigc++ in favor of std::function et alia.  jlib/apps/jlib-mail.cc is a good place to start.
+Both former entries here are done: libsigc++ is gone in favour of std::function
+and jlib/sys/signal.hh, and the SSL code verifies the peer certificate against
+the system trust store and checks the hostname with SSL_set1_host.
 
-Verify certs in SSL code.
+Remaining work is tracked in GitHub issues rather than here.
 
