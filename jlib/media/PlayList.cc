@@ -139,7 +139,10 @@ namespace jlib {
         void PlayList::set_measure(int measure) { m_measure = measure; }
         
         int PlayList::get_next_pattern_id() {
-            ++m_pattern_id_max;
+            // Incremented but never returned.  m_pattern_id_max starts at 0,
+            // so the first id handed out is 1.  Caught by -Werror=return-type;
+            // it has no callers, which is why it went unnoticed.
+            return ++m_pattern_id_max;
         }
         
         PlayList::reference PlayList::operator[](int i) {

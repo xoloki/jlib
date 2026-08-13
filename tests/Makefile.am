@@ -35,6 +35,7 @@ TESTS = \
  \
 	net_extract_address_simple_test \
 	net_extract_address_mangled_test \
+	net_extract_address_noat_test \
 	net_extract_address_test \
 	net_email_test \
 	net_email_received_test \
@@ -69,6 +70,8 @@ net_extract_address_simple_test_SOURCES = net_extract_address_simple_test.cc
 net_extract_address_simple_test_LDADD   = $(JNET_LA)
 net_extract_address_mangled_test_SOURCES = net_extract_address_mangled_test.cc
 net_extract_address_mangled_test_LDADD   = $(JNET_LA)
+net_extract_address_noat_test_SOURCES = net_extract_address_noat_test.cc
+net_extract_address_noat_test_LDADD   = $(JNET_LA)
 net_email_test_SOURCES          = net_email_test.cc
 net_email_test_LDADD            = $(JNET_LA)
 net_email_received_test_SOURCES = net_email_received_test.cc

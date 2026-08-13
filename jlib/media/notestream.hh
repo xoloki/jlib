@@ -252,7 +252,10 @@ namespace jlib {
             }
             
             if(note.size() == 2) {
-                if(note[1] != '#' && !note[1] == 'b') {
+                // was "!note[1] == 'b'": the ! binds to note[1] alone, so this
+                // compared a bool against 'b' and was always false, meaning
+                // the whole condition was false and the throw never fired.
+                if(note[1] != '#' && note[1] != 'b') {
                     throw std::runtime_error("two char notes must be either 'Ab' or 'C#'");
                 }
                 
@@ -369,8 +372,8 @@ namespace jlib {
                         u_int16_t u = htons(usample);
                         char* v = reinterpret_cast<char*>(&u);
 
-                        jlib::util::byte_copy(data,&v+1,1,p0);
-                        jlib::util::byte_copy(data,&v+0,1,p1);
+                        jlib::util::byte_copy(data,v+1,1,p0);
+                        jlib::util::byte_copy(data,v+0,1,p1);
                         //c = (s & 0x00ff);
                         //d = (s & 0xff00) >> 8;
                     }
@@ -378,8 +381,8 @@ namespace jlib {
                         u_int16_t u = htons(usample);
                         char* v = reinterpret_cast<char*>(&u);
 
-                        jlib::util::byte_copy(data,&v+0,2,p0);
-                        //jlib::util::byte_copy(data,&v+1,1,p1);
+                        jlib::util::byte_copy(data,v+0,2,p0);
+                        //jlib::util::byte_copy(data,v+1,1,p1);
                         //c = (s & 0xff00) >> 8;
                         //d = (s & 0x00ff);
                     }
@@ -409,8 +412,8 @@ namespace jlib {
                         u_int16_t u = htons(s);
                         char* v = reinterpret_cast<char*>(&u);
 
-                        jlib::util::byte_copy(data,&v+0,2,p0);
-                        //jlib::util::byte_copy(data,&v+1,1,p1);
+                        jlib::util::byte_copy(data,v+0,2,p0);
+                        //jlib::util::byte_copy(data,v+1,1,p1);
                         //int16_t s = sample - amp;
                         //c = (s & 0xff00) >> 8;
                         //d = (s & 0x00ff);

@@ -168,7 +168,10 @@ inline
 T buffer<T>::sum() const {
     T s = 0;
     for(unsigned int i = 0; i < size(); i++) {
-        s += *this[i];
+        // was *this[i], which parses as *(this[i]) -- pointer arithmetic on
+        // this, then a dereference.  Neither sum() nor product() had ever
+        // been instantiated, so it never had to compile.
+        s += (*this)[i];
     }
     return s;
 }
@@ -178,7 +181,7 @@ inline
 T buffer<T>::product() const {
     T p = 1;
     for(unsigned int i = 0; i < size(); i++) {
-        p *= *this[i];
+        p *= (*this)[i];
     }
     return p;
 }

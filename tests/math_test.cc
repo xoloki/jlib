@@ -26,6 +26,7 @@
 #include <jlib/math/polynomial.hh>
 #include <jlib/util/util.hh>
 
+using jlib::math::buffer;
 using jlib::math::matrix;
 using jlib::math::cuboid;
 using jlib::math::vertex;
@@ -197,6 +198,32 @@ int main(int argc, char** argv) {
             return 1;
         }
 
+        // buffer<T>::sum() and product() had never been instantiated, so
+        // "*this[i]" -- pointer arithmetic on this, then a dereference --
+        // had never had to compile.
+        {
+            buffer<int> b(4);
+            for(unsigned int i = 0; i < b.size(); i++) {
+                b[i] = static_cast<int>(i) + 2;   // 2 3 4 5
+            }
+
+            if(b.sum() != 14) {
+                std::cerr << "buffer<int>::sum() = " << b.sum() << " not 14" << std::endl;
+                return 1;
+            }
+
+            if(b.product() != 120) {
+                std::cerr << "buffer<int>::product() = " << b.product() << " not 120" << std::endl;
+                return 1;
+            }
+
+            buffer<int> empty;
+            if(empty.sum() != 0 || empty.product() != 1) {
+                std::cerr << "empty buffer should sum to 0 and multiply to 1, got "
+                          << empty.sum() << " and " << empty.product() << std::endl;
+                return 1;
+            }
+        }
 
     } catch (matrix<int>::mismatch) {
         std::cerr << "matrices are mismatched" << std::endl;

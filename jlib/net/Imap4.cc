@@ -749,8 +749,17 @@ namespace jlib {
             if(getenv("JLIB_NET_IMAP4_DEBUG")) {
                 std::cout <<buf<<std::endl;
             }
-            // TODO: figure out why the hell I'm getting an 'm' character before the '+'
-            if(!buf.find("+") == buf.npos) {
+            // The server must answer APPEND with a "+" continuation before we
+            // send the message body.  This read "!buf.find(...) == buf.npos",
+            // where the ! binds to find() alone: the bool result then widens
+            // to 0 or 1 and is compared against npos, so it was always false
+            // and the throw never fired.  On an error reply we would go on to
+            // send the body, which the server then reads as commands.
+            //
+            // TODO: figure out why the hell I'm getting an 'm' character
+            // before the '+' -- which is why this looks for "+" anywhere in
+            // the reply rather than requiring it at position 0.
+            if(buf.find("+") == buf.npos) {
                 throw exception(buf);
             }
             

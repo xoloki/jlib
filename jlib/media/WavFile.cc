@@ -160,7 +160,10 @@ namespace jlib {
             
             m_format_tag = util::get<short>(chunk, FORMAT_TAG_OFFSET);
             m_bits_per_sample = util::get<u_short>(chunk, BITS_PER_SAMPLE_OFFSET);
-            m_samples_per_sec = util::get<u_long>(chunk, SAMPLES_PER_SEC_OFFSET);
+            // WAV nSamplesPerSec is a 4-byte DWORD (bytes 4..7); nAvgBytesPerSec
+            // starts at byte 8.  u_long is 8 bytes on LP64, so this used to read
+            // and write straight through the following field.
+            m_samples_per_sec = util::get<u_int32_t>(chunk, SAMPLES_PER_SEC_OFFSET);
             m_channels = util::get<u_short>(chunk, CHANNELS_OFFSET);
 
             if(m_format_tag != WAV_FMT_PCM && m_format_tag != WAV_FMT_OKI_ADPCM) 
@@ -266,7 +269,7 @@ namespace jlib {
 
             util::set<short>(chunk,get_format_tag(),base+FORMAT_TAG_OFFSET);
             util::set<u_short>(chunk,get_bits_per_sample(),base+BITS_PER_SAMPLE_OFFSET);
-            util::set<u_long>(chunk,get_samples_per_sec(),base+SAMPLES_PER_SEC_OFFSET);
+            util::set<u_int32_t>(chunk,get_samples_per_sec(),base+SAMPLES_PER_SEC_OFFSET);
             util::set<u_short>(chunk,get_channels(),base+CHANNELS_OFFSET);
    
             return chunk;
