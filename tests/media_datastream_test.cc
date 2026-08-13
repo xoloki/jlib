@@ -9,6 +9,8 @@
 #include <jlib/media/notestream.hh>
 #include <jlib/media/PortAudioSink.hh>
 
+#include "audio_test.hh"
+
 #include <jlib/sys/sys.hh>
 
 const long double 	PI = 3.14159265358979323846264338;
@@ -16,23 +18,39 @@ const long double 	PI = 3.14159265358979323846264338;
 
 
 int main(int argc, char** argv) {
-    // No output device (headless container): automake reads 77 as SKIP.
-    if(!jlib::media::PortAudioSink::have_output_device()) {
+    using namespace jlib::media;
+    using namespace jlib::tests;
+
+    const audio_mode mode = get_audio_mode(argc, argv);
+
+    if(mode != AUDIO_SILENT && !PortAudioSink::have_output_device()) {
         std::cerr << "no audio output device, skipping" << std::endl;
         return 77;
     }
 
-    using namespace jlib::media;
-
     try {
-        PortAudioSink dsp;
+        const int format = Type::PCM_U8;
 
         notestream note(220.0);
-        note.set_format(Type::PCM_U8);
+        note.set_format(format);
         note.set_channels(1);
         note.set_time(0.5);
 
-        dsp.play(note);
+        std::string pcm;
+        jlib::sys::read(note, pcm);
+
+        if(!check_pcm(pcm, format, 1, "datastream U8"))
+            return 1;
+
+        if(should_play(mode, format)) {
+                notestream again(220.0);
+            again.set_format(format);
+            again.set_channels(1);
+            again.set_time(0.5);
+
+            PortAudioSink dsp;
+            dsp.play(again);
+        }
     }
     catch(std::exception& e) {
         std::cerr << e.what() << std::endl;

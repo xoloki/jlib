@@ -15,7 +15,7 @@ int main(int argc, char** argv) {
     try {
         using namespace jlib::media;
 
-        int format = Type::PCM_S16_LE;
+        int format = Type::PCM_FLOAT32;
         int channels = 2;
         std::string note;
         double t = 5;

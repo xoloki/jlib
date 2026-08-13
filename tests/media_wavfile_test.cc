@@ -16,18 +16,22 @@
 #include <jlib/media/notestream.hh>
 #include <jlib/media/WavFile.hh>
 #include <jlib/media/PortAudioSink.hh>
+
+#include "audio_test.hh"
 #include <jlib/media/Type.hh>
 
 #include <jlib/sys/sys.hh>
 
 int main(int argc, char** argv) {
-    // No output device (headless container): automake reads 77 as SKIP.
-    if(!jlib::media::PortAudioSink::have_output_device()) {
+    using namespace jlib::media;
+    using namespace jlib::tests;
+
+    const audio_mode mode = get_audio_mode(argc, argv);
+
+    if(mode != AUDIO_SILENT && !PortAudioSink::have_output_device()) {
         std::cerr << "no audio output device, skipping" << std::endl;
         return 77;
     }
-
-    using namespace jlib::media;
 
     const int RATE = 44100;
     const int CHANNELS = 2;
@@ -88,8 +92,8 @@ int main(int argc, char** argv) {
             ++failures;
         }
 
-        if(failures == 0) {
-            datastream data(in.get_pcm());
+        if(failures == 0 && should_play(mode, FORMAT)) {
+                datastream data(in.get_pcm());
             data.set<WavFile>(in);
 
             PortAudioSink dsp;

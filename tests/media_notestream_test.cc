@@ -1,75 +1,78 @@
+// Verify the PCM notestream generates, for every format it supports.
+//
+// Silent by default -- pass --play for the clean formats, or --play-all for
+// every one of them.  See audio_test.hh.
 #include <iostream>
-
-#include <unistd.h>
-
-#include <cmath>
+#include <string>
 
 #include <jlib/media/notestream.hh>
 #include <jlib/media/PortAudioSink.hh>
+#include <jlib/media/Type.hh>
 
 #include <jlib/sys/sys.hh>
 
-const long double 	PI = 3.14159265358979323846264338;
+#include "audio_test.hh"
 
-void play(double freq, int format, int channels, std::string tag, bool out=true);
+using namespace jlib::media;
+using namespace jlib::tests;
 
-int main(int argc, char** argv) {
-    // No output device (headless container): automake reads 77 as SKIP.
-    if(!jlib::media::PortAudioSink::have_output_device()) {
-        std::cerr << "no audio output device, skipping" << std::endl;
-        return 77;
-    }
-
-
-    try {
-        using namespace jlib::media;
-        
-        play(110, Type::PCM_U8, 1, "Type::PCM_U8");
-        play(220, Type::PCM_U8, 2, "Type::PCM_U8");
-//         play(55, Type::PCM_S8, 1, "Type::PCM_S8");
-//         play(55, Type::PCM_S8, 2, "Type::PCM_S8");
-        play(440, Type::PCM_S16_LE, 1, "Type::PCM_S16_LE");
-        play(880, Type::PCM_S16_LE, 2, "Type::PCM_S16_LE");
-        //play(110, Type::PCM_U16_LE, 1, "Type::PCM_U16_LE");
-        //play(110, Type::PCM_U16_LE, 2, "Type::PCM_U16_LE");
-//         play(110, Type::PCM_S16_BE, 1, "Type::PCM_S16_BE");
-//         play(110, Type::PCM_S16_BE, 2, "Type::PCM_S16_BE");
-//         play(110, Type::PCM_U16_BE, 1, "Type::PCM_U16_BE");
-//         play(110, Type::PCM_U16_BE, 2, "Type::PCM_U16_BE");
-
-        /*
-        std::cout << "\"mary had a little lamb\" in c major:" << std::endl;
-        double c = jlib::media::basic_notebuf<char>::get_freq(4,220);
-        double b = jlib::media::basic_notebuf<char>::get_freq(2,220);
-        double a = jlib::media::basic_notebuf<char>::get_freq(0,220);
-        play(c, Type::PCM_S16_LE, 2, "Type::PCM_S16_LE", false);
-        play(b, Type::PCM_S16_LE, 2, "Type::PCM_S16_LE", false);
-        play(a, Type::PCM_S16_LE, 2, "Type::PCM_S16_LE", false);
-        play(b, Type::PCM_S16_LE, 2, "Type::PCM_S16_LE", false);
-        play(c, Type::PCM_S16_LE, 2, "Type::PCM_S16_LE", false);
-        play(c, Type::PCM_S16_LE, 2, "Type::PCM_S16_LE", false);
-        play(c, Type::PCM_S16_LE, 2, "Type::PCM_S16_LE", false);
-        */
-    }
-    catch(std::exception& e) {
-        std::cerr << e.what() << std::endl;
-        exit(1);
-    }
-
-    exit(0);
-}
-
-void play(double freq, int format, int channels, std::string tag, bool out) {
-    jlib::media::PortAudioSink dsp;
-
-    jlib::media::notestream note(freq);
+static int check(double freq, int format, int channels,
+                 const std::string& tag, audio_mode mode)
+{
+    notestream note(freq);
     note.set_format(format);
     note.set_channels(channels);
     note.set_time(0.25);
 
-    dsp.play(note);
+    std::string pcm;
+    jlib::sys::read(note, pcm);
 
-    if(out)
-        std::cout << tag << ": " << (channels > 1 ? "stereo" : "mono") << std::endl;
+    const std::string label =
+        tag + " " + (channels > 1 ? "stereo" : "mono");
 
+    if(!check_pcm(pcm, format, channels, label))
+        return 1;
+
+    if(should_play(mode, format)) {
+        notestream again(freq);
+        again.set_format(format);
+        again.set_channels(channels);
+        again.set_time(0.25);
+
+        PortAudioSink dsp;
+        dsp.play(again);
+    }
+
+    std::cout << label << ": " << pcm.size() << " bytes ok" << std::endl;
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    const audio_mode mode = get_audio_mode(argc, argv);
+
+    if(mode != AUDIO_SILENT && !PortAudioSink::have_output_device()) {
+        std::cerr << "no audio output device, skipping" << std::endl;
+        return 77;
+    }
+
+    int failures = 0;
+
+    try {
+        failures += check(110, Type::PCM_U8,      1, "Type::PCM_U8", mode);
+        failures += check(220, Type::PCM_U8,      2, "Type::PCM_U8", mode);
+        failures += check(110, Type::PCM_S8,      1, "Type::PCM_S8", mode);
+        failures += check(440, Type::PCM_S16_LE,  1, "Type::PCM_S16_LE", mode);
+        failures += check(880, Type::PCM_S16_LE,  2, "Type::PCM_S16_LE", mode);
+        failures += check(440, Type::PCM_S16_BE,  1, "Type::PCM_S16_BE", mode);
+        failures += check(440, Type::PCM_U16_LE,  1, "Type::PCM_U16_LE", mode);
+        failures += check(440, Type::PCM_U16_BE,  1, "Type::PCM_U16_BE", mode);
+        failures += check(440, Type::PCM_FLOAT32, 1, "Type::PCM_FLOAT32", mode);
+        failures += check(880, Type::PCM_FLOAT32, 2, "Type::PCM_FLOAT32", mode);
+    }
+    catch(std::exception& e) {
+        std::cerr << e.what() << std::endl;
+        return 1;
+    }
+
+    return failures ? 1 : 0;
 }
