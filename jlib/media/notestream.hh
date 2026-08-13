@@ -370,7 +370,20 @@ namespace jlib {
                         envelope = 0.5 * (1.0 - cos(pi * (samples - 1 - i) / fade));
                 }
 
-                int64_t sample = (int64_t)((envelope*vol*amp*sin(freq*this->get_time()*(2*pi)*(i/double(samples)))));
+                // The waveform in [-1,1], before it is committed to any
+                // particular sample format.  PCM_FLOAT32 wants exactly this;
+                // the integer formats scale and quantize it below.
+                const double raw =
+                    envelope*vol*sin(freq*this->get_time()*(2*pi)*(i/double(samples)));
+
+                // Round rather than truncate.  A cast truncates toward zero,
+                // which both doubles the worst-case quantization error and
+                // makes it asymmetric: every value in (-1,1) collapses to 0,
+                // so the waveform sits flat through each zero crossing
+                // instead of passing through it.  That deadband is crossover
+                // distortion, and at 8 bits -- where the whole signal is only
+                // ~170 levels wide -- it is clearly audible.
+                int64_t sample = std::llround(raw * amp);
                 u_int64_t usample = sample+amp;
                 
                 
@@ -390,6 +403,16 @@ namespace jlib {
                             throw exception("sample out of bounds at Type::PCM_S8");
                         char s = sample;
                         jlib::util::byte_copy(data,&s,1,p0);
+                    }
+                    else if(this->get_format() == Type::PCM_FLOAT32) {
+                        // The shortest branch here, and the only one that
+                        // quantizes nothing: no bias, no byte order, no
+                        // clipping.  It is also what the hardware actually
+                        // wants -- CoreAudio works in float32 internally, and
+                        // PortAudio treats paFloat32 as its native format --
+                        // so this is the one path with no conversion at all.
+                        Type::scaled f = static_cast<Type::scaled>(raw);
+                        jlib::util::byte_copy(data, &f, sizeof(f), p0);
                     }
                     else if(this->get_format() == Type::PCM_U16_LE) {
                         u_int16_t u = htons(usample);

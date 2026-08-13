@@ -8,21 +8,33 @@
 #include <jlib/media/datastream.hh>
 #include <jlib/media/notestream.hh>
 #include <jlib/media/Player.hh>
+#include <jlib/media/PortAudioSink.hh>
 
 #include <jlib/sys/sys.hh>
+
+#include "audio_test.hh"
 
 const long double 	PI = 3.14159265358979323846264338;
 
 
 
 int main(int argc, char** argv) {
-    // No output device (headless container): automake reads 77 as SKIP.
-    if(!jlib::media::PortAudioSink::have_output_device()) {
-        std::cerr << "no audio output device, skipping" << std::endl;
+    using namespace jlib::media;
+    using namespace jlib::tests;
+
+    // Player drives a real device, so unlike the other media tests there is
+    // nothing to verify without one.  Silent by default means skip.
+    const audio_mode mode = get_audio_mode(argc, argv);
+
+    if(mode == AUDIO_SILENT) {
+        std::cerr << "Player needs a device; pass --play to exercise it" << std::endl;
         return 77;
     }
 
-    using namespace jlib::media;
+    if(!PortAudioSink::have_output_device()) {
+        std::cerr << "no audio output device, skipping" << std::endl;
+        return 77;
+    }
 
     try {
         notestream note(220.0);

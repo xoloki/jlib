@@ -3,6 +3,8 @@
 AM_CPPFLAGS = -I$(top_srcdir) \
 	$(GPGME_CFLAGS) $(GPGERROR_CFLAGS) $(SODIUM_CFLAGS) $(OPENSSL_CFLAGS) $(JSONC_CFLAGS) $(PORTAUDIO_CFLAGS)
 
+EXTRA_DIST = audio_test.hh
+
 JSYS_LA   = $(top_builddir)/jlib/sys/libjsys.la
 JUTIL_LA  = $(top_builddir)/jlib/util/libjutil.la
 JCRYPT_LA = $(top_builddir)/jlib/crypt/libjcrypt.la
@@ -57,11 +59,11 @@ TESTS = \
 check_PROGRAMS = $(TESTS)
 
 media_datastream_test_SOURCES = media_datastream_test.cc
-media_datastream_test_LDADD   = $(JMEDIA_LA)
+media_datastream_test_LDADD   = $(JMEDIA_LA) $(JSYS_LA)
 media_notestream_test_SOURCES = media_notestream_test.cc
-media_notestream_test_LDADD   = $(JMEDIA_LA)
+media_notestream_test_LDADD   = $(JMEDIA_LA) $(JSYS_LA)
 media_player_test_SOURCES     = media_player_test.cc
-media_player_test_LDADD       = $(JMEDIA_LA)
+media_player_test_LDADD       = $(JMEDIA_LA) $(JSYS_LA)
 media_wavfile_test_SOURCES    = media_wavfile_test.cc
 media_wavfile_test_LDADD      = $(JMEDIA_LA) $(JSYS_LA)
 
