@@ -204,9 +204,32 @@ template<typename T>
 bool operator!=(const vertex<T>& a, const vertex<T>& b);
 
 
+/**
+ * A shape: vertices, and the topology connecting them.
+ *
+ * Topology is held as indices into the vertex list.  It used to be held as
+ * copies of the vertices themselves, which made coordinates the identity of a
+ * vertex, and that is wrong in three ways.
+ *
+ * Two vertices with the same coordinates became indistinguishable, so a
+ * renderer looking them up by value collapsed them into one -- which spheroid
+ * and staroid trigger constantly, since they emit D*2^D vertex records with
+ * heavy duplication.  Every lookup cost a tree search and a coordinate
+ * comparison.  And change() had to walk every adjacency list re-dimensioning
+ * the copies, which indices make unnecessary.
+ *
+ * faces holds each face as a loop of vertex indices.  Nothing fills it yet;
+ * solid rendering needs it and a 1-skeleton cannot supply it.
+ */
 template<typename T>
 class object {
 public:
+    /** A face, as a loop of vertex indices. */
+    typedef std::vector<uint> face_type;
+
+    /** An edge, as a pair of vertex indices, always ordered low to high. */
+    typedef std::pair<uint,uint> edge_type;
+
     object(uint n);
 
     void normalize();
@@ -215,15 +238,31 @@ public:
     const vertex<T>& operator[](uint x) const;
     uint size() const;
 
-    std::list< vertex<T> > adjacent(uint x);
+    /**
+     * Indices of the vertices adjacent to x.
+     *
+     * Symmetric: if b is adjacent to a then a is adjacent to b, so walking
+     * every vertex's neighbours visits each edge twice, once from each end.
+     */
+    const std::vector<uint>& adjacent(uint x) const;
+
+    /** Each edge once, rather than once per endpoint. */
+    const std::vector<edge_type>& get_edges() const;
+
+    const std::vector<face_type>& get_faces() const;
 
     void change(uint n);
 
     uint D;
 
 protected:
+    /** Record an edge between two vertices, in both directions. */
+    void connect(uint a, uint b);
+
     std::vector<vertex<T> > v;
-    std::vector< std::list< vertex<T> > > adj;
+    std::vector< std::vector<uint> > adj;
+    std::vector<edge_type> edges;
+    std::vector<face_type> faces;
 };
 
 
@@ -1074,21 +1113,42 @@ uint object<T>::size() const {
 
 template<typename T>
 inline
-std::list< vertex<T> > object<T>::adjacent(uint x) {
+const std::vector<uint>& object<T>::adjacent(uint x) const {
     return adj[x];
 }
 
 template<typename T>
 inline
+const std::vector<typename object<T>::edge_type>& object<T>::get_edges() const {
+    return edges;
+}
+
+template<typename T>
+inline
+const std::vector<typename object<T>::face_type>& object<T>::get_faces() const {
+    return faces;
+}
+
+template<typename T>
+inline
+void object<T>::connect(uint a, uint b) {
+    if(a == b)
+        return;
+
+    adj[a].push_back(b);
+    adj[b].push_back(a);
+
+    edges.push_back(a < b ? edge_type(a, b) : edge_type(b, a));
+}
+
+template<typename T>
+inline
 void object<T>::change(uint n) {
+    // Only the vertices: the topology is indices, which do not change with
+    // dimensionality.  This used to re-dimension a copy of every vertex held
+    // in every adjacency list as well.
     for(uint i = 0; i < size(); i++) {
         v[i].change(n);
-
-        std::list< vertex<T> >& adjacent = adj[i];
-        typename std::list< vertex<T> >::iterator j = adjacent.begin();
-        for(; j != adjacent.end(); j++) {
-            j->change(n);
-        }
     }
 }
 
@@ -1098,24 +1158,26 @@ inline
 cuboid<T>::cuboid(uint n) 
     : object<T>(n)
 {
-    std::vector<T> vals(this->D), adj(this->D);
-    for(uint i = 0; i < std::pow(2.0, static_cast<int>(this->D)); i++) {
-        std::list< vertex<T> > a;
+    const uint count = 1u << this->D;
 
+    std::vector<T> vals(this->D);
+    for(uint i = 0; i < count; i++) {
         for(uint j = 0; j < this->D; j++) {
             vals[j] = (((i >> j) & 0x1) ? 1 : -1);
         }
 
-        for(uint j = 0; j < this->D; j++) {
-            adj = vals;
-            adj[j] *= -1;
-
-            vertex<T> vadj(adj);
-            a.push_back(vadj);
-        }
-
         this->v.push_back(vertex<T>(vals));
-        this->adj.push_back(a);
+        this->adj.push_back(std::vector<uint>());
+    }
+
+    // Vertex i is the bit pattern i, so flipping bit j is the neighbour along
+    // axis j.  Only connect upwards, or every edge would be added twice.
+    for(uint i = 0; i < count; i++) {
+        for(uint j = 0; j < this->D; j++) {
+            const uint n = i ^ (1u << j);
+            if(i < n)
+                this->connect(i, n);
+        }
     }
 }
 
@@ -1132,13 +1194,12 @@ pyramoid<T>::pyramoid(uint n)
             vals.push_back(j == 1 ? 1 : 0);
         }
         
-        std::list< vertex<T> > a; 
         vertex<T> vertex(vals);
         this->v.push_back(vertex);
-        this->adj.push_back(a);
+        this->adj.push_back(std::vector<uint>());
     }
 
-    for(uint i = 0; i < std::pow(2.0, static_cast<int>(this->D)); i++) {
+    for(uint i = 0; i < (1u << this->D); i++) {
         std::vector<T> vals;
         
         for(uint j = 0; j < this->D; j++) {
@@ -1148,18 +1209,20 @@ pyramoid<T>::pyramoid(uint n)
         if(vals[1] == 1) 
             continue;
         
-        std::list< vertex<T> > a; a.push_back(this->v[0]);
         vertex<T> vertex(vals);
         this->v.push_back(vertex);
-        this->adj.push_back(a);
-        this->adj[0].push_back(vertex);
+        this->adj.push_back(std::vector<uint>());
+
+        // apex to base corner
+        this->connect(0, this->size() - 1);
     }
 
+    // base corners to each other, where they differ in exactly one coordinate.
+    // j starts at i+1 so each edge is recorded once.
     for(uint i = 1; i < this->size(); i++) {
-        std::list< vertex<T> > a;
         vertex<T>& vi = this->v[i];
         
-        for(uint j = 1; j < this->size(); j++) {
+        for(uint j = i + 1; j < this->size(); j++) {
             vertex<T>& vj = this->v[j];
             int d = 0;
 
@@ -1169,7 +1232,7 @@ pyramoid<T>::pyramoid(uint n)
             }
 
             if(d == 1) {
-                this->adj[i].push_back(vj);
+                this->connect(i, j);
             }
         }
     }
@@ -1200,10 +1263,9 @@ spheroid<T>::spheroid(uint n)
                 vals.push_back(j == i ? r2 : 0);
             }
             
-            std::list< vertex<T> > a; 
             vertex<T> vertex(vals);
             this->v.push_back(vertex);
-            this->adj.push_back(a);
+            this->adj.push_back(std::vector<uint>());
         }
         
         {
@@ -1213,10 +1275,9 @@ spheroid<T>::spheroid(uint n)
                 vals.push_back(j == i ? nr2 : 0);
             }
             
-            std::list< vertex<T> > a; 
             vertex<T> vertex(vals);
             this->v.push_back(vertex);
-            this->adj.push_back(a);
+            this->adj.push_back(std::vector<uint>());
         }
     }
 
@@ -1227,20 +1288,17 @@ spheroid<T>::spheroid(uint n)
             vals.push_back(((i >> j) & 0x1) ? 1 : -1);
         }
 
+        // A fresh vertex per corner per axis, each joined to one pole.  These
+        // duplicate coordinates heavily -- which is exactly what a value-keyed
+        // renderer used to collapse.  As indices they stay distinct.
         for(uint k = 0; k < this->D; k++) {
-            if(vals[k] == 1) {
-                std::list< vertex<T> > a; a.push_back(this->v[2*k]);
-                vertex<T> vertex(vals);
-                this->v.push_back(vertex);
-                this->adj.push_back(a);
-                this->adj[2*k].push_back(vertex);
-            } else if(vals[k] == -1) {
-                std::list< vertex<T> > a; a.push_back(this->v[2*k + 1]);
-                vertex<T> vertex(vals);
-                this->v.push_back(vertex);
-                this->adj.push_back(a);
-                this->adj[2*k + 1].push_back(vertex);
-            }
+            const uint pole = (vals[k] == 1) ? (2*k) : (2*k + 1);
+
+            vertex<T> vertex(vals);
+            this->v.push_back(vertex);
+            this->adj.push_back(std::vector<uint>());
+
+            this->connect(pole, this->size() - 1);
         }
     }
 }
@@ -1268,10 +1326,9 @@ staroid<T>::staroid(uint n)
                 vals.push_back(j == i ? r2 : 0);
             }
             
-            std::list< vertex<T> > a; 
             vertex<T> vertex(vals);
             this->v.push_back(vertex);
-            this->adj.push_back(a);
+            this->adj.push_back(std::vector<uint>());
         }
         
         {
@@ -1281,10 +1338,9 @@ staroid<T>::staroid(uint n)
                 vals.push_back(j == i ? nr2 : 0);
             }
             
-            std::list< vertex<T> > a; 
             vertex<T> vertex(vals);
             this->v.push_back(vertex);
-            this->adj.push_back(a);
+            this->adj.push_back(std::vector<uint>());
         }
     }
 
@@ -1295,20 +1351,17 @@ staroid<T>::staroid(uint n)
             vals.push_back(((i >> j) & 0x1) ? 1 : -1);
         }
 
+        // A fresh vertex per corner per axis, each joined to one pole.  These
+        // duplicate coordinates heavily -- which is exactly what a value-keyed
+        // renderer used to collapse.  As indices they stay distinct.
         for(uint k = 0; k < this->D; k++) {
-            if(vals[k] == 1) {
-                std::list< vertex<T> > a; a.push_back(this->v[2*k]);
-                vertex<T> vertex(vals);
-                this->v.push_back(vertex);
-                this->adj.push_back(a);
-                this->adj[2*k].push_back(vertex);
-            } else if(vals[k] == -1) {
-                std::list< vertex<T> > a; a.push_back(this->v[2*k + 1]);
-                vertex<T> vertex(vals);
-                this->v.push_back(vertex);
-                this->adj.push_back(a);
-                this->adj[2*k + 1].push_back(vertex);
-            }
+            const uint pole = (vals[k] == 1) ? (2*k) : (2*k + 1);
+
+            vertex<T> vertex(vals);
+            this->v.push_back(vertex);
+            this->adj.push_back(std::vector<uint>());
+
+            this->connect(pole, this->size() - 1);
         }
     }
 }
