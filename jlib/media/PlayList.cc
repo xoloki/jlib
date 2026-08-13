@@ -24,7 +24,6 @@
 
 #include <iostream>
 
-#include <sys/soundcard.h>
 
 namespace jlib {
     namespace media {

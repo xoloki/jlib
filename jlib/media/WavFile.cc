@@ -30,7 +30,6 @@
 
 #include <fstream>
 
-#include <sys/soundcard.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>

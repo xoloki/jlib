@@ -33,7 +33,6 @@
 
 #include <cstdlib>
 
-#include <sys/soundcard.h>
 
 #include <errno.h>
 

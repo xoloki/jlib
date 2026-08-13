@@ -1,7 +1,7 @@
 # Public jlib headers include <gpgme.h>, <sodium.h>, <openssl/*.h> and
 # <json.h> directly, so anything compiling against them needs those -I flags.
 AM_CPPFLAGS = -I$(top_srcdir) \
-	$(GPGME_CFLAGS) $(GPGERROR_CFLAGS) $(SODIUM_CFLAGS) $(OPENSSL_CFLAGS) $(JSONC_CFLAGS)
+	$(GPGME_CFLAGS) $(GPGERROR_CFLAGS) $(SODIUM_CFLAGS) $(OPENSSL_CFLAGS) $(JSONC_CFLAGS) $(PORTAUDIO_CFLAGS)
 
 # Every program below is gated on the conditionals its _LDADD needs.  The
 # libraries themselves are conditional, so an ungated program would fail at
@@ -19,7 +19,7 @@ if HAVE_CUDA
 cuda_programs = jcublas
 endif
 
-if HAVE_OSS_AUDIO
+if HAVE_PORTAUDIO
 media_programs = jnote jmelody
 endif
 

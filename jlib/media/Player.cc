@@ -24,7 +24,6 @@
 
 #include <jlib/util/util.hh>
 
-#include <sys/soundcard.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
@@ -62,7 +61,7 @@ namespace jlib {
               m_loop(false),
               m_beat(0),
               m_last_beat(0),
-              m_frags_desired(2)
+              m_periods_desired(2)
         {
             init();
             if(s)
@@ -71,7 +70,7 @@ namespace jlib {
 
         
         Player::~Player() {
-            // The worker touches m_dsp and m_stream, both members of Player.
+            // The worker touches m_sink and m_stream, both members of Player.
             // Leaving this empty meant those were destroyed -- closing the
             // audio device -- while the worker was potentially still inside
             // play_slot(), because ~Servent only runs after ~Player returns.
@@ -129,14 +128,14 @@ namespace jlib {
                 std::cerr << "received PLAY command" << std::endl;
             m_playing = !m_playing;
             if(!m_playing)
-                m_dsp.reset();
+                m_sink.reset();
         }
 
         void Player::pause_signal() { 
             if(getenv("JLIB_MEDIA_PLAYER_DEBUG")) 
                 std::cerr << "\treceived PAUSE command" << std::endl;
             m_playing = false;
-            m_dsp.reset();
+            m_sink.reset();
         }
 
         void Player::stop_signal() { 
@@ -144,7 +143,7 @@ namespace jlib {
                 std::cerr << "\treceived STOP command" << std::endl;
             m_playing = false;
             if(m_stream) {
-                m_dsp.reset();
+                m_sink.reset();
                 m_stream->rewind();
             
                 send_pulse(true);
@@ -157,7 +156,7 @@ namespace jlib {
                 std::cerr << "\treceived REWIND command" << std::endl;
 
             if(m_stream) {
-                m_dsp.reset();
+                m_sink.reset();
                 m_stream->clear();
                 jlib::media::basic_streambuf<char>::off_type increment = static_cast<jlib::media::basic_streambuf<char>::off_type>(m_stream->get_length() / get_beats());
 
@@ -178,7 +177,7 @@ namespace jlib {
                 std::cerr << "\treceived FFWD command" << std::endl;
             
             if(m_stream) {
-                m_dsp.reset();
+                m_sink.reset();
                 m_stream->clear();
                 
                 basic_streambuf<char>::off_type increment = static_cast<basic_streambuf<char>::off_type>(m_stream->get_length() / get_beats());
@@ -206,8 +205,8 @@ namespace jlib {
             if(m_stream && p < m_stream->get_length())
                 m_stream->seekg(p);
 
-            m_dsp.config(*m_stream);
-            m_dsp.reset();
+            m_sink.config(*m_stream);
+            m_sink.reset();
         }
 
         void Player::send_pulse(bool force) {
@@ -230,13 +229,20 @@ namespace jlib {
 
             if(!m_stream->eof()) {
                 send_pulse(false);
-                int n = m_dsp.get_frags_used();
-                if(n < m_frags_desired)
-                    m_dsp.play_frag(*m_stream,(m_frags_desired-n));
-                
+
+                // Top the device up to m_periods_desired periods queued.  This
+                // is counted in frames now rather than OSS fragments, which
+                // were a byte count unrelated to frame size.
+                const int want = m_periods_desired * m_sink.get_period();
+                const int have = m_sink.queued();
+
+                if(have < want) {
+                    const int periods = (want - have + m_sink.get_period() - 1) / m_sink.get_period();
+                    m_sink.play_frag(*m_stream, periods);
+                }
+
                 if(getenv("JLIB_MEDIA_PLAYER_DEBUG")) {
-                    std::cerr << "\t" << m_dsp.get_fragments() 
-                              << "/" << m_dsp.get_frags_total() << std::endl;
+                    std::cerr << "\t" << have << "/" << want << " frames queued" << std::endl;
                 }
             }
             

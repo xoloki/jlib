@@ -27,7 +27,7 @@
 #include <jlib/sys/Servent.hh>
 
 #include <jlib/media/stream.hh>
-#include <jlib/media/Dsp.hh>
+#include <jlib/media/PortAudioSink.hh>
 
 #include <sys/poll.h>
 
@@ -96,8 +96,8 @@ namespace jlib {
 
             beat_type m_beat, m_last_beat;
 
-            Dsp m_dsp;
-            int m_frags_desired;
+            PortAudioSink m_sink;
+            int m_periods_desired;
         };
     }
 }
