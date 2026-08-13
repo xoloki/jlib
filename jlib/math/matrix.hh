@@ -249,6 +249,14 @@ public:
     /** Each edge once, rather than once per endpoint. */
     const std::vector<edge_type>& get_edges() const;
 
+    /**
+     * The faces, built on first use.
+     *
+     * Deferred rather than built in the constructor because there are a lot
+     * of them: an n-cube has C(n,2)*2^(n-2), which is 372736 at n=14 -- a
+     * dimensionality wireframe rendering handles comfortably, and four times
+     * the vertex count.  Nothing should pay for faces it never draws.
+     */
     const std::vector<face_type>& get_faces() const;
 
     void change(uint n);
@@ -259,10 +267,21 @@ protected:
     /** Record an edge between two vertices, in both directions. */
     void connect(uint a, uint b);
 
+    /**
+     * Fill faces.  Called at most once, from get_faces().
+     *
+     * The base has none: a shape is a 1-skeleton unless a subclass says
+     * otherwise, and enumerating 2-faces is specific to the shape.
+     */
+    virtual void build_faces() const {}
+
     std::vector<vertex<T> > v;
     std::vector< std::vector<uint> > adj;
     std::vector<edge_type> edges;
-    std::vector<face_type> faces;
+
+    // mutable so get_faces() can stay const
+    mutable std::vector<face_type> faces;
+    mutable bool faces_built;
 };
 
 
@@ -270,6 +289,9 @@ template<typename T>
 class cuboid : public object<T> {
 public:
     cuboid(uint n);
+
+protected:
+    virtual void build_faces() const;
 };
 
 
@@ -1078,7 +1100,8 @@ const T* vertex<T>::data() const {
 template<typename T>
 inline
 object<T>::object(uint n) 
-    : D(n)
+    : D(n),
+      faces_built(false)
 {
 }
 
@@ -1126,6 +1149,11 @@ const std::vector<typename object<T>::edge_type>& object<T>::get_edges() const {
 template<typename T>
 inline
 const std::vector<typename object<T>::face_type>& object<T>::get_faces() const {
+    if(!faces_built) {
+        faces_built = true;
+        build_faces();
+    }
+
     return faces;
 }
 
@@ -1177,6 +1205,51 @@ cuboid<T>::cuboid(uint n)
             const uint n = i ^ (1u << j);
             if(i < n)
                 this->connect(i, n);
+        }
+    }
+}
+
+
+/**
+ * The 2-faces of an n-cube.
+ *
+ * A face is fixed by choosing two axes to leave free and pinning the other
+ * n-2 coordinates to a particular sign pattern, so there are C(n,2)*2^(n-2)
+ * of them: 6 for a cube, 24 for a tesseract, 80 for a 5-cube.
+ *
+ * Vertex i is the bit pattern i, so a face's four corners are the base
+ * pattern with the two free bits taking all four combinations.  They are
+ * emitted 00, 10, 11, 01 -- around the square rather than across it, so the
+ * loop is a real quad and not a bowtie.
+ *
+ * No attempt is made to wind them consistently outward.  A hypercube reduced
+ * to three dimensions is a shadow, not a solid: faces turn inside out as it
+ * rotates, and both sides are seen.  Normals are computed per frame from the
+ * projected positions, and lighting is two-sided.
+ */
+template<typename T>
+inline
+void cuboid<T>::build_faces() const {
+    const uint count = 1u << this->D;
+
+    for(uint a = 0; a < this->D; a++) {
+        for(uint b = a + 1; b < this->D; b++) {
+            const uint bit_a = 1u << a;
+            const uint bit_b = 1u << b;
+
+            for(uint base = 0; base < count; base++) {
+                // one face per assignment of the other n-2 coordinates
+                if((base & bit_a) != 0 || (base & bit_b) != 0)
+                    continue;
+
+                typename object<T>::face_type f;
+                f.push_back(base);
+                f.push_back(base | bit_a);
+                f.push_back(base | bit_a | bit_b);
+                f.push_back(base | bit_b);
+
+                this->faces.push_back(f);
+            }
         }
     }
 }
