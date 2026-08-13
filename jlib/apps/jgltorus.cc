@@ -58,11 +58,11 @@ GLdouble inner_z_rad = 0;
 GLdouble bounce_rad = 0;
 GLdouble color_rad = 0;
 
-GLdouble outer_inc = 0.001;
-GLdouble inner_x_inc = 0.002;
-GLdouble inner_y_inc = 0.004;
-GLdouble inner_z_inc = 0.006;
-GLdouble bounce_inc = 0.001;
+GLdouble outer_inc = 0.010;
+GLdouble inner_x_inc = 0.020;
+GLdouble inner_y_inc = 0.040;
+GLdouble inner_z_inc = 0.060;
+GLdouble bounce_inc = 0.010;
 GLdouble color_inc = 0.001;
 
 GLdouble inner = 0.17;
