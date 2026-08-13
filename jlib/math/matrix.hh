@@ -24,6 +24,7 @@
 #include <jlib/math/buffer.hh>
 
 #include <iostream>
+#include <memory>
 #include <iomanip>
 #include <exception>
 #include <vector>
@@ -231,6 +232,17 @@ public:
     typedef std::pair<uint,uint> edge_type;
 
     object(uint n);
+    virtual ~object() {}
+
+    /**
+     * A copy that keeps its actual type.
+     *
+     * Plot stores objects by value, so handing it a cuboid used to slice off
+     * everything but the base -- including build_faces(), which left the copy
+     * a 1-skeleton no matter what was added.  Shapes differ only in how they
+     * are built, so this is the one thing they need to carry.
+     */
+    virtual std::shared_ptr< object<T> > clone() const;
 
     void normalize();
     
@@ -290,6 +302,8 @@ class cuboid : public object<T> {
 public:
     cuboid(uint n);
 
+    virtual std::shared_ptr< object<T> > clone() const;
+
 protected:
     virtual void build_faces() const;
 };
@@ -299,6 +313,8 @@ template<typename T>
 class pyramoid : public object<T> {
 public:
     pyramoid(uint n);
+
+    virtual std::shared_ptr< object<T> > clone() const;
 };
 
 
@@ -306,12 +322,16 @@ template<typename T>
 class staroid : public object<T> {
 public:
     staroid(uint n);
+
+    virtual std::shared_ptr< object<T> > clone() const;
 };
 
 template<typename T>
 class spheroid : public object<T> {
 public:
     spheroid(uint n);
+
+    virtual std::shared_ptr< object<T> > clone() const;
 };
 
 
@@ -1148,6 +1168,13 @@ const std::vector<typename object<T>::edge_type>& object<T>::get_edges() const {
 
 template<typename T>
 inline
+std::shared_ptr< object<T> > object<T>::clone() const {
+    return std::make_shared< object<T> >(*this);
+}
+
+
+template<typename T>
+inline
 const std::vector<typename object<T>::face_type>& object<T>::get_faces() const {
     if(!faces_built) {
         faces_built = true;
@@ -1178,6 +1205,13 @@ void object<T>::change(uint n) {
     for(uint i = 0; i < size(); i++) {
         v[i].change(n);
     }
+}
+
+
+template<typename T>
+inline
+std::shared_ptr< object<T> > cuboid<T>::clone() const {
+    return std::make_shared< cuboid<T> >(*this);
 }
 
 
@@ -1257,6 +1291,13 @@ void cuboid<T>::build_faces() const {
 
 template<typename T>
 inline
+std::shared_ptr< object<T> > pyramoid<T>::clone() const {
+    return std::make_shared< pyramoid<T> >(*this);
+}
+
+
+template<typename T>
+inline
 pyramoid<T>::pyramoid(uint n) 
     : object<T>(n)
 {
@@ -1310,6 +1351,13 @@ pyramoid<T>::pyramoid(uint n)
         }
     }
 
+}
+
+
+template<typename T>
+inline
+std::shared_ptr< object<T> > spheroid<T>::clone() const {
+    return std::make_shared< spheroid<T> >(*this);
 }
 
 
@@ -1375,6 +1423,13 @@ spheroid<T>::spheroid(uint n)
         }
     }
 }
+
+template<typename T>
+inline
+std::shared_ptr< object<T> > staroid<T>::clone() const {
+    return std::make_shared< staroid<T> >(*this);
+}
+
 
 template<typename T>
 inline
