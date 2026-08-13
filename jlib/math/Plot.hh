@@ -27,6 +27,7 @@
 #include <cmath>
 #include <iostream>
 
+#include <memory>
 #include <vector>
 #include <stack>
 
@@ -72,7 +73,7 @@ public:
      */
     enum class projection_mode { perspective, orthographic, mixed };
 
-    typedef typename std::list< object<T> >::iterator objref;
+    typedef typename std::list< std::shared_ptr< object<T> > >::iterator objref;
 
     Plot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h);
     virtual ~Plot() {}
@@ -128,7 +129,9 @@ protected:
     mutable T m_radius;
 
     std::vector< std::pair<T,T> > clip;
-    std::list< object<T> > objects;
+    // Held by pointer so a shape keeps its type.  These used to be stored by
+    // value, which sliced every subclass down to the base on the way in.
+    std::list< std::shared_ptr< object<T> > > objects;
     std::stack< matrix<T> > modelview;
     std::stack< matrix<T> > projection;
     STACK current;
@@ -155,16 +158,16 @@ Plot<T>::Plot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h)
 template<typename T>
 inline
 typename Plot<T>::objref Plot<T>::add(const object<T>& o) {
-    return objects.insert(objects.end(), o);
+    return objects.insert(objects.end(), o.clone());
 }
 
 
 template<typename T>
 inline
 void Plot<T>::draw() {
-    typename std::list< object<T> >::iterator i = objects.begin();
+    objref i = objects.begin();
     for(; i != objects.end(); i++) {
-        object<T>& object = *i;
+        object<T>& object = **i;
 
         // Indexed in parallel with the object's vertices.  This was a
         // std::map keyed by the vertex itself, which made coordinates the
