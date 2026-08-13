@@ -212,8 +212,11 @@ namespace jlib {
             }
         }
 
-        long find_end(std::string s, const std::vector<std::string>& e) {
-            long ret = s.npos;
+        // Returns size_type rather than long so that npos survives the round
+        // trip.  Callers used to store the result in a u_int, which truncates
+        // npos (SIZE_MAX) to 0xFFFFFFFF and so never compares equal to it.
+        std::string::size_type find_end(std::string s, const std::vector<std::string>& e) {
+            std::string::size_type ret = s.npos;
             std::string::size_type p;
             for(std::string::size_type i=0;i<e.size();i++) {
                 if( (p=s.find(e[i])) != s.npos ) {
@@ -234,7 +237,7 @@ namespace jlib {
                 return s;
             }
             
-            u_int p = find_end(s,ends);
+            std::string::size_type p = find_end(s,ends);
             if(p != s.npos) {
                 return s.substr(0,p);
             }
@@ -288,20 +291,24 @@ namespace jlib {
         }
         
         std::string extract_address(std::string p_addr) {
-            u_int p = p_addr.find("@");
+            // p was a u_int, which truncates npos to 0xFFFFFFFF, so the
+            // "no @ present" guard below never fired: the function fell into
+            // the else branch, where p+1 wrapped to 0, and returned a chunk of
+            // the input instead of an empty string.
+            std::string::size_type p = p_addr.find("@");
             int m=0,n=-1;
-                
+
             if(p == p_addr.npos) {
                 return std::string();
             }
             else {
-                for(int i=p+1;i<(int)p_addr.length();i++) {
+                for(int i=static_cast<int>(p)+1;i<(int)p_addr.length();i++) {
                     if(!Email::is_valid(p_addr[i])) {
                         n = i;
                         break;
                     }
                 }
-                for(int i=p-1;i>=0;i--) {
+                for(int i=static_cast<int>(p)-1;i>=0;i--) {
                     if(!Email::is_valid(p_addr[i])) {
                         m = i+1;
                         break;

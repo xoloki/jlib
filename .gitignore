@@ -1,6 +1,10 @@
 COPYING
 INSTALL
 Doxyfile
+
+# scratch files for composing a commit message / PR body
+commit.txt
+pr.txt
 Makefile
 Makefile.in
 aclocal.m4

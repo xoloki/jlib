@@ -212,7 +212,7 @@ namespace jlib {
 
             util::set<short>(chunk,get_format_tag(),base+FORMAT_TAG_OFFSET);
             util::set<u_short>(chunk,get_bits_per_sample(),base+BITS_PER_SAMPLE_OFFSET);
-            util::set<u_long>(chunk,get_samples_per_sec(),base+SAMPLES_PER_SEC_OFFSET);
+            util::set<u_int32_t>(chunk,get_samples_per_sec(),base+SAMPLES_PER_SEC_OFFSET);
             util::set<u_short>(chunk,get_channels(),base+CHANNELS_OFFSET);
    
             return chunk;

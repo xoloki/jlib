@@ -64,6 +64,14 @@ AC_COMPILE_IFELSE(
    AC_MSG_RESULT([no])
    AC_MSG_ERROR([a C++20 compiler is required (clang 15+ or gcc 11+)])])
 
+dnl Falling off the end of a value-returning function is undefined behaviour,
+dnl not merely a diagnostic: at -O2 the compiler treats the path as
+dnl unreachable and emits no epilogue.  do_hash() in jlib/crypt/curve.hh did
+dnl exactly this and crashed inside _Unwind_Resume with no exception in
+dnl flight.  A missing return is never intentional, so make it fatal.
+AX_CHECK_COMPILE_FLAG([-Werror=return-type],
+                      [CXXFLAGS="$CXXFLAGS -Werror=return-type"], [], [-Werror])
+
 AX_PTHREAD([], [AC_MSG_ERROR([a working pthread implementation is required])])
 LIBS="$PTHREAD_LIBS $LIBS"
 CXXFLAGS="$CXXFLAGS $PTHREAD_CFLAGS"

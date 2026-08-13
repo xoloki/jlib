@@ -239,7 +239,7 @@ tensor<T> operator^(const tensor<T>& a, const tensor<T>& b) {
 
         // inner product is a tensor with rank equal to sum of args' ranks - 2
         buffer<unsigned int> meta(a.rank() + b.rank() - 2);
-        buffer<T> data();
+        buffer<T> data;   // was data(), which declares a function
         tensor<T> ret(meta, data);
     
         return ret;

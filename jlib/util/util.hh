@@ -252,14 +252,23 @@ namespace jlib {
 
         bool imaps(const std::map<std::string,std::string>& m, std::string key, std::string val);
         
+        // These read a T out of a byte buffer at an arbitrary offset, so the
+        // address is not generally aligned for T.  Doing that by casting the
+        // pointer and dereferencing is undefined behaviour -- it also breaks
+        // strict aliasing -- and -fsanitize=alignment traps it.  memcpy
+        // expresses the same thing legally and compiles to the same load.
         template<class T>
         T get(std::string s, unsigned int offset=0) {
-            return *reinterpret_cast<T*>(const_cast<char*>(s.data())+offset);
+            T t;
+            std::memcpy(&t, s.data() + offset, sizeof(T));
+            return t;
         }
-        
+
         template<class T>
         T get(const char* c, unsigned int offset=0) {
-            return *reinterpret_cast<T*>(const_cast<char*>(c)+offset);
+            T t;
+            std::memcpy(&t, c + offset, sizeof(T));
+            return t;
         }
 
         template<class T>
