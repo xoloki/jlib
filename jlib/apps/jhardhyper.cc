@@ -174,23 +174,25 @@ void HPlot<T>::draw() {
 
     typename std::list< math::object<T> >::iterator i = math::Plot<T>::objects.begin();
     for(; i != math::Plot<T>::objects.end(); i++) {
-        std::map<math::vertex<T>, math::vertex<T> > transformed;
         math::object<T>& object = *i;
 
-        for(uint j = 0; j < object.size(); j++) {
-            math::vertex<T>& v1 = object[j];
-            math::vertex<T> tv1 = transform(v1);
+        // Parallel to the object's vertices; see the note in math::Plot::draw.
+        // Built by push_back rather than sized up front: vertex<T> has no
+        // default constructor, since a vertex has no meaning without a
+        // dimensionality.
+        std::vector< math::vertex<T> > transformed;
+        transformed.reserve(object.size());
 
-            transformed.insert(std::make_pair(v1, tv1));
+        for(uint j = 0; j < object.size(); j++) {
+            transformed.push_back(transform(object[j]));
         }
 
         // Frame the object: far enough back that the outermost vertex sits
         // inside the field, growing the distance if a later rotation reaches
         // further than anything seen so far.
         T radius = 0;
-        typename std::map<math::vertex<T>, math::vertex<T> >::iterator t;
-        for(t = transformed.begin(); t != transformed.end(); t++) {
-            const math::vertex<T>& v = t->second;
+        for(uint j = 0; j < transformed.size(); j++) {
+            const math::vertex<T>& v = transformed[j];
             T r2 = 0;
             for(uint k = 0; k < 3 && k < v.D; k++)
                 r2 += v[k] * v[k];
@@ -227,18 +229,13 @@ void HPlot<T>::draw() {
         glScaled(scale, scale, scale);
 
         for(uint j = 0; j < object.size(); j++) {
-            math::vertex<T>& v1 = object[j];
-            math::vertex<T>& tv1 = transformed.find(v1)->second;
+            math::vertex<T>& tv1 = transformed[j];
 
             draw_point(tv1);
-            
-            std::list< math::vertex<T> > adjacent = object.adjacent(j);
-            typename std::list< math::vertex<T> >::iterator k;
-            for(k = adjacent.begin(); k != adjacent.end(); k++) {
-                math::vertex<T>& v2 = *k;
-                math::vertex<T>& tv2 = transformed.find(v2)->second;
 
-                draw_line(tv1, tv2);
+            const std::vector<uint>& adjacent = object.adjacent(j);
+            for(uint k = 0; k < adjacent.size(); k++) {
+                draw_line(tv1, transformed[adjacent[k]]);
             }
         }
     }

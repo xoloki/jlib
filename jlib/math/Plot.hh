@@ -164,36 +164,37 @@ inline
 void Plot<T>::draw() {
     typename std::list< object<T> >::iterator i = objects.begin();
     for(; i != objects.end(); i++) {
-        std::map<vertex<T>, std::pair<uint,uint> > mapped;
         object<T>& object = *i;
 
-        for(uint j = 0; j < object.size(); j++) {
-            vertex<T>& v1 = object[j];
-            vertex<T> tv1 = transform(v1);
-            std::pair<uint,uint> p1 = map(tv1);
+        // Indexed in parallel with the object's vertices.  This was a
+        // std::map keyed by the vertex itself, which made coordinates the
+        // identity of a vertex: two vertices at the same position collapsed
+        // into one entry, and every lookup cost a tree search.  It also
+        // dereferenced find() without checking it, so an adjacency naming a
+        // vertex the object did not hold was undefined behaviour rather than
+        // an error.
+        std::vector< std::pair<uint,uint> > mapped(object.size());
 
-            mapped.insert(std::make_pair(v1, p1));
+        for(uint j = 0; j < object.size(); j++) {
+            mapped[j] = map(transform(object[j]));
         }
 
         for(uint j = 0; j < object.size(); j++) {
-            math::vertex<T>& v1 = object[j];
-            //math::vertex<T>& tv1 = transformed.find(v1)->second;
-            std::pair<uint,uint>& p1 = mapped.find(v1)->second;
+            const std::pair<uint,uint>& p1 = mapped[j];
 
             /* if(!visible(tv1)) continue; */
 
             draw_point(p1);
-            
-            std::list< math::vertex<T> > adjacent = object.adjacent(j);
-            typename std::list< math::vertex<T> >::iterator k;
-            for(k = adjacent.begin(); k != adjacent.end(); k++) {
-                math::vertex<T>& v2 = *k;
-                //math::vertex<T>& tv2 = transformed.find(v2)->second;
-                std::pair<uint,uint>& p2 = mapped.find(v2)->second;
 
+            // Adjacency is symmetric, so this draws each edge twice, once
+            // from each end.  draw_line() in Hyper.hh relies on that: it draws
+            // half an edge in the colour of the vertex it started from, which
+            // is how an edge comes out blending its two endpoints.
+            const std::vector<uint>& adjacent = object.adjacent(j);
+            for(uint k = 0; k < adjacent.size(); k++) {
                 /* if(!visible(tv2)) continue; */
 
-                draw_line(p1, p2);
+                draw_line(p1, mapped[adjacent[k]]);
             }
         }
     }
