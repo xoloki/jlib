@@ -305,8 +305,15 @@ bool operator!=(const Point& x, const Point& y) {
     return !(x == y);
 }
 
-BasePoint Commitment::G;
-Point Commitment::H = hash<Point::HASHSIZE>(G);
+const BasePoint& Commitment::G() {
+    static const BasePoint g;
+    return g;
+}
+
+const Point& Commitment::H() {
+    static const Point h = hash<Point::HASHSIZE>(G());
+    return h;
+}
     
 Commitment::Commitment() {
 }
@@ -320,7 +327,7 @@ Commitment::Commitment(const Scalar& value, const Scalar& blind)
     : m_value(value),
       m_blind(blind)
 {
-    Point p = value * G + blind * H;
+    Point p = value * G() + blind * H();
     static_cast<Point&>(*this) = p;
 }
 

@@ -25,7 +25,7 @@
 #include <iostream>
 #include <string>
 
-#include <sigc++/slot.h>
+#include <functional>
 
 namespace jlib {
     namespace sys {
@@ -74,7 +74,7 @@ namespace jlib {
          * before and unlock after
          *
          */
-        void thread(const sigc::slot0<void>& slot, std::string s="");
+        void thread(const std::function<void()>& slot, std::string s="");
 
         /**
          * lock a global mutex referred to by s

@@ -20,9 +20,9 @@
 
 #include <jlib/glut/main.hh>
 
-#include <GL/gl.h>
-#include <GL/glu.h>
-#include <GL/glut.h>
+#include <jlib/gl/opengl.hh>
+#include <jlib/gl/opengl.hh>
+#include <jlib/glut/glut.hh>
 
 const int RES     = 128;
 const int DEPTH   = 4;
@@ -70,18 +70,18 @@ void Main::run() {
     glutMainLoop();
 }
     
-sigc::signal0<void> Main::init_buffers;
-sigc::signal0<void> Main::init_lights;
-sigc::signal0<void> Main::init_textures;
+sys::signal<void()> Main::init_buffers;
+sys::signal<void()> Main::init_lights;
+sys::signal<void()> Main::init_textures;
     
-sigc::signal0<std::string> Main::make_textures;
+sys::signal<std::string()> Main::make_textures;
     
-sigc::signal0<void> Main::display;
-sigc::signal2<void,int,int> Main::reshape;
-sigc::signal3<void,unsigned char,int,int> Main::keyboard;
-sigc::signal3<void,int,int,int> Main::special;
-sigc::signal4<void,int,int,int,int> Main::mouse;
-sigc::signal0<void> Main::idle;
+sys::signal<void()> Main::display;
+sys::signal<void(int,int)> Main::reshape;
+sys::signal<void(unsigned char,int,int)> Main::keyboard;
+sys::signal<void(int,int,int)> Main::special;
+sys::signal<void(int,int,int,int)> Main::mouse;
+sys::signal<void()> Main::idle;
     
     
     
@@ -215,13 +215,13 @@ std::string Main::make_checkered_texture() {
 }
     
 void Main::connect_defaults() {
-    reshape.connect(sigc::ptr_fun(&default_reshape));
+    reshape.connect(&default_reshape);
     
-    init_buffers.connect(sigc::ptr_fun(&default_init_buffers));
-    init_lights.connect(sigc::ptr_fun(&default_init_lights));
-    init_textures.connect(sigc::ptr_fun(&default_init_textures));
+    init_buffers.connect(&default_init_buffers);
+    init_lights.connect(&default_init_lights);
+    init_textures.connect(&default_init_textures);
     
-    make_textures.connect(sigc::ptr_fun(&make_checkered_texture));
+    make_textures.connect(&make_checkered_texture);
 }
     
 bool Main::is_fullscreen() { return m_is_fullscreen; }

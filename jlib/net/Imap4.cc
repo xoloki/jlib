@@ -302,7 +302,7 @@ namespace jlib {
 
         std::string Imap4::retrieve_headers(unsigned int which, 
                                        std::string mailbox,
-                                       unsigned int& size) throw(std::exception)
+                                       unsigned int& size)
         {
             sys::socketstream* sock;
             sock = connect();
@@ -320,7 +320,7 @@ namespace jlib {
         std::string Imap4::retrieve_headers(sys::socketstream& sock, 
                                        unsigned int which, 
                                        std::string mailbox,
-                                       unsigned int& size) throw(std::exception) {
+                                       unsigned int& size) {
 
             std::string buf;
             //std::vector<std::string> info;
@@ -364,7 +364,7 @@ namespace jlib {
             return ret;            
         }
 
-        std::string Imap4::retrieve(int which, std::string mailbox) throw(std::exception) {
+        std::string Imap4::retrieve(int which, std::string mailbox) {
             sys::socketstream* sock;
             sock = connect();
             login(*sock);
@@ -379,7 +379,7 @@ namespace jlib {
             return ret;
         }
 
-        std::string Imap4::retrieve(sys::socketstream& sock, int which, std::string mailbox) throw(std::exception) 
+        std::string Imap4::retrieve(sys::socketstream& sock, int which, std::string mailbox) 
         {
             std::string buf;
             //std::vector<std::string> info;
@@ -415,7 +415,7 @@ namespace jlib {
             return ret;
         }
         
-        sys::socketstream* Imap4::connect() throw(std::exception) {
+        sys::socketstream* Imap4::connect() {
             sys::socketstream* sock = 0;
             if(getenv("JLIB_NET_IMAP4_DEBUG")) 
                 std::cout << "begin opening "<<m_host<<" on port "<<m_port<<"... "<<std::endl;
@@ -485,14 +485,14 @@ namespace jlib {
             //handshake(sock"LOGIN "+m_user+" "+m_pass);
         }
         
-        void Imap4::disconnect(sys::socketstream& sock) throw(std::exception) {
+        void Imap4::disconnect(sys::socketstream& sock) {
             //handshake(sock"CLOSE");
             //handshake(sock"LOGOUT");
             sock.close();
             m_state = UnConnected;
         }
         
-        void Imap4::remove(int which, std::string mailbox) throw(std::exception) {
+        void Imap4::remove(int which, std::string mailbox) {
             sys::socketstream* sock;
             sock = connect();
             login(*sock);
@@ -523,7 +523,7 @@ namespace jlib {
             return true;
         }
 
-        std::vector<std::string> Imap4::handshake(sys::socketstream& sock, std::string data) throw(std::exception) {
+        std::vector<std::string> Imap4::handshake(sys::socketstream& sock, std::string data) {
             std::string buf;
             std::string com = tag(1)+" "+data;
             std::vector<std::string> ret;
@@ -672,14 +672,14 @@ namespace jlib {
             return ret;
         }
 
-        void Imap4::logout(sys::socketstream& sock) throw(std::exception) {
+        void Imap4::logout(sys::socketstream& sock) {
             handshake(sock,"LOGOUT");
             m_state = UnConnected;
         }
         void Imap4::authenticate(sys::socketstream& sock,std::string name) {
             handshake(sock,"AUTHENTICATE "+name);
         }
-        void Imap4::login(sys::socketstream& sock, std::string user, std::string pass) throw(std::exception) {
+        void Imap4::login(sys::socketstream& sock, std::string user, std::string pass) {
             if(user!="" && pass != "") {
                 handshake(sock,"LOGIN "+user+" "+pass);
             }

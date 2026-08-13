@@ -27,7 +27,7 @@
 
 #include <jlib/sys/joystick.hh>
 #include <jlib/util/util.hh>
-#include <bits/char_traits.h>
+#include <string>
 
 using namespace jlib;
 

@@ -29,8 +29,8 @@
 
 #include <cstdlib>
 
-#include <GL/glu.h>
-#include <GL/glut.h>
+#include <jlib/gl/opengl.hh>
+#include <jlib/glut/glut.hh>
 
 #include <unistd.h>
 
@@ -86,9 +86,9 @@ int main(int argc, char** argv) {
     try {
         glx::Window window("GLX Box", 500, 500);
 
-        window.key_press.connect(sigc::ptr_fun(&on_keyboard));
-        window.button_press.connect(sigc::ptr_fun(&on_mouse));
-        window.timeout.connect(sigc::bind(sigc::ptr_fun(&on_idle), window));
+        window.key_press.connect(&on_keyboard);
+        window.button_press.connect(&on_mouse);
+        window.timeout.connect([&window]() { on_idle(window); });
 
         gl::buffers::init(false, true, true);
         gl::lights::init(false);

@@ -23,7 +23,7 @@
 
 #include <string>
 
-#include <sigc++/sigc++.h>
+#include <jlib/sys/signal.hh>
 
 namespace jlib {
 namespace x {
@@ -120,15 +120,15 @@ public:
     Window& operator<<(std::string msg);
     Window& operator<<(int value);
     
-    sigc::signal<void,std::string,int,int> key_press;
-    sigc::signal<void,std::string,int,int> key_release;
+    sys::signal<void(std::string,int,int)> key_press;
+    sys::signal<void(std::string,int,int)> key_release;
     
-    sigc::signal<void,int,int,int> button_press;
-    sigc::signal<void,int,int,int> button_release;
+    sys::signal<void(int,int,int)> button_press;
+    sys::signal<void(int,int,int)> button_release;
 
-    sigc::signal<void,int,int> configure_notify;
+    sys::signal<void(int,int)> configure_notify;
 
-    sigc::signal<void> timeout;
+    sys::signal<void()> timeout;
     
 protected:
     Window();

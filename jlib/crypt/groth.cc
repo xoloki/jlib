@@ -213,7 +213,7 @@ ZeroProof prove(const std::vector<curve::Commitment>& c, std::size_t l, const cu
     std::cout << "c0rxn = " << c0rxn << std::endl;
     std::cout << "S_rhok_xk = " << S_rhok_xk << std::endl;
     std::cout << "c0_S_rhok_xk = " << c0_S_rhok_xk << std::endl;
-    std::cout << "S_rhok_xk * H = " << S_rhok_xk * curve::Commitment::H << std::endl;
+    std::cout << "S_rhok_xk * H = " << S_rhok_xk * curve::Commitment::H() << std::endl;
     std::cout << "P_c0rhok_xk = " << P_c0rhok_xk << std::endl;
     std::cout << "c0rxn - P_c0rhok_xk = " << (c0rxn - P_c0rhok_xk) << std::endl;
     std::cout << "c0rxn - c0_S_rhok_xk = " << (c0rxn - c0_S_rhok_xk) << std::endl;

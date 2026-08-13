@@ -44,7 +44,7 @@ namespace jlib {
         
         std::vector<Email> Imap4Fetch::retrieve() {
             std::vector<Email> ret;
-            std::auto_ptr<jlib::sys::socketstream> sock(connect());
+            std::unique_ptr<jlib::sys::socketstream> sock(connect());
             login(*sock);
             select(*sock,"INBOX");
 

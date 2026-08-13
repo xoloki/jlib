@@ -20,8 +20,7 @@
 
 #include <jlib/glx/Window.hh>
 #include <jlib/glu/projection.hh>
-#include <GL/glu.h>
-#include <GL/gl.h>
+#include <jlib/gl/opengl.hh>
 
 namespace jlib {
 namespace glx {

@@ -40,7 +40,7 @@ namespace jlib {
         
         void Imap4BoxBuf::list() {
             std::list<std::string> path;// = util::tokenize_list(m_url.get_path());
-            std::auto_ptr<jlib::sys::socketstream> sock(connect());
+            std::unique_ptr<jlib::sys::socketstream> sock(connect());
 
             login(*sock);
             tree(path,*sock,m_root);
@@ -67,7 +67,7 @@ namespace jlib {
         }
 
         void Imap4BoxBuf::create_folder(std::list<std::string> path) {
-            std::auto_ptr<jlib::sys::socketstream> sock(connect());
+            std::unique_ptr<jlib::sys::socketstream> sock(connect());
             login(*sock);
             
             create(*sock,m_url.get_path_no_slash()+MailNode::pathstr(path,m_delim,false));
@@ -77,7 +77,7 @@ namespace jlib {
         }
 
         void Imap4BoxBuf::delete_folder(std::list<std::string> path) {
-            std::auto_ptr<jlib::sys::socketstream> sock(connect());
+            std::unique_ptr<jlib::sys::socketstream> sock(connect());
             login(*sock);
             
             remove(*sock,m_url.get_path_no_slash()+MailNode::pathstr(path,m_delim,false));
@@ -87,7 +87,7 @@ namespace jlib {
         }
 
         void Imap4BoxBuf::rename_folder(std::list<std::string> path, std::list<std::string> npath) {
-            std::auto_ptr<jlib::sys::socketstream> sock(connect());
+            std::unique_ptr<jlib::sys::socketstream> sock(connect());
             login(*sock);
 
             rename(*sock,

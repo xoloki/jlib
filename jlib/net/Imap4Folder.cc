@@ -59,7 +59,7 @@ namespace jlib {
             unsigned int exists = this->exists();
             unsigned int recent = this->recent();
             
-            std::auto_ptr<jlib::sys::socketstream> sock(connect());
+            std::unique_ptr<jlib::sys::socketstream> sock(connect());
             login(*sock);
             
             examine(*sock,m_path);
@@ -74,8 +74,7 @@ namespace jlib {
             unsigned int exists = this->exists();
             unsigned int recent = this->recent();
 
-            std::auto_ptr<jlib::sys::socketstream> sock(connect());
-            //sock = std::auto_ptr(connect());
+            std::unique_ptr<jlib::sys::socketstream> sock(connect());
             login(*sock);
             examine(*sock,m_path);
 
@@ -159,7 +158,7 @@ namespace jlib {
                 }
             }
             
-            std::auto_ptr<jlib::sys::socketstream> sock(connect());
+            std::unique_ptr<jlib::sys::socketstream> sock(connect());
             //sock(connect())
             login(*sock);
             select(*sock,m_path);
@@ -189,7 +188,7 @@ namespace jlib {
                 }
             }
 
-            std::auto_ptr<jlib::sys::socketstream> sock(connect());
+            std::unique_ptr<jlib::sys::socketstream> sock(connect());
             login(*sock);
             select(*sock,m_path);
             
@@ -202,7 +201,7 @@ namespace jlib {
         }
 
         void Imap4FolderBuffer::sync() {
-            std::auto_ptr<jlib::sys::socketstream> sock(connect());
+            std::unique_ptr<jlib::sys::socketstream> sock(connect());
             login(*sock);
             select(*sock,m_path);
             
@@ -230,7 +229,7 @@ namespace jlib {
         }
         
         void Imap4FolderBuffer::add(std::vector<Email> mails) {
-            std::auto_ptr<jlib::sys::socketstream> sock(connect());
+            std::unique_ptr<jlib::sys::socketstream> sock(connect());
             login(*sock);
 
             for(unsigned int i=0;i<mails.size();i++) {

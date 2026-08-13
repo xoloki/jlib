@@ -29,9 +29,9 @@ int main(int argc, char** argv) {
         window.seek(-40,5);
         window << "HELLO, WORLD!";
 
-        window.key_press.connect(sigc::ptr_fun(&key_pressed));
-        window.button_press.connect(sigc::ptr_fun(&button_pressed));
-        window.timeout.connect(sigc::ptr_fun(&timeout));
+        window.key_press.connect(&key_pressed);
+        window.button_press.connect(&button_pressed);
+        window.timeout.connect(&timeout);
 
         window.run();
     }

@@ -22,7 +22,6 @@
 
 #include <jlib/sys/sys.hh>
 #include <jlib/sys/tfstream.hh>
-#include <glibmm/thread.h>
 #include <jlib/sys/socketstream.hh>
 #include <jlib/sys/sslstream.hh>
 
@@ -758,7 +757,7 @@ namespace jlib {
             }
             
             //void send(std::string mail, std::string rcpt, std::string data, 
-            //std::string host, const unsigned int port) throw(exception) {
+            //std::string host, const unsigned int port) {
 
             std::string convert_to_crlf(std::string data) {
                 std::string::size_type p = 0, i;
@@ -914,10 +913,10 @@ namespace jlib {
             }
 
             /*
-            void send(std::string mail, std::string rcpt, std::string data, std::string host) throw(exception) {
+            void send(std::string mail, std::string rcpt, std::string data, std::string host) {
                 send(mail,rcpt,data,host,25);
             }
-            void send(std::string mail, std::string rcpt, std::string data) throw(exception) {
+            void send(std::string mail, std::string rcpt, std::string data) {
                 send(mail,rcpt,data,"localhost",25);
             }
             */

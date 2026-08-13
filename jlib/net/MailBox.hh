@@ -27,7 +27,7 @@
 #include <vector>
 #include <list>
 
-#include <sigc++/sigc++.h>
+#include <jlib/sys/signal.hh>
 
 #include <jlib/net/MailFolder.hh>
 
@@ -175,7 +175,7 @@ namespace jlib {
          * 
          * 
          */
-        class MailBox : public sigc::trackable {
+        class MailBox {
         public:
             class exception : public std::exception {
             public:

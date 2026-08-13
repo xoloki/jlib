@@ -23,7 +23,7 @@
 
 
 #include <jlib/sys/object.hh>
-#include <glibmm/refptr.h>
+#include <memory>
 
 #include <list>
 #include <map>
@@ -35,7 +35,7 @@ namespace ai {
 class Percept : public sys::Object {
 public:
     typedef int sense;
-    typedef Glib::RefPtr<Percept> ptr;
+    typedef std::shared_ptr<Percept> ptr;
     typedef std::list<ptr> list;
     typedef std::map<sense, Percept::ptr> map;
 

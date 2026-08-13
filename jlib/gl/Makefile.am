@@ -1,16 +1,19 @@
-INCLUDES = -I$(top_srcdir)
+AM_CPPFLAGS = -I$(top_srcdir) $(GL_CFLAGS)
 
 if HAVE_GL
 LIBJGL = libjgl.la
-else
-LIBJGL = 
 endif
 
 lib_LTLIBRARIES = $(LIBJGL)
 libjgl_la_SOURCES = lights.cc buffers.cc
-libjgl_la_LDFLAGS = -version-info $(LIBJ_SO_VERSION) -release $(JLIB_RELEASE) -no-undefined -L/usr/X11/lib -lX11 -lXext -lGL
-libjgl_la_LIBADD = $(top_builddir)/jlib/x/libjx.la
-libjglincludedir=$(includedir)/jlib-1.2/jlib/gl
+libjgl_la_LDFLAGS = -version-info $(LIBJ_SO_VERSION) -release $(JLIB_RELEASE) -no-undefined
+libjgl_la_LIBADD = $(GL_LIBS)
 
-libjglinclude_HEADERS = lights.hh buffers.hh
+jgl_hdrs = lights.hh buffers.hh opengl.hh
 
+libjglincludedir = $(includedir)/jlib-1.2/jlib/gl
+if HAVE_GL
+libjglinclude_HEADERS = $(jgl_hdrs)
+endif
+
+EXTRA_DIST = $(jgl_hdrs)

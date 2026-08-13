@@ -24,6 +24,7 @@
 
 #include <jlib/ai/environment.hh>
 
+#include <memory>
 #include <vector>
 
 
@@ -35,7 +36,7 @@ typedef std::vector<double> location;
     
 class Move : public Action {
 public:
-    typedef Glib::RefPtr<Move> ptr;
+    typedef std::shared_ptr<Move> ptr;
 
     Move(location l) : loc(l) {}
     location loc;
@@ -43,7 +44,7 @@ public:
 
 class Clean : public Action {
 public:
-    typedef Glib::RefPtr<Clean> ptr;
+    typedef std::shared_ptr<Clean> ptr;
     Clean() {}
 };
 

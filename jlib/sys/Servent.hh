@@ -21,19 +21,21 @@
 #ifndef JLIB_SYS_SERVENT_HH
 #define JLIB_SYS_SERVENT_HH
 
-#include <glibmm/thread.h>
 #include <jlib/sys/pipe.hh>
 #include <jlib/sys/object.hh>
+#include <jlib/sys/signal.hh>
 #include <jlib/sys/sync.hh>
 
 #include <exception>
-#include <string>
-#include <sstream>
+#include <functional>
+#include <list>
 #include <map>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <thread>
 
 #include <cstring>
-
-#include <sigc++/sigc++.h>
 
 #include <errno.h>
 
@@ -48,8 +50,8 @@ namespace jlib {
                     m_msg = "jlib::sys::Servent exception"+
                         (msg != "" ? (": "+msg):"");
                 }
-                virtual ~exception() throw() {}
-                virtual const char* what() const throw() { return m_msg.c_str(); }
+                virtual ~exception() noexcept {}
+                virtual const char* what() const noexcept { return m_msg.c_str(); }
                 
                 static void throw_errno(std::string msg) {
                     std::ostringstream o;
@@ -61,34 +63,44 @@ namespace jlib {
                 std::string m_msg;
             };
 
-            typedef int                                       id_type;
-            typedef std::map< id_type,sigc::slot<void> >     command_map_type;
+            typedef int                                        id_type;
+            typedef std::map< id_type, std::function<void()> > command_map_type;
 
-            typedef std::list<std::pair<sigc::slot<bool>,sigc::slot<void> > >
-                                                              condition_list_type;
+            typedef std::list<std::pair<std::function<bool()>, std::function<void()> > >
+                                                               condition_list_type;
 
             static const id_type EXIT = -1;
 
             Servent();
             virtual ~Servent();
 
-            void map(id_type command, sigc::slot<void> slot);
+            void map(id_type command, std::function<void()> slot);
             void add(condition_list_type::value_type condition);
 
             void exec(id_type command, int maxwait=-1);
 
             void run();
-            
+
             void start();
 
-            sigc::signal0<void> cycle;
+            /**
+             * Stop the worker and wait for it to finish.
+             *
+             * A derived class must call this from its own destructor.  ~Servent
+             * calls it too, but by then the derived part of the object is
+             * already gone, so anything the worker touches that a subclass owns
+             * must be shut down earlier than that.
+             */
+            void stop();
+
+            signal<void()> cycle;
 
         protected:
             pipe m_pipe;
             command_map_type m_commands;
             condition_list_type m_conditions;
-            Glib::Thread* m_worker;
-            Glib::Mutex m_lock;
+            std::thread m_worker;
+            std::mutex m_lock;
             sync<bool> m_bunny;
         };
 

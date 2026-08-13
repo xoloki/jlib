@@ -23,7 +23,6 @@
 
 #include <jlib/net/Email.hh>
 
-#include <sigc++/trackable.h>
 
 #include <string>
 #include <iostream>
@@ -35,7 +34,7 @@
 namespace jlib {
 	namespace net {
 
-        class FolderBuffer : public sigc::trackable {
+        class FolderBuffer {
         public:
             
             typedef std::vector<Email> rep_type;
@@ -83,7 +82,7 @@ namespace jlib {
 
         };
         
-        class MailFolder : public sigc::trackable {
+        class MailFolder {
         public:
             typedef std::vector<Email> rep_type;
 

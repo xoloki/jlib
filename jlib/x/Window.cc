@@ -19,12 +19,11 @@
  */
 
 #include <jlib/x/Window.hh>
-#include <glibmm/main.h>
-#include <glibmm/thread.h>
-#include <glibmm/timer.h>
 
+#include <chrono>
 #include <iostream>
 #include <sstream>
+#include <thread>
 
 namespace jlib {
 namespace x {
@@ -474,7 +473,7 @@ void Window::iterate() {
 		}
     }
 
-    Glib::usleep(m_timeout);
+    std::this_thread::sleep_for(std::chrono::microseconds(m_timeout));
     timeout.emit();
 }
 

@@ -19,9 +19,6 @@
  */
 
 #include <jlib/x/Display.hh>
-#include <glibmm/main.h>
-#include <glibmm/thread.h>
-#include <glibmm/timer.h>
 
 #include <iostream>
 #include <sstream>

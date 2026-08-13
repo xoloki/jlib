@@ -18,7 +18,6 @@
  * 
  */
 
-#include <jlib/crypt/crypt.hh>
 
 #include <jlib/util/util.hh>
 #include <jlib/util/URL.hh>

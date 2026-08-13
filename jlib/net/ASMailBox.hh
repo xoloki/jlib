@@ -27,7 +27,7 @@
 #include <vector>
 #include <list>
 
-#include <sigc++/sigc++.h>
+#include <jlib/sys/signal.hh>
 
 #include <jlib/sys/ASServent.hh>
 #include <jlib/net/Email.hh>
@@ -282,26 +282,26 @@ namespace jlib {
              * signal an error
              * std::string: text description of error
              */
-            sigc::signal1<void,std::string> 
+            sys::signal<void(std::string)> 
             error;
 
             /**
              * signal an error during login
              */
-            sigc::signal0<void> 
+            sys::signal<void()> 
             login_error;
             
             /**
              * signal status
              * std::string: text description of error
              */
-            sigc::signal1<void,std::string> 
+            sys::signal<void(std::string)> 
             status;
 
             /**
              * signal that the mailbox has been initialized
              */
-            sigc::signal0<void> 
+            sys::signal<void()> 
             initialized;
 
             /**
@@ -309,7 +309,7 @@ namespace jlib {
              * std::string: text description of action
              * float:       amount done (0.0 -> 1.0)
              */
-            sigc::signal2<void,std::string,float> 
+            sys::signal<void(std::string,float)> 
             progress;
 
             /**
@@ -319,7 +319,7 @@ namespace jlib {
              * std::string:            header data
              * message_attributes:     attributes of message
              */
-            sigc::signal3<void,folder_info_type,int,Email> 
+            sys::signal<void(folder_info_type,int,Email)> 
             message_listed;
 
             /**
@@ -329,7 +329,7 @@ namespace jlib {
              * std::string:            text of message
              * message_attributes:     attributes of message
              */
-            sigc::signal3<void,folder_info_type,int,Email> 
+            sys::signal<void(folder_info_type,int,Email)> 
             message_loaded;
 
             /**
@@ -339,7 +339,7 @@ namespace jlib {
              * std::string:            text of message
              * message_attributes:     attributes of message
              */
-            sigc::signal3<void,folder_info_type,folder_indx_type,Email> 
+            sys::signal<void(folder_info_type,folder_indx_type,Email)> 
             message_flags_set;
 
             /**
@@ -349,7 +349,7 @@ namespace jlib {
              * std::string:            text of message
              * message_attributes:     attributes of message
              */
-            sigc::signal3<void,folder_info_type,folder_indx_type,Email> 
+            sys::signal<void(folder_info_type,folder_indx_type,Email)> 
             message_flags_unset;
 
             /**
@@ -359,7 +359,7 @@ namespace jlib {
              * std::string:            text of message
              * message_attributes:     attributes of message
              */
-            sigc::signal3<void,folder_info_type,folder_info_type,folder_indx_type> 
+            sys::signal<void(folder_info_type,folder_info_type,folder_indx_type)> 
             messages_copied;
 
             /**
@@ -367,7 +367,7 @@ namespace jlib {
              * std::list<std::string>: path of folder
              * folder_attributes:      folder attributes
              */
-            sigc::signal1<void,folder_info_type>  
+            sys::signal<void(folder_info_type)>  
             folder_listed;
             
 
@@ -376,7 +376,7 @@ namespace jlib {
              * std::list<std::string>: path of folder
              * folder_attributes:      folder attributes
              */
-            sigc::signal1<void,folder_info_type> 
+            sys::signal<void(folder_info_type)> 
             folder_created;
 
             /**
@@ -384,7 +384,7 @@ namespace jlib {
              * std::list<std::string>: path of folder
              * folder_attributes:      folder attributes
              */
-            sigc::signal1<void,folder_info_type> 
+            sys::signal<void(folder_info_type)> 
             folder_deleted;
             
             /**
@@ -393,7 +393,7 @@ namespace jlib {
              * std::list<std::string>: path of folder
              * folder_attributes:      folder attributes
              */
-            sigc::signal2<void,folder_info_type,folder_info_type> 
+            sys::signal<void(folder_info_type,folder_info_type)> 
             folder_renamed;
 
             /**
@@ -401,14 +401,14 @@ namespace jlib {
              * std::list<std::string>: path of folder
              * folder_attributes:      folder attributes
              */
-            sigc::signal1<void,folder_info_type> 
+            sys::signal<void(folder_info_type)> 
             folder_expunged;
 
             /**
              * signal when all folder info is loaded
              * folder_map_type: folder info
              */
-            sigc::signal1<void,folder_map_type> 
+            sys::signal<void(folder_map_type)> 
             folders_loaded;
 
         protected:

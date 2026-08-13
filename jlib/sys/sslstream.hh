@@ -22,13 +22,12 @@
 #define JLIB_SYS_SSLSTREAM_HH
 
 #include <jlib/sys/socketstream.hh>
-#include <glibmm/thread.h>
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/x509v3.h>
 
 #include <sstream>
-#include <atomic>
 
 namespace jlib {
     namespace sys {
@@ -200,13 +199,9 @@ namespace jlib {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
                     std::cerr << "basic_sslbuf::open_ssl()"<<std::endl;
 
-                int err;
-                bool f = false;
-                static std::atomic<bool> s_init(false);
-                if(s_init.compare_exchange_strong(f, true, std::memory_order_seq_cst)) {
-                    SSL_load_error_strings();
-                    SSL_library_init();
-                }
+                // OpenSSL 1.1 initializes itself on first use: SSL_library_init
+                // and SSL_load_error_strings became no-ops there and are gone
+                // in 3.0, along with the hand-rolled once-guard they needed.
 
                 m_ctx = SSL_CTX_new(m_method);
                 if(m_ctx == 0) {
@@ -214,16 +209,41 @@ namespace jlib {
                     throw typename basic_socketbuf<charT, traitT>::exception("error calling SSL_CTX_new()");
                 }
 
-                SSL_CTX_set_options(m_ctx, SSL_OP_NO_SSLv2|SSL_OP_NO_SSLv3);
+                // SSL_OP_NO_SSLv2 has been a no-op since 1.1 and SSLv3 is long
+                // dead; state the floor directly instead.
+                SSL_CTX_set_min_proto_version(m_ctx, TLS1_2_VERSION);
+
                 SSL_CTX_set_verify(m_ctx, SSL_VERIFY_PEER, nullptr);
-                SSL_CTX_load_verify_locations(m_ctx, nullptr, "/etc/ssl/certs");
-                
+
+                // This used to hardcode /etc/ssl/certs, which does not exist on
+                // macOS -- so with SSL_VERIFY_PEER set, every connection there
+                // failed to validate.  Use the locations OpenSSL was built
+                // with, still overridable via SSL_CERT_FILE and SSL_CERT_DIR.
+                // NB: not print() here -- that reports via SSL_get_error(m_ssl),
+                // and m_ssl does not exist until SSL_new below.
+                if(!SSL_CTX_set_default_verify_paths(m_ctx)) {
+                    throw typename basic_socketbuf<charT, traitT>::exception("error calling SSL_CTX_set_default_verify_paths()");
+                }
+
                 m_ssl = SSL_new(m_ctx);
                 if(m_ssl == 0) {
                     std::cerr <<"exception in jlib::sys::sslstream::open_ssl()"<<std::endl;
                     throw typename basic_socketbuf<charT, traitT>::exception("error calling SSL_new()");
                 }
-                
+
+                // Check that the certificate actually belongs to the host we
+                // asked for.  Verifying the chain without this accepts any
+                // valid certificate from any server the trust store covers,
+                // which is the hole TODO.md meant by "verify certs".  Sending
+                // SNI as well, so name-based virtual hosts serve the right one.
+                if(!this->m_host.empty()) {
+                    SSL_set_hostflags(m_ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+                    if(!SSL_set1_host(m_ssl, this->m_host.c_str())) {
+                        throw typename basic_socketbuf<charT, traitT>::exception(this->print("SSL_set1_host", 0));
+                    }
+                    SSL_set_tlsext_host_name(m_ssl, this->m_host.c_str());
+                }
+
                 throw_if("SSL_set_fd", SSL_set_fd(m_ssl, this->m_sock));
                 throw_if("SSL_connect", SSL_connect(m_ssl));
             }
@@ -244,12 +264,12 @@ namespace jlib {
             basic_sslstream(std::string host, unsigned int port) 
                 : basic_socketstream<charT,traitT>()
             {
-                this->m_buf=new basic_sslbuf<charT,traitT>(host, port, SSLv23_client_method());
+                this->m_buf=new basic_sslbuf<charT,traitT>(host, port, TLS_client_method());
                 this->init(this->m_buf);
             }
             
             void open(std::string host, unsigned int port) {
-                this->m_buf=new basic_sslbuf<charT,traitT>(host, port, SSLv23_client_method());
+                this->m_buf=new basic_sslbuf<charT,traitT>(host, port, TLS_client_method());
                 this->init(this->m_buf);
             }
 
@@ -267,12 +287,12 @@ namespace jlib {
             {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
                     std::cerr << "basic_tlsstream::basic_tlsstream(" << host << ", " << port << ", " << std::boolalpha << delay << ")"<<std::endl;
-                this->m_buf=new basic_sslbuf<charT,traitT>(host,port, SSLv23_client_method(), delay);
+                this->m_buf=new basic_sslbuf<charT,traitT>(host,port, TLS_client_method(), delay);
                 this->init(this->m_buf);
             }
             
             void open(std::string host, unsigned int port, bool delay = false) {
-                this->m_buf=new basic_sslbuf<charT,traitT>(host,port, SSLv23_client_method(), delay);
+                this->m_buf=new basic_sslbuf<charT,traitT>(host,port, TLS_client_method(), delay);
                 this->init(this->m_buf);
             }
 

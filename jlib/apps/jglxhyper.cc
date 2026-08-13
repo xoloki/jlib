@@ -36,9 +36,9 @@ public:
     GLXPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
         : HyperPlot<T, PlotType>(n, c, w, h)
     {
-        key_press.connect(sigc::mem_fun(this, &GLXPlot::key_pressed));
-        button_press.connect(sigc::mem_fun(this, &GLXPlot::button_pressed));
-        timeout.connect(sigc::mem_fun(this, &GLXPlot::on_timeout));
+        key_press.connect([this](auto&&... a) { return this->key_pressed(a...); });
+        button_press.connect([this](auto&&... a) { return this->button_pressed(a...); });
+        timeout.connect([this](auto&&... a) { return this->on_timeout(a...); });
     }
 
     void set_color(const triple<T>& color) {

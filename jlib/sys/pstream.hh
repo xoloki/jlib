@@ -26,7 +26,6 @@
 #include <exception>
 #include <string>
 
-#include <bits/char_traits.h>
 
 #include <netinet/in.h>
 #include <sys/types.h>

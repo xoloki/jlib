@@ -20,7 +20,7 @@
  */
 
 // needed includes
-#include <bits/char_traits.h>
+#include <string>
 
 #include <jlib/util/xml.hh>
 #include <jlib/util/xmltokenizer.hh>

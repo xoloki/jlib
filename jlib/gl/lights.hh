@@ -21,7 +21,7 @@
 #ifndef JLIB_GL_LIGHTS_H
 #define JLIB_GL_LIGHTS_H
 
-#include <GL/gl.h>
+#include <jlib/gl/opengl.hh>
 
 namespace jlib {
 namespace gl {

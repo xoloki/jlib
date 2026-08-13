@@ -22,11 +22,11 @@
 #include <jlib/util/util.hh>
 #include <jlib/sys/sys.hh>
 #include <jlib/sys/Directory.hh>
-#include <glibmm/main.h>
-#include <glibmm/thread.h>
-#include <sigc++/sigc++.h>
+#include <jlib/sys/signal.hh>
 
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 #include <fstream>
 #include <iostream>
@@ -44,7 +44,7 @@ namespace jlib {
 namespace poisoned {
 
 
-class Download : public sigc::trackable {
+class Download {
 public:
     class Chunk {
     public:
@@ -181,7 +181,7 @@ private:
     std::set<Download> downloads;
 };
 
-class Show : public sigc::trackable {
+class Show {
 public:
     void on_key_press(std::string key, int x, int y) {
 	if (key == "q" || key == "Q") {
@@ -272,7 +272,7 @@ public:
 		 800, 600)
     {
 	window.center();
-	window.key_press.connect(sigc::mem_fun(this, &Show::on_key_press));
+	window.key_press.connect([this](auto&&... a) { return this->on_key_press(a...); });
 
 	daemon.load();
 	if (n > daemon.get_downloads().size()) {
@@ -280,11 +280,42 @@ public:
 	}
 
 	xdraw();
+    }
 
-	Glib::signal_timeout().
-	    connect(sigc::mem_fun(this, &Show::on_timeout), 66);
-	Glib::signal_timeout().
-	    connect(sigc::mem_fun(this, &Show::xdraw), 1000);
+    /**
+     * Drive the window.
+     *
+     * This replaces a Glib::MainLoop with two Glib::signal_timeout()
+     * sources, at 66ms and 1000ms.  Both handlers return bool on the glib
+     * convention that false detaches the source, so returning false here
+     * ends the loop.
+     */
+    void run() {
+	typedef std::chrono::steady_clock clock;
+
+	const std::chrono::milliseconds tick(66);
+	const std::chrono::milliseconds redraw(1000);
+
+	clock::time_point next_tick = clock::now();
+	clock::time_point next_redraw = clock::now();
+
+	while(true) {
+	    clock::time_point now = clock::now();
+
+	    if(now >= next_tick) {
+		if(!on_timeout())
+		    return;
+		next_tick = now + tick;
+	    }
+
+	    if(now >= next_redraw) {
+		if(!xdraw())
+		    return;
+		next_redraw = now + redraw;
+	    }
+
+	    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
     }
 
 private:
@@ -300,10 +331,9 @@ using namespace jlib;
 
 int main(int argc, char** argv) {
     try {
-	Glib::RefPtr<Glib::MainLoop> loop = Glib::MainLoop::create();
 	poisoned::Show show(23);
 
-	loop->run();
+	show.run();
     }
     catch(std::exception& e) {
         std::cerr << "caught exception: "<<e.what() << std::endl;

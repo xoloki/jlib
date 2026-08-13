@@ -92,11 +92,13 @@ object::object()
       m_put(true)
 {}
     
-object::object(std::string data) 
+object::object(std::string data)
     : m_obj(json_tokener_parse(data.data())),
       m_put(true)
 {
-    if(is_error(m_obj))
+    // json-c dropped the is_error() pointer encoding in 0.13; the tokener
+    // now simply returns null on a parse failure.
+    if(m_obj == nullptr)
 	throw std::runtime_error("data did not parse to JSON: '" + data + "'");
 }
     
@@ -190,11 +192,12 @@ array::array()
       m_put(true)
 {}
     
-array::array(std::string data) 
+array::array(std::string data)
     : m_obj(json_tokener_parse(data.data())),
       m_put(true)
 {
-    if(is_error(m_obj))
+    // see object::object(std::string) above
+    if(m_obj == nullptr)
 	throw std::runtime_error("data did not parse to JSON: '" + data + "'");
 }
     
