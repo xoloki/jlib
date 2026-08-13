@@ -20,4 +20,23 @@ RUN wget https://github.com/jedisct1/libsodium/releases/download/1.0.18-RELEASE/
 RUN tar xvzf libsodium-1.0.18.tar.gz
 RUN cd libsodium-1.0.18 && ./configure --enable-opt --enable-shared=no --with-pic --prefix=/usr && make -j16 && make install
 
+COPY Makefile.am /root/src/jlib/Makefile.am
+COPY configure.ac /root/src/jlib/configure.ac
+COPY AUTHORS /root/src/jlib/
+COPY ChangeLog /root/src/jlib/
+COPY NEWS /root/src/jlib/
+COPY README /root/src/jlib/
+COPY jlib/ /root/src/jlib/jlib/
+COPY tests/ /root/src/jlib/tests/
+
+WORKDIR /root/src/jlib
+
+RUN autoreconf -i
+
+RUN mkdir /root/src/jlib/build
+WORKDIR /root/src/jlib/build
+
+RUN ../configure
+RUN make -j8
+
 ENTRYPOINT /bin/bash
