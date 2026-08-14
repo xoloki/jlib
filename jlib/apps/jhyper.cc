@@ -48,15 +48,16 @@ public:
     }
 
     void draw() {
-        i = 0;
-        
-        jlib::x::Plot<T>::draw();
-        
+        // Up through HyperPlot rather than straight to the backend.  This
+        // used to skip it and keep the colour bookkeeping itself -- zeroing
+        // the vertex counter on the way in and clearing the first-frame flag
+        // on the way out -- which is exactly the work HyperPlot::draw does
+        // now that the primitives carry a vertex index.
+        HyperPlot<T, PlotType>::draw();
+
         this->set_foreground(255, 255, 255);
         this->move(25, 25);
         this->draw_string("N=" + jlib::util::string_value(this->D) + " R=" + util::string_value(this->r) + " T=" + util::string_value((int)this->m_timeout)+"us");
-        
-        if(first) first = false;
     }
 
     void set_color(const triple<T>& color) {

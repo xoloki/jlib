@@ -103,8 +103,18 @@ public:
     uint D;
 
     virtual void change(uint n);
-    virtual void draw_point(std::pair<uint,uint> p) = 0;
-    virtual void draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2)=0;
+    /**
+     * A vertex and an edge, each told which object vertices they came from.
+     *
+     * The index is what lets a subclass colour an endpoint.  Without it the
+     * only thing an override could reach was a counter incremented by
+     * draw_point, so an edge could only be drawn in the colour of whichever
+     * end came through first -- which is why edges used to be drawn in halves.
+     * Indices are numbered across every object in the plot.
+     */
+    virtual void draw_point(std::pair<uint,uint> p, uint index) = 0;
+    virtual void draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2,
+                           uint i1, uint i2) = 0;
 
 protected:
     bool visible(math::vertex<T> vertex) const;
@@ -165,6 +175,9 @@ typename Plot<T>::objref Plot<T>::add(const object<T>& o) {
 template<typename T>
 inline
 void Plot<T>::draw() {
+    // Vertices are numbered across every object in the plot.
+    uint base = 0;
+
     objref i = objects.begin();
     for(; i != objects.end(); i++) {
         object<T>& object = **i;
@@ -187,17 +200,21 @@ void Plot<T>::draw() {
 
             /* if(!visible(tv1)) continue; */
 
-            draw_point(p1);
+            draw_point(p1, base + j);
 
-            // Adjacency is symmetric, so this draws each edge twice, once
-            // from each end.  draw_line() in Hyper.hh relies on that: it draws
-            // half an edge in the colour of the vertex it started from, which
-            // is how an edge comes out blending its two endpoints.
+            // Once per edge, not once per endpoint.  Adjacency is symmetric,
+            // so walking it reaches every edge from both ends; that used to be
+            // load-bearing, because half an edge was drawn from each end in
+            // that end's colour and the two halves met in the middle.  An edge
+            // now carries both its endpoints and is drawn whole, so the second
+            // visit would be drawing it again.
             const std::vector<uint>& adjacent = object.adjacent(j);
             for(uint k = 0; k < adjacent.size(); k++) {
+                if(adjacent[k] < j) continue;
+
                 /* if(!visible(tv2)) continue; */
 
-                draw_line(p1, mapped[adjacent[k]]);
+                draw_line(p1, mapped[adjacent[k]], base + j, base + adjacent[k]);
             }
         }
     }
