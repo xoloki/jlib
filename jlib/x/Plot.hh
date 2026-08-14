@@ -37,8 +37,9 @@ public:
     Plot(uint n, std::vector< std::pair<T,T> > c, uint w=400, uint h=400);
 
     virtual void draw();
-    virtual void draw_point(std::pair<uint,uint> p);
-    virtual void draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2);
+    virtual void draw_point(std::pair<uint,uint> p, uint index);
+    virtual void draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2,
+                           uint i1, uint i2);
 
 protected:
     void on_configure(int width, int height);
@@ -59,14 +60,15 @@ Plot<T>::Plot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h)
 
 template<typename T>
 inline
-void Plot<T>::draw_point(std::pair<uint,uint> p) {
+void Plot<T>::draw_point(std::pair<uint,uint> p, uint) {
     Window::draw_point(p);
 }
 
 
 template<typename T>
 inline
-void Plot<T>::draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2) {
+void Plot<T>::draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2,
+                        uint, uint) {
     Window::draw_line(p1, p2);
 }
 

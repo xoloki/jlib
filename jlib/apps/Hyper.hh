@@ -23,6 +23,7 @@
 #ifndef JLIB_APPS_HYPER_HH
 #define JLIB_APPS_HYPER_HH
 
+#include <jlib/apps/color.hh>
 #include <jlib/math/math.hh>
 #include <jlib/util/util.hh>
 
@@ -33,13 +34,7 @@ using namespace jlib::math;
 
 const long double PI = 3.14159265358979323846264338;
 
-template<class O>
-struct triple {
-    O r;
-    O g;
-    O b;
-};
-
+using apps::triple;
 template<typename T, typename Plot>
 class HyperPlot : public Plot {
 public:
@@ -49,8 +44,9 @@ public:
 
     virtual void change(uint n);
     virtual void draw();
-    virtual void draw_point(std::pair<uint,uint> point);
-    virtual void draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2);
+    virtual void draw_point(std::pair<uint,uint> point, uint index);
+    virtual void draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2,
+                           uint i1, uint i2);
     virtual void set_color(const triple<T>& color) = 0;
 
     void key_pressed(unsigned char key,int x,int y);
@@ -62,10 +58,15 @@ protected:
     void initialize_rotation(uint n);
     void initialize_glazzies(uint n);
 
-    std::vector< triple<T> > colors;
-    uint i;
+    /**
+     * One hue per vertex, numbered across every object in the plot.
+     *
+     * See apps/color.hh: hues rather than triples so edges can blend without
+     * washing out to grey, spaced by the golden ratio so neighbours stay
+     * distinguishable and the figure comes up the same every run.
+     */
+    std::vector<T> hues;
     uint r;
-    bool first;
 
     matrix<T> rotate;
     matrix<T> back_rotate;
@@ -83,7 +84,6 @@ inline
 HyperPlot<T,Plot>::HyperPlot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h) 
     : Plot(n, c, w, h),
       r(n),
-      first(true),
       rotate(matrix<T>::identity(n+1)),
       back_rotate(matrix<T>::identity(n+1)),
       waiting(false),
@@ -163,56 +163,58 @@ void HyperPlot<T,Plot>::initialize(uint n) {
 template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::draw() {
-    i = 0;
+    // Colours are per vertex and have to exist before anything is drawn.
+    // draw_point used to generate them as it went, on the first frame only,
+    // which needed a flag to say which frame that was and a counter to say
+    // which vertex; an index on the primitives replaces both.
+    uint n = 0;
+    typename Plot::objref o = this->objects.begin();
+    for(; o != this->objects.end(); o++)
+        n += (*o)->size();
+
+    while(hues.size() < n)
+        hues.push_back(apps::golden_hue<T>(hues.size()));
 
     Plot::draw();
-
-    if(first) first = false;
 }
 
 template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::change(uint n) {
     Plot::change(n);
-    first = true;
-    colors.clear();
+    hues.clear();
 }
 
 
 template<typename T, typename Plot>
 inline
-void HyperPlot<T,Plot>::draw_point(std::pair<uint,uint> point) {
-    if(first) {
-        triple<T> color; color.r = 0; color.b = 0; color.g = 0;
+void HyperPlot<T,Plot>::draw_point(std::pair<uint,uint> point, uint index) {
+    this->set_color(apps::hsv(hues[index]));
 
-        const T MIN = 1.5;
-        while(color.r + color.b + color.g < MIN) {
-            color.r = static_cast<T>(std::rand() % 256) / 255.0;
-            color.g = static_cast<T>(std::rand() % 256) / 255.0;
-            color.b = static_cast<T>(std::rand() % 256) / 255.0;
-        }
-        
-        colors.push_back(color);
-    } 
-
-    Plot::draw_point(point);
-
-    i++;
+    Plot::draw_point(point, index);
 }
 
 template<typename T, typename Plot>
 inline
-void HyperPlot<T,Plot>::draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2) {
-    triple<T> color = colors[i-1];
-    //set_foreground(color.r, color.g, color.b);
+void HyperPlot<T,Plot>::draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2,
+                                  uint i1, uint i2) {
+    // The whole edge, in the blend of its two endpoints.
+    //
+    // This used to draw half an edge, p1 to the midpoint, in p1's colour, and
+    // rely on the edge being reached again from the other end to fill in the
+    // rest.  The halves met at a hard seam in the middle, which is what made
+    // the wireframe look assembled from pieces.
+    //
+    // Blending on the colour wheel rather than in RGB: averaging channels
+    // drives every edge toward grey, which is what the old random triples did
+    // whenever two colours were combined.
+    std::vector<T> h;
+    h.push_back(hues[i1]);
+    h.push_back(hues[i2]);
 
-    this->set_color(color);
+    this->set_color(apps::hsv(apps::hue_mean(h)));
 
-    std::pair<uint,uint> mid; 
-    mid.first = (p1.first + p2.first) / 2;
-    mid.second = (p1.second + p2.second) / 2;
-
-    Plot::draw_line(p1, mid);
+    Plot::draw_line(p1, p2, i1, i2);
 }
 
 template<typename T, typename Plot>
@@ -267,7 +269,6 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
         // nesting from the highest dimension still shows while everything
         // below it stays parallel -- which is why it is the default.
         this->cycle_projection_mode();
-        this->first = true;
 /*
     } else if(key == 'y' || key == 'h') {
         T x = (key == 't' ? 0.1 : -0.1);

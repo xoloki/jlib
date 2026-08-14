@@ -58,7 +58,7 @@ dist_pkgdata_DATA = wow-buttons-ps3.map wow-axes-ps3.map \
                     ksp-axes-ps3.map ksp-buttons-ps3.map \
                     tor-axes-ps3.map tor-buttons-ps3.map
 
-EXTRA_DIST = Hyper.hh
+EXTRA_DIST = Hyper.hh color.hh
 
 JCRYPT_LA  = $(top_builddir)/jlib/crypt/libjcrypt.la
 JNET_LA    = $(top_builddir)/jlib/net/libjnet.la

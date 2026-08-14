@@ -54,8 +54,9 @@ public:
          std::string title = "jlib::glfw::Plot");
 
     virtual void draw();
-    virtual void draw_point(std::pair<uint,uint> p);
-    virtual void draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2);
+    virtual void draw_point(std::pair<uint,uint> p, uint index);
+    virtual void draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2,
+                           uint i1, uint i2);
 
 protected:
     /**
@@ -104,7 +105,7 @@ Plot<T>::Plot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h, std::stri
 
 template<typename T>
 inline
-void Plot<T>::draw_point(std::pair<uint,uint> p) {
+void Plot<T>::draw_point(std::pair<uint,uint> p, uint) {
     glBegin(GL_POINTS);
     glVertex2i(p.first, p.second);
     glEnd();
@@ -113,7 +114,8 @@ void Plot<T>::draw_point(std::pair<uint,uint> p) {
 
 template<typename T>
 inline
-void Plot<T>::draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2) {
+void Plot<T>::draw_line(std::pair<uint,uint> p1, std::pair<uint,uint> p2,
+                        uint, uint) {
     glBegin(GL_LINES);
     glVertex2i(p1.first, p1.second);
     glVertex2i(p2.first, p2.second);
