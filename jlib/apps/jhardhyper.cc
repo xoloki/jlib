@@ -116,6 +116,14 @@ protected:
     T m_radius = 0;
 
     /**
+     * Zoom, as a multiplier on how much of the window the figure fills.
+     *
+     * Survives change(), unlike the measured framing: how close you want to
+     * sit is a preference, not a property of the figure.
+     */
+    T m_zoom = 1.0;
+
+    /**
      * Discard the measured framing so the next frame re-measures.  Needed
      * whenever the projection changes shape -- a different mode or a
      * different D both change how big the result comes out.
@@ -323,10 +331,30 @@ void HPlot<T>::draw() {
         // has the object appear the same size throughout.
         const T scale = (m_radius > 0) ? (1.0 / m_radius) : 1.0;
 
-        // 80 degree vertical field, so a half-angle of 40; 0.6 leaves room for
-        // the corners, which swing wider than the radius on any one frame.
+        // Put the camera where the figure fills the fraction of the window we
+        // asked for.
+        //
+        // For a unit-radius figure at the origin and a camera at distance d on
+        // +z with vertical half-angle t, the widest any vertex can project is
+        // 1/(sqrt(d^2-1)*tan(t)) of the half-field.  That maximum is not at
+        // the silhouette: it falls at cos = 1/d, because a vertex nearer the
+        // camera projects wider than its radius alone would suggest.
+        // Inverting for a desired fill f gives the line below, where f = 1 has
+        // the figure's diameter exactly span the window height.
+        //
+        // This used to read d = 1/(0.6*tan(t)), which looks like 60% fill and
+        // is not: it works out to 69% at the figure's widest moment, and since
+        // m_radius is a running maximum most frames sit well under their own
+        // maximum -- landing around half the window, which is how it looked.
+        //
+        // Clamped below 1.8 because the figure has unit radius and
+        // gluPerspective's near plane is at 0.1: past there the camera closes
+        // to within 1.1 of the centre and the near face crosses the plane.
         const T half_field = std::tan(40.0 * PI / 180.0);
-        m_camera = 1.0 / (0.6 * half_field);
+        const T fill = std::min(std::max(0.9 * m_zoom, 0.1), 1.8);
+        const T reach = fill * half_field;
+
+        m_camera = std::sqrt(1.0 + 1.0 / (reach * reach));
 
         // The 3-D camera, set here rather than through the N-D lookAt so it
         // is not scaled by the perspective divide.  See initialize_glazzies.
@@ -765,6 +793,9 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
             return;
 
         initialize(d);
+    } else if(key == 'z' || key == 'x') {
+        this->m_zoom *= (key == 'z' ? 1.15 : 1.0 / 1.15);
+        this->draw();
     } else if(key == 'o') {
         this->m_solid = !this->m_solid;
         this->draw();
