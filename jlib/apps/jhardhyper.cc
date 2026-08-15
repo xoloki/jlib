@@ -76,18 +76,50 @@ public:
                            uint i1, uint i2);
 
     /**
-     * One face, as a polygon with a normal.
+     * One face, as a polygon with a normal per corner.
+     *
+     * normal is 3 values per corner, parallel to corner: flat shading repeats
+     * the face's own normal, smooth shading gives each corner the mean of the
+     * faces meeting there.
      *
      * index[k] is the object vertex that corner[k] came from, numbered across
      * every object in the plot, so a subclass can colour a face from whatever
      * it keeps per vertex.  The geometry here ignores it.
      */
     virtual void draw_face(const std::vector< math::vertex<T> >& corner,
-                           const math::vertex<T>& normal,
+                           const std::vector<T>& normal,
                            const std::vector<uint>& index);
 
     /** Solid faces as well as the wireframe.  The o key toggles it. */
     bool m_solid = true;
+
+    /**
+     * Draw the edges and vertices over the faces.
+     *
+     * Right when the edges are the structure, as on a hypercube, where they
+     * are 2% of the projected surface.  A tessellated surface's edges are
+     * just where the mesh was cut: a 32x32 torus puts 2048 of them over the
+     * same area, covering 21% of it, and what you see is the mesh rather than
+     * the shape.  Set from the shape, and the l key overrides it.
+     */
+    bool m_wire = true;
+
+    /**
+     * Per-face alpha.
+     *
+     * A hypercube is a shadow to see into; a surface is a surface, and wants
+     * to read as one while still showing where it passes through itself.
+     */
+    T m_alpha = 0.18;
+
+    /**
+     * Average the normals of the faces meeting at a vertex.
+     *
+     * Right for a surface, wrong for a hypercube: its faces meet at right
+     * angles, so averaging would round off corners that are not round.  Set
+     * from the shape, and the m key overrides it to compare.
+     */
+    bool m_smooth = false;
 
 protected:
     virtual math::vertex<T> transform(const math::vertex<T>& v) const;
@@ -212,13 +244,13 @@ void HPlot<T>::draw_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
 template<typename T>
 inline
 void HPlot<T>::draw_face(const std::vector< math::vertex<T> >& corner,
-                         const math::vertex<T>& normal,
+                         const std::vector<T>& normal,
                          const std::vector<uint>&) {
-    glNormal3d(normal[0], normal[1], normal[2]);
-
     glBegin(GL_POLYGON);
-    for(uint k = 0; k < corner.size(); k++)
+    for(uint k = 0; k < corner.size(); k++) {
+        glNormal3d(normal[3 * k], normal[3 * k + 1], normal[3 * k + 2]);
         glVertex4dv(corner[k].data());
+    }
     glEnd();
 }
 
@@ -398,20 +430,94 @@ void HPlot<T>::draw() {
             // Depth of a face is its centroid's z.  The modelview applies a
             // uniform positive scale and a translation along z, so ordering
             // by z here is the same as ordering by eye-space depth.
+            //
+            // The normals are wanted here too rather than at draw time,
+            // because a vertex normal is the average over the faces meeting
+            // at it and that cannot be known one face at a time.
             std::vector< std::pair<T,uint> > order;
             order.reserve(faces.size());
 
+            std::vector<T> fnormal(3 * faces.size(), 0);
+            std::vector<bool> flat(faces.size(), false);
+
+            std::vector< math::vertex<T> > fcorner;
+            math::vertex<T> fn(3);
+
             for(uint f = 0; f < faces.size(); f++) {
                 T z = 0;
-                for(uint k = 0; k < faces[f].size(); k++)
+                fcorner.clear();
+                for(uint k = 0; k < faces[f].size(); k++) {
                     z += transformed[faces[f][k]][2];
+                    fcorner.push_back(transformed[faces[f][k]]);
+                }
 
                 order.push_back(std::make_pair(z / faces[f].size(), f));
+
+                if(face_normal(fcorner, fn)) {
+                    flat[f] = true;
+                    for(uint k = 0; k < 3; k++) fnormal[3 * f + k] = fn[k];
+                }
+            }
+
+            // Vertex normals: the mean of the faces meeting at a vertex,
+            // which is what makes a curved surface shade as curved rather
+            // than as the flat quads it is made of.
+            //
+            // Aligned before averaging, and only where the shape is really a
+            // surface.  A hypercube's faces meet at right angles and its
+            // shadow everts, so averaging there would round off corners that
+            // are not round and cancel to nothing wherever two faces face
+            // opposite ways.  A torus is a genuine surface with consistent
+            // winding, so its faces agree -- except along the fold curves,
+            // where the projection reverses orientation.  Taking the first
+            // face at each vertex as the reference and flipping the rest to
+            // agree keeps the average meaningful across a fold; the fold
+            // itself then reads as a crease, which is what it is.
+            std::vector<T> vnormal;
+            if(m_smooth) {
+                vnormal.assign(3 * object.size(), 0);
+                std::vector<bool> seen(object.size(), false);
+
+                for(uint f = 0; f < faces.size(); f++) {
+                    if(!flat[f]) continue;
+
+                    for(uint k = 0; k < faces[f].size(); k++) {
+                        const uint v = faces[f][k];
+
+                        T dot = 0;
+                        for(uint x = 0; x < 3; x++)
+                            dot += vnormal[3 * v + x] * fnormal[3 * f + x];
+
+                        const T sign = (seen[v] && dot < 0) ? -1.0 : 1.0;
+                        seen[v] = true;
+
+                        for(uint x = 0; x < 3; x++)
+                            vnormal[3 * v + x] += sign * fnormal[3 * f + x];
+                    }
+                }
+
+                for(uint v = 0; v < object.size(); v++) {
+                    T len = 0;
+                    for(uint x = 0; x < 3; x++)
+                        len += vnormal[3 * v + x] * vnormal[3 * v + x];
+                    len = std::sqrt(len);
+
+                    // A vertex whose faces cancel has no mean direction; the
+                    // face normal is used for it instead, at draw time.
+                    if(len < 1e-12) { seen[v] = false; continue; }
+
+                    for(uint x = 0; x < 3; x++) vnormal[3 * v + x] /= len;
+                }
+
+                for(uint v = 0; v < object.size(); v++)
+                    if(!seen[v])
+                        for(uint x = 0; x < 3; x++) vnormal[3 * v + x] = 0;
             }
 
             // ascending z: the camera looks down -z, so smallest is farthest
             std::sort(order.begin(), order.end());
 
+            glShadeModel(GL_SMOOTH);
             glEnable(GL_LIGHTING);
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -420,26 +526,59 @@ void HPlot<T>::draw() {
 
             std::vector< math::vertex<T> > corner;
             std::vector<uint> index;
-            math::vertex<T> normal(3);
+            std::vector<T> normal;
 
             for(uint o = 0; o < order.size(); o++) {
-                const typename math::object<T>::face_type& face =
-                    faces[order[o].second];
+                const uint f = order[o].second;
+                if(!flat[f]) continue;
+
+                const typename math::object<T>::face_type& face = faces[f];
 
                 corner.clear();
                 index.clear();
+                normal.clear();
+
                 for(uint k = 0; k < face.size(); k++) {
-                    corner.push_back(transformed[face[k]]);
-                    index.push_back(base + face[k]);
+                    const uint v = face[k];
+
+                    corner.push_back(transformed[v]);
+                    index.push_back(base + v);
+
+                    // Per corner where the surface has a mean direction there,
+                    // and the face's own normal otherwise -- which covers both
+                    // the flat-shaded shapes and the cancelled vertices.
+                    T len = 0;
+                    if(m_smooth)
+                        for(uint x = 0; x < 3; x++)
+                            len += vnormal[3 * v + x] * vnormal[3 * v + x];
+
+                    if(len > 0) {
+                        // to the side this face is facing, so a fold creases
+                        // rather than shading through itself
+                        T dot = 0;
+                        for(uint x = 0; x < 3; x++)
+                            dot += vnormal[3 * v + x] * fnormal[3 * f + x];
+
+                        const T sign = (dot < 0) ? -1.0 : 1.0;
+                        for(uint x = 0; x < 3; x++)
+                            normal.push_back(sign * vnormal[3 * v + x]);
+                    } else {
+                        for(uint x = 0; x < 3; x++)
+                            normal.push_back(fnormal[3 * f + x]);
+                    }
                 }
 
-                if(face_normal(corner, normal))
-                    draw_face(corner, normal, index);
+                draw_face(corner, normal, index);
             }
 
             glDepthMask(GL_TRUE);
             glDisable(GL_BLEND);
             glDisable(GL_LIGHTING);
+        }
+
+        if(!m_wire) {
+            base += object.size();
+            continue;
         }
 
         // Smooth shading so an edge blends between its endpoints' colours
@@ -540,7 +679,7 @@ public:
     virtual void draw_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
                            uint i1, uint i2);
     virtual void draw_face(const std::vector< math::vertex<T> >& corner,
-                           const math::vertex<T>& normal,
+                           const std::vector<T>& normal,
                            const std::vector<uint>& index);
 
     void key_pressed(unsigned char key,int x,int y);
@@ -627,9 +766,31 @@ void HyperPlot<T,Plot>::initialize(uint n) {
         // 1024 quads, which is where a hypercube sits at D=10.
         torus<T> object(n, 2, 32);
         this->add(object);
+
+        // Hue from the position around the first circle, rather than one per
+        // vertex from the golden ratio.
+        //
+        // Scattered hues are right when vertices are landmarks -- a
+        // hypercube has sixteen of them and each is somewhere in particular.
+        // A mesh vertex is just where the surface got sampled, so scattering
+        // hues across 1024 of them gives every face four unrelated corners to
+        // blend and the surface renders as coloured static.
+        //
+        // The wrap is exact and free: position around a circle is cyclic and
+        // so is hue, so the last band meets the first with no seam.
+        hues.clear();
+        for(uint i = 0; i < object.size(); i++)
+            hues.push_back(static_cast<T>(i % object.M) / object.M);
+
         break;
     }
     }
+
+    // A surface shades smoothly, reads better without its own mesh drawn over
+    // it, and wants to look more solid than a shadow does.
+    this->m_smooth = (m_shape == TORUS);
+    this->m_wire   = (m_shape != TORUS);
+    this->m_alpha  = (m_shape == TORUS ? 0.5 : 0.18);
 }
 
 template<typename T, typename Plot>
@@ -681,7 +842,7 @@ void HyperPlot<T,Plot>::draw_point(const math::vertex<T>& point, uint index) {
 template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::draw_face(const std::vector< math::vertex<T> >& corner,
-                                  const math::vertex<T>& normal,
+                                  const std::vector<T>& normal,
                                   const std::vector<uint>& index) {
     std::vector<T> h;
     for(uint k = 0; k < index.size(); k++)
@@ -694,7 +855,7 @@ void HyperPlot<T,Plot>::draw_face(const std::vector< math::vertex<T> >& corner,
     // reads as separate surfaces rather than a solid block.
     GLfloat fcolors[4];
     fcolors[0] = color.r; fcolors[1] = color.g; fcolors[2] = color.b;
-    fcolors[3] = 0.18;
+    fcolors[3] = static_cast<GLfloat>(this->m_alpha);
 
     glColor4fv(fcolors);
     glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, fcolors);
@@ -745,6 +906,12 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
             return;
 
         initialize(d);
+    } else if(key == 'l') {
+        this->m_wire = !this->m_wire;
+        this->draw();
+    } else if(key == 'm') {
+        this->m_smooth = !this->m_smooth;
+        this->draw();
     } else if(key == 't') {
         m_shape = (m_shape == CUBOID ? TORUS : CUBOID);
         initialize(this->D);
