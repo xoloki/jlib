@@ -131,6 +131,9 @@ public:
     /** Faces along a line of sight, measured each frame. */
     T m_depth = 1.8;
 
+    /** Projected face area this frame, summed over every object. */
+    mutable T m_area = 0;
+
     /** Stereographic outermost step; see transform().  The h key. */
     bool m_stereo = false;
 
@@ -359,6 +362,8 @@ template<typename T>
 inline
 void HPlot<T>::draw() {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    m_area = 0;
 
     // Vertices are numbered across every object, matching the counter
     // draw_point keeps, so a subclass can index one colour table with either.
@@ -626,9 +631,13 @@ void HPlot<T>::draw() {
                     area += std::fabs(a) / 2;
                 }
 
-                const T disc = PI * m_radius * m_radius;
-
-                m_depth = (disc > 0 && area > disc) ? (area / disc) : 1.8;
+                // Accumulated across every object rather than set from this
+                // one.  Nested tori all lie along the same lines of sight, so
+                // what matters for alpha is their total: four surfaces at 1.8
+                // deep each stack 7 deep, and treating each as though it were
+                // alone would let them accumulate to near opacity.  Read a
+                // frame late, which is invisible at these rotation rates.
+                m_area += area;
             }
 
             // ascending z: the camera looks down -z, so smallest is farthest
@@ -733,6 +742,13 @@ void HPlot<T>::draw() {
         glDisable(GL_BLEND);
 
         base += object.size();
+    }
+
+    // The frame's total, for the next frame's alpha.
+    if(m_adapt) {
+        const T disc = PI * m_radius * m_radius;
+
+        m_depth = (disc > 0 && m_area > disc) ? (m_area / disc) : 1.8;
     }
 
     glDisable(GL_FOG);
@@ -881,6 +897,9 @@ protected:
     /** Circles in the torus.  Only 2 makes a surface; see initialize(). */
     uint m_circles = 2;
 
+    /** Tori drawn through the Hopf foliation.  The n and b keys. */
+    uint m_shells = 1;
+
     matrix<T> rotate;
     matrix<T> back_rotate;
     bool waiting;
@@ -948,29 +967,61 @@ void HyperPlot<T,Plot>::initialize(uint n) {
         if(m < 3) m = 3;
         if(m > 64) m = 64;
 
-        torus<T> object(n, k, m);
-        this->add(object);
-
-        std::cout << "torus: " << k << " circles, " << m << " per circle, "
-                  << object.size() << " vertices, "
-                  << object.get_faces().size() << " faces" << std::endl;
-
-        // Hue from the position around the first circle, rather than one per
-        // vertex from the golden ratio.
+        // One torus, or a stack of them through the Hopf foliation.
         //
-        // Scattered hues are right when vertices are landmarks -- a
-        // hypercube has sixteen of them and each is somewhere in particular.
-        // A mesh vertex is just where the surface got sampled, so scattering
-        // hues across 1024 of them gives every face four unrelated corners to
-        // blend and the surface renders as coloured static.
+        // Radii (cos a, sin a) give a torus for every a in (0, pi/2): they are
+        // disjoint, they fill the sphere apart from the two circles they close
+        // down onto at the ends, and each threads through the last.  Spacing a
+        // evenly across the interval samples that family.  a = pi/4 is the
+        // Clifford torus, which is what a single shell gives.
         //
-        // The wrap is exact and free: position around a circle is cyclic and
-        // so is hue, so the last band meets the first with no seam.
+        // Only for k=2.  Above that the radii are a simplex rather than one
+        // angle, and there is no single family to walk.
+        const uint shells = (k == 2 ? m_shells : 1);
+
         hues.clear();
-        for(uint i = 0; i < object.size(); i++)
-            hues.push_back(static_cast<T>(i % object.M) / object.M);
 
-        surface = (object.K == 2);
+        for(uint shell = 0; shell < shells; shell++) {
+            std::vector<T> weight;
+
+            if(shells > 1) {
+                const T a = PI / 2 * (shell + 1) / (shells + 1);
+
+                weight.push_back(std::cos(a));
+                weight.push_back(std::sin(a));
+            }
+
+            torus<T> object(n, k, m, weight);
+            this->add(object);
+
+            // One hue per shell, so the nesting is legible.  Within a shell
+            // the shading is the surface's own; between them it is the colour
+            // that says which is which where they pass through each other.
+            const T hue = (shells > 1)
+                ? static_cast<T>(shell) / shells
+                : 0.0;
+
+            for(uint i = 0; i < object.size(); i++)
+                hues.push_back(shells > 1
+                               ? hue
+                               : static_cast<T>(i % object.M) / object.M);
+
+            if(shell == 0)
+                std::cout << "torus: " << k << " circles, " << m
+                          << " per circle, " << shells << " shell"
+                          << (shells > 1 ? "s, " : ", ")
+                          << shells * object.size() << " vertices, "
+                          << shells * object.get_faces().size() << " faces"
+                          << std::endl;
+        }
+
+        // A single torus is banded by position around its first circle:
+        // scattered hues are right when vertices are landmarks, but a mesh
+        // vertex is just where the surface got sampled, and scattering across
+        // 1024 of them gives every face four unrelated corners to blend and
+        // renders the surface as coloured static.  The wrap is exact and
+        // free, position around a circle being cyclic like hue itself.
+        surface = (k == 2);
         break;
     }
     }
@@ -1103,6 +1154,13 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
             return;
 
         initialize(d);
+    } else if(key == 'n' || key == 'b') {
+        const uint want = (key == 'n' ? m_shells + 1 : m_shells - 1);
+
+        if(want >= 1 && want <= 8) {
+            m_shells = want;
+            if(m_shape == TORUS) initialize(this->D);
+        }
     } else if(key == 'h') {
         // Only from the sphere; a hypercube is not on one.
         if(m_shape == TORUS) {

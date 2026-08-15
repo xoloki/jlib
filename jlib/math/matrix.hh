@@ -340,7 +340,8 @@ protected:
 template<typename T>
 class torus : public object<T> {
 public:
-    torus(uint n, uint k = 2, uint m = 32);
+    torus(uint n, uint k = 2, uint m = 32,
+          std::vector<T> weight = std::vector<T>());
 
     virtual std::shared_ptr< object<T> > clone() const;
 
@@ -349,6 +350,18 @@ public:
 
     /** Samples around each circle. */
     uint M;
+
+    /**
+     * Radius of each circle, normalized so the sum of squares is one.
+     *
+     * Equal radii give the Clifford torus.  Unequal ones give the rest of the
+     * family: with k=2 and radii (cos a, sin a), every a in (0, pi/2) is a
+     * torus, they are disjoint, and together they fill the sphere except for
+     * the two circles a=0 and a=pi/2 that they close down onto.  That is the
+     * Hopf foliation, and stereographic projection shows it as tori nested
+     * one inside the next, each threading through the last.
+     */
+    std::vector<T> R;
 
 protected:
     virtual void build_faces() const;
@@ -1344,7 +1357,7 @@ std::shared_ptr< object<T> > torus<T>::clone() const {
 
 template<typename T>
 inline
-torus<T>::torus(uint n, uint k, uint m)
+torus<T>::torus(uint n, uint k, uint m, std::vector<T> weight)
     : object<T>(n),
       K(k),
       M(m)
@@ -1360,8 +1373,19 @@ torus<T>::torus(uint n, uint k, uint m)
     uint count = 1;
     for(uint j = 0; j < K; j++) count *= M;
 
-    // On the unit sphere: k circles of radius 1/sqrt(k) give sum r^2 = 1.
-    const T r = 1.0 / std::sqrt(static_cast<T>(K));
+    // On the unit sphere, whatever the proportions: the radii are normalized
+    // so their squares sum to one.  Equal radii are the Clifford torus.
+    R.assign(K, 1.0 / std::sqrt(static_cast<T>(K)));
+
+    if(weight.size() == K) {
+        T sum = 0;
+        for(uint j = 0; j < K; j++) sum += weight[j] * weight[j];
+
+        if(sum > 0) {
+            sum = std::sqrt(sum);
+            for(uint j = 0; j < K; j++) R[j] = weight[j] / sum;
+        }
+    }
 
     for(uint i = 0; i < count; i++) {
         vertex<T> v(n);
@@ -1375,8 +1399,8 @@ torus<T>::torus(uint n, uint k, uint m)
 
             const T angle = 2 * M_PI * static_cast<T>(digit) / M;
 
-            v[2 * j]     = r * std::cos(angle);
-            v[2 * j + 1] = r * std::sin(angle);
+            v[2 * j]     = R[j] * std::cos(angle);
+            v[2 * j + 1] = R[j] * std::sin(angle);
         }
 
         this->v.push_back(v);
