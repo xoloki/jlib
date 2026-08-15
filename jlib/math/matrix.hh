@@ -309,6 +309,65 @@ protected:
 };
 
 
+/**
+ * A flat torus: k circles, one per pair of coordinate axes, in n dimensions.
+ *
+ * The Cartesian product of k circles, S^1 x ... x S^1, with circle j laid in
+ * the (2j, 2j+1) coordinate plane and every axis from 2k up left at zero:
+ *
+ *     x_2j     = r cos(theta_j)
+ *     x_(2j+1) = r sin(theta_j)
+ *
+ * At k=2, n=4 this is the Clifford torus, which is what XScreenSaver's
+ * hypertorus draws.  Every radius is 1/sqrt(k), so the whole thing sits on the
+ * unit sphere of R^2k.
+ *
+ * It is flat -- zero Gaussian curvature -- which is why no such surface exists
+ * in three dimensions and why its shadow is so strange.  Rotations that mix
+ * the unused axes into the used ones carry parts of it through the axis being
+ * projected away, and the perspective divide inflates and deflates them, so
+ * the surface passes through itself and comes back out.
+ *
+ * k is independent of n, so the mesh does not grow when n does: a 2-torus is
+ * the same m^2 vertices whether it turns in four dimensions or ten, and only
+ * the number of planes it can turn in changes.  n must be at least 2k.
+ *
+ * The topology is a cuboid's with cycles in place of edges.  A vertex is a
+ * tuple of k digits base m rather than a pattern of n bits, its neighbour
+ * along axis j steps that digit by one modulo m rather than flipping a bit,
+ * and a face still comes from choosing two axes and pinning the rest.
+ */
+template<typename T>
+class torus : public object<T> {
+public:
+    torus(uint n, uint k = 2, uint m = 32,
+          std::vector<T> weight = std::vector<T>());
+
+    virtual std::shared_ptr< object<T> > clone() const;
+
+    /** Circles. */
+    uint K;
+
+    /** Samples around each circle. */
+    uint M;
+
+    /**
+     * Radius of each circle, normalized so the sum of squares is one.
+     *
+     * Equal radii give the Clifford torus.  Unequal ones give the rest of the
+     * family: with k=2 and radii (cos a, sin a), every a in (0, pi/2) is a
+     * torus, they are disjoint, and together they fill the sphere except for
+     * the two circles a=0 and a=pi/2 that they close down onto.  That is the
+     * Hopf foliation, and stereographic projection shows it as tori nested
+     * one inside the next, each threading through the last.
+     */
+    std::vector<T> R;
+
+protected:
+    virtual void build_faces() const;
+};
+
+
 template<typename T>
 class pyramoid : public object<T> {
 public:
@@ -1281,6 +1340,126 @@ void cuboid<T>::build_faces() const {
                 f.push_back(base | bit_a);
                 f.push_back(base | bit_a | bit_b);
                 f.push_back(base | bit_b);
+
+                this->faces.push_back(f);
+            }
+        }
+    }
+}
+
+
+template<typename T>
+inline
+std::shared_ptr< object<T> > torus<T>::clone() const {
+    return std::make_shared< torus<T> >(*this);
+}
+
+
+template<typename T>
+inline
+torus<T>::torus(uint n, uint k, uint m, std::vector<T> weight)
+    : object<T>(n),
+      K(k),
+      M(m)
+{
+    // A cycle needs three vertices to be one: at two the step forward and the
+    // step back are the same neighbour, at one it is a self-loop.
+    if(M < 3) M = 3;
+    if(K < 1) K = 1;
+
+    // Each circle occupies a coordinate pair, so there has to be room.
+    if(2 * K > n) K = n / 2;
+
+    uint count = 1;
+    for(uint j = 0; j < K; j++) count *= M;
+
+    // On the unit sphere, whatever the proportions: the radii are normalized
+    // so their squares sum to one.  Equal radii are the Clifford torus.
+    R.assign(K, 1.0 / std::sqrt(static_cast<T>(K)));
+
+    if(weight.size() == K) {
+        T sum = 0;
+        for(uint j = 0; j < K; j++) sum += weight[j] * weight[j];
+
+        if(sum > 0) {
+            sum = std::sqrt(sum);
+            for(uint j = 0; j < K; j++) R[j] = weight[j] / sum;
+        }
+    }
+
+    for(uint i = 0; i < count; i++) {
+        vertex<T> v(n);
+        for(uint x = 0; x < n; x++) v[x] = 0;
+
+        // digit j of i, base M, is the position around circle j
+        uint rest = i;
+        for(uint j = 0; j < K; j++) {
+            const uint digit = rest % M;
+            rest /= M;
+
+            const T angle = 2 * M_PI * static_cast<T>(digit) / M;
+
+            v[2 * j]     = R[j] * std::cos(angle);
+            v[2 * j + 1] = R[j] * std::sin(angle);
+        }
+
+        this->v.push_back(v);
+        this->adj.push_back(std::vector<uint>());
+    }
+
+    // One edge per vertex per circle: the step forward.  Stepping back would
+    // reach the same edges from the other end.
+    uint stride = 1;
+    for(uint j = 0; j < K; j++) {
+        for(uint i = 0; i < count; i++) {
+            const uint digit = (i / stride) % M;
+            const uint next = i + stride * ((digit + 1) % M) - stride * digit;
+
+            this->connect(i, next);
+        }
+
+        stride *= M;
+    }
+}
+
+
+/**
+ * The 2-faces of a flat torus.
+ *
+ * One quad per vertex per pair of circles: step forward along both.  That is
+ * C(k,2)*m^k of them -- 1024 for a 2-torus at m=32, and equal to the vertex
+ * count, which is Euler characteristic zero as a torus requires.
+ *
+ * Emitted around the quad rather than across it, and consistently: unlike a
+ * hypercube's shadow, this is a real surface, so its faces have a side.
+ */
+template<typename T>
+inline
+void torus<T>::build_faces() const {
+    uint count = 1;
+    for(uint j = 0; j < K; j++) count *= M;
+
+    std::vector<uint> stride(K);
+    uint s = 1;
+    for(uint j = 0; j < K; j++) { stride[j] = s; s *= M; }
+
+    for(uint a = 0; a < K; a++) {
+        for(uint b = a + 1; b < K; b++) {
+            for(uint i = 0; i < count; i++) {
+                const uint da = (i / stride[a]) % M;
+                const uint db = (i / stride[b]) % M;
+
+                const uint ia = i + stride[a] * ((da + 1) % M) - stride[a] * da;
+                const uint ib = i + stride[b] * ((db + 1) % M) - stride[b] * db;
+
+                const uint dab = (ia / stride[b]) % M;
+                const uint iab = ia + stride[b] * ((dab + 1) % M) - stride[b] * dab;
+
+                typename object<T>::face_type f;
+                f.push_back(i);
+                f.push_back(ia);
+                f.push_back(iab);
+                f.push_back(ib);
 
                 this->faces.push_back(f);
             }

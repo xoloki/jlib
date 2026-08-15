@@ -76,18 +76,95 @@ public:
                            uint i1, uint i2);
 
     /**
-     * One face, as a polygon with a normal.
+     * One face, as a polygon with a normal per corner.
+     *
+     * normal is 3 values per corner, parallel to corner: flat shading repeats
+     * the face's own normal, smooth shading gives each corner the mean of the
+     * faces meeting there.
      *
      * index[k] is the object vertex that corner[k] came from, numbered across
      * every object in the plot, so a subclass can colour a face from whatever
      * it keeps per vertex.  The geometry here ignores it.
      */
     virtual void draw_face(const std::vector< math::vertex<T> >& corner,
-                           const math::vertex<T>& normal,
+                           const std::vector<T>& normal,
                            const std::vector<uint>& index);
 
     /** Solid faces as well as the wireframe.  The o key toggles it. */
     bool m_solid = true;
+
+    /**
+     * Draw the edges and vertices over the faces.
+     *
+     * Right when the edges are the structure, as on a hypercube, where they
+     * are 2% of the projected surface.  A tessellated surface's edges are
+     * just where the mesh was cut: a 32x32 torus puts 2048 of them over the
+     * same area, covering 21% of it, and what you see is the mesh rather than
+     * the shape.  Set from the shape, and the l key overrides it.
+     */
+    bool m_wire = true;
+
+    /**
+     * Per-face alpha.
+     *
+     * A hypercube is a shadow to see into; a surface is a surface, and wants
+     * to read as one while still showing where it passes through itself.
+     */
+    T m_alpha = 0.18;
+
+    /**
+     * Hold the total accumulated opacity constant instead of the per-face
+     * value, using how deeply the faces actually stack this frame.
+     *
+     * A 2-torus is a surface: 1.8 faces along a line of sight, so what you
+     * set is roughly what you get.  A 3-torus is not a surface -- its faces
+     * are interior scaffold, 18 deep at the coarsest useful mesh -- and the
+     * same alpha there accumulates to 0.97 and hides everything it is meant
+     * to show.  Solving 1-(1-a)^depth for a fixed total gives
+     * a = 1-(1-m_alpha)^(1.8/depth), which leaves a surface where it was and
+     * thins everything denser in proportion.
+     *
+     * Off for the hypercube, whose look is already settled.
+     */
+    bool m_adapt = false;
+
+    /** Faces along a line of sight, measured each frame. */
+    T m_depth = 1.8;
+
+    /** Projected face area this frame, summed over every object. */
+    mutable T m_area = 0;
+
+    /** Stereographic outermost step; see transform().  The h key. */
+    bool m_stereo = false;
+
+    /** Frustum offset for the steps after a stereographic one. */
+    T m_eye_offset = 0;
+
+    /**
+     * Extent of the stereographic image, measured each frame.
+     *
+     * It has to be measured, and it has to be measured every frame.  The
+     * perspective steps that follow assume a figure of about unit radius --
+     * that is what the eye offset and the clip volume are sized for -- but
+     * the stereographic image breathes as the figure turns, between about 1
+     * and 5 at D=6, because how much it magnifies depends on how close the
+     * figure passes to the pole.  Left unscaled, parts of it arrive within
+     * 0.36 of the eye where the frustum's near plane is at 1.5, and dividing
+     * by w then magnifies them by an order of magnitude relative to the far
+     * side: the figure appears to sweep forward and swallow the camera.
+     *
+     * mutable because transform() is const, as with the framing radius.
+     */
+    mutable T m_stereo_scale = 1;
+
+    /**
+     * Average the normals of the faces meeting at a vertex.
+     *
+     * Right for a surface, wrong for a hypercube: its faces meet at right
+     * angles, so averaging would round off corners that are not round.  Set
+     * from the shape, and the m key overrides it to compare.
+     */
+    bool m_smooth = false;
 
 protected:
     virtual math::vertex<T> transform(const math::vertex<T>& v) const;
@@ -212,13 +289,13 @@ void HPlot<T>::draw_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
 template<typename T>
 inline
 void HPlot<T>::draw_face(const std::vector< math::vertex<T> >& corner,
-                         const math::vertex<T>& normal,
+                         const std::vector<T>& normal,
                          const std::vector<uint>&) {
-    glNormal3d(normal[0], normal[1], normal[2]);
-
     glBegin(GL_POLYGON);
-    for(uint k = 0; k < corner.size(); k++)
+    for(uint k = 0; k < corner.size(); k++) {
+        glNormal3d(normal[3 * k], normal[3 * k + 1], normal[3 * k + 2]);
         glVertex4dv(corner[k].data());
+    }
     glEnd();
 }
 
@@ -286,6 +363,8 @@ inline
 void HPlot<T>::draw() {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    m_area = 0;
+
     // Vertices are numbered across every object, matching the counter
     // draw_point keeps, so a subclass can index one colour table with either.
     uint base = 0;
@@ -298,6 +377,42 @@ void HPlot<T>::draw() {
         // Built by push_back rather than sized up front: vertex<T> has no
         // default constructor, since a vertex has no meaning without a
         // dimensionality.
+        // How big the stereographic image comes out this frame, before
+        // anything downstream assumes a size.  A separate pass because
+        // transform() works a vertex at a time and this is a property of all
+        // of them; the percentile is for the same reason the framing uses one,
+        // that a vertex approaching the pole runs off on its own.
+        if(m_stereo && math::Plot<T>::D > 3) {
+            const int d = math::Plot<T>::D;
+
+            std::vector<T> radii;
+            radii.reserve(object.size());
+
+            for(uint j = 0; j < object.size(); j++) {
+                math::vertex<T> p(d);
+                p = math::Plot<T>::modelview.top() * object[j]();
+
+                T denom = 1 - p[d - 1];
+                if(denom < 0.05) denom = 0.05;
+
+                T r = 0;
+                for(int i = 0; i < d - 1; i++) {
+                    const T x = p[i] / denom;
+                    r += x * x;
+                }
+
+                radii.push_back(r);
+            }
+
+            std::sort(radii.begin(), radii.end());
+
+            const uint at = static_cast<uint>(radii.size() * 0.98);
+            const T r = radii.empty()
+                ? 1 : std::sqrt(radii[std::min<uint>(at, radii.size() - 1)]);
+
+            m_stereo_scale = (r > 1e-9) ? r : 1;
+        }
+
         std::vector< math::vertex<T> > transformed;
         transformed.reserve(object.size());
 
@@ -308,15 +423,31 @@ void HPlot<T>::draw() {
         // Frame the object: far enough back that the outermost vertex sits
         // inside the field, growing the distance if a later rotation reaches
         // further than anything seen so far.
-        T radius = 0;
+        // The outermost vertex, or near enough.
+        //
+        // Under stereographic projection a vertex approaching the pole runs
+        // off toward infinity, and since the framing only ever grows, one of
+        // them would shrink the figure to a dot and keep it there.  Taking a
+        // high percentile instead lets a handful diverge without dragging the
+        // rest with them; the divergence is still drawn, just not framed for.
+        std::vector<T> radii;
+        radii.reserve(transformed.size());
+
         for(uint j = 0; j < transformed.size(); j++) {
             const math::vertex<T>& v = transformed[j];
             T r2 = 0;
             for(uint k = 0; k < 3 && k < v.D; k++)
                 r2 += v[k] * v[k];
-            if(r2 > radius) radius = r2;
+            radii.push_back(r2);
         }
-        radius = std::sqrt(radius);
+
+        std::sort(radii.begin(), radii.end());
+
+        const uint at = m_stereo
+            ? static_cast<uint>(radii.size() * 0.98)
+            : (radii.empty() ? 0 : radii.size() - 1);
+
+        T radius = radii.empty() ? 0 : std::sqrt(radii[std::min<uint>(at, radii.size() - 1)]);
 
         if(radius > m_radius)
             m_radius = radius;
@@ -398,20 +529,121 @@ void HPlot<T>::draw() {
             // Depth of a face is its centroid's z.  The modelview applies a
             // uniform positive scale and a translation along z, so ordering
             // by z here is the same as ordering by eye-space depth.
+            //
+            // The normals are wanted here too rather than at draw time,
+            // because a vertex normal is the average over the faces meeting
+            // at it and that cannot be known one face at a time.
             std::vector< std::pair<T,uint> > order;
             order.reserve(faces.size());
 
+            std::vector<T> fnormal(3 * faces.size(), 0);
+            std::vector<bool> flat(faces.size(), false);
+
+            std::vector< math::vertex<T> > fcorner;
+            math::vertex<T> fn(3);
+
             for(uint f = 0; f < faces.size(); f++) {
                 T z = 0;
-                for(uint k = 0; k < faces[f].size(); k++)
+                fcorner.clear();
+                for(uint k = 0; k < faces[f].size(); k++) {
                     z += transformed[faces[f][k]][2];
+                    fcorner.push_back(transformed[faces[f][k]]);
+                }
 
                 order.push_back(std::make_pair(z / faces[f].size(), f));
+
+                if(face_normal(fcorner, fn)) {
+                    flat[f] = true;
+                    for(uint k = 0; k < 3; k++) fnormal[3 * f + k] = fn[k];
+                }
+            }
+
+            // Vertex normals: the mean of the faces meeting at a vertex,
+            // which is what makes a curved surface shade as curved rather
+            // than as the flat quads it is made of.
+            //
+            // Aligned before averaging, and only where the shape is really a
+            // surface.  A hypercube's faces meet at right angles and its
+            // shadow everts, so averaging there would round off corners that
+            // are not round and cancel to nothing wherever two faces face
+            // opposite ways.  A torus is a genuine surface with consistent
+            // winding, so its faces agree -- except along the fold curves,
+            // where the projection reverses orientation.  Taking the first
+            // face at each vertex as the reference and flipping the rest to
+            // agree keeps the average meaningful across a fold; the fold
+            // itself then reads as a crease, which is what it is.
+            std::vector<T> vnormal;
+            if(m_smooth) {
+                vnormal.assign(3 * object.size(), 0);
+                std::vector<bool> seen(object.size(), false);
+
+                for(uint f = 0; f < faces.size(); f++) {
+                    if(!flat[f]) continue;
+
+                    for(uint k = 0; k < faces[f].size(); k++) {
+                        const uint v = faces[f][k];
+
+                        T dot = 0;
+                        for(uint x = 0; x < 3; x++)
+                            dot += vnormal[3 * v + x] * fnormal[3 * f + x];
+
+                        const T sign = (seen[v] && dot < 0) ? -1.0 : 1.0;
+                        seen[v] = true;
+
+                        for(uint x = 0; x < 3; x++)
+                            vnormal[3 * v + x] += sign * fnormal[3 * f + x];
+                    }
+                }
+
+                for(uint v = 0; v < object.size(); v++) {
+                    T len = 0;
+                    for(uint x = 0; x < 3; x++)
+                        len += vnormal[3 * v + x] * vnormal[3 * v + x];
+                    len = std::sqrt(len);
+
+                    // A vertex whose faces cancel has no mean direction; the
+                    // face normal is used for it instead, at draw time.
+                    if(len < 1e-12) { seen[v] = false; continue; }
+
+                    for(uint x = 0; x < 3; x++) vnormal[3 * v + x] /= len;
+                }
+
+                for(uint v = 0; v < object.size(); v++)
+                    if(!seen[v])
+                        for(uint x = 0; x < 3; x++) vnormal[3 * v + x] = 0;
+            }
+
+            // How deeply the faces stack: total projected area over the area
+            // they cover.  A face crossing a given line of sight contributes
+            // to both, so the ratio is the mean number along one.  Scale-free,
+            // so measuring before GL scales the figure is fine.
+            if(m_adapt) {
+                T area = 0;
+                for(uint f = 0; f < faces.size(); f++) {
+                    T a = 0;
+                    for(uint k = 0; k < faces[f].size(); k++) {
+                        const math::vertex<T>& p = transformed[faces[f][k]];
+                        const math::vertex<T>& q =
+                            transformed[faces[f][(k + 1) % faces[f].size()]];
+
+                        a += p[0] * q[1] - q[0] * p[1];
+                    }
+                    area += std::fabs(a) / 2;
+                }
+
+                // Accumulated across every object rather than set from this
+                // one.  Nested tori all lie along the same lines of sight, so
+                // what matters for alpha is their total: four surfaces at 1.8
+                // deep each stack 7 deep, and treating each as though it were
+                // alone would let them accumulate to near opacity.  Read a
+                // frame late, which is invisible at these rotation rates.
+                m_area += area;
             }
 
             // ascending z: the camera looks down -z, so smallest is farthest
             std::sort(order.begin(), order.end());
 
+            glShadeModel(GL_SMOOTH);
             glEnable(GL_LIGHTING);
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -420,26 +652,59 @@ void HPlot<T>::draw() {
 
             std::vector< math::vertex<T> > corner;
             std::vector<uint> index;
-            math::vertex<T> normal(3);
+            std::vector<T> normal;
 
             for(uint o = 0; o < order.size(); o++) {
-                const typename math::object<T>::face_type& face =
-                    faces[order[o].second];
+                const uint f = order[o].second;
+                if(!flat[f]) continue;
+
+                const typename math::object<T>::face_type& face = faces[f];
 
                 corner.clear();
                 index.clear();
+                normal.clear();
+
                 for(uint k = 0; k < face.size(); k++) {
-                    corner.push_back(transformed[face[k]]);
-                    index.push_back(base + face[k]);
+                    const uint v = face[k];
+
+                    corner.push_back(transformed[v]);
+                    index.push_back(base + v);
+
+                    // Per corner where the surface has a mean direction there,
+                    // and the face's own normal otherwise -- which covers both
+                    // the flat-shaded shapes and the cancelled vertices.
+                    T len = 0;
+                    if(m_smooth)
+                        for(uint x = 0; x < 3; x++)
+                            len += vnormal[3 * v + x] * vnormal[3 * v + x];
+
+                    if(len > 0) {
+                        // to the side this face is facing, so a fold creases
+                        // rather than shading through itself
+                        T dot = 0;
+                        for(uint x = 0; x < 3; x++)
+                            dot += vnormal[3 * v + x] * fnormal[3 * f + x];
+
+                        const T sign = (dot < 0) ? -1.0 : 1.0;
+                        for(uint x = 0; x < 3; x++)
+                            normal.push_back(sign * vnormal[3 * v + x]);
+                    } else {
+                        for(uint x = 0; x < 3; x++)
+                            normal.push_back(fnormal[3 * f + x]);
+                    }
                 }
 
-                if(face_normal(corner, normal))
-                    draw_face(corner, normal, index);
+                draw_face(corner, normal, index);
             }
 
             glDepthMask(GL_TRUE);
             glDisable(GL_BLEND);
             glDisable(GL_LIGHTING);
+        }
+
+        if(!m_wire) {
+            base += object.size();
+            continue;
         }
 
         // Smooth shading so an edge blends between its endpoints' colours
@@ -479,6 +744,13 @@ void HPlot<T>::draw() {
         base += object.size();
     }
 
+    // The frame's total, for the next frame's alpha.
+    if(m_adapt) {
+        const T disc = PI * m_radius * m_radius;
+
+        m_depth = (disc > 0 && m_area > disc) ? (m_area / disc) : 1.8;
+    }
+
     glDisable(GL_FOG);
 
 	this->flush();
@@ -503,7 +775,58 @@ math::vertex<T> HPlot<T>::transform(const math::vertex<T>& vertex) const {
     typedef typename math::Plot<T>::projection_mode mode;
     const mode m = this->get_projection_mode();
 
-    for(int d = math::Plot<T>::D; d > 3; d--) {
+    // Stereographic for the outermost step, when the shape allows it.
+    //
+    // Only from a sphere: the map sends a point of the unit sphere S^(d-1) to
+    // the plane through its equator, along the line from the north pole,
+    //
+    //     x_i' = x_i / (1 - x_(d-1))
+    //
+    // which needs |x| = 1 to mean anything.  The torus is built on the unit
+    // sphere and rotation preserves it, so it qualifies; a hypercube does not,
+    // and its vertices sit at radius sqrt(n).
+    //
+    // The reason to want it is that stereographic projection sends circles to
+    // circles.  The Clifford torus is ruled by the Hopf fibres, so at D=4 they
+    // come through as Villarceau circles -- linked circles lying on an
+    // ordinary donut -- which perspective projection does not show.
+    //
+    // Note the eye offset has to be zero for this to work at all: any
+    // translation before the divide moves the figure off the sphere.  That is
+    // why initialize_glazzies zeroes it in this mode and the offset for the
+    // remaining perspective steps is applied afterwards, below, once the
+    // sphere is no longer needed.
+    int d = math::Plot<T>::D;
+
+    if(m_stereo && d > 3) {
+        const T pole = ret[d - 1];
+
+        // Clamped: a point reaching the pole projects to infinity.  That
+        // divergence is the eversion rather than a fault, so it is bounded
+        // instead of dropped, and the framing uses a percentile so a few
+        // vertices on their way out cannot carry the whole figure with them.
+        T denom = 1 - pole;
+        if(denom < 0.05) denom = 0.05;
+
+        // Normalized to about unit radius, so the perspective steps that
+        // follow get the size of figure their frustum was built for.  A
+        // uniform scale, so it changes nothing about the shape.
+        math::vertex<T> s(d - 1);
+        for(int i = 0; i < d - 1; i++)
+            s[i] = ret[i] / (denom * m_stereo_scale);
+
+        // Now put it in front of the frustums the remaining steps use.  The
+        // eye offset could not be applied before the divide without spoiling
+        // the sphere, so it lands here instead.
+        for(int i = 3; i < d - 1; i++)
+            s[i] += m_eye_offset;
+
+        ret = s;
+        ret.change(d - 1);
+        d--;
+    }
+
+    for(; d > 3; d--) {
         math::matrix<T> p = math::matrix<T>::project(d, math::Plot<T>::clip);
         math::vertex<T> v(d);
         v = ret;
@@ -540,10 +863,17 @@ public:
     virtual void draw_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
                            uint i1, uint i2);
     virtual void draw_face(const std::vector< math::vertex<T> >& corner,
-                           const math::vertex<T>& normal,
+                           const std::vector<T>& normal,
                            const std::vector<uint>& index);
 
     void key_pressed(unsigned char key,int x,int y);
+
+    /**
+     * A hypercube is a solid whose shadow is a shadow; the flat torus is a
+     * surface that cannot exist in three dimensions at all.  Both want the
+     * same pipeline and show different things through it.
+     */
+    enum Shape { CUBOID, TORUS };
     void button_pressed(int button, int state, int x, int y);
     void on_timeout();
 
@@ -562,6 +892,13 @@ protected:
      */
     std::vector<T> hues;
     uint r;
+    Shape m_shape = CUBOID;
+
+    /** Circles in the torus.  Only 2 makes a surface; see initialize(). */
+    uint m_circles = 2;
+
+    /** Tori drawn through the Hopf foliation.  The n and b keys. */
+    uint m_shells = 1;
 
     matrix<T> rotate;
     matrix<T> back_rotate;
@@ -591,6 +928,8 @@ HyperPlot<T,Plot>::HyperPlot(uint n, std::vector< std::pair<T,T> > c, uint w, ui
 template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::initialize(uint n) {
+    bool surface = false;
+
     // Rotate in every plane, including those touching the highest axis.
     //
     // This defaulted to n-1, so a 4-cube's planes were only ever (0,1), (0,2)
@@ -607,8 +946,94 @@ void HyperPlot<T,Plot>::initialize(uint n) {
     initialize_rotation(n);
     (*this) * matrix<T>::lookAt(n, eye, up, center);
 
-    cuboid<T> object(n);
-    this->add(object);
+    switch(m_shape) {
+    case CUBOID: {
+        cuboid<T> object(n);
+        this->add(object);
+        break;
+    }
+    case TORUS: {
+        // Circles, not dimensions: k=2 is a surface whatever n is, so the
+        // mesh does not grow when the figure turns in more planes.
+        uint k = m_circles;
+        if(k < 1) k = 1;
+        if(2 * k > n) k = n / 2;
+        if(k < 1) k = 1;
+
+        // m^k vertices, so the samples per circle have to come down as
+        // circles go up or the mesh explodes: 32 per circle is 1024 at k=2
+        // and 32768 at k=3.  Holding m^k near 1024 gives 32, 10, 6, 4.
+        uint m = static_cast<uint>(std::lround(std::pow(1024.0, 1.0 / k)));
+        if(m < 3) m = 3;
+        if(m > 64) m = 64;
+
+        // One torus, or a stack of them through the Hopf foliation.
+        //
+        // Radii (cos a, sin a) give a torus for every a in (0, pi/2): they are
+        // disjoint, they fill the sphere apart from the two circles they close
+        // down onto at the ends, and each threads through the last.  Spacing a
+        // evenly across the interval samples that family.  a = pi/4 is the
+        // Clifford torus, which is what a single shell gives.
+        //
+        // Only for k=2.  Above that the radii are a simplex rather than one
+        // angle, and there is no single family to walk.
+        const uint shells = (k == 2 ? m_shells : 1);
+
+        hues.clear();
+
+        for(uint shell = 0; shell < shells; shell++) {
+            std::vector<T> weight;
+
+            if(shells > 1) {
+                const T a = PI / 2 * (shell + 1) / (shells + 1);
+
+                weight.push_back(std::cos(a));
+                weight.push_back(std::sin(a));
+            }
+
+            torus<T> object(n, k, m, weight);
+            this->add(object);
+
+            // One hue per shell, so the nesting is legible.  Within a shell
+            // the shading is the surface's own; between them it is the colour
+            // that says which is which where they pass through each other.
+            const T hue = (shells > 1)
+                ? static_cast<T>(shell) / shells
+                : 0.0;
+
+            for(uint i = 0; i < object.size(); i++)
+                hues.push_back(shells > 1
+                               ? hue
+                               : static_cast<T>(i % object.M) / object.M);
+
+            if(shell == 0)
+                std::cout << "torus: " << k << " circles, " << m
+                          << " per circle, " << shells << " shell"
+                          << (shells > 1 ? "s, " : ", ")
+                          << shells * object.size() << " vertices, "
+                          << shells * object.get_faces().size() << " faces"
+                          << std::endl;
+        }
+
+        // A single torus is banded by position around its first circle:
+        // scattered hues are right when vertices are landmarks, but a mesh
+        // vertex is just where the surface got sampled, and scattering across
+        // 1024 of them gives every face four unrelated corners to blend and
+        // renders the surface as coloured static.  The wrap is exact and
+        // free, position around a circle being cyclic like hue itself.
+        surface = (k == 2);
+        break;
+    }
+    }
+
+    // Only a 2-torus is a surface.  Above that the faces are interior
+    // scaffold: there is nothing for smooth normals to smooth, the edges are
+    // structure again rather than a mesh laid over something, and the faces
+    // stack deeply enough that the alpha has to be measured rather than set.
+    this->m_smooth = surface;
+    this->m_wire   = !surface;
+    this->m_alpha  = (m_shape == TORUS ? 0.5 : 0.18);
+    this->m_adapt  = (m_shape == TORUS);
 }
 
 template<typename T, typename Plot>
@@ -660,7 +1085,7 @@ void HyperPlot<T,Plot>::draw_point(const math::vertex<T>& point, uint index) {
 template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::draw_face(const std::vector< math::vertex<T> >& corner,
-                                  const math::vertex<T>& normal,
+                                  const std::vector<T>& normal,
                                   const std::vector<uint>& index) {
     std::vector<T> h;
     for(uint k = 0; k < index.size(); k++)
@@ -673,7 +1098,12 @@ void HyperPlot<T,Plot>::draw_face(const std::vector< math::vertex<T> >& corner,
     // reads as separate surfaces rather than a solid block.
     GLfloat fcolors[4];
     fcolors[0] = color.r; fcolors[1] = color.g; fcolors[2] = color.b;
-    fcolors[3] = 0.18;
+    // Thinned by how deeply the faces stack, when the shape needs it.
+    const T alpha = this->m_adapt
+        ? 1 - std::pow(1 - this->m_alpha, 1.8 / this->m_depth)
+        : this->m_alpha;
+
+    fcolors[3] = static_cast<GLfloat>(alpha);
 
     glColor4fv(fcolors);
     glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, fcolors);
@@ -724,6 +1154,40 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
             return;
 
         initialize(d);
+    } else if(key == 'n' || key == 'b') {
+        const uint want = (key == 'n' ? m_shells + 1 : m_shells - 1);
+
+        if(want >= 1 && want <= 8) {
+            m_shells = want;
+            if(m_shape == TORUS) initialize(this->D);
+        }
+    } else if(key == 'h') {
+        // Only from the sphere; a hypercube is not on one.
+        if(m_shape == TORUS) {
+            this->m_stereo = !this->m_stereo;
+            this->reframe();
+            initialize(this->D);
+
+            std::cout << "projection: "
+                      << (this->m_stereo ? "stereographic" : "perspective")
+                      << std::endl;
+        }
+    } else if(key == 'k' || key == 'j') {
+        const uint want = (key == 'k' ? m_circles + 1 : m_circles - 1);
+
+        if(want >= 1 && 2 * want <= this->D) {
+            m_circles = want;
+            if(m_shape == TORUS) initialize(this->D);
+        }
+    } else if(key == 'l') {
+        this->m_wire = !this->m_wire;
+        this->draw();
+    } else if(key == 'm') {
+        this->m_smooth = !this->m_smooth;
+        this->draw();
+    } else if(key == 't') {
+        m_shape = (m_shape == CUBOID ? TORUS : CUBOID);
+        initialize(this->D);
     } else if(key == 'z' || key == 'x') {
         this->m_zoom *= (key == 'z' ? 1.15 : 1.0 / 1.15);
         this->draw();
@@ -834,10 +1298,17 @@ void HyperPlot<T,Plot>::initialize_glazzies(uint n) {
     // them through the origin, with the two halves straddling the camera.
     for(uint i = 3; i < n; i++) {
         clip.push_back(std::make_pair(r22, 3*r22));
-        eye[i] = r2;
+
+        // Zero under stereographic projection: it needs the figure on the
+        // unit sphere, and a translation would take it off.  transform()
+        // applies the offset after the divide instead, for whatever
+        // perspective steps remain.
+        eye[i] = (this->m_stereo ? 0 : r2);
         up[i] = 0;
         center[i] = 0;
     }
+
+    this->m_eye_offset = r2;
 }
 
 
