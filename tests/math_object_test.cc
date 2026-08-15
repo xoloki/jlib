@@ -13,6 +13,7 @@
  */
 #include <jlib/math/matrix.hh>
 
+#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -124,6 +125,101 @@ int main() {
 
         std::cout << "\n";
     }
+
+    // The flat torus, checked against what a torus has to be.
+    //
+    // The alternating sum of cell counts is the real test: it only comes out
+    // right if the vertices, the cyclic adjacency and the face enumeration all
+    // agree, and a missing wrap-around at the seam would break it.
+    //
+    // A k-torus grid has C(k,j)*m^k cells of dimension j, so the full sum is
+    // m^k*(1-1)^k = 0.  object only holds cells up to dimension 2, so what is
+    // checkable here is the truncation, m^k*(1 - k + C(k,2)).  At k=2 nothing
+    // exists above dimension 2 and that truncation is the Euler characteristic
+    // itself, zero, as a torus requires; at k=3 it is m^3, with the 3-cells
+    // that would cancel it not represented.
+    for(uint k = 2; k <= 3; k++) {
+        for(uint m = 3; m <= 8; m += 5) {
+            const uint n = 2 * k;
+            torus<T> t(n, k, m);
+
+            long verts = 1;
+            for(uint j = 0; j < k; j++) verts *= m;
+
+            const long edges = static_cast<long>(k) * verts;
+            const long faces = (static_cast<long>(k) * (k - 1) / 2) * verts;
+
+            std::cout << k << "-torus in " << n << "D, " << m << " per circle:\n";
+            check("vertices", t.size(), verts);
+            check("edges (each once)", t.get_edges().size(), edges);
+            check("faces", t.get_faces().size(), faces);
+
+            // every vertex has two neighbours per circle
+            long degree_wrong = 0;
+            for(uint i = 0; i < t.size(); i++)
+                if(t.adjacent(i).size() != 2 * k) ++degree_wrong;
+            check("vertices with wrong degree", degree_wrong, 0);
+
+            const long alternating = verts * (1 - static_cast<long>(k)
+                                              + static_cast<long>(k) * (k - 1) / 2);
+            check(k == 2 ? "Euler characteristic V-E+F" : "V-E+F (2-skeleton)",
+                  static_cast<long>(t.size()) - edges + faces, alternating);
+
+            // on the unit sphere, by construction
+            long off_sphere = 0;
+            for(uint i = 0; i < t.size(); i++) {
+                T r2 = 0;
+                for(uint x = 0; x < t.D; x++) r2 += t[i][x] * t[i][x];
+                if(std::fabs(std::sqrt(r2) - 1.0) > 1e-9) ++off_sphere;
+            }
+            check("vertices off the unit sphere", off_sphere, 0);
+
+            // every side of every face is a real edge, and every edge is used
+            // by exactly the faces that should use it
+            std::map<std::pair<uint,uint>, long> sides;
+            long face_oob = 0, wrong_size = 0;
+            for(uint f = 0; f < t.get_faces().size(); f++) {
+                const std::vector<uint>& face = t.get_faces()[f];
+                if(face.size() != 4) ++wrong_size;
+                for(uint x = 0; x < face.size(); x++) {
+                    if(face[x] >= t.size()) ++face_oob;
+                    const uint p = face[x], q = face[(x + 1) % face.size()];
+                    sides[p < q ? std::make_pair(p, q) : std::make_pair(q, p)]++;
+                }
+            }
+            check("faces that are not quads", wrong_size, 0);
+            check("out-of-range face indices", face_oob, 0);
+
+            std::set<std::pair<uint,uint> > real;
+            for(uint e = 0; e < t.get_edges().size(); e++)
+                real.insert(t.get_edges()[e]);
+
+            long not_an_edge = 0;
+            for(std::map<std::pair<uint,uint>, long>::iterator u = sides.begin();
+                u != sides.end(); u++)
+                if(real.find(u->first) == real.end()) ++not_an_edge;
+            check("face sides that are not edges", not_an_edge, 0);
+            check("edges covered by faces", sides.size(), edges);
+
+            std::cout << "\n";
+        }
+    }
+
+    // A 2-torus in higher ambient dimensions is the same surface: the mesh
+    // must not grow, and the unused axes must stay flat.
+    for(uint n = 4; n <= 7; n++) {
+        torus<T> t(n, 2, 8);
+
+        std::cout << "2-torus in " << n << "D: ";
+        check("vertices", t.size(), 64);
+
+        long nonzero = 0;
+        for(uint i = 0; i < t.size(); i++)
+            for(uint x = 4; x < t.D; x++)
+                if(t[i][x] != 0) ++nonzero;
+        check("  nonzero unused axes", nonzero, 0);
+    }
+    std::cout << "\n";
 
     // the shape that used to be mangled: duplicates must survive as distinct
     spheroid<T> s(3);

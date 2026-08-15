@@ -544,6 +544,13 @@ public:
                            const std::vector<uint>& index);
 
     void key_pressed(unsigned char key,int x,int y);
+
+    /**
+     * A hypercube is a solid whose shadow is a shadow; the flat torus is a
+     * surface that cannot exist in three dimensions at all.  Both want the
+     * same pipeline and show different things through it.
+     */
+    enum Shape { CUBOID, TORUS };
     void button_pressed(int button, int state, int x, int y);
     void on_timeout();
 
@@ -562,6 +569,7 @@ protected:
      */
     std::vector<T> hues;
     uint r;
+    Shape m_shape = CUBOID;
 
     matrix<T> rotate;
     matrix<T> back_rotate;
@@ -607,8 +615,21 @@ void HyperPlot<T,Plot>::initialize(uint n) {
     initialize_rotation(n);
     (*this) * matrix<T>::lookAt(n, eye, up, center);
 
-    cuboid<T> object(n);
-    this->add(object);
+    switch(m_shape) {
+    case CUBOID: {
+        cuboid<T> object(n);
+        this->add(object);
+        break;
+    }
+    case TORUS: {
+        // k=2 regardless of n, so the mesh does not grow with dimension: the
+        // same surface, turning in more planes.  32 around each circle is
+        // 1024 quads, which is where a hypercube sits at D=10.
+        torus<T> object(n, 2, 32);
+        this->add(object);
+        break;
+    }
+    }
 }
 
 template<typename T, typename Plot>
@@ -724,6 +745,9 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
             return;
 
         initialize(d);
+    } else if(key == 't') {
+        m_shape = (m_shape == CUBOID ? TORUS : CUBOID);
+        initialize(this->D);
     } else if(key == 'z' || key == 'x') {
         this->m_zoom *= (key == 'z' ? 1.15 : 1.0 / 1.15);
         this->draw();
