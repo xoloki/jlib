@@ -29,6 +29,7 @@
 #include <iostream>
 #include <exception>
 #include <string>
+#include <vector>
 #include <list>
 
 #include <cstdlib>
@@ -71,6 +72,24 @@ namespace jlib {
             
             basic_streambuf();
             virtual ~basic_streambuf();
+
+            /**
+             * Not copyable.
+             *
+             * std::basic_streambuf leaves its copy operations protected rather
+             * than deleted, so a derived class gets implicit ones -- and both
+             * compiled here and double-freed, since the two buffers were raw
+             * pointers deleted in the destructor.  The vectors below fix the
+             * ownership, but a copy would still be wrong: the base copies the
+             * get and put area pointers, so the copy's stream positions would
+             * address the original's storage.  A streambuf is not a value.
+             *
+             * basic_stream needs no such declaration -- std::basic_iostream
+             * deletes its copy operations, so the whole stream layer is
+             * already uncopyable by inheritance.
+             */
+            basic_streambuf(const basic_streambuf&) = delete;
+            basic_streambuf& operator=(const basic_streambuf&) = delete;
             
             //virtual int_type underflow();
             virtual int_type overflow(int_type c=traits_type::eof());
@@ -101,8 +120,12 @@ namespace jlib {
             pos_type m_length;
             pos_type m_pos;
             std::list<plugin*> m_plugins;
-            char_type* m_get_buf;
-            char_type* m_put_buf;
+            // Vectors rather than new[], so the buffer owns them and nothing
+            // has to remember to free them.  Sized once in the constructor and
+            // never resized, so the pointers handed to setg and setp stay
+            // valid for the life of the object.
+            std::vector<char_type> m_get_buf;
+            std::vector<char_type> m_put_buf;
         };
         
         template<typename charT, typename traitT=std::char_traits<charT> >
@@ -198,11 +221,11 @@ namespace jlib {
         template< typename charT, typename traitT >
         inline
         basic_streambuf<charT,traitT>::basic_streambuf() {
-            m_get_buf = new char_type[BUF_SIZE];
-            this->setg(m_get_buf,m_get_buf,m_get_buf);
+            m_get_buf.resize(BUF_SIZE);
+            this->setg(m_get_buf.data(),m_get_buf.data(),m_get_buf.data());
             
-            m_put_buf = new char_type[BUF_SIZE];
-            this->setp(m_put_buf,m_put_buf+BUF_SIZE);
+            m_put_buf.resize(BUF_SIZE);
+            this->setp(m_put_buf.data(),m_put_buf.data()+BUF_SIZE);
 
             m_eintr = false;
             m_length = pos_type(off_type(traits_type::eof()));
@@ -220,9 +243,6 @@ namespace jlib {
             if(std::getenv("JLIB_MEDIA_STREAM_DEBUG"))
                 std::cerr << "basic_streambuf<charT,traitT>::~basic_streambuf()"<<std::endl;
             close();
-            
-            delete [] m_get_buf;
-            delete [] m_put_buf;
         }
         
         template< typename charT, typename traitT >
