@@ -24,6 +24,7 @@
 #include <iostream>
 #include <exception>
 #include <string>
+#include <utility>
 #include <vector>
 #include <cstring>
 
@@ -70,7 +71,7 @@ namespace jlib {
             virtual pos_type seekpos(pos_type, 
                                      std::ios_base::openmode = std::ios_base::in | std::ios_base::out);
 
-            std::string get_data() const; 
+            const std::string& get_data() const; 
             void set_data(std::string s);
 
         protected:
@@ -83,7 +84,7 @@ namespace jlib {
             basic_datastream();
             basic_datastream(std::string data);
             
-            std::string get_data() const; 
+            const std::string& get_data() const; 
             void set_data(std::string s);
 
             static basic_datastream<charT,traitT>* create_scaled(basic_stream<charT,traitT>* s);
@@ -107,7 +108,7 @@ namespace jlib {
         basic_databuf<charT,traitT>::basic_databuf(std::string data) 
             : basic_streambuf<charT,traitT>()
         {
-            set_data(data);
+            set_data(std::move(data));
         }
         
         /*
@@ -120,14 +121,14 @@ namespace jlib {
         
         template< typename charT, typename traitT >
         inline
-        std::string basic_databuf<charT,traitT>::get_data() const {
+        const std::string& basic_databuf<charT,traitT>::get_data() const {
             return m_data;
         }
 
         template< typename charT, typename traitT >
         inline
         void basic_databuf<charT,traitT>::set_data(std::string data) {
-            m_data = data;
+            m_data = std::move(data);
             this->set_length(m_data.length());
         }
 
@@ -298,13 +299,13 @@ namespace jlib {
         basic_datastream<charT,traitT>::basic_datastream(std::string data) 
             : basic_stream<charT,traitT>()
         {
-            this->m_buf.reset(new basic_databuf<charT,traitT>(data));
+            this->m_buf.reset(new basic_databuf<charT,traitT>(std::move(data)));
             this->init(this->m_buf.get());
         }
         
         template< typename charT, typename traitT >
         inline
-        std::string
+        const std::string&
         basic_datastream<charT,traitT>::get_data() const
         {
             if(!this->m_buf)
@@ -325,7 +326,7 @@ namespace jlib {
                 throw basic_databuf<charT,traitT>::exception("this->m_buf == null");
             basic_databuf<charT,traitT>* buf = dynamic_cast< basic_databuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
-                buf->set_data(data);
+                buf->set_data(std::move(data));
             else
                 throw typename basic_databuf<charT,traitT>::exception("buf == null");
         }

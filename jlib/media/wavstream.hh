@@ -21,19 +21,38 @@
 #ifndef JLIB_MEDIA_WAVSTREAM_HH
 #define JLIB_MEDIA_WAVSTREAM_HH
 
-#include <iostream>
 #include <exception>
+#include <iostream>
 #include <string>
 #include <cstring>
 
-
-#include <errno.h>
-
+#include <jlib/media/WavFile.hh>
 #include <jlib/media/stream.hh>
 
 namespace jlib {
     namespace media {
-        
+
+        /**
+         * A read-only stream over a WAV file's samples.
+         *
+         * The point of it is to cut out the middle man.  Getting a WAV's audio
+         * into anything that takes a media::stream meant
+         *
+         *     WavFile in(path);
+         *     datastream data(in.get_pcm());
+         *     data.set<WavFile>(in);
+         *
+         * -- three objects, and the format had to be copied across by hand
+         * afterwards or the samples would be interpreted wrongly.  A wavstream
+         * is one object that holds the file, serves its samples, and takes its
+         * format from the header, so there is nothing to remember and nothing
+         * to get out of step.
+         *
+         * Read-only.  The class used to carry its own copies of WavFile's
+         * three chunk builders, which were never called by anything, and
+         * writing a WAV is what WavFile::save is for.  sync() reports failure
+         * rather than quietly discarding anything written.
+         */
         template< typename charT, typename traitT = std::char_traits<charT> >
         class basic_wavbuf : public basic_streambuf<charT,traitT> {
         public:
@@ -47,76 +66,107 @@ namespace jlib {
             protected:
                 std::string m_msg;
             };
-            
-            typedef charT 					            char_type;
-            typedef traitT 					            traits_type;
-            typedef typename traits_type::int_type 		int_type;
-            typedef typename traits_type::pos_type 		pos_type;
-            typedef typename traits_type::off_type 		off_type;
-            
+
+            typedef charT                               char_type;
+            typedef traitT                              traits_type;
+            typedef typename traits_type::int_type      int_type;
+            typedef typename traits_type::pos_type      pos_type;
+            typedef typename traits_type::off_type      off_type;
+
             static const unsigned int BUF_SIZE = 1024;
-            
+
             basic_wavbuf();
-            basic_wavbuf(std::string file);
-            
+            explicit basic_wavbuf(const std::string& file);
+            explicit basic_wavbuf(const WavFile& wav);
+
             virtual int_type underflow();
-            //virtual int_type overflow(int_type c=traits_type::eof());
             virtual int_type sync();
 
-            std::string get_file() const; 
-            void set_file(std::string s);
+            /** The file this was loaded from, empty if it was handed a WavFile. */
+            std::string get_file() const;
+
+            /** Load a WAV and rewind to the start of its samples. */
+            void set_file(const std::string& s);
+
+            const WavFile& get_wav() const;
+            void set_wav(const WavFile& w);
 
         protected:
+            /**
+             * Take the stream's format from the file's, and rewind.
+             *
+             * This is the part that made it worth finishing.  A datastream
+             * knows nothing about what it holds, so its format has to be set
+             * separately and can disagree with the samples; a wavstream reads
+             * both from the same header.
+             */
+            void adopt();
 
-            std::string create_riff_header();
-            std::string create_format_chunk();
-            std::string create_data_chunk();
-
+            WavFile m_wav;
             std::string m_file;
             std::string::size_type m_p;
         };
-        
+
         template<typename charT, typename traitT=std::char_traits<charT> >
         class basic_wavstream : public basic_stream<charT,traitT> {
         public:
             basic_wavstream();
-            basic_wavstream(std::string file);
-            
-            std::string get_file() const; 
-            void set_file(std::string s);
+            explicit basic_wavstream(const std::string& file);
+            explicit basic_wavstream(const WavFile& wav);
+
+            std::string get_file() const;
+            void set_file(const std::string& s);
+
+            const WavFile& get_wav() const;
+            void set_wav(const WavFile& w);
 
         protected:
+            basic_wavbuf<charT,traitT>* buf() const;
         };
-        
+
         typedef basic_wavstream<char> wavstream;
-        
-        
+
+
         template< typename charT, typename traitT >
         inline
-        basic_wavbuf<charT,traitT>::basic_wavbuf() 
-            : basic_streambuf<charT,traitT>()
+        basic_wavbuf<charT,traitT>::basic_wavbuf()
+            : basic_streambuf<charT,traitT>(),
+              m_p(0)
         {
-            m_p = 0;
-            set_file("");
+            adopt();
         }
-        
+
         template< typename charT, typename traitT >
         inline
-        basic_wavbuf<charT,traitT>::basic_wavbuf(std::string file) 
-            : basic_streambuf<charT,traitT>()
+        basic_wavbuf<charT,traitT>::basic_wavbuf(const std::string& file)
+            : basic_streambuf<charT,traitT>(),
+              m_p(0)
         {
-            m_p = 0;
             set_file(file);
         }
-        
-        /*
+
         template< typename charT, typename traitT >
         inline
-        basic_wavbuf<charT,traitT>::~basic_wavbuf() {
-            
+        basic_wavbuf<charT,traitT>::basic_wavbuf(const WavFile& wav)
+            : basic_streambuf<charT,traitT>(),
+              m_wav(wav),
+              m_p(0)
+        {
+            adopt();
         }
-        */
-        
+
+        template< typename charT, typename traitT >
+        inline
+        void basic_wavbuf<charT,traitT>::adopt() {
+            this->set_format(m_wav.get_format());
+            this->set_channels(m_wav.get_channels());
+            this->set_samples_per_sec(m_wav.get_samples_per_sec());
+            this->set_bits_per_sample(m_wav.get_bits_per_sample());
+            this->set_length(m_wav.get_pcm().length());
+
+            m_p = 0;
+        }
+
         template< typename charT, typename traitT >
         inline
         std::string basic_wavbuf<charT,traitT>::get_file() const {
@@ -125,171 +175,132 @@ namespace jlib {
 
         template< typename charT, typename traitT >
         inline
-        void basic_wavbuf<charT,traitT>::set_file(std::string file) {
+        void basic_wavbuf<charT,traitT>::set_file(const std::string& file) {
             m_file = file;
-            set_length(m_file.length());
+
+            if(!m_file.empty())
+                m_wav.load(m_file);
+
+            adopt();
         }
 
         template< typename charT, typename traitT >
         inline
-        typename basic_wavbuf<charT,traitT>::int_type 
+        const WavFile& basic_wavbuf<charT,traitT>::get_wav() const {
+            return m_wav;
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        void basic_wavbuf<charT,traitT>::set_wav(const WavFile& wav) {
+            m_wav = wav;
+            m_file.clear();
+
+            adopt();
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        typename basic_wavbuf<charT,traitT>::int_type
         basic_wavbuf<charT,traitT>::underflow() {
-            if(getenv("JLIB_MEDIA_STREAM_DEBUG"))
-                std::cerr << "enter jlib::media::basic_wavbuf<charT,traitT>::underflow()"<<std::endl;
-            
-            if(m_wav.length() == 0) {
-                if(getenv("JLIB_MEDIA_STREAM_DEBUG")) {
-                    std::cerr << "\tm_wav.length() == 0, returning eof"<<std::endl;
-                    std::cerr << "leave jlib::media::basic_wavbuf<charT,traitT>::underflow()"<<std::endl;
-                }
+            // By reference.  get_pcm() returned by value when this was written,
+            // which was free under the copy-on-write std::string of the time
+            // and is a copy of the whole file now.
+            const std::string& pcm = m_wav.get_pcm();
+
+            if(m_p >= pcm.length())
                 return traits_type::eof();
-            }
 
-            if(m_p == m_wav.length()) {
-                if(getenv("JLIB_MEDIA_STREAM_DEBUG")) {
-                    std::cerr << "\tm_p == m_wav.length(), returning eof"<<std::endl;
-                    std::cerr << "leave jlib::media::basic_wavbuf<charT,traitT>::underflow()"<<std::endl;
-                }
-                return traits_type::eof();
-            }
-            //m_p = 0;
+            const std::string::size_type left = pcm.length() - m_p;
+            const std::string::size_type count =
+                (left > BUF_SIZE) ? BUF_SIZE : left;
 
-            if(m_p > m_wav.length())
-                throw exception("m_p > m_wav.length() in underflow()");
+            std::memcpy(this->eback(), pcm.data() + m_p, count);
+            this->setg(this->eback(), this->eback(), this->eback() + count);
 
-            int count = (((m_p+BUF_SIZE) > m_wav.length()) ? (m_wav.length()-m_p) : (BUF_SIZE));
-            if(getenv("JLIB_MEDIA_STREAM_DEBUG")) {
-                std::cerr << "\tm_p = "<<m_p<<std::endl;
-                std::cerr << "\tcount = "<<count<<std::endl;
-                std::cerr << "\tm_wav.length() = "<<m_wav.length()<<std::endl;
-                std::cerr << "\ttraits_type::eof() = "<<traits_type::eof()<<std::endl;
-            }
-            memcpy(eback(),m_wav.wav()+m_p,count);
-
-            char_type* end = eback()+count;
-            setg(eback(), eback(), end);
-            
             m_p += count;
 
-            if(getenv("JLIB_MEDIA_STREAM_DEBUG"))
-                std::cerr << "leave jlib::media::basic_wavbuf<charT,traitT>::underflow(): return "
-                          <<(int)*gptr() << std::endl;
-            return traits_type::to_int_type(*gptr());
+            return traits_type::to_int_type(*this->gptr());
         }
 
         template< typename charT, typename traitT >
         inline
-        typename basic_wavbuf<charT,traitT>::int_type 
+        typename basic_wavbuf<charT,traitT>::int_type
         basic_wavbuf<charT,traitT>::sync() {
-            if(getenv("JLIB_MEDIA_STREAM_DEBUG"))
-                std::cerr << "basic_wavbuf<charT,traitT>::sync()"<<std::endl;
-
-            m_wav.append(pbase(),pptr() - pbase());
-            setp(pbase(), pbase()+BUF_SIZE);
-
-            return 0;                
+            // Read-only.  Anything written would have nowhere to go, so say so
+            // rather than swallow it; an empty put area syncs cleanly, which is
+            // what flushing on destruction does.
+            return (this->pptr() != this->pbase()) ? -1 : 0;
         }
-
-        template< typename charT, typename traitT >
-        inline
-        std::string basic_wavbuf<charT,traitT>::create_riff_header() {
-            std::string chunk(GROUP_ID_SIZE+RIFF_TYPE_SIZE, '\0');
-
-            chunk.replace(0,GROUP_ID_SIZE,"RIFF\0\0\0\0");
-            chunk.replace(RIFF_TYPE_OFFSET,RIFF_TYPE_SIZE,"WAVE");
-            
-            return chunk;
-        }
-
-        template< typename charT, typename traitT >
-        inline
-        std::string basic_wavbuf<charT,traitT>::create_format_chunk() {
-            std::string chunk(CHUNK_ID_SIZE+CHUNK_SIZE_SIZE+FMT_CHUNK_SIZE, '\0');
-            int base = CHUNK_ID_SIZE+CHUNK_SIZE_SIZE;
-
-            chunk.replace(0,CHUNK_ID_SIZE,CHUNK_ID_FORMAT);
-            util::set<int>(chunk,FMT_CHUNK_SIZE,CHUNK_SIZE_OFFSET);
-
-            util::set<short>(chunk,get_format_tag(),base+FORMAT_TAG_OFFSET);
-            util::set<u_short>(chunk,get_bits_per_sample(),base+BITS_PER_SAMPLE_OFFSET);
-            util::set<u_int32_t>(chunk,get_samples_per_sec(),base+SAMPLES_PER_SEC_OFFSET);
-            util::set<u_short>(chunk,get_channels(),base+CHANNELS_OFFSET);
-   
-            return chunk;
-        }
-
-        template< typename charT, typename traitT >
-        inline
-        std::string basic_wavbuf<charT,traitT>::create_data_chunk() {
-            std::string chunk(CHUNK_ID_SIZE+CHUNK_SIZE_SIZE, '\0');
-            
-            chunk.replace(0,CHUNK_ID_SIZE,CHUNK_ID_DATA);
-            util::set<u_int>(chunk,get_pcm().length(),CHUNK_SIZE_OFFSET);
-
-            chunk.append(get_pcm());
-
-            return chunk;
-        }
-
-
-
-
-
-
-
-
-
-
 
 
         template< typename charT, typename traitT >
         inline
-        basic_wavstream<charT,traitT>::basic_wavstream() 
+        basic_wavstream<charT,traitT>::basic_wavstream()
             : basic_stream<charT,traitT>()
         {
             this->m_buf.reset(new basic_wavbuf<charT,traitT>());
             this->init(this->m_buf.get());
         }
-        
+
         template< typename charT, typename traitT >
         inline
-        basic_wavstream<charT,traitT>::basic_wavstream(std::string wav) 
+        basic_wavstream<charT,traitT>::basic_wavstream(const std::string& file)
+            : basic_stream<charT,traitT>()
+        {
+            this->m_buf.reset(new basic_wavbuf<charT,traitT>(file));
+            this->init(this->m_buf.get());
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        basic_wavstream<charT,traitT>::basic_wavstream(const WavFile& wav)
             : basic_stream<charT,traitT>()
         {
             this->m_buf.reset(new basic_wavbuf<charT,traitT>(wav));
             this->init(this->m_buf.get());
         }
-        
+
         template< typename charT, typename traitT >
         inline
-        std::string
-        basic_wavstream<charT,traitT>::get_wav() const
-        {
+        basic_wavbuf<charT,traitT>* basic_wavstream<charT,traitT>::buf() const {
             if(!this->m_buf)
-                throw basic_wavbuf<charT,traitT>::exception("m_buf == null");
-            basic_wavbuf<charT,traitT>* buf = dynamic_cast< basic_wavbuf<charT,traitT>* >(this->m_buf.get());
-            if(buf)
-                return buf->get_wav();
-            else
-                throw basic_wavbuf<charT,traitT>::exception("buf == null");
+                throw typename basic_wavbuf<charT,traitT>::exception("m_buf == null");
+
+            basic_wavbuf<charT,traitT>* b =
+                dynamic_cast< basic_wavbuf<charT,traitT>* >(this->m_buf.get());
+
+            if(!b)
+                throw typename basic_wavbuf<charT,traitT>::exception("buf == null");
+
+            return b;
         }
 
         template< typename charT, typename traitT >
         inline
-        void
-        basic_wavstream<charT,traitT>::set_wav(std::string wav) 
-        {
-            if(!this->m_buf)
-                throw basic_wavbuf<charT,traitT>::exception("m_buf == null");
-            basic_wavbuf<charT,traitT>* buf = dynamic_cast< basic_wavbuf<charT,traitT>* >(this->m_buf.get());
-            if(buf)
-                buf->set_wav(wav);
-            else
-                throw basic_wavbuf<charT,traitT>::exception("buf == null");
+        std::string basic_wavstream<charT,traitT>::get_file() const {
+            return buf()->get_file();
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        void basic_wavstream<charT,traitT>::set_file(const std::string& file) {
+            buf()->set_file(file);
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        const WavFile& basic_wavstream<charT,traitT>::get_wav() const {
+            return buf()->get_wav();
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        void basic_wavstream<charT,traitT>::set_wav(const WavFile& wav) {
+            buf()->set_wav(wav);
         }
 
     }
 }
 
-
-#endif // JLIB_MEDIA_STREAM_HH
+#endif // JLIB_MEDIA_WAVSTREAM_HH

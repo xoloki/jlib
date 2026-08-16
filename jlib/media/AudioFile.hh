@@ -67,7 +67,21 @@ namespace jlib {
             int get_channels() const; 
             int get_samples_per_sec() const; 
             int get_format() const; 
-            std::string get_pcm() const;
+            /**
+             * The samples, by reference.
+             *
+             * This returned by value, which was free when it was written:
+             * libstdc++'s std::string was copy-on-write then, so returning one
+             * was a refcount bump.  C++11 outlawed that and gcc dropped it in
+             * 5.0, which turned every call into a full copy of the audio --
+             * measured, 861K for a five second stereo sample, and four times
+             * that to get it as far as a datastream.
+             *
+             * The setters keep taking by value, but move rather than assign,
+             * so passing a temporary costs nothing and passing a variable
+             * costs one copy instead of two.
+             */
+            const std::string& get_pcm() const;
         
             int get_sample_count() const;
 
@@ -76,7 +90,7 @@ namespace jlib {
             void set_samples_per_sec(int s); 
             void set_format(int s); 
             void set_pcm(std::string pcm);
-            void add_pcm(std::string pcm);
+            void add_pcm(const std::string& pcm);
             void clear_pcm();
 
             virtual void load();

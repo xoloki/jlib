@@ -18,7 +18,8 @@ if HAVE_PORTAUDIO
 MEDIA_TESTS = media_datastream_test \
               media_notestream_test \
               media_player_test \
-              media_wavfile_test
+              media_wavfile_test \
+              media_wavstream_test
 endif
 
 if HAVE_SODIUM
@@ -67,6 +68,9 @@ media_player_test_SOURCES     = media_player_test.cc
 media_player_test_LDADD       = $(JMEDIA_LA) $(JSYS_LA)
 media_wavfile_test_SOURCES    = media_wavfile_test.cc
 media_wavfile_test_LDADD      = $(JMEDIA_LA) $(JSYS_LA)
+
+media_wavstream_test_SOURCES  = media_wavstream_test.cc
+media_wavstream_test_LDADD    = $(JMEDIA_LA) $(JSYS_LA)
 
 net_extract_address_test_SOURCES        = net_extract_address_test.cc
 net_extract_address_test_LDADD          = $(JNET_LA)
