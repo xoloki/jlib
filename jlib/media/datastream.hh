@@ -289,8 +289,8 @@ namespace jlib {
         basic_datastream<charT,traitT>::basic_datastream() 
             : basic_stream<charT,traitT>()
         {
-            this->m_buf=new basic_databuf<charT,traitT>();
-            this->init(this->m_buf);
+            this->m_buf.reset(new basic_databuf<charT,traitT>());
+            this->init(this->m_buf.get());
         }
         
         template< typename charT, typename traitT >
@@ -298,8 +298,8 @@ namespace jlib {
         basic_datastream<charT,traitT>::basic_datastream(std::string data) 
             : basic_stream<charT,traitT>()
         {
-            this->m_buf=new basic_databuf<charT,traitT>(data);
-            this->init(this->m_buf);
+            this->m_buf.reset(new basic_databuf<charT,traitT>(data));
+            this->init(this->m_buf.get());
         }
         
         template< typename charT, typename traitT >
@@ -309,7 +309,7 @@ namespace jlib {
         {
             if(!this->m_buf)
                 throw basic_databuf<charT,traitT>::exception("this->m_buf == null");
-            basic_databuf<charT,traitT>* buf = dynamic_cast< basic_databuf<charT,traitT>* >(this->m_buf);
+            basic_databuf<charT,traitT>* buf = dynamic_cast< basic_databuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 return buf->get_data();
             else
@@ -323,7 +323,7 @@ namespace jlib {
         {
             if(!this->m_buf)
                 throw basic_databuf<charT,traitT>::exception("this->m_buf == null");
-            basic_databuf<charT,traitT>* buf = dynamic_cast< basic_databuf<charT,traitT>* >(this->m_buf);
+            basic_databuf<charT,traitT>* buf = dynamic_cast< basic_databuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 buf->set_data(data);
             else

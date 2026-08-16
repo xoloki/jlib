@@ -214,10 +214,25 @@ namespace jlib {
 
             const int n = (int)(((double)get_width() / (double)ticks_per_minute)*60*m_samples_per_sec);
 
-            Type::scaled samples[n];// = new Type::sample<N>::buf[n];
-            typename Type::sample<N>::buf samples_out[n];// = new Type::sample<N>::buf[n];
-            memset(samples,0,n*sizeof(Type::scaled));
-            memset(samples_out,0,n*sizeof(typename Type::sample<N>::buf));
+            // Nothing to render, and every path below would be worse than
+            // useless: the mixing loop takes a remainder modulo n, and a
+            // zero-length array is not something you can declare.
+            if(n <= 0)
+                return std::string();
+
+            // Heap, not stack.
+            //
+            // These were declared as arrays of length n, which is not C++ at
+            // all -- a GNU extension the compilers here happen to take -- and
+            // n comes from the playlist rather than from anything bounded.  At
+            // 4/4 and 120bpm the two of them together come to about 33K of
+            // stack per tick of width, so a few hundred ticks of playlist runs
+            // off the end of an 8M stack, and nothing checks.  The commented
+            // out new[] on the old lines says this was on the heap once.
+            //
+            // Value-initialized, which is what the two memsets were for.
+            std::vector<Type::scaled> samples(n);
+            std::vector<typename Type::sample<N>::buf> samples_out(n);
 
             std::string data;
             
@@ -276,7 +291,8 @@ namespace jlib {
             for(int z=0;z<n;z++)
                 samples_out[z] = Type::sample<N>::descale(samples[z]);
 
-            data.assign((char*)samples_out, n*sizeof(typename Type::sample<N>::buf));
+            data.assign((const char*)samples_out.data(),
+                        n*sizeof(typename Type::sample<N>::buf));
             
             if(getenv("JLIB_MEDIA_PLAYLIST_DEBUG"))
                 std::cerr << "void jlib::media::PlayList::render(): leave" << std::endl;
