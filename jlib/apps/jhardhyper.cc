@@ -826,11 +826,22 @@ math::vertex<T> HPlot<T>::transform(const math::vertex<T>& vertex) const {
         d--;
     }
 
+    this->build_projections();
+
     for(; d > 3; d--) {
-        math::matrix<T> p = math::matrix<T>::project(d, math::Plot<T>::clip);
-        math::vertex<T> v(d);
-        v = ret;
-        ret = p * v();
+        // Reset the homogeneous coordinate, then project in place.
+        //
+        // This used to build a fresh vertex of the same dimensionality, copy
+        // ret into it and multiply that.  The copy was not the point: vertex(d)
+        // sets its own homogeneous coordinate to 1 and operator=(vertex) copies
+        // only the spatial elements, so what the temporary did was reset w
+        // before the multiply.  That matters in orthographic mode, where
+        // normalize() is skipped and w is not already 1, so it is kept -- but
+        // as one assignment rather than an allocation and a copy per step per
+        // vertex.  change() runs unconditionally here, so ret's dimensionality
+        // tracks the step and it can be projected in place.
+        ret[d] = 1;
+        ret = this->m_project[math::Plot<T>::D - d] * ret();
 
         const bool outermost = (d == static_cast<int>(math::Plot<T>::D));
         if(m == mode::perspective || (m == mode::mixed && outermost)) {

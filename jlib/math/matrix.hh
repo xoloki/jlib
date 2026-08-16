@@ -98,7 +98,7 @@ public:
     static matrix<T> diagonal(uint n, T x);
     static matrix<T> diagonalv(uint n, ...);
     
-    static matrix<T> project(uint n, std::vector< std::pair<T,T> > clip);
+    static matrix<T> project(uint n, const std::vector< std::pair<T,T> >& clip);
     static matrix<T> translate(uint n, const vertex<T>& v);
     static matrix<T> rotate(uint n, plane p, double rad);
     static matrix<T> rotate(uint n, PLANE p, double rad);
@@ -882,7 +882,7 @@ std::map<std::string, matrix<T> > matrix<T>::factor(factorization f) const {
 
 template<typename T>
 inline
-matrix<T> matrix<T>::project(uint n, std::vector< std::pair<T,T> > clip) {
+matrix<T> matrix<T>::project(uint n, const std::vector< std::pair<T,T> >& clip) {
     uint z = (n - 1);
     uint w = (n);
     matrix<T> ret(n+1, n+1);
