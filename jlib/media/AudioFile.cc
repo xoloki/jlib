@@ -19,6 +19,8 @@
  */
 
 #include <jlib/media/AudioFile.hh>
+
+#include <utility>
 #include <jlib/media/Type.hh>
 
 #include <jlib/util/util.hh>
@@ -69,7 +71,7 @@ namespace jlib {
             return m_format;
         }
 
-        std::string AudioFile::get_pcm() const {
+        const std::string& AudioFile::get_pcm() const {
             return m_pcm;
         }
 
@@ -90,10 +92,10 @@ namespace jlib {
         }
 
         void AudioFile::set_pcm(std::string pcm) {
-            m_pcm = pcm;
+            m_pcm = std::move(pcm);
         }
 
-        void AudioFile::add_pcm(std::string pcm) {
+        void AudioFile::add_pcm(const std::string& pcm) {
             m_pcm.append(pcm);
         }
 
