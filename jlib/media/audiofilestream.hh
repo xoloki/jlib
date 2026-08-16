@@ -139,9 +139,8 @@ namespace jlib {
         basic_audiofilestream<charT,traitT>::basic_audiofilestream() 
             : basic_datastream<charT,traitT>()
         {
-            if(this->m_buf) delete this->m_buf;
-            this->m_buf=new basic_audiofilebuf<charT,traitT>();
-            this->init(this->m_buf);
+            this->m_buf.reset(new basic_audiofilebuf<charT,traitT>());
+            this->init(this->m_buf.get());
         }
         
         template< typename charT, typename traitT >
@@ -149,8 +148,8 @@ namespace jlib {
         basic_audiofilestream<charT,traitT>::basic_audiofilestream(AudioFile* audiofile)
             : basic_datastream<charT,traitT>()
         {
-            this->m_buf=new basic_audiofilebuf<charT,traitT>(audiofile);
-            this->init(this->m_buf);
+            this->m_buf.reset(new basic_audiofilebuf<charT,traitT>(audiofile));
+            this->init(this->m_buf.get());
         }
         
         template< typename charT, typename traitT >
@@ -160,7 +159,7 @@ namespace jlib {
         {
             if(!this->m_buf)
                 throw basic_audiofilebuf<charT,traitT>::exception("m_buf == null");
-            basic_audiofilebuf<charT,traitT>* buf = dynamic_cast< basic_audiofilebuf<charT,traitT>* >(this->m_buf);
+            basic_audiofilebuf<charT,traitT>* buf = dynamic_cast< basic_audiofilebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 return buf->get_audiofile();
             else
@@ -174,7 +173,7 @@ namespace jlib {
         {
             if(!this->m_buf)
                 throw basic_audiofilebuf<charT,traitT>::exception("m_buf == null");
-            basic_audiofilebuf<charT,traitT>* buf = dynamic_cast< basic_audiofilebuf<charT,traitT>* >(this->m_buf);
+            basic_audiofilebuf<charT,traitT>* buf = dynamic_cast< basic_audiofilebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 buf->set_audiofile(audiofile);
             else

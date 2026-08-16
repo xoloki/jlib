@@ -519,8 +519,8 @@ namespace jlib {
         basic_notestream<charT,traitT>::basic_notestream() 
             : basic_datastream<charT,traitT>()
         {
-            this->m_buf=new basic_notebuf<charT,traitT>();
-            this->init(this->m_buf);
+            this->m_buf.reset(new basic_notebuf<charT,traitT>());
+            this->init(this->m_buf.get());
         }
         
         template< typename charT, typename traitT >
@@ -528,8 +528,8 @@ namespace jlib {
         basic_notestream<charT,traitT>::basic_notestream(std::string note) 
             : basic_datastream<charT,traitT>()
         {
-            this->m_buf=new basic_notebuf<charT,traitT>(note);
-            this->init(this->m_buf);
+            this->m_buf.reset(new basic_notebuf<charT,traitT>(note));
+            this->init(this->m_buf.get());
         }
         
         template< typename charT, typename traitT >
@@ -537,8 +537,8 @@ namespace jlib {
         basic_notestream<charT,traitT>::basic_notestream(double freq) 
             : basic_datastream<charT,traitT>()
         {
-            this->m_buf=new basic_notebuf<charT,traitT>(freq);
-            this->init(this->m_buf);
+            this->m_buf.reset(new basic_notebuf<charT,traitT>(freq));
+            this->init(this->m_buf.get());
         }
 
         template< typename charT, typename traitT >
@@ -546,8 +546,8 @@ namespace jlib {
         basic_notestream<charT,traitT>::basic_notestream(int step, double base) 
             : basic_datastream<charT,traitT>()
         {
-            this->m_buf=new basic_notebuf<charT,traitT>(step, base);
-            this->init(this->m_buf);
+            this->m_buf.reset(new basic_notebuf<charT,traitT>(step, base));
+            this->init(this->m_buf.get());
         }
 
         template< typename charT, typename traitT >
@@ -557,7 +557,7 @@ namespace jlib {
         {
             if(!this->m_buf)
                 throw basic_notebuf<charT,traitT>::exception("this->m_buf == null");
-            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf);
+            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 return buf->get_note();
             else
@@ -571,7 +571,7 @@ namespace jlib {
         {
             if(!this->m_buf)
                 throw basic_notebuf<charT,traitT>::exception("this->m_buf == null");
-            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf);
+            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 buf->set_note(note);
             else
@@ -585,7 +585,7 @@ namespace jlib {
         {
             if(!this->m_buf)
                 throw basic_notebuf<charT,traitT>::exception("this->m_buf == null");
-            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf);
+            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 buf->set_note(freq);
             else
@@ -599,7 +599,7 @@ namespace jlib {
         {
             if(!this->m_buf)
                 throw basic_notebuf<charT,traitT>::exception("this->m_buf == null");
-            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf);
+            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 buf->set_note(step,base);
             else
@@ -613,7 +613,7 @@ namespace jlib {
         {
             if(!this->m_buf)
                 throw basic_notebuf<charT,traitT>::exception("this->m_buf == null");
-            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf);
+            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 return buf->get_time();
             else
@@ -627,7 +627,7 @@ namespace jlib {
         {
             if(!this->m_buf)
                 throw typename basic_notebuf<charT,traitT>::exception("this->m_buf == null");
-            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf);
+            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 buf->set_time(time);
             else
@@ -641,7 +641,7 @@ namespace jlib {
         {
             if(!this->m_buf)
                 throw typename basic_notebuf<charT,traitT>::exception("this->m_buf == null");
-            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf);
+            basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 buf->set_nearest_time(time);
             else

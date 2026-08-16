@@ -29,6 +29,7 @@
 #include <iostream>
 #include <exception>
 #include <string>
+#include <memory>
 #include <vector>
 #include <list>
 
@@ -212,7 +213,16 @@ namespace jlib {
             }
 
         protected:
-            basic_streambuf<charT,traitT>* m_buf;
+            /**
+             * The buffer, owned.
+             *
+             * Each derived stream installs its own subclass here and the base
+             * destroys it.  It was a raw pointer new'd in every derived
+             * constructor and deleted in ~basic_stream, which is sound only
+             * because std::basic_iostream makes the whole hierarchy
+             * uncopyable -- the ownership was correct but stated nowhere.
+             */
+            std::unique_ptr< basic_streambuf<charT,traitT> > m_buf;
         };
         
         typedef basic_stream<char> stream;
@@ -372,14 +382,13 @@ namespace jlib {
         basic_stream<charT,traitT>::basic_stream() 
             : std::basic_iostream<charT,traitT>(NULL)
         {
-            m_buf = 0;
+
         }
         
         template< typename charT, typename traitT >
         inline
         basic_stream<charT,traitT>::~basic_stream() {
-            if(m_buf != 0)
-                delete m_buf;
+
         }
 
         template< typename charT, typename traitT >

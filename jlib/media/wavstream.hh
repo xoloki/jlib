@@ -247,8 +247,8 @@ namespace jlib {
         basic_wavstream<charT,traitT>::basic_wavstream() 
             : basic_stream<charT,traitT>()
         {
-            m_buf=new basic_wavbuf<charT,traitT>();
-            this->init(m_buf);
+            this->m_buf.reset(new basic_wavbuf<charT,traitT>());
+            this->init(this->m_buf.get());
         }
         
         template< typename charT, typename traitT >
@@ -256,8 +256,8 @@ namespace jlib {
         basic_wavstream<charT,traitT>::basic_wavstream(std::string wav) 
             : basic_stream<charT,traitT>()
         {
-            m_buf=new basic_wavbuf<charT,traitT>(wav);
-            this->init(m_buf);
+            this->m_buf.reset(new basic_wavbuf<charT,traitT>(wav));
+            this->init(this->m_buf.get());
         }
         
         template< typename charT, typename traitT >
@@ -265,9 +265,9 @@ namespace jlib {
         std::string
         basic_wavstream<charT,traitT>::get_wav() const
         {
-            if(!m_buf)
+            if(!this->m_buf)
                 throw basic_wavbuf<charT,traitT>::exception("m_buf == null");
-            basic_wavbuf<charT,traitT>* buf = dynamic_cast< basic_wavbuf<charT,traitT>* >(m_buf);
+            basic_wavbuf<charT,traitT>* buf = dynamic_cast< basic_wavbuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 return buf->get_wav();
             else
@@ -279,9 +279,9 @@ namespace jlib {
         void
         basic_wavstream<charT,traitT>::set_wav(std::string wav) 
         {
-            if(!m_buf)
+            if(!this->m_buf)
                 throw basic_wavbuf<charT,traitT>::exception("m_buf == null");
-            basic_wavbuf<charT,traitT>* buf = dynamic_cast< basic_wavbuf<charT,traitT>* >(m_buf);
+            basic_wavbuf<charT,traitT>* buf = dynamic_cast< basic_wavbuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 buf->set_wav(wav);
             else
