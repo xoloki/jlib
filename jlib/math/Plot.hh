@@ -90,7 +90,7 @@ public:
     void multiply(const math::matrix<T>& m);
     Plot& operator*(const math::matrix<T>& m);
 
-    void setClip(std::vector< std::pair<T,T> > c);
+    void setClip(const std::vector< std::pair<T,T> >& c);
 
     projection_mode get_projection_mode() const;
     void set_projection_mode(projection_mode m);
@@ -137,6 +137,22 @@ protected:
      * transform() is const.
      */
     mutable T m_radius;
+
+    /**
+     * One projection matrix per reduction step, built once and kept.
+     *
+     * project() depends only on the step's dimension and the clip volume,
+     * neither of which changes within a frame, but it was being rebuilt for
+     * every vertex: at D=10 that is seven matrices per vertex and 1024
+     * vertices, so seven thousand matrices a frame where four are needed.
+     *
+     * Discarded whenever D or the clip changes, which is the only way either
+     * can move.  mutable because transform() is const.
+     */
+    mutable std::vector< math::matrix<T> > m_project;
+
+    /** Build m_project if it is empty. */
+    void build_projections() const;
 
     std::vector< std::pair<T,T> > clip;
     // Held by pointer so a shape keeps its type.  These used to be stored by
@@ -291,11 +307,16 @@ math::vertex<T> Plot<T>::transform(const math::vertex<T>& vertex) const {
     // match the step, that index still holds the 1 left by the previous step --
     // so the divide silently became a no-op.  That is what made every step
     // after the first orthographic by accident, which is now MIXED.
+    build_projections();
+
     for(int d = (D - 1); d > 2; d--) {
-        math::matrix<T> p = math::matrix<T>::project(d, clip);
+        // The temporary stays here, unlike in jhardhyper's copy of this loop.
+        // change() below is conditional, so outside perspective mode ret keeps
+        // its dimensionality while the steps shrink, and v is what truncates
+        // ret to the step -- not merely a copy of it.
         math::vertex<T> v(d);
         v = ret;
-        ret = p * v();
+        ret = m_project[D - d] * v();
 
         if(m_projection == projection_mode::perspective) {
             ret.normalize();
@@ -354,8 +375,24 @@ void Plot<T>::set(STACK s) {
 
 template<typename T>
 inline
-void Plot<T>::setClip(std::vector< std::pair<T,T> > c) {
+void Plot<T>::setClip(const std::vector< std::pair<T,T> >& c) {
     clip = c;
+    m_project.clear();
+}
+
+
+template<typename T>
+inline
+void Plot<T>::build_projections() const {
+    if(!m_project.empty())
+        return;
+
+    // Every step any reduction might take, indexed by D - d.  This one starts
+    // at D-1, since its outermost step uses the projection stack rather than
+    // project(); jhardhyper's starts at D.  Building the union is two extra
+    // matrices a frame and keeps one index convention.
+    for(int d = D; d > 2; d--)
+        m_project.push_back(math::matrix<T>::project(d, clip));
 }
 
 template<typename T>
@@ -413,6 +450,7 @@ inline
 void Plot<T>::change(uint n) {
     D = n;
     m_radius = 0;
+    m_project.clear();
     while(modelview.size()) {
         modelview.pop();
     }
