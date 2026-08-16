@@ -385,7 +385,7 @@ namespace jlib {
             }
             
 
-            std::string decode(std::string s) {
+            std::string decode(const std::string& s) {
                 char* out = new char[s.length()];
                 const char* in = s.data();
                 
@@ -434,7 +434,7 @@ namespace jlib {
                 }
             }
             
-            std::string encode(std::string s) {
+            std::string encode(const std::string& s) {
                 char* outbuf = new char[2*s.length()];
                 int sz = 0;
                 u_int j = 0;
@@ -482,7 +482,7 @@ namespace jlib {
         
         namespace qp {
             
-            std::string decode(std::string s) {
+            std::string decode(const std::string& s) {
                 std::string ret;
                 
                 int i=0;
@@ -507,7 +507,7 @@ namespace jlib {
                 return ret;
             }
 
-            std::string encode(std::string s) {
+            std::string encode(const std::string& s) {
                 std::string ret;
                 
                 //TODO: write qp::encode()
@@ -543,7 +543,7 @@ namespace jlib {
 	    }
 
 
-            std::string encode(std::string s) {
+            std::string encode(const std::string& s) {
                 std::string::size_type i, j=0;
                 std::string ret = s;
                 while( (i=ret.find_first_of(reserved,j)) != std::string::npos ) {
@@ -554,7 +554,7 @@ namespace jlib {
                 return ret;
             }
 
-            std::string decode(std::string s) {
+            std::string decode(const std::string& s) {
                 std::string ret = s;
                 std::string::size_type i;
                 while( (i=ret.find("%")) != ret.npos ) {
@@ -570,7 +570,7 @@ namespace jlib {
 
         namespace xml {
 
-            std::string encode(std::string s) {
+            std::string encode(const std::string& s) {
                 //static jlib::sys::sync< std::map< std::string, std::string> > encmap;
                 static jlib::sys::sync< std::map< std::string, std::string> > encmap;
 
@@ -586,7 +586,7 @@ namespace jlib {
                 return recode(s,encref);
             }
 
-            std::string decode(std::string s) {
+            std::string decode(const std::string& s) {
                 static jlib::sys::sync< std::map< std::string, std::string> > decmap;
 
                 decmap.lock();

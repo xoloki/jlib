@@ -300,7 +300,7 @@ namespace jlib {
              * @param s std::string to parse data from
              * @return decoded data
              */
-            std::string decode(std::string s);
+            std::string decode(const std::string& s);
             
             /**
              * Encode the blob into a string.
@@ -308,7 +308,7 @@ namespace jlib {
              * @param s std::string to parse data from
              * @return encoded data
              */
-            std::string encode(std::string s);
+            std::string encode(const std::string& s);
 
         }
         
@@ -320,7 +320,7 @@ namespace jlib {
              * @param s std::string to parse data from
              * @return decoded data
              */
-            std::string decode(std::string s);
+            std::string decode(const std::string& s);
             
             /**
              * Encode the blob into a string.
@@ -328,20 +328,20 @@ namespace jlib {
              * @param s std::string to parse data from
              * @return encoded data
              */
-            std::string encode(std::string s);
+            std::string encode(const std::string& s);
 
         }
 
 
         namespace uri {
-            std::string encode(std::string s);
-            std::string decode(std::string s);
+            std::string encode(const std::string& s);
+            std::string decode(const std::string& s);
         }
        
         
         namespace xml {
-            std::string encode(std::string s);
-            std::string decode(std::string s);
+            std::string encode(const std::string& s);
+            std::string decode(const std::string& s);
             std::string recode(std::string s, const std::map<std::string,std::string>& codec);
         }
        

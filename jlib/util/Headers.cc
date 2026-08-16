@@ -23,6 +23,8 @@
 #include <jlib/util/util.hh>
 #include <jlib/util/Headers.hh>
 
+#include <utility>
+
 #include <sstream>
 #include <algorithm>
 
@@ -151,7 +153,12 @@ namespace jlib {
 
         
         void Headers::parse(std::string s, bool uppercase) {
-            std::istringstream stream(s);
+            // Moved into the stream rather than copied.  This took the whole
+            // message by value and then copied it again into the istringstream,
+            // so parsing a 2M message cost 4M before it read a byte.  Taking by
+            // value and moving costs one copy for a variable and none for a
+            // temporary, and does not change the signature.
+            std::istringstream stream(std::move(s));
             if(getenv("JLIB_UTIL_HEADERS_DEBUG")) {
                 std::cerr <<"enter jlib::util::Headers::parse()"<<std::endl;
             }

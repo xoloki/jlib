@@ -66,7 +66,7 @@ namespace jlib {
 
         MailBoxRequest::MailBoxRequest(request_type t, 
                                        folder_info_type s, 
-                                       Email e, 
+                                       const Email& e, 
                                        folder_indx_type i)
             : type(t),
               src(s),
@@ -116,7 +116,7 @@ namespace jlib {
 
         MailBoxResponse::MailBoxResponse(response_type t, 
                                        folder_info_type s, 
-                                       Email e, 
+                                       const Email& e, 
                                        folder_indx_type i) 
             : type(t),
               src(s),
@@ -316,19 +316,19 @@ namespace jlib {
         }
 
         
-        void ASMailBox::append_message(folder_info_type folder, Email email) {
+        void ASMailBox::append_message(folder_info_type folder, const Email& email) {
             push(MailBoxRequest(MailBoxRequest::APPEND_MESSAGE, folder, email));
         }
 
         void ASMailBox::set_message_flags(folder_info_type folder, 
                                           folder_indx_type indx, 
-                                          Email email) {
+                                          const Email& email) {
             push(MailBoxRequest(MailBoxRequest::SET_MESSAGE_FLAGS, folder, email, indx));
         }
         
         void ASMailBox::unset_message_flags(folder_info_type folder, 
                                             folder_indx_type indx, 
-                                            Email email) {
+                                            const Email& email) {
             push(MailBoxRequest(MailBoxRequest::UNSET_MESSAGE_FLAGS, folder, email, indx));
         }
 

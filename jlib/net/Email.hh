@@ -104,7 +104,17 @@ namespace jlib {
              *
              * @return raw text
              */
-            std::string raw() const { return m_raw; }
+            /**
+             * The raw message, by reference.
+             *
+             * This returned by value, which was free when it was written:
+             * libstdc++'s std::string was copy-on-write then, so returning
+             * one was a refcount bump.  C++11 outlawed COW and gcc dropped it
+             * in 5.0, which turned every call into a full copy of the
+             * message.  Measured, building an Email from a 2M message copied
+             * 12M, and each raw() or data() after that copied 2M more.
+             */
+            const std::string& raw() const { return m_raw; }
 
             /**
              * Get vector of Email attachments
@@ -147,12 +157,12 @@ namespace jlib {
             /**
              * set the binary data to what is passed
              */
-            void data(std::string data) { m_data = data; }
+            void data(std::string data) { m_data = std::move(data); }
             
             /**
              * get the binary data
              */
-            std::string data() const { return m_data; }
+            const std::string& data() const { return m_data; }
 
             /**
              * build the text of the email based on the data and attachments

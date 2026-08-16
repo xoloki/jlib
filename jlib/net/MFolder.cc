@@ -21,6 +21,8 @@
 #include <jlib/net/net.hh>
 #include <jlib/net/MFolder.hh>
 
+#include <utility>
+
 #include <jlib/sys/sys.hh>
 
 #include <jlib/util/util.hh>
@@ -113,7 +115,8 @@ namespace jlib {
                         jlib::sys::getstring( ifs, buf, (m_divide[j+1]-m_divide[j]) );
                     }
                     //std::istringstream is(buf);
-                    m_rep[j].create(buf);
+                    // buf is not read again; it is the whole message.
+                    m_rep[j].create(std::move(buf));
                     m_filled[j] = true;
                 }
             }
@@ -198,7 +201,11 @@ namespace jlib {
                               <<"constructing Email object and pushing onto m_rep" << std::endl;
                 }
                 
-                m_rep.push_back(Email(buf));
+                // Moved twice over: the buffer into the Email, and the Email
+                // into the vector.  This built the message, copied it into a
+                // temporary Email, then copied that Email -- raw and body both
+                // -- into m_rep.
+                m_rep.push_back(Email(std::move(buf)));
                 m_rep.back().set_data_size(size);
                 m_filled.push_back(false);
             }

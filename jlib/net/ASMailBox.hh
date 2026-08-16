@@ -113,7 +113,7 @@ namespace jlib {
             MailBoxRequest(request_type t, folder_info_type src, folder_info_type dst, 
                            folder_indx_type indx=folder_indx_type());
 
-            MailBoxRequest(request_type t, folder_info_type src, Email email, 
+            MailBoxRequest(request_type t, folder_info_type src, const Email& email, 
                            folder_indx_type indx=folder_indx_type());
 
             request_type type;
@@ -183,7 +183,7 @@ namespace jlib {
             MailBoxResponse(response_type t, folder_info_type src, folder_info_type dst, 
                            folder_indx_type indx=folder_indx_type());
 
-            MailBoxResponse(response_type t, folder_info_type src, Email email, 
+            MailBoxResponse(response_type t, folder_info_type src, const Email& email, 
                            folder_indx_type indx=folder_indx_type());
 
 
@@ -244,12 +244,12 @@ namespace jlib {
             void copy_messages(folder_info_type src, folder_info_type dst, 
                                folder_indx_type indx);
             
-            void append_message(folder_info_type folder, Email email);
+            void append_message(folder_info_type folder, const Email& email);
             
             void set_message_flags(folder_info_type folder, 
-                                   folder_indx_type indx, Email email);
+                                   folder_indx_type indx, const Email& email);
             void unset_message_flags(folder_info_type folder, 
-                                     folder_indx_type indx, Email email);
+                                     folder_indx_type indx, const Email& email);
 
 
             virtual void on_init() = 0;
@@ -269,12 +269,12 @@ namespace jlib {
             virtual void on_copy_messages(folder_info_type src, folder_info_type dst, 
                                           folder_indx_type indx) = 0;
 
-            virtual void on_append_message(folder_info_type folder, Email email) = 0;
+            virtual void on_append_message(folder_info_type folder, const Email& email) = 0;
 
             virtual void on_set_message_flags(folder_info_type folder, 
-                                              folder_indx_type indx, Email email) = 0;
+                                              folder_indx_type indx, const Email& email) = 0;
             virtual void on_unset_message_flags(folder_info_type folder, 
-                                                folder_indx_type indx, Email email) = 0;
+                                                folder_indx_type indx, const Email& email) = 0;
 
 
 

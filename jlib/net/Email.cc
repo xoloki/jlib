@@ -44,7 +44,7 @@ namespace jlib {
             : m_is_loaded(false),
               m_indx(-1)
         {
-            create(is);
+            create(std::move(is));
         }
 
         void Email::create(std::string is) {
@@ -62,7 +62,8 @@ namespace jlib {
                 }
                 std::cerr << ">, \"" << m_raw << "\") " << std::endl;
             }
-            m_raw = is;// = parse_end(is, m_bounds);
+            // Moved: is is not read again below, and it is the whole message.
+            m_raw = std::move(is);// = parse_end(is, m_bounds);
             if(getenv("JLIB_NET_EMAIL_DEBUG")) {
                 std::cerr <<"jlib::net::Email::create(): after parse_end(),"
                           <<"m_raw => \n" << m_raw << std::endl;
