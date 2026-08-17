@@ -39,8 +39,8 @@ namespace jlib {
             exception(const std::string& msg = "") {
                 m_msg = std::string("jlib::crypt exception")+( (msg=="")?"":": ")+msg;
             }
-            virtual ~exception() throw() {}
-            virtual const char* what() const throw() { return m_msg.c_str(); }
+            virtual ~exception() {}
+            virtual const char* what() const noexcept { return m_msg.c_str(); }
         protected:
             std::string m_msg;
         };
@@ -58,15 +58,15 @@ namespace jlib {
                 exception(const std::string& s) {
                     m_msg = ("jlib::crypt::gpg::exception: " + s);
                 }
-                virtual ~exception() throw() {}
-                virtual const char* what() const throw() { return m_msg.c_str(); }
+                virtual ~exception() {}
+                virtual const char* what() const noexcept { return m_msg.c_str(); }
             protected:
                 std::string m_msg;
             };
 
             class eof : public std::exception {
             public:
-                virtual const char* what() const throw() { return "jlib::crypt::gpg: EOF"; }
+                virtual const char* what() const noexcept { return "jlib::crypt::gpg: EOF"; }
             };
 
             class ctx;

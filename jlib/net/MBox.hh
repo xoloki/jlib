@@ -41,8 +41,8 @@ namespace jlib {
                 exception(const std::string& msg = "") {
                     m_msg = std::string("jlib::net::MBoxBuf exception")+( (msg=="")?"":": ")+msg;
                 }
-                virtual ~exception() throw() {}
-                virtual const char* what() const throw() { return m_msg.c_str(); }
+                virtual ~exception() {}
+                virtual const char* what() const noexcept { return m_msg.c_str(); }
             protected:
                 std::string m_msg;
             };

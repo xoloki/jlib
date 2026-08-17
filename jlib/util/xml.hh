@@ -83,12 +83,12 @@ namespace jlib {
             public:
                 //! constructor
                 error( errorcode code ){ m_code = code; };
-                virtual ~error() throw() {}
+                virtual ~error() {}
                 //! returns the error code
                 errorcode get_error(){ return m_code; };
                 //! returns the std::string representation of the error code
                 std::string get_strerror();
-                virtual const char* what() const throw();
+                virtual const char* what() const noexcept;
             protected:
                 errorcode m_code;
             };

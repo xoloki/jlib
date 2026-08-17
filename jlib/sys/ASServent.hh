@@ -56,8 +56,8 @@ public:
             m_msg = "jlib::sys::ASServent<Request,Response> exception"+
                 (msg != "" ? (": "+msg):"");
         }
-        virtual ~exception() throw() {}
-        virtual const char* what() const throw() { return m_msg.c_str(); }
+        virtual ~exception() {}
+        virtual const char* what() const noexcept { return m_msg.c_str(); }
         
         static void throw_errno(const std::string& msg) {
             std::ostringstream o;

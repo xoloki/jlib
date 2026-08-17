@@ -43,8 +43,8 @@ namespace jlib {
                     m_msg = "jlib::sys::pipe exception"+
                         (msg != "" ? (": "+msg):"");
                 }
-                virtual ~exception() throw() {}
-                virtual const char* what() const throw() { return m_msg.c_str(); }
+                virtual ~exception() {}
+                virtual const char* what() const noexcept { return m_msg.c_str(); }
                 
                 [[noreturn]] static void throw_errno(const std::string& msg) {
                     std::ostringstream o;
@@ -58,7 +58,7 @@ namespace jlib {
 
             class would_block : public std::exception {
             public:
-                virtual const char* what() const throw() { 
+                virtual const char* what() const noexcept { 
                     return "jlib::sys::pipe: i/o would block";
                 }
             };
