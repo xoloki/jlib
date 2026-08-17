@@ -8,5 +8,5 @@ libjsys_la_LIBADD = $(PTHREAD_LIBS)
 libjsysincludedir = $(includedir)/jlib-1.2/jlib/sys
 libjsysinclude_HEADERS = tfstream.hh socketstream.hh sslstream.hh proxystream.hh \
                          sslproxystream.hh serialstream.hh pstream.hh \
-                         sys.hh Directory.hh auto.hh sync.hh Servent.hh \
+                         sys.hh Directory.hh auto.hh sync.hh ringbuffer.hh Servent.hh \
                          ASServent.hh pipe.hh object.hh joystick.hh
