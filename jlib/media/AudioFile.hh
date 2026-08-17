@@ -31,7 +31,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = std::string("jlib::media::AudioBuffer::exception")+((msg!="")?": ":"")+msg;
                 }
                 virtual ~exception() throw() {}
@@ -51,7 +51,7 @@ namespace jlib {
             
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = std::string("jlib::media::AudioFile::exception")+((msg!="")?": ":"")+msg;
                 }
                 virtual ~exception() throw() {}
@@ -60,7 +60,7 @@ namespace jlib {
                 std::string m_msg;
             };
 
-            AudioFile(std::string filename="");
+            AudioFile(const std::string& filename="");
             ~AudioFile();
             
             int get_bits_per_sample() const; 
@@ -89,14 +89,14 @@ namespace jlib {
             void set_channels(int s); 
             void set_samples_per_sec(int s); 
             void set_format(int s); 
-            void set_pcm(std::string pcm);
+            void set_pcm(const std::string& pcm);
             void add_pcm(const std::string& pcm);
             void clear_pcm();
 
             virtual void load();
             virtual void save();
-            virtual void load(std::string filename);
-            virtual void save(std::string filename);
+            virtual void load(const std::string& filename);
+            virtual void save(const std::string& filename);
 
             /**
              * get the p'th sample from the pcm data

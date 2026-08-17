@@ -29,7 +29,7 @@ namespace jlib {
 namespace glu {
 namespace textures {
         
-void init(std::string data) {
+void init(const std::string& data) {
     GLuint texture;
 
     glGenTextures(1, &texture);

@@ -49,7 +49,7 @@ namespace jlib {
             
             static const unsigned int BUF_SIZE = 1024;
 
-            basic_procbuf(std::string cmd, std::ios_base::openmode mode) {
+            basic_procbuf(const std::string& cmd, std::ios_base::openmode mode) {
                 char_type* tmp;
                 
                 tmp = new char_type[BUF_SIZE];
@@ -161,7 +161,7 @@ namespace jlib {
             int exitval() { return m_exitval; }
 
         protected:
-            void open_process(std::string cmd, std::ios_base::openmode mode) {
+            void open_process(const std::string& cmd, std::ios_base::openmode mode) {
                 m_cmd = cmd;
                 m_mode = mode;
                 m_filep = 0;
@@ -195,7 +195,7 @@ namespace jlib {
                 m_buf = 0;
             }
 
-            basic_pstream(std::string cmd, std::ios_base::openmode mode)
+            basic_pstream(const std::string& cmd, std::ios_base::openmode mode)
                 : std::basic_iostream<charT,traitT>(NULL)
             {
                 m_buf = 0;
@@ -208,7 +208,7 @@ namespace jlib {
                     delete m_buf;
             }
             
-            void open(std::string cmd, std::ios_base::openmode mode) {
+            void open(const std::string& cmd, std::ios_base::openmode mode) {
                 if(m_buf != 0)
                     delete m_buf;
                 m_buf=new basic_procbuf<charT,traitT>(cmd,mode);

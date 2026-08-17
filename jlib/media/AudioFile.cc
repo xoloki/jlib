@@ -41,7 +41,7 @@ const std::string DSP = "/dev/dsp";
 
 namespace jlib {
     namespace media {
-        AudioFile::AudioFile(std::string filename)
+        AudioFile::AudioFile(const std::string& filename)
             : m_bits_per_sample(16),
               m_channels(1),
               m_samples_per_sec(44100),
@@ -91,7 +91,7 @@ namespace jlib {
             m_format = s;
         }
 
-        void AudioFile::set_pcm(std::string pcm) {
+        void AudioFile::set_pcm(const std::string& pcm) {
             m_pcm = std::move(pcm);
         }
 
@@ -111,11 +111,11 @@ namespace jlib {
             save(m_filename);
         }
 
-        void AudioFile::load(std::string filename) {
-            m_filename = filename;
+        void AudioFile::load(const std::string& filename) {
+            m_filename = std::move(filename);
         }
 
-        void AudioFile::save(std::string filename) {
+        void AudioFile::save(const std::string& filename) {
             m_filename = filename;
             std::ofstream ofs(filename.c_str());
             ofs << m_pcm;

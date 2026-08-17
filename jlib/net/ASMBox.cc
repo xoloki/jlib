@@ -67,7 +67,7 @@ namespace jlib {
             push(MailBoxResponse(MailBoxResponse::STATUS, "Initialized"));
         }
 
-        void ASMBox::on_set_password(std::string password) {
+        void ASMBox::on_set_password(const std::string& password) {
 
         }
 

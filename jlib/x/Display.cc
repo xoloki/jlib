@@ -40,7 +40,7 @@ void Display::send_event(XEvent e) {
     //std::cout << "Display::send_event: status = " << s << std::endl;
 }
 
-KeySym Display::sym(std::string s) const {
+KeySym Display::sym(const std::string& s) const {
     return XStringToKeysym(s.data());
 }
 
@@ -48,7 +48,7 @@ KeyCode Display::code(KeySym sym) const {
     return XKeysymToKeycode(m_dpy, sym);
 }
 
-KeyCode Display::code(std::string s) const {
+KeyCode Display::code(const std::string& s) const {
     return XKeysymToKeycode(m_dpy, sym(s));
 }
 	

@@ -36,7 +36,7 @@ namespace jlib {
         class ListItem {
         public:
             ListItem();
-            ListItem(std::string line);
+            ListItem(const std::string& line);
             
             std::vector<std::string> get_attributes();
             std::string get_delim();
@@ -61,7 +61,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = "imap4 exception: "+msg;
                 }
                 virtual ~exception() throw() {}
@@ -141,7 +141,7 @@ namespace jlib {
              *
              * @param name authentication mechanism name
              */ 
-            void authenticate(jlib::sys::socketstream& sock, std::string name);
+            void authenticate(jlib::sys::socketstream& sock, const std::string& name);
 
             /**
              * The LOGIN command identifies the user to the server and carries
@@ -152,7 +152,7 @@ namespace jlib {
              *
              * @throw imap4_exception if an exception occurs while doing i/o
              */
-            void login(jlib::sys::socketstream& sock, std::string user="", std::string pass="");
+            void login(jlib::sys::socketstream& sock, const std::string& user="", const std::string& pass="");
             
 
             // 6.3.    Client Commands - Authenticated State
@@ -179,7 +179,7 @@ namespace jlib {
              *
              * @return vector containing server response
              */
-            std::vector<std::string> select(jlib::sys::socketstream& sock, std::string path);
+            std::vector<std::string> select(jlib::sys::socketstream& sock, const std::string& path);
 
             /**
              * The EXAMINE command is identical to SELECT and returns the same
@@ -191,7 +191,7 @@ namespace jlib {
              *
              * @return vector containing server response
              */
-            std::vector<std::string> examine(jlib::sys::socketstream& sock, std::string path);
+            std::vector<std::string> examine(jlib::sys::socketstream& sock, const std::string& path);
 
             /**
              * The CREATE command creates a mailbox with the given name.  An OK
@@ -202,7 +202,7 @@ namespace jlib {
              * 
              * @param path mailbox name
              */
-            void create(jlib::sys::socketstream& sock, std::string path);
+            void create(jlib::sys::socketstream& sock, const std::string& path);
 
             /**
              * The DELETE command permanently removes the mailbox with the given
@@ -213,7 +213,7 @@ namespace jlib {
              *
              * @param path mailbox name
              */
-            void remove(jlib::sys::socketstream& sock, std::string path);
+            void remove(jlib::sys::socketstream& sock, const std::string& path);
             
             /**
              * The RENAME command changes the name of a mailbox.  A tagged OK
@@ -225,7 +225,7 @@ namespace jlib {
              * @param old_name old mailbox name
              * @param new_name new mailbox name
              */
-            void rename(jlib::sys::socketstream& sock, std::string old_name, std::string new_name);
+            void rename(jlib::sys::socketstream& sock, const std::string& old_name, const std::string& new_name);
             
             /**
              * The SUBSCRIBE command adds the specified mailbox name to the
@@ -235,7 +235,7 @@ namespace jlib {
              *
              * @param path mailbox
              */
-            void subscribe(jlib::sys::socketstream& sock, std::string path);
+            void subscribe(jlib::sys::socketstream& sock, const std::string& path);
 
             /**
              * The UNSUBSCRIBE command removes the specified mailbox name from
@@ -245,7 +245,7 @@ namespace jlib {
              * 
              * @param path mailbox
              */
-            void unsubscribe(jlib::sys::socketstream& sock, std::string path);
+            void unsubscribe(jlib::sys::socketstream& sock, const std::string& path);
 
             /**
              * The LIST command returns a subset of names from the complete set
@@ -279,7 +279,7 @@ namespace jlib {
              * @param ref reference name
              * @param path mailbox name
              */
-            std::vector<ListItem> list(jlib::sys::socketstream& sock, std::string ref, std::string path);
+            std::vector<ListItem> list(jlib::sys::socketstream& sock, const std::string& ref, const std::string& path);
 
             /**
              * The LSUB command returns a subset of names from the set of names
@@ -290,7 +290,7 @@ namespace jlib {
              * @param ref reference name
              * @param path mailbox name
              */
-            std::vector<ListItem> lsub(jlib::sys::socketstream& sock, std::string ref, std::string path);
+            std::vector<ListItem> lsub(jlib::sys::socketstream& sock, const std::string& ref, const std::string& path);
 
             /**
              * The APPEND command appends the literal argument as a new message
@@ -305,7 +305,7 @@ namespace jlib {
              * @param flag optional flag parenthesized list
              * @param date optional date/time string
              */
-            void append(jlib::sys::socketstream& sock, std::string path, std::string data, std::string flag="", std::string date="");
+            void append(jlib::sys::socketstream& sock, const std::string& path, const std::string& data, const std::string& flag="", const std::string& date="");
 
 
             //6.4.    Client Commands - Selected State
@@ -352,7 +352,7 @@ namespace jlib {
              *
              * @return vector with server response
              */
-            std::vector<std::string> search(jlib::sys::socketstream& sock, std::string criteria, std::string spec="");
+            std::vector<std::string> search(jlib::sys::socketstream& sock, const std::string& criteria, const std::string& spec="");
             
             /**
              * The FETCH command retrieves data associated with a message in the
@@ -399,7 +399,7 @@ namespace jlib {
              * 
              * @return vector containing sever response
              */
-            std::vector<std::string> store(jlib::sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, std::string key, std::vector<std::string> val);
+            std::vector<std::string> store(jlib::sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, const std::string& key, std::vector<std::string> val);
             
             /**
              * The COPY command copies the specified message(s) to the specified
@@ -409,7 +409,7 @@ namespace jlib {
              * @param set message set
              * @param box mailbox
              */
-            void copy(jlib::sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, std::string box);
+            void copy(jlib::sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, const std::string& box);
 
             /**
              * The UID command has two forms.  In the first form, it takes as its
@@ -470,7 +470,7 @@ namespace jlib {
              * 
              * @return result of cmd
              */
-            std::vector<std::string> uid(jlib::sys::socketstream& sock, std::string cmd, std::vector<std::string> arg);
+            std::vector<std::string> uid(jlib::sys::socketstream& sock, const std::string& cmd, std::vector<std::string> arg);
 
             /**
              * Any command prefixed with an X is an experimental command.
@@ -478,7 +478,7 @@ namespace jlib {
              * or standards-track revision of this specification, MUST use the X
              * prefix.
              */
-            //void x(std::string cmd);
+            //void x(const std::string& cmd);
             
             /**
              * Get the the specified email with flags
@@ -494,8 +494,8 @@ namespace jlib {
              * @param which which email we're retrieving
              * @throw imap4_exception if an exception occurs while doing i/o
              */
-            std::string retrieve(int which, std::string mailbox="INBOX");
-            std::string retrieve(jlib::sys::socketstream& sock, int which, std::string mailbox="INBOX");
+            std::string retrieve(int which, const std::string& mailbox="INBOX");
+            std::string retrieve(jlib::sys::socketstream& sock, int which, const std::string& mailbox="INBOX");
             
             /**
              * Retrieve the text of specified email
@@ -503,8 +503,8 @@ namespace jlib {
              * @param which which email we're retrieving
              * @throw std::exception if an exception occurs while doing i/o
              */
-            std::string retrieve_headers(unsigned int which, std::string mailbox,unsigned int& size);
-            std::string retrieve_headers(jlib::sys::socketstream& sock, unsigned int which, std::string mailbox,unsigned int& size);
+            std::string retrieve_headers(unsigned int which, const std::string& mailbox,unsigned int& size);
+            std::string retrieve_headers(jlib::sys::socketstream& sock, unsigned int which, const std::string& mailbox,unsigned int& size);
             
             /**
              * Remove this email from it's server
@@ -512,9 +512,9 @@ namespace jlib {
              * @param which which email we're removing
              * @throw std::exception if an exception occurs while doing i/o
              */
-            void remove(int which, std::string mailbox="INBOX");
+            void remove(int which, const std::string& mailbox="INBOX");
             
-            std::vector<std::string> handshake(jlib::sys::socketstream& sock, std::string data);
+            std::vector<std::string> handshake(jlib::sys::socketstream& sock, const std::string& data);
             
             bool unseen(jlib::sys::socketstream& sock,int i);
 

@@ -63,7 +63,7 @@ class Window {
 public:
     class exception : public std::exception {
     public:
-        exception(std::string msg = "") {
+        exception(const std::string& msg = "") {
             m_msg = "jlib::glfw::Window exception" + (msg != "" ? (": " + msg) : "");
         }
         virtual ~exception() noexcept {}
@@ -73,7 +73,7 @@ public:
         std::string m_msg;
     };
 
-    Window(std::string title, int width, int height, bool depth = true);
+    Window(const std::string& title, int width, int height, bool depth = true);
     virtual ~Window();
 
     /**
@@ -86,7 +86,7 @@ public:
     int get_width() const;
     int get_height() const;
 
-    void set_title(std::string title);
+    void set_title(const std::string& title);
     void center();
 
     void clear();

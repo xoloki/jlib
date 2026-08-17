@@ -11,7 +11,7 @@
 const long double 	PI = 3.14159265358979323846264338;
 
 void play(double freq, int format, int channels, double t);
-void play(std::string note, int format, int channels, double t);
+void play(const std::string& note, int format, int channels, double t);
 void play(jlib::media::notestream& ns, int format, int channels, double t);
 
 int main(int argc, char** argv) {
@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
 }
 
 // note denotes the frequency
-void play(std::string note, int format, int channels, double t) {
+void play(const std::string& note, int format, int channels, double t) {
     jlib::media::notestream ns(note);
     play(ns, format, channels, t);
 }

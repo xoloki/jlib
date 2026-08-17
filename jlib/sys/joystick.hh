@@ -46,10 +46,10 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = "sys::joystick exception: " + msg;
                 }
-                exception(std::string msg, int e) {
+                exception(const std::string& msg, int e) {
                     m_msg = "sys::joystick exception: " + msg + std::strerror(e);
                 }
                 virtual ~exception() throw() {}
@@ -69,7 +69,7 @@ namespace jlib {
                 js_event jse;
             };
 
-            joystick(std::string device, bool open = true, bool write = false) 
+            joystick(const std::string& device, bool open = true, bool write = false) 
                 : m_device(device),
                   m_fd(-1)
             {
@@ -137,7 +137,7 @@ namespace jlib {
                 return data;
             }
             
-            std::string set_axes_map(std::string amap) {
+            std::string set_axes_map(const std::string& amap) {
                 std::string data(ABS_MAX + 1, 0);
 
                 if (ioctl(m_fd, JSIOCSAXMAP, amap.data()) < 0)
@@ -159,7 +159,7 @@ namespace jlib {
                 return data;
             }
             
-            std::string set_button_map(std::string amap) {
+            std::string set_button_map(const std::string& amap) {
                 std::string data(KEY_MAX - BTN_MISC + 1, 0);
 
                 if (ioctl(m_fd, JSIOCSBTNMAP, amap.data()) < 0)

@@ -19,7 +19,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = "jlib::util::Timer::exception: "+msg;
                 }
                 virtual ~exception() throw() {}

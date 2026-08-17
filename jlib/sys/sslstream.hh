@@ -43,7 +43,7 @@ namespace jlib {
             
             static const unsigned int BUF_SIZE = 1024;
 
-            basic_sslbuf(std::string host, unsigned int port, const SSL_METHOD* method, bool delay = false)
+            basic_sslbuf(const std::string& host, unsigned int port, const SSL_METHOD* method, bool delay = false)
                 : basic_socketbuf<charT,traitT>(host,port),
                   m_ctx(0),
                   m_ssl(0),
@@ -146,7 +146,7 @@ namespace jlib {
 
         protected:
 
-            std::string print(std::string ctx, int err) {
+            std::string print(const std::string& ctx, int err) {
                 std::ostringstream o;
                 o << ctx << " failed: ";
                 
@@ -190,7 +190,7 @@ namespace jlib {
                 return o.str();
             }
 
-            void throw_if(std::string ctx, int err) {
+            void throw_if(const std::string& ctx, int err) {
                 if(err <= 0) 
                     throw typename basic_socketbuf<charT, traitT>::exception(this->print(ctx, err));
             }
@@ -261,14 +261,14 @@ namespace jlib {
                 : basic_socketstream<charT,traitT>()
             {}
 
-            basic_sslstream(std::string host, unsigned int port) 
+            basic_sslstream(const std::string& host, unsigned int port) 
                 : basic_socketstream<charT,traitT>()
             {
                 this->m_buf=new basic_sslbuf<charT,traitT>(host, port, TLS_client_method());
                 this->init(this->m_buf);
             }
             
-            void open(std::string host, unsigned int port) {
+            void open(const std::string& host, unsigned int port) {
                 this->m_buf=new basic_sslbuf<charT,traitT>(host, port, TLS_client_method());
                 this->init(this->m_buf);
             }
@@ -282,7 +282,7 @@ namespace jlib {
                 : basic_socketstream<charT,traitT>()
             {}
 
-            basic_tlsstream(std::string host, unsigned int port, bool delay = false) 
+            basic_tlsstream(const std::string& host, unsigned int port, bool delay = false) 
                 : basic_socketstream<charT,traitT>()
             {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
@@ -291,7 +291,7 @@ namespace jlib {
                 this->init(this->m_buf);
             }
             
-            void open(std::string host, unsigned int port, bool delay = false) {
+            void open(const std::string& host, unsigned int port, bool delay = false) {
                 this->m_buf=new basic_sslbuf<charT,traitT>(host,port, TLS_client_method(), delay);
                 this->init(this->m_buf);
             }

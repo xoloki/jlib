@@ -53,9 +53,9 @@ namespace jlib {
                 //! compare operator for literals
                 bool operator !=(char ch){ return bgen?true:ch!=literal; };
                 //! compare operator for a generic string
-                bool operator ==(std::string str){ return bgen?str==generic:false; };
+                bool operator ==(const std::string& str){ return bgen?str==generic:false; };
                 //! compare operator for a generic string
-                bool operator !=(std::string str){ return bgen?str!=generic:true; };
+                bool operator !=(const std::string& str){ return bgen?str!=generic:true; };
                 //! compare operator for an xmltoken
                 bool operator ==(token tok)
                 {

@@ -36,7 +36,7 @@ namespace sys {
 
 class sync_exception : public std::exception {
 public:
-    sync_exception(std::string msg = "") {
+    sync_exception(const std::string& msg = "") {
         m_msg = "sys exception: "+msg;
     }
     virtual ~sync_exception() throw() {}

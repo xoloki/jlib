@@ -32,7 +32,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string p_msg = "") {
+                exception(const std::string& p_msg = "") {
                     m_msg = "jlib::util::Regex::exception: "+p_msg;
                 }
                 virtual ~exception() throw() {}
@@ -63,19 +63,19 @@ namespace jlib {
                 char* m_text;
             };
 
-            Regex(std::string pattern="", int flags=REG_EXTENDED);
+            Regex(const std::string& pattern="", int flags=REG_EXTENDED);
             Regex(const Regex& r);
             ~Regex();
 
-            Match match(std::string str);
-            Match operator()(std::string str);
+            Match match(const std::string& str);
+            Match operator()(const std::string& str);
 
             Regex& operator=(const Regex& r);
 
             std::string operator[](unsigned int i);
 
         protected:
-            void init(std::string pattern, int flags);
+            void init(const std::string& pattern, int flags);
             void copy(const Regex& r);
 
             regex_t m_regex;

@@ -120,7 +120,7 @@ namespace jlib {
 
             class exception : public std::exception {
             public:
-                exception(std::string msg = "date exception") : m_msg(msg) {}
+                exception(const std::string& msg = "date exception") : m_msg(msg) {}
                 virtual ~exception() throw() {}
                 virtual const char* what() const throw() { return m_msg.c_str(); }
             protected:
@@ -132,6 +132,20 @@ namespace jlib {
             Date(time_t secs);
             Date(struct tm* t);
             virtual ~Date();
+
+            /**
+             * The rest of the five, explicitly.
+             *
+             * A user-declared destructor -- which a polymorphic class needs,
+             * and which also anchors the vtable -- suppresses the implicit
+             * move constructor and move assignment, so every std::move of a
+             * Date was quietly doing a copy.  Defaulting them says what was
+             * meant and costs nothing now that m_time is a value.
+             */
+            Date(const Date&) = default;
+            Date& operator=(const Date&) = default;
+            Date(Date&&) = default;
+            Date& operator=(Date&&) = default;
             
             /**
              * set from the current time
@@ -148,20 +162,20 @@ namespace jlib {
              */
             virtual void set(struct tm* t);
             
-            virtual std::string get(std::string fmt="%a, %d %b %Y %H:%M:%S %z") const;
-            virtual void set(std::string s, std::string fmt="%O");
+            virtual std::string get(const std::string& fmt="%a, %d %b %Y %H:%M:%S %z") const;
+            virtual void set(const std::string& s, const std::string& fmt="%O");
             
             /**
              * return the current date as a time_t
              */
             time_t time() const;
             
-            int year() const { return m_time->tm_year; }
-            int mon() const { return m_time->tm_mon; }
-            int mday() const { return m_time->tm_mday; }
-            int hour() const { return m_time->tm_hour; }
-            int min() const { return m_time->tm_min; }
-            int sec() const { return m_time->tm_sec; }
+            int year() const { return m_time.tm_year; }
+            int mon() const { return m_time.tm_mon; }
+            int mday() const { return m_time.tm_mday; }
+            int hour() const { return m_time.tm_hour; }
+            int min() const { return m_time.tm_min; }
+            int sec() const { return m_time.tm_sec; }
             
             friend std::istream& operator>>(std::istream& in, Date& d);
             friend std::ostream& operator<<(std::ostream& out, const Date& d);
@@ -169,14 +183,14 @@ namespace jlib {
             /**
              * given a month as string, return it's integer rep
              */
-            int find_month(std::string s, name_format f) const;
-            int find_weekday(std::string s, name_format f) const;
+            int find_month(const std::string& s, name_format f) const;
+            int find_weekday(const std::string& s, name_format f) const;
             
             /**
              * recursively build date std::string from current tm and passed
              * fmt string
              */
-            std::string build_date(std::string fmt) const;
+            std::string build_date(const std::string& fmt) const;
             
             /**
              * recursively build tm from passed date s and format fmt
@@ -185,7 +199,7 @@ namespace jlib {
              * the clustered directives are ignored, as are the day of week
              * and day of year
              */
-            void build_date(std::istream& is, std::string fmt);
+            void build_date(std::istream& is, const std::string& fmt);
             
             /**
              * automagically parse the date string, building a best
@@ -204,35 +218,35 @@ namespace jlib {
              * get rid of punctuation 
              *
              */
-            std::string sanitize(std::string s) const;
+            std::string sanitize(const std::string& s) const;
             
             /**
              * is the entire std::string alpha
              *
              */
-            bool is_alpha(std::string s) const;
+            bool is_alpha(const std::string& s) const;
             
             /**
              * is the entire std::string digit
              *
              */
-            bool is_digit(std::string s) const;
+            bool is_digit(const std::string& s) const;
             
-            bool is_time(std::string s) const;
-            bool is_timezone(std::string s) const;
-            bool is_date(std::string s) const;
+            bool is_time(const std::string& s) const;
+            bool is_timezone(const std::string& s) const;
+            bool is_date(const std::string& s) const;
             
             /**
              * return the format std::string for the passed date
              *
              */
-            std::string which_date(std::string s) const;
+            std::string which_date(const std::string& s) const;
             
             /**
              * convert the std::string to first letter uppercase, ow lower
              *
              */
-            std::string first_upper(std::string s) const;
+            std::string first_upper(const std::string& s) const;
             
             /**
              * print the contents of each member of the struct tm*
@@ -255,7 +269,20 @@ namespace jlib {
             struct tm* stm();
             
         private:
-            struct tm* m_time;
+            /**
+             * The broken-down time, by value.
+             *
+             * This was a struct tm* allocated with new in every constructor
+             * and deleted in the destructor -- for a POD of nine ints, which
+             * needs no allocation at all.  Worse, no copy constructor was
+             * declared, so copying a Date copied the pointer and both
+             * destructors freed it: ASan reported the double free at
+             * Date.cc:63.
+             *
+             * As a value the copy is correct and free, and with the
+             * destructor gone the implicit move comes back.
+             */
+            struct tm m_time;
             std::map<std::string,std::string> m_tz_name;
             std::map<std::string,int> m_tz_val;
             

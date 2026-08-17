@@ -40,7 +40,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = "jlib::net::MailFetch exception: "+msg;
                 }
                 virtual ~exception() throw() {}

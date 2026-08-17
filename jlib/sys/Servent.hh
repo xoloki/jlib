@@ -46,14 +46,14 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = "jlib::sys::Servent exception"+
                         (msg != "" ? (": "+msg):"");
                 }
                 virtual ~exception() noexcept {}
                 virtual const char* what() const noexcept { return m_msg.c_str(); }
                 
-                static void throw_errno(std::string msg) {
+                static void throw_errno(const std::string& msg) {
                     std::ostringstream o;
                     o << ((msg!="")?(msg+": "):"") << strerror(errno);
                     throw exception(o.str());

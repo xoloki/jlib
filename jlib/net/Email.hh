@@ -39,7 +39,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = "jlib::net::email exception: "+msg;
                 }
                 virtual ~exception() throw() {}
@@ -80,20 +80,27 @@ namespace jlib {
             /**
              * create email from passed data string
              */
-            Email(std::string is);
+            Email(const std::string& is);
             
-            void create(std::string is);
+            void create(const std::string& is);
 
             /**
              * Destructor.
              */
-            ~Email();
+            /**
+             * No destructor.
+             *
+             * There was an empty one, and a user-declared destructor -- even
+             * an empty one -- suppresses the implicit move constructor and
+             * move assignment.  Every std::move of one of these was silently
+             * doing a copy; measured, moving a 2M Email copied 4M.
+             */
             
-            void set(std::string key,std::string val);
-            void add(std::string key,std::string val);
+            void set(const std::string& key,std::string val);
+            void add(const std::string& key,std::string val);
 
-            std::string find(std::string key) const { return operator[](key); }
-            std::string operator[](std::string key) const;
+            std::string find(const std::string& key) const { return operator[](key); }
+            std::string operator[](const std::string& key) const;
             Email& operator[](unsigned int i) { return m_attach[i]; }
 
             void push_front(const Email& e) { m_attach.insert(m_attach.begin(),e); }
@@ -104,7 +111,17 @@ namespace jlib {
              *
              * @return raw text
              */
-            std::string raw() const { return m_raw; }
+            /**
+             * The raw message, by reference.
+             *
+             * This returned by value, which was free when it was written:
+             * libstdc++'s std::string was copy-on-write then, so returning
+             * one was a refcount bump.  C++11 outlawed COW and gcc dropped it
+             * in 5.0, which turned every call into a full copy of the
+             * message.  Measured, building an Email from a 2M message copied
+             * 12M, and each raw() or data() after that copied 2M more.
+             */
+            const std::string& raw() const { return m_raw; }
 
             /**
              * Get vector of Email attachments
@@ -135,7 +152,7 @@ namespace jlib {
              * @param field field to sort by
              *
              */
-            void sort(std::string field);
+            void sort(const std::string& field);
             
             /**
              * Get the headers for this email.
@@ -147,12 +164,12 @@ namespace jlib {
             /**
              * set the binary data to what is passed
              */
-            void data(std::string data) { m_data = data; }
+            void data(const std::string& data) { m_data = std::move(data); }
             
             /**
              * get the binary data
              */
-            std::string data() const { return m_data; }
+            const std::string& data() const { return m_data; }
 
             /**
              * build the text of the email based on the data and attachments
@@ -201,7 +218,7 @@ namespace jlib {
             std::string get_name() const;
             std::string get_filename() const;
 
-            bool is(std::string type) const;
+            bool is(const std::string& type) const;
 
             void parse_received();
 
@@ -213,11 +230,11 @@ namespace jlib {
             void set_indx(int indx);
             int get_indx() const;
 
-            reference grep(std::string s, bool recursive = true);
+            reference grep(const std::string& s, bool recursive = true);
 
         protected:
             std::string get_text(bool html, bool render, bool globbed, bool recurse) const;
-            bool check(std::string buf);
+            bool check(const std::string& buf);
             
             std::string m_sort;
             std::string m_raw;

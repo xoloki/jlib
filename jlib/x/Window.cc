@@ -34,7 +34,7 @@ Window::Window()
 {
 }
 
-Window::Window(std::string title, int w, int h) 
+Window::Window(const std::string& title, int w, int h) 
 {
     m_timeout = 1000;
 
@@ -184,12 +184,12 @@ void Window::draw_string(std::pair<int,int> p, int s) {
     draw_string(s);
 }
 	
-void Window::draw_string(std::pair<int,int> p, std::string s) {
+void Window::draw_string(std::pair<int,int> p, const std::string& s) {
     move(p);
     draw_string(s);
 }
 	
-void Window::draw_string(std::string s) {
+void Window::draw_string(const std::string& s) {
     XDrawString(m_dpy, m_win, m_gc, m_p.first, m_p.second, s.data(), s.length());
     int w = XTextWidth(m_font, s.data(), s.length());
     move(m_p.first+w,m_p.second);
@@ -204,7 +204,7 @@ void Window::draw_string(int s) {
     draw_string(o.str());
 }
 	
-Window& Window::operator<<(std::string msg) {
+Window& Window::operator<<(const std::string& msg) {
     draw_string(msg);
     return *this;
 }
@@ -416,7 +416,7 @@ void Window::select_input(long event_mask) {
     XSelectInput(m_dpy, m_win, m_event_mask);
 }
 	
-void Window::set_font(std::string font) {
+void Window::set_font(const std::string& font) {
     m_font=XLoadQueryFont(m_dpy,font.c_str());
 	
     XSetFont(m_dpy,m_gc_draw,m_font->fid);
@@ -425,7 +425,7 @@ void Window::set_font(std::string font) {
     XSetFont(m_dpy,m_gc_overlay,m_font->fid);
 }
     
-void Window::set_title(std::string title) {
+void Window::set_title(const std::string& title) {
     m_title=title;
     XSetStandardProperties(m_dpy, m_win, title.c_str(), title.c_str(), 
                            None, NULL,0, NULL);

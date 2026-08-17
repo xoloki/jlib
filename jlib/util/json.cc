@@ -83,7 +83,7 @@ object::ptr object::create() {
     return ptr(new object());
 }
     
-object::ptr object::create(std::string data) { 
+object::ptr object::create(const std::string& data) { 
     return ptr(new object(data));
 }
     
@@ -92,7 +92,7 @@ object::object()
       m_put(true)
 {}
     
-object::object(std::string data)
+object::object(const std::string& data)
     : m_obj(json_tokener_parse(data.data())),
       m_put(true)
 {
@@ -113,7 +113,7 @@ object::~object() {
 	json_object_put(m_obj); 
 }
     
-proxy object::get(std::string key) const {
+proxy object::get(const std::string& key) const {
     return proxy(json_object_object_get(m_obj, key.data()));
 }
     
@@ -121,32 +121,32 @@ proxy object::get(std::size_t idx) const {
     return proxy(json_object_array_get_idx(m_obj, idx));
 }
     
-void object::add(std::string key, std::string val) {
+void object::add(const std::string& key, const std::string& val) {
     json_object_object_add(m_obj, key.data(), json_object_new_string(const_cast<char*>(val.data())));
 }
     
-void object::add(std::string key, int val) {
+void object::add(const std::string& key, int val) {
     json_object_object_add(m_obj, key.data(), json_object_new_int(val));
 }
     
-void object::add(std::string key, unsigned int val) {
+void object::add(const std::string& key, unsigned int val) {
     add(key, static_cast<int>(val));
 }
     
-void object::add(std::string key, double val) {
+void object::add(const std::string& key, double val) {
     json_object_object_add(m_obj, key.data(), json_object_new_double(val));
 }
     
-void object::add(std::string key, long double val) {
+void object::add(const std::string& key, long double val) {
     add(key, static_cast<double>(val));
 }
     
-void object::add(std::string key, object::ptr val) {
+void object::add(const std::string& key, object::ptr val) {
     json_object_object_add(m_obj, key.data(), val->obj());
     val->m_put = false;
 }
     
-void object::add(std::string key, object::arrayptr val) {
+void object::add(const std::string& key, object::arrayptr val) {
     json_object_object_add(m_obj, key.data(), val->obj());
     val->m_put = false;
 }
@@ -161,7 +161,7 @@ json_object* object::obj() {
     return m_obj;
 }
     
-object::ptr object::obj(std::string key) {
+object::ptr object::obj(const std::string& key) {
     json_object* o = json_object_object_get(m_obj, key.data());
     return ptr(new object(o, false));
 }
@@ -183,7 +183,7 @@ array::ptr array::create() {
     return ptr(new array());
 }
     
-array::ptr array::create(std::string data) { 
+array::ptr array::create(const std::string& data) { 
     return ptr(new array(data));
 }
     
@@ -192,7 +192,7 @@ array::array()
       m_put(true)
 {}
     
-array::array(std::string data)
+array::array(const std::string& data)
     : m_obj(json_tokener_parse(data.data())),
       m_put(true)
 {
@@ -212,7 +212,7 @@ array::~array() {
         json_object_put(m_obj); 
 }
     
-void array::add(std::string val) {
+void array::add(const std::string& val) {
     json_object_array_add(m_obj, json_object_new_string(const_cast<char*>(val.data())));
 }
     

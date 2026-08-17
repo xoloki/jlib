@@ -232,7 +232,7 @@ namespace jlib {
             }
 
 
-            std::string parser::clean(std::string s) {
+            std::string parser::clean(const std::string& s) {
                 std::string ret = s;
                 if(ret.length() > 1) {
                     if( (ret[0] == '"' && ret[ret.length()-1] == '"') ||

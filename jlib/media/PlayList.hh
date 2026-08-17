@@ -49,17 +49,17 @@ namespace jlib {
             typedef rep_type::difference_type difference_type;
             typedef rep_type::allocator_type allocator_type;            
             
-            Roll(int id, stream* s, std::string name, std::string sample, std::string data);
+            Roll(int id, stream* s, const std::string& name, const std::string& sample, const std::string& data);
             Roll();
             
             int get_id() const;
             void set_id(int id);
             
             std::string get_name() const;
-            void set_name(std::string name);
+            void set_name(const std::string& name);
             
             std::string get_sample() const;
-            void set_sample(std::string sample);
+            void set_sample(const std::string& sample);
             
             reference operator[](int i);
             const_reference operator[](int i) const;
@@ -96,14 +96,14 @@ namespace jlib {
             typedef rep_type::difference_type difference_type;
             typedef rep_type::allocator_type allocator_type;            
             
-            Pattern(int id, std::string name);
+            Pattern(int id, const std::string& name);
             virtual ~Pattern();
             
             int get_id() const;
             void set_id(int id);
             
             std::string get_name() const;
-            void set_name(std::string id);
+            void set_name(const std::string& id);
             
             int get_next_roll_id();
             
@@ -148,14 +148,14 @@ namespace jlib {
             typedef rep_type::allocator_type allocator_type;            
 
             PlayList();
-            PlayList(int id, std::string name);
+            PlayList(int id, const std::string& name);
             virtual ~PlayList();
 
             int get_id() const;
             void set_id(int id);
             
             std::string get_name() const;
-            void set_name(std::string id);
+            void set_name(const std::string& id);
 
             int get_bpm() const;
             void set_bpm(int bpm);

@@ -64,7 +64,7 @@ public:
         set_foreground(255*color.r, 255*color.g, 255*color.b);
     }
     
-    void key_pressed(std::string key, int x, int y) {
+    void key_pressed(const std::string& key, int x, int y) {
         HyperPlot<T, PlotType>::key_pressed(key[0], x, y);
 
         if(key == "y" || key == "h") {

@@ -60,7 +60,7 @@ public:
 	}
     };
 
-    Download(std::string file) 
+    Download(const std::string& file) 
 	: state(get_incoming() + file)
     {
 	load();
@@ -183,7 +183,7 @@ private:
 
 class Show {
 public:
-    void on_key_press(std::string key, int x, int y) {
+    void on_key_press(const std::string& key, int x, int y) {
 	if (key == "q" || key == "Q") {
 	    std::exit(0);
 	} else {

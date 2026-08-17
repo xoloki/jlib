@@ -40,18 +40,18 @@ namespace jlib {
             
         }
 
-        URL::URL(std::string url) {
+        URL::URL(const std::string& url) {
             parse(url);
         }
 
-        URL::URL(std::string protocol, std::string host, std::string path) {
+        URL::URL(const std::string& protocol, const std::string& host, const std::string& path) {
             set_protocol(protocol);
             set_host(host);
             set_path(path); 
        }
 
-        URL::URL(std::string protocol, std::string user, std::string pass, 
-                 std::string host, std::string port, std::string path, std::string qs) {
+        URL::URL(const std::string& protocol, const std::string& user, const std::string& pass, 
+                 const std::string& host, const std::string& port, const std::string& path, const std::string& qs) {
             set_protocol(protocol);
             set_user(user);
             set_pass(pass);
@@ -61,15 +61,12 @@ namespace jlib {
             set_qs(qs);
         }
         
-        URL::~URL() {
-            
-        }
-        
-        void URL::parse(std::string url) {
+        void URL::parse(const std::string& url) {
             if(std::getenv("JLIB_UTIL_URL_DEBUG"))
                 std::cerr << "jlib::util::URL::parse(\""<<url<<"\")"<<std::endl;
             
-            url = jlib::util::trim(url);
+            // On a local: this overwrote its own parameter.
+            const std::string text = jlib::util::trim(url);
             jlib::util::Regex full_url(FULL_URL);
             
             if(full_url(url)) {
@@ -144,7 +141,7 @@ namespace jlib {
             
         }
 
-        std::map<std::string,std::string> URL::parse_qs(std::string qs) {
+        std::map<std::string,std::string> URL::parse_qs(const std::string& qs) {
             std::map<std::string,std::string> ret;
 
             std::vector<std::string> tokens = tokenize(qs,"&");
@@ -222,35 +219,35 @@ namespace jlib {
             return int_value(get_port());
         }
         
-        void URL::set_protocol(std::string protocol) {
-            m_protocol = protocol;
+        void URL::set_protocol(const std::string& protocol) {
+            m_protocol = std::move(protocol);
         }
 
-        void URL::set_user(std::string user) {
-            m_user = user;
+        void URL::set_user(const std::string& user) {
+            m_user = std::move(user);
         }
 
-        void URL::set_pass(std::string pass) {
-            m_pass = pass;
+        void URL::set_pass(const std::string& pass) {
+            m_pass = std::move(pass);
         }
 
-        void URL::set_host(std::string host) {
-            m_host = host;
+        void URL::set_host(const std::string& host) {
+            m_host = std::move(host);
         }
 
-        void URL::set_port(std::string port) {
-            m_port = port;
+        void URL::set_port(const std::string& port) {
+            m_port = std::move(port);
         }
 
-        void URL::set_path(std::string path) {
-            m_path = path;
+        void URL::set_path(const std::string& path) {
+            m_path = std::move(path);
         }
 
-        void URL::set_delim(std::string delim) {
-            m_delim = delim;
+        void URL::set_delim(const std::string& delim) {
+            m_delim = std::move(delim);
         }
 
-        void URL::set_qs(std::string qs) {
+        void URL::set_qs(const std::string& qs) {
             m_qs = qs;
             m_qs_hash = parse_qs(qs);
         }
@@ -260,7 +257,7 @@ namespace jlib {
             m_qs = parse_qs(qs);
         }
         
-        std::string URL::operator[](std::string key) const {
+        std::string URL::operator[](const std::string& key) const {
             const_iterator i = m_qs_hash.find(key);
             if(i != end()) return i->second;
             else return std::string();

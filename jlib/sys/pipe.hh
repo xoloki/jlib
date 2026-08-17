@@ -39,14 +39,14 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = "jlib::sys::pipe exception"+
                         (msg != "" ? (": "+msg):"");
                 }
                 virtual ~exception() throw() {}
                 virtual const char* what() const throw() { return m_msg.c_str(); }
                 
-                [[noreturn]] static void throw_errno(std::string msg) {
+                [[noreturn]] static void throw_errno(const std::string& msg) {
                     std::ostringstream o;
                     o << ((msg!="")?(msg+": "):"") << strerror(errno);
                     throw exception(o.str());

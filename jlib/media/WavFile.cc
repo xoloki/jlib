@@ -71,7 +71,7 @@ namespace jlib {
             set_format_tag(WAV_FMT_PCM);
         }
 
-        WavFile::WavFile(std::string filename, bool load_data) {
+        WavFile::WavFile(const std::string& filename, bool load_data) {
             set_format_tag(WAV_FMT_PCM);
             m_filename = filename;
             parse_chunks();
@@ -235,7 +235,7 @@ namespace jlib {
             m_format_tag = s;
         }
 
-        void WavFile::load(std::string filename) {
+        void WavFile::load(const std::string& filename) {
             m_filename = filename;
             parse_chunks();
             parse_fmt();
@@ -243,7 +243,7 @@ namespace jlib {
             load_data_chunks();
         }
 
-        void WavFile::save(std::string filename) {
+        void WavFile::save(const std::string& filename) {
             m_filename = filename;
             std::ofstream ofs(filename.c_str());
             ofs << create_riff_header() << create_format_chunk() << create_data_chunk();

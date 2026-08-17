@@ -37,7 +37,7 @@ const int JLIB_MEDIA_DSP_FRAGSIZE = 2048;
 namespace jlib {
     namespace media {
         
-        Dsp::Dsp(std::string node,bool open)
+        Dsp::Dsp(const std::string& node,bool open)
             : m_bits_per_sample(-1),
               m_samples_per_sec(-1),
               m_channels(-1),
@@ -56,7 +56,7 @@ namespace jlib {
             close();
         }
         
-        void Dsp::open(std::string node) {
+        void Dsp::open(const std::string& node) {
             if(node != "")
                 m_node = node;
             
@@ -212,7 +212,7 @@ namespace jlib {
             if(m_dsp != -1) ::close(m_dsp);
         }
         
-        void Dsp::write(std::string data) {
+        void Dsp::write(const std::string& data) {
             if(m_dsp != -1 && data.length() > 0) {
                 int e = ::write(m_dsp,data.data(),data.length());
                 if(e == -1)

@@ -41,8 +41,8 @@ namespace jlib {
             
             static const unsigned int BUF_SIZE = 1024;
 
-            basic_sslproxybuf(std::string host, unsigned int port, 
-                              std::string phost, u_int pport)
+            basic_sslproxybuf(const std::string& host, unsigned int port, 
+                              const std::string& phost, u_int pport)
                 : basic_proxybuf<charT,traitT>(host,port,phost,pport)
             {
                 open_ssl();
@@ -173,16 +173,16 @@ namespace jlib {
                 : basic_proxystream<charT,traitT>()
             {}
 
-            basic_sslproxystream(std::string host, unsigned int port,
-                                 std::string phost, u_int pport) 
+            basic_sslproxystream(const std::string& host, unsigned int port,
+                                 const std::string& phost, u_int pport) 
                 : basic_proxystream<charT,traitT>()
             {
                 this->m_buf=new basic_sslproxybuf<charT,traitT>(host,port,phost,pport);
                 this->init(this->m_buf);
             }
             
-            void open(std::string host, unsigned int port,
-                      std::string phost, u_int pport) 
+            void open(const std::string& host, unsigned int port,
+                      const std::string& phost, u_int pport) 
             {
                 this->m_buf=new basic_sslproxybuf<charT,traitT>(host,port,phost,pport);
                 this->init(this->m_buf);

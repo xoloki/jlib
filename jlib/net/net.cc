@@ -111,7 +111,7 @@ namespace jlib {
             }
         }
 
-        std::vector<std::string> parse_header(std::istream& stream, std::string header) {
+        std::vector<std::string> parse_header(std::istream& stream, const std::string& header) {
             std::vector<std::string> ret;
             std::string buf, key, val;
             std::vector<std::string>::iterator current = ret.end();
@@ -174,7 +174,7 @@ namespace jlib {
             return ret;
         }
         
-        void parse_divide(std::istream& is, std::vector<long>& divide, std::string div) {
+        void parse_divide(std::istream& is, std::vector<long>& divide, const std::string& div) {
             if(getenv("JLIB_NET_DEBUG")) {
                 std::cerr <<"net::parse_divide(is,divide,\""<<div<<"\"): entering"<<std::endl;
             }
@@ -215,7 +215,7 @@ namespace jlib {
         // Returns size_type rather than long so that npos survives the round
         // trip.  Callers used to store the result in a u_int, which truncates
         // npos (SIZE_MAX) to 0xFFFFFFFF and so never compares equal to it.
-        std::string::size_type find_end(std::string s, const std::vector<std::string>& e) {
+        std::string::size_type find_end(const std::string& s, const std::vector<std::string>& e) {
             std::string::size_type ret = s.npos;
             std::string::size_type p;
             for(std::string::size_type i=0;i<e.size();i++) {
@@ -232,7 +232,7 @@ namespace jlib {
             return ret;
         }
 
-        std::string parse_end(std::string s, const std::vector<std::string>& ends) {
+        std::string parse_end(const std::string& s, const std::vector<std::string>& ends) {
             if(ends.size() == 0) {
                 return s;
             }
@@ -276,7 +276,7 @@ namespace jlib {
             raw = tmp;
         }
 
-        bool same_address(std::string p_addr1, std::string p_addr2) {
+        bool same_address(const std::string& p_addr1, const std::string& p_addr2) {
             std::string addr1, addr2;
             
             try {
@@ -290,7 +290,7 @@ namespace jlib {
             return (addr1 == addr2);
         }
         
-        std::string extract_address(std::string p_addr) {
+        std::string extract_address(const std::string& p_addr) {
             // p was a u_int, which truncates npos to 0xFFFFFFFF, so the
             // "no @ present" guard below never fired: the function fell into
             // the else branch, where p+1 wrapped to 0, and returned a chunk of
@@ -319,7 +319,7 @@ namespace jlib {
             }
         }
 
-        std::list<std::string> extract_addresses(std::string s) {
+        std::list<std::string> extract_addresses(const std::string& s) {
             std::list<std::string> tokens = util::tokenize_list(s, ",");
             std::list<std::string> ret;
 
@@ -333,7 +333,7 @@ namespace jlib {
             return ret;
         }
 
-        std::list<std::string> split_addresses(std::string s) {
+        std::list<std::string> split_addresses(const std::string& s) {
             std::list<std::string> ret;
             std::string token;
             u_int x = 0, y;
@@ -457,7 +457,7 @@ namespace jlib {
             }    
         }
 
-        bool is_addr(std::string s) {
+        bool is_addr(const std::string& s) {
             for(std::string::size_type i=0;i<s.length();i++) {
                 if(!isdigit(s[i]) && s[i] != '.')
                     return false;
@@ -465,7 +465,7 @@ namespace jlib {
             return true;
         }
 
-        std::pair< std::string, std::vector<std::string> > get_host(std::string s) {
+        std::pair< std::string, std::vector<std::string> > get_host(const std::string& s) {
             struct hostent *h;
             std::pair< std::string, std::vector<std::string> > ret;
 
@@ -513,11 +513,11 @@ namespace jlib {
             return inet_ntoa(a);
         }
 
-        long get_ip_val(std::string addr) {
+        long get_ip_val(const std::string& addr) {
             return inet_addr(addr.c_str());
         }
 
-        bool is_reserved(std::string ip) {
+        bool is_reserved(const std::string& ip) {
             long twf_ip   = htonl(0x0a000000);
             long twf_mask = htonl(0xff000000);
             long twy_ip   = htonl(0xac100000);
@@ -538,7 +538,7 @@ namespace jlib {
 
 
         std::string pathstr(std::list<std::string> path, 
-                            std::string delim, 
+                            const std::string& delim, 
                             bool begin_delim,
                             bool end_delim,
                             bool only_delim) {
@@ -571,7 +571,7 @@ namespace jlib {
         }
 
         namespace mbox {
-            std::string make_path(std::string maildir, std::list<std::string> path) {
+            std::string make_path(const std::string& maildir, std::list<std::string> path) {
                 if(path.size() == 1 && path.front() == "INBOX") {
                     return (std::string(SYS_MAIL_DIR) + "/" + getenv("USER"));
                 } else {
@@ -580,20 +580,20 @@ namespace jlib {
 
             }
 
-            void create(std::string maildir, std::list<std::string> path) {
+            void create(const std::string& maildir, std::list<std::string> path) {
                 create(make_path(maildir, path));
             }
 
-            void create(std::string path) {
+            void create(const std::string& path) {
                 std::fstream box(path.c_str(), (std::ios_base::out|std::ios_base::app));
                 box.close();
             }
 
-            void deleet(std::string maildir, std::list<std::string> path) {
+            void deleet(const std::string& maildir, std::list<std::string> path) {
                 deleet(make_path(maildir, path));
             }
 
-            void deleet(std::string path) {
+            void deleet(const std::string& path) {
                 int e = unlink(path.c_str());
                 if(e == -1) {
                     std::ostringstream o;
@@ -602,11 +602,11 @@ namespace jlib {
                 }
             }
 
-            void rename(std::string maildir, std::list<std::string> src, std::list<std::string> dst) {
+            void rename(const std::string& maildir, std::list<std::string> src, std::list<std::string> dst) {
                 rename(make_path(maildir, src), make_path(maildir, dst));
             }
 
-            void rename(std::string src, std::string dst) {
+            void rename(const std::string& src, const std::string& dst) {
                 int e = ::rename(src.c_str(), dst.c_str());
                 if(e == -1) {
                     std::ostringstream o;
@@ -615,11 +615,11 @@ namespace jlib {
                 }
             }
 
-            void remove(std::string maildir, std::list<std::string> path, std::list<int> which, std::vector<long> divide) {
+            void remove(const std::string& maildir, std::list<std::string> path, std::list<int> which, std::vector<long> divide) {
                 remove(make_path(maildir, path), which, divide);
             }
 
-            void remove(std::string path, std::list<int> which, std::vector<long> divide) {
+            void remove(const std::string& path, std::list<int> which, std::vector<long> divide) {
                 std::vector<int> phys;
                 std::vector<int>::iterator pi;
                 for(std::list<int>::iterator i = which.begin(); i != which.end(); i++) {
@@ -652,11 +652,11 @@ namespace jlib {
                 
             }
             
-            Email get(std::string maildir, std::list<std::string> path, int i, std::vector<long> divide, bool oheader) {
+            Email get(const std::string& maildir, std::list<std::string> path, int i, std::vector<long> divide, bool oheader) {
                 return get(make_path(maildir, path), i, divide, oheader);
             }
 
-            Email get(std::string path, int i, std::vector<long> divide, bool oheader) {
+            Email get(const std::string& path, int i, std::vector<long> divide, bool oheader) {
                 std::ifstream ifs(path.c_str(), std::ios_base::in);
                 return get(ifs, i, divide, oheader);
             }
@@ -707,11 +707,11 @@ namespace jlib {
              }
 
 
-            void append(std::string maildir, std::list<std::string> path, Email e) {
+            void append(const std::string& maildir, std::list<std::string> path, Email e) {
                 append(make_path(maildir, path), e);
             }
 
-            void append(std::string path, Email e) {
+            void append(const std::string& path, Email e) {
                 std::ofstream ofs(path.c_str(), std::ios_base::out | std::ios_base::app);
                 std::ifstream ifs(path.c_str());
                 ifs.seekg(-1,std::ios_base::end);
@@ -732,7 +732,7 @@ namespace jlib {
 
         namespace smtp {
 
-            std::vector<std::string> parse(std::string field) {
+            std::vector<std::string> parse(const std::string& field) {
                 std::vector<std::string> ret;
                 std::string tmp = field;
                 tmp = util::excise(tmp, "\"", "\"");
@@ -747,7 +747,7 @@ namespace jlib {
             }
 
 
-            void handshake(sys::socketstream& stream, std::string data, std::string ok) {
+            void handshake(sys::socketstream& stream, const std::string& data, const std::string& ok) {
                 if(getenv("JLIB_NET_DEBUG"))
                     std::cerr << "SMTP << "<<data<<std::endl;
                 stream << data << "\r\n" << std::flush;
@@ -763,9 +763,10 @@ namespace jlib {
                 }
             }
             
-            //void send(std::string mail, std::string rcpt, std::string data, 
+            //void send(const std::string& mail, const std::string& rcpt, const std::string& data, 
             //std::string host, const unsigned int port) {
 
+            /** By value deliberately: data is modified in place and returned. */
             std::string convert_to_crlf(std::string data) {
                 std::string::size_type p = 0, i;
                 while( (i=data.find("\n",p)) != std::string::npos ) {
@@ -778,20 +779,20 @@ namespace jlib {
                 return data;
             }
 
-            void send(std::string mail, std::string rcpt, std::string data, sys::socketstream& stream);
-            void finish(std::string mail, std::string rcpt, std::string data, sys::socketstream& stream);
+            void send(const std::string& mail, const std::string& rcpt, const std::string& data, sys::socketstream& stream);
+            void finish(const std::string& mail, const std::string& rcpt, const std::string& data, sys::socketstream& stream);
 
-            void send(std::string mail, std::string rcpt, std::string data, std::string host, unsigned int port) {
+            void send(const std::string& mail, const std::string& rcpt, const std::string& data, const std::string& host, unsigned int port) {
                 sys::socketstream stream(host, port);
                 send(mail, rcpt, data, stream);
             }
 
-            void send_ssl(std::string mail, std::string rcpt, std::string data, std::string host, unsigned int port) {
+            void send_ssl(const std::string& mail, const std::string& rcpt, const std::string& data, const std::string& host, unsigned int port) {
                 sys::sslstream stream(host, port);
                 send(mail, rcpt, data, stream);
             }
 
-            std::list<std::string> eshake(sys::socketstream& sock, std::string data, std::string ok) {
+            std::list<std::string> eshake(sys::socketstream& sock, const std::string& data, const std::string& ok) {
                 std::list<std::string> ret;
                 std::string buf;
                 
@@ -809,7 +810,7 @@ namespace jlib {
                 return ret;
             }
 
-            void send_tls(std::string mail, std::string rcpt, std::string data, std::string host, unsigned int port) {
+            void send_tls(const std::string& mail, const std::string& rcpt, const std::string& data, const std::string& host, unsigned int port) {
                 sys::tlsstream stream(host, port, true);
                 std::list<std::string> r;
 
@@ -825,7 +826,7 @@ namespace jlib {
                 finish(mail, rcpt, data, stream);
             }
                 
-            void send_tls_auth(std::string mail, std::string rcpt, std::string data, std::string host, unsigned int port, std::string user, std::string pass) {
+            void send_tls_auth(const std::string& mail, const std::string& rcpt, const std::string& data, const std::string& host, unsigned int port, const std::string& user, const std::string& pass) {
                 sys::tlsstream stream(host, port, true);
                 std::list<std::string> r;
 
@@ -858,7 +859,7 @@ namespace jlib {
                 finish(mail, rcpt, data, stream);
             }
                 
-            void send_ssl_auth(std::string mail, std::string rcpt, std::string data, std::string host, unsigned int port, std::string user, std::string pass) {
+            void send_ssl_auth(const std::string& mail, const std::string& rcpt, const std::string& data, const std::string& host, unsigned int port, const std::string& user, const std::string& pass) {
                 sys::sslstream stream(host, port);
                 std::list<std::string> r;
 
@@ -884,7 +885,7 @@ namespace jlib {
                 finish(mail, rcpt, data, stream);
             }
                 
-            void send(std::string mail, std::string rcpt, std::string data, sys::socketstream& stream) {
+            void send(const std::string& mail, const std::string& rcpt, const std::string& data, sys::socketstream& stream) {
                 std::string helo = "localhost";
                 std::string greet;
 
@@ -898,7 +899,7 @@ namespace jlib {
                 finish(mail, rcpt, data, stream);
             }
 
-            void finish(std::string mail, std::string rcpt, std::string data, sys::socketstream& stream) {
+            void finish(const std::string& mail, const std::string& rcpt, const std::string& data, sys::socketstream& stream) {
                 handshake(stream, "MAIL FROM: <"+extract_address(mail)+">", "250");
                 
                 std::vector<std::string> rcptVec = parse(rcpt);
@@ -906,24 +907,27 @@ namespace jlib {
                     handshake(stream, "RCPT TO: <"+(*i)+">", "250");
                 }
                
-                data = convert_to_crlf(data);
+                // On a local: this rewrote its own parameter, first to
+                // canonical line endings and then to escape any end-of-message
+                // sequence in the body.
+                std::string body = convert_to_crlf(data);
                 std::string eom = "\r\n.\r\n";
                 std::string neom = "\r\n. \r\n";
-                while(data.find(eom) != data.npos) {
-                    data.replace(data.find(eom), eom.length(), neom);
+                while(body.find(eom) != body.npos) {
+                    body.replace(body.find(eom), eom.length(), neom);
                 }
                 
                 handshake(stream, "DATA", "354");
-                handshake(stream, data+eom, "250");
+                handshake(stream, body+eom, "250");
                 
                 stream.close();
             }
 
             /*
-            void send(std::string mail, std::string rcpt, std::string data, std::string host) {
+            void send(const std::string& mail, const std::string& rcpt, const std::string& data, const std::string& host) {
                 send(mail,rcpt,data,host,25);
             }
-            void send(std::string mail, std::string rcpt, std::string data) {
+            void send(const std::string& mail, const std::string& rcpt, const std::string& data) {
                 send(mail,rcpt,data,"localhost",25);
             }
             */
@@ -984,7 +988,7 @@ namespace jlib {
         }
 
         namespace html {
-            std::string render(std::string s) {
+            std::string render(const std::string& s) {
                 sys::tfstream buf;
                 std::string cmd,out,err;
 

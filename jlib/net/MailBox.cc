@@ -23,7 +23,7 @@
 namespace jlib {
 	namespace net {
 
-        MailNode::MailNode(std::string name, bool folder, bool parent) {
+        MailNode::MailNode(const std::string& name, bool folder, bool parent) {
             m_path.push_back(name);
             m_is_folder=folder;
             m_is_parent=parent;
@@ -83,7 +83,7 @@ namespace jlib {
             }
         }
 
-        void MailNode::set_name(std::string n) { 
+        void MailNode::set_name(const std::string& n) { 
             if(m_path.size() > 0) {
                 m_path.back() = n;
             }
@@ -96,7 +96,7 @@ namespace jlib {
             return m_delim; 
         }
 
-        void MailNode::set_delim(std::string n) { 
+        void MailNode::set_delim(const std::string& n) { 
             m_delim=n; 
         }
         
@@ -108,7 +108,7 @@ namespace jlib {
         
 
         std::string MailNode::pathstr(std::list<std::string> path, 
-                                      std::string delim, 
+                                      const std::string& delim, 
                                       bool begin_delim,
                                       bool end_delim,
                                       bool only_delim) {
@@ -149,7 +149,7 @@ namespace jlib {
             m_buf  = buf;
         }
 
-        MailBox::MailBox(std::string name, BoxBuf* buf) {
+        MailBox::MailBox(const std::string& name, BoxBuf* buf) {
             m_name = name;
             m_buf  = buf;
         }

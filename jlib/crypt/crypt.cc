@@ -69,7 +69,7 @@ namespace jlib {
                 gpgme_set_progress_cb(m_ctx, cb, hook);
             }
 
-            void ctx::op_keylist_start(std::string ptrn, bool secret_only) {
+            void ctx::op_keylist_start(const std::string& ptrn, bool secret_only) {
                 const char* pttrn = (ptrn != "" ? ptrn.c_str() : NULL);
                 gpgme_error_t err = gpgme_op_keylist_start(m_ctx, pttrn, static_cast<int>(secret_only));
 
@@ -211,11 +211,11 @@ namespace jlib {
                 return data::ptr(new data(d, n, copy));
             }
 
-            data::ptr data::create(std::string d) {
+            data::ptr data::create(const std::string& d) {
                 return data::ptr(new data(d));
             }
 
-            data::ptr data::create(std::string file, bool copy) {
+            data::ptr data::create(const std::string& file, bool copy) {
                 return data::ptr(new data(file, copy));
             }
 
@@ -230,14 +230,14 @@ namespace jlib {
                 } 
             }
 
-            data::data(std::string data) {
+            data::data(const std::string& data) {
                 gpgme_error_t err = gpgme_data_new_from_mem(&m_data, data.data(), data.length(), 1);
                 if(gpgme_err_code(err) != GPG_ERR_NO_ERROR) {
                     throw exception(err);
                 } 
             }
 
-            data::data(std::string file, bool copy) {
+            data::data(const std::string& file, bool copy) {
                 gpgme_error_t err = gpgme_data_new_from_file(&m_data, file.c_str(), static_cast<int>(copy));
                 if(gpgme_err_code(err) != GPG_ERR_NO_ERROR) {
                     throw exception(err);
@@ -309,7 +309,7 @@ namespace jlib {
                 return ret;
             }
 
-            void data::write(std::string data) {
+            void data::write(const std::string& data) {
                 std::size_t n = gpgme_data_write(m_data, data.data(), data.length());
                 if(n != data.size()) {
                     std::ostringstream os;
@@ -341,7 +341,7 @@ namespace jlib {
             }
             */
 
-            key::list list_keys(std::string id, bool secret_only) {
+            key::list list_keys(const std::string& id, bool secret_only) {
                 key::list keys;
                 ctx ctx;
                 
@@ -359,31 +359,31 @@ namespace jlib {
                 return keys;
             }
 
-            std::string verify(std::string sig) {
+            std::string verify(const std::string& sig) {
                 return "";
             }
 
-            std::string verify(std::string sig,std::list<std::string> data) {
+            std::string verify(const std::string& sig,std::list<std::string> data) {
                 return "";
             }
 
-            std::string decrypt(std::string text, std::string pass) {
+            std::string decrypt(const std::string& text, const std::string& pass) {
                 return "";
             }
 
-            std::string decrypt(std::string text, std::string pass, std::string& out) {
+            std::string decrypt(const std::string& text, const std::string& pass, std::string& out) {
                 return "";
             }
 
-            std::string sign(std::string from, std::string data, std::string pass) {
+            std::string sign(const std::string& from, const std::string& data, const std::string& pass) {
                 return "";
             }
 
-            std::string encrypt(std::string to, std::string data) {
+            std::string encrypt(const std::string& to, const std::string& data) {
                 return "";
             }
 
-            std::string sign_encrypt(std::string from, std::string to, std::string data, std::string pass) {
+            std::string sign_encrypt(const std::string& from, const std::string& to, const std::string& data, const std::string& pass) {
                 return "";
             }
 

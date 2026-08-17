@@ -33,10 +33,10 @@ public:
     
     void send_event(XEvent e);
 
-    KeySym sym(std::string s) const;
+    KeySym sym(const std::string& s) const;
 
     KeyCode code(KeySym sym) const;
-    KeyCode code(std::string s) const;
+    KeyCode code(const std::string& s) const;
     
 protected:
     ::Display* m_dpy;
