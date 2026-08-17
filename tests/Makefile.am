@@ -19,7 +19,8 @@ MEDIA_TESTS = media_datastream_test \
               media_notestream_test \
               media_player_test \
               media_wavfile_test \
-              media_wavstream_test
+              media_wavstream_test \
+              sys_ringbuffer_test
 endif
 
 if HAVE_SODIUM
@@ -71,6 +72,9 @@ media_wavfile_test_LDADD      = $(JMEDIA_LA) $(JSYS_LA)
 
 media_wavstream_test_SOURCES  = media_wavstream_test.cc
 media_wavstream_test_LDADD    = $(JMEDIA_LA) $(JSYS_LA)
+
+sys_ringbuffer_test_SOURCES   = sys_ringbuffer_test.cc
+sys_ringbuffer_test_LDADD     = $(JSYS_LA)
 
 net_extract_address_test_SOURCES        = net_extract_address_test.cc
 net_extract_address_test_LDADD          = $(JNET_LA)
