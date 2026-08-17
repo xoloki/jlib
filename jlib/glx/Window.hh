@@ -29,14 +29,14 @@ namespace glx {
         
 class Window : public x::Window {
 public:
-    Window(std::string title="jlib::glx::Window", int w=400, int h=400, bool depth = true);
+    Window(const std::string& title="jlib::glx::Window", int w=400, int h=400, bool depth = true);
     virtual ~Window();
     
     virtual void clear();
     virtual void flush();
     virtual void iterate();
     
-    //Window& operator<<(std::string msg);
+    //Window& operator<<(const std::string& msg);
     //Window& operator<<(int value);
 
     void on_configure(int w, int h);

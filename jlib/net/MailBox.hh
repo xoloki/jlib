@@ -59,7 +59,7 @@ namespace jlib {
             typedef rep_type::allocator_type allocator_type;            
 
 
-            MailNode(std::string name="INBOX", bool folder=true, bool parent=false);
+            MailNode(const std::string& name="INBOX", bool folder=true, bool parent=false);
             MailNode(std::list<std::string> path, bool folder, bool parent);
 
             MailNode& operator[](unsigned int i);
@@ -76,10 +76,10 @@ namespace jlib {
             bool is_filled() const { return (m_folder != 0); }
             
             std::string get_name() const;
-            void set_name(std::string n);
+            void set_name(const std::string& n);
 
             std::string get_delim() const;
-            void set_delim(std::string n);
+            void set_delim(const std::string& n);
 
             std::list<std::string> get_path() const;
             void set_path(const std::list<std::string>& n);
@@ -106,7 +106,7 @@ namespace jlib {
             void clear() { m_children.clear(); }
 
             static std::string pathstr(std::list<std::string> path, 
-                                       std::string delim="/", 
+                                       const std::string& delim="/", 
                                        bool begin_delim = true, 
                                        bool end_delim = false,
                                        bool only_delim = false);
@@ -180,7 +180,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = std::string("jlib::net::MailBox exception")+( (msg=="")?"":": ")+msg;
                 }
                 virtual ~exception() throw() {}
@@ -191,7 +191,7 @@ namespace jlib {
 
 
             MailBox(BoxBuf* buf);
-            MailBox(std::string name, BoxBuf* buf);
+            MailBox(const std::string& name, BoxBuf* buf);
             virtual ~MailBox();
 
             void init();
@@ -217,7 +217,7 @@ namespace jlib {
 
             MailFolder* get_folder(std::list<std::string> path);
 
-            void set_name(std::string n) { m_name = std::move(n); }
+            void set_name(const std::string& n) { m_name = std::move(n); }
             std::string get_name() { return m_name; }
             
         protected:

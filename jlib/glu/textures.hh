@@ -27,7 +27,7 @@ namespace jlib {
 namespace glu {
 namespace textures {
 
-void init(std::string texture);
+void init(const std::string& texture);
 std::string make_checker2d();
 
 }

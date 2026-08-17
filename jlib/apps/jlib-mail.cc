@@ -44,7 +44,7 @@ namespace jlib {
         
         class ConsoleMain : public sys::Object {
         public:
-            void push(std::string cmd, std::function<void(std::string)> slot) {
+            void push(const std::string& cmd, std::function<void(std::string)> slot) {
                 m_handlers.insert(std::make_pair(cmd,slot));
             }
 
@@ -86,7 +86,7 @@ namespace jlib {
 
         class MailClient : public ConsoleMain {
         public:
-            MailClient(std::string url="") {
+            MailClient(const std::string& url="") {
                 init();
                 if(url != "") {
                     open(url);
@@ -141,7 +141,7 @@ namespace jlib {
             }
 
 
-            void open(std::string s) {
+            void open(const std::string& s) {
                 jlib::util::URL url(s);
                 if(m_folder != 0) {
                     delete m_folder;
@@ -160,7 +160,7 @@ namespace jlib {
 
             }
    
-            void read(std::string s) {
+            void read(const std::string& s) {
                 if(m_folder == 0) {
                     std::cout << "ERROR: no valid mailfolder"<<std::endl;
                     return;
@@ -181,12 +181,11 @@ namespace jlib {
 
          
         protected:
-            std::ostream& printw(std::ostream& out, std::string in, unsigned int w) {
-                if(in.length() >= w) {
-                    in = in.substr(0,w);
-                }
-                //out << std::setw(w) << std::setfill(' ') << std::left <<in;
-                out << in;
+            std::ostream& printw(std::ostream& out, const std::string& in, unsigned int w) {
+                // On a local; this truncated its own parameter.
+                const std::string text = (in.length() >= w) ? in.substr(0, w) : in;
+                //out << std::setw(w) << std::setfill(' ') << std::left << text;
+                out << text;
                 return out;
             }
 

@@ -31,15 +31,15 @@ namespace jlib {
         class WavFile : public AudioFile {
         public:
             WavFile();
-            WavFile(std::string filename, bool load_data=true);
+            WavFile(const std::string& filename, bool load_data=true);
             virtual ~WavFile();
 
             int get_format_tag() const;
             
             void set_format_tag(int s);
 
-            virtual void load(std::string filename);
-            virtual void save(std::string filename);
+            virtual void load(const std::string& filename);
+            virtual void save(const std::string& filename);
 
             void load_data_chunks();
 

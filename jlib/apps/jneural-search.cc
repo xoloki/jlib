@@ -28,8 +28,8 @@ using namespace jlib::util;
 
 typedef double T;
 
-math::matrix<T> load(std::string path, uint r, uint c, bool greyscale = true);
-std::vector<std::tuple<int,math::matrix<T>>> load_mnist(std::string path);
+math::matrix<T> load(const std::string& path, uint r, uint c, bool greyscale = true);
+std::vector<std::tuple<int,math::matrix<T>>> load_mnist(const std::string& path);
 
 char convert(int n);
 int convert(char c);
@@ -295,7 +295,7 @@ int main(int argc, char** argv) {
     return 0;
 }
 
-std::vector<std::tuple<int,math::matrix<T>>> load_mnist(std::string path) {
+std::vector<std::tuple<int,math::matrix<T>>> load_mnist(const std::string& path) {
     std::cout << "Loading mnist data from " << path << std::endl;
     std::vector<std::tuple<int,math::matrix<T>>> inputs;
     std::ifstream ifs(path);
@@ -324,7 +324,7 @@ std::vector<std::tuple<int,math::matrix<T>>> load_mnist(std::string path) {
 
 
 
-math::matrix<T> load(std::string path, uint r, uint c, bool greyscale) {
+math::matrix<T> load(const std::string& path, uint r, uint c, bool greyscale) {
     using MagickCore::Quantum;
     const uint QMAX = QuantumRange;
     Magick::Image image(path);

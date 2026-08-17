@@ -29,7 +29,7 @@
 namespace jlib {
     namespace media {
         
-        Roll::Roll(int id, stream* s, std::string name, std::string sample, std::string data) 
+        Roll::Roll(int id, stream* s, const std::string& name, const std::string& sample, const std::string& data) 
             : m_pattern(data.length())
         {
             set_id(id);
@@ -53,10 +53,10 @@ namespace jlib {
         void Roll::set_id(int id) { m_id = id; }
         
         std::string Roll::get_sample() const { return m_sample; }
-        void Roll::set_sample(std::string sample) { m_sample = std::move(sample); }
+        void Roll::set_sample(const std::string& sample) { m_sample = std::move(sample); }
         
         std::string Roll::get_name() const { return m_name; }
-        void Roll::set_name(std::string name) { m_name = std::move(name); }
+        void Roll::set_name(const std::string& name) { m_name = std::move(name); }
         
         Roll::reference Roll::operator[](int i) {
             return m_pattern[i];
@@ -79,7 +79,7 @@ namespace jlib {
         }
         
         
-        Pattern::Pattern(int id, std::string name) {
+        Pattern::Pattern(int id, const std::string& name) {
             m_id = id;
             m_name = name;
             m_roll_id_max = 0;
@@ -93,7 +93,7 @@ namespace jlib {
         void Pattern::set_id(int id) { m_id = id; }
         
         std::string Pattern::get_name() const { return m_name; }
-        void Pattern::set_name(std::string name) { m_name = std::move(name); }
+        void Pattern::set_name(const std::string& name) { m_name = std::move(name); }
         
         Pattern::reference Pattern::operator[](int i) {
             return m_rolls[i];
@@ -115,7 +115,7 @@ namespace jlib {
 
         PlayList::PlayList() { m_pattern_id_max = 0; }
 
-        PlayList::PlayList(int id, std::string name) { 
+        PlayList::PlayList(int id, const std::string& name) { 
             set_id(id);
             set_name(name);
             m_pattern_id_max = 0; 
@@ -127,7 +127,7 @@ namespace jlib {
         void PlayList::set_id(int id) { m_id = id; }
         
         std::string PlayList::get_name() const { return m_name; }
-        void PlayList::set_name(std::string name) { m_name = std::move(name); }
+        void PlayList::set_name(const std::string& name) { m_name = std::move(name); }
 
         int PlayList::get_bpm() const { return m_bpm; }
         void PlayList::set_bpm(int bpm) { m_bpm = bpm; }

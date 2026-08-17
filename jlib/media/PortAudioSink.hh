@@ -88,7 +88,7 @@ protected:
     const std::string& convert(const std::string& pcm, std::string& scratch) const;
 
     void start();
-    [[noreturn]] void throw_pa(std::string ctx, PaError err) const;
+    [[noreturn]] void throw_pa(const std::string& ctx, PaError err) const;
 
     PaStream* m_stream;
     PaSampleFormat m_pa_format;

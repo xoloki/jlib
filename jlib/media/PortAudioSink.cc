@@ -81,7 +81,7 @@ PortAudioSink::~PortAudioSink() {
     }
 }
 
-void PortAudioSink::throw_pa(std::string ctx, PaError err) const {
+void PortAudioSink::throw_pa(const std::string& ctx, PaError err) const {
     std::ostringstream o;
     o << ctx << " failed: " << Pa_GetErrorText(err);
 

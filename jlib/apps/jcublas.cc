@@ -31,7 +31,7 @@ using namespace jlib::util;
 
 typedef float T;
 
-math::matrix<T> load(std::string path, uint r, uint c, bool greyscale = true);
+math::matrix<T> load(const std::string& path, uint r, uint c, bool greyscale = true);
 char convert(int n);
 int convert(char c);
 char capitalize(char c);
@@ -365,7 +365,7 @@ int main(int argc, char** argv) {
     return 0;
 }
 
-math::matrix<T> load(std::string path, uint r, uint c, bool greyscale) {
+math::matrix<T> load(const std::string& path, uint r, uint c, bool greyscale) {
     using MagickCore::Quantum;
     const uint QMAX = QuantumRange;
     Magick::Image image(path);

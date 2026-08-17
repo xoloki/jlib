@@ -38,7 +38,7 @@ namespace jlib {
 
             virtual void on_init();
 
-            virtual void on_set_password(std::string password);
+            virtual void on_set_password(const std::string& password);
 
             virtual void on_list_folders();
 

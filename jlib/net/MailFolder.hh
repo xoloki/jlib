@@ -154,7 +154,7 @@ namespace jlib {
 
             Email copy(unsigned int i) { return get(i); }
 
-            void sort_field(std::string field) { m_sort_field = std::move(field); }
+            void sort_field(const std::string& field) { m_sort_field = std::move(field); }
             std::string sort_field() { return m_sort_field; }
 
             void filter_rules(std::multimap<std::string,std::string>& rules) { m_filter_rules = rules; }

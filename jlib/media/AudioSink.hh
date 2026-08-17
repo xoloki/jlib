@@ -49,7 +49,7 @@ class AudioSink {
 public:
     class exception : public std::exception {
     public:
-        exception(std::string msg = "") {
+        exception(const std::string& msg = "") {
             m_msg = "jlib::media::AudioSink exception" + (msg != "" ? (": " + msg) : "");
         }
         virtual ~exception() noexcept {}

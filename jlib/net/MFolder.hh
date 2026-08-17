@@ -28,7 +28,7 @@ namespace jlib {
         
         class MFolderBuffer : public FolderBuffer {
         public:
-            MFolderBuffer(std::string path);
+            MFolderBuffer(const std::string& path);
 
             virtual ~MFolderBuffer();
             
@@ -65,7 +65,7 @@ namespace jlib {
         
         class MFolder : public MailFolder {
         public:
-            MFolder(std::string path)
+            MFolder(const std::string& path)
                 : MailFolder(NULL)
             {
                 // Straight to init, which owns it.  This assigned the base's

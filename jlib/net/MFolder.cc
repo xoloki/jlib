@@ -42,7 +42,7 @@ namespace jlib {
     namespace net {
 
 
-        MFolderBuffer::MFolderBuffer(std::string path) {
+        MFolderBuffer::MFolderBuffer(const std::string& path) {
             m_scan_begin = 0;
             m_path = path;
             std::ofstream ofs(m_path.c_str(),std::ios_base::out | std::ios_base::app);

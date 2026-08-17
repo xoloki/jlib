@@ -64,7 +64,7 @@ namespace jlib {
             }
         }
 
-        void ASImapBox::on_set_password(std::string password) {
+        void ASImapBox::on_set_password(const std::string& password) {
             m_url.set_pass(password);
             m_pass = password;
         }

@@ -105,7 +105,7 @@ namespace jlib {
 
             MailBoxRequest(request_type t);
 
-            MailBoxRequest(request_type t, std::string p);
+            MailBoxRequest(request_type t, const std::string& p);
 
             MailBoxRequest(request_type t, folder_info_type src, 
                            folder_indx_type indx=folder_indx_type());
@@ -175,7 +175,7 @@ namespace jlib {
 
             MailBoxResponse(response_type t);
 
-            MailBoxResponse(response_type t, std::string text, float p=0);
+            MailBoxResponse(response_type t, const std::string& text, float p=0);
 
             MailBoxResponse(response_type t, folder_info_type src, 
                             folder_indx_type indx=folder_indx_type());
@@ -210,7 +210,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = std::string("jlib::net::ASMailBox exception")+( (msg=="")?"":": ")+msg;
                 }
                 virtual ~exception() throw() {}
@@ -229,7 +229,7 @@ namespace jlib {
 
             void init();
             void reinit();
-            void set_password(std::string password);
+            void set_password(const std::string& password);
             void list_folders();
 
             void create_folder(folder_info_type folder);
@@ -253,7 +253,7 @@ namespace jlib {
 
 
             virtual void on_init() = 0;
-            virtual void on_set_password(std::string password) = 0;
+            virtual void on_set_password(const std::string& password) = 0;
 
             virtual void on_list_folders() = 0;
 

@@ -30,7 +30,7 @@ namespace jlib {
     namespace util {
         
         
-        std::string MimeType::get_type_from_file(std::string path) {
+        std::string MimeType::get_type_from_file(const std::string& path) {
             //return gnome_mime_type_of_file(path.c_str());
             std::string out, err;
             sys::shell("file "+path, out, err);
@@ -38,7 +38,7 @@ namespace jlib {
             return parse_file_output(out);
         }
 
-        std::string MimeType::get_type_from_data(std::string data) {
+        std::string MimeType::get_type_from_data(const std::string& data) {
             std::string ret;
             std::string out, err;
             jlib::sys::tfstream in;
@@ -49,10 +49,11 @@ namespace jlib {
             return parse_file_output(out);
         }
 
-        std::string MimeType::parse_file_output(std::string data) {
-            if(data.find(":") != std::string::npos) {
-                data = data.substr(data.find(":"));
-            }
+        std::string MimeType::parse_file_output(const std::string& data) {
+            // On a local: this overwrote its own parameter.
+            const std::string body = (data.find(":") != std::string::npos)
+                ? data.substr(data.find(":"))
+                : data;
             std::string ret;
 
             if(icontains(data, "image")) {

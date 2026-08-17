@@ -120,7 +120,7 @@ namespace jlib {
 
             class exception : public std::exception {
             public:
-                exception(std::string msg = "date exception") : m_msg(msg) {}
+                exception(const std::string& msg = "date exception") : m_msg(msg) {}
                 virtual ~exception() throw() {}
                 virtual const char* what() const throw() { return m_msg.c_str(); }
             protected:
@@ -162,8 +162,8 @@ namespace jlib {
              */
             virtual void set(struct tm* t);
             
-            virtual std::string get(std::string fmt="%a, %d %b %Y %H:%M:%S %z") const;
-            virtual void set(std::string s, std::string fmt="%O");
+            virtual std::string get(const std::string& fmt="%a, %d %b %Y %H:%M:%S %z") const;
+            virtual void set(const std::string& s, const std::string& fmt="%O");
             
             /**
              * return the current date as a time_t
@@ -183,14 +183,14 @@ namespace jlib {
             /**
              * given a month as string, return it's integer rep
              */
-            int find_month(std::string s, name_format f) const;
-            int find_weekday(std::string s, name_format f) const;
+            int find_month(const std::string& s, name_format f) const;
+            int find_weekday(const std::string& s, name_format f) const;
             
             /**
              * recursively build date std::string from current tm and passed
              * fmt string
              */
-            std::string build_date(std::string fmt) const;
+            std::string build_date(const std::string& fmt) const;
             
             /**
              * recursively build tm from passed date s and format fmt
@@ -199,7 +199,7 @@ namespace jlib {
              * the clustered directives are ignored, as are the day of week
              * and day of year
              */
-            void build_date(std::istream& is, std::string fmt);
+            void build_date(std::istream& is, const std::string& fmt);
             
             /**
              * automagically parse the date string, building a best
@@ -218,35 +218,35 @@ namespace jlib {
              * get rid of punctuation 
              *
              */
-            std::string sanitize(std::string s) const;
+            std::string sanitize(const std::string& s) const;
             
             /**
              * is the entire std::string alpha
              *
              */
-            bool is_alpha(std::string s) const;
+            bool is_alpha(const std::string& s) const;
             
             /**
              * is the entire std::string digit
              *
              */
-            bool is_digit(std::string s) const;
+            bool is_digit(const std::string& s) const;
             
-            bool is_time(std::string s) const;
-            bool is_timezone(std::string s) const;
-            bool is_date(std::string s) const;
+            bool is_time(const std::string& s) const;
+            bool is_timezone(const std::string& s) const;
+            bool is_date(const std::string& s) const;
             
             /**
              * return the format std::string for the passed date
              *
              */
-            std::string which_date(std::string s) const;
+            std::string which_date(const std::string& s) const;
             
             /**
              * convert the std::string to first letter uppercase, ow lower
              *
              */
-            std::string first_upper(std::string s) const;
+            std::string first_upper(const std::string& s) const;
             
             /**
              * print the contents of each member of the struct tm*

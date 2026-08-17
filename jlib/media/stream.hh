@@ -46,7 +46,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = std::string("jlib::media::basic_streambuf::exception")+(msg==""?"":": ")+msg;
                 }
                 virtual ~exception() throw() {}

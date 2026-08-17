@@ -48,7 +48,7 @@ namespace jlib {
         
         class util_exception : public std::exception {
         public:
-            util_exception(std::string p_msg = "") {
+            util_exception(const std::string& p_msg = "") {
                 m_msg = "util exception: "+p_msg;
             }
             virtual ~util_exception() throw() {}
@@ -63,12 +63,12 @@ namespace jlib {
          * @param s std::string to convert
          * @return s with all characters in upper case
          */
-        std::string upper(std::string s);
+        std::string upper(const std::string& s);
 
         /**
          * make the first character and every char following a '-' caps
          */
-        std::string studly_caps(std::string s);
+        std::string studly_caps(const std::string& s);
         
         /**
          * Convert to lower case.
@@ -76,7 +76,7 @@ namespace jlib {
          * @param s std::string to convert
          * @return s with all characters in upper case
          */
-        std::string lower(std::string s);
+        std::string lower(const std::string& s);
         
         /**
          * Tokenize this std::string with the given delimiter.
@@ -86,9 +86,9 @@ namespace jlib {
          * @return vector of strings
          */
 
-        std::vector<std::string> tokenize(std::string s, std::string d = " ", bool split_delim = true);
+        std::vector<std::string> tokenize(const std::string& s, const std::string& d = " ", bool split_delim = true);
 
-        std::list<std::string> tokenize_list(std::string s, std::string d = "/", bool split_delim = false);
+        std::list<std::string> tokenize_list(const std::string& s, const std::string& d = "/", bool split_delim = false);
         
         /**
          * Get a std::string from an int.
@@ -127,8 +127,8 @@ namespace jlib {
          * @param base radix to use on conversion
          * @return s converted to int
          */
-        int intValue(std::string s, int base = 10);
-        int int_value(std::string s, int base = 10);
+        int intValue(const std::string& s, int base = 10);
+        int int_value(const std::string& s, int base = 10);
         
         /**
          * Get a double from a string.
@@ -136,11 +136,11 @@ namespace jlib {
          * @param s std::string to convert to double
          * @return s converted to double
          */
-        double doubleValue(std::string s);
-        double double_value(std::string s);
+        double doubleValue(const std::string& s);
+        double double_value(const std::string& s);
 
         std::string hex_value(unsigned char c, bool upper=false);
-        std::string hex_value(std::string s, bool upper=false);
+        std::string hex_value(const std::string& s, bool upper=false);
         std::string hex_value(const unsigned char* data, std::size_t size, bool upper=false, bool space=false);
         
         /**
@@ -149,7 +149,7 @@ namespace jlib {
          * @param s std::string to chip
          * @return s without leading whitespace
          */
-        std::string chip(std::string s);
+        std::string chip(const std::string& s);
         
         /**
          * Remove whitespace from end of passed string.
@@ -157,7 +157,7 @@ namespace jlib {
          * @param s std::string to chop
          * @return s without trailing whitespace
          */
-        std::string chop(std::string s);
+        std::string chop(const std::string& s);
         
         /**
          * Remove whitespace from beginning and end of passed string.
@@ -165,7 +165,7 @@ namespace jlib {
          * @param s std::string to trim
          * @return s without leading or trailing whitespace
          */
-        std::string trim(std::string s);
+        std::string trim(const std::string& s);
         
         /**
          * Remove characters between passed delimiters
@@ -175,7 +175,7 @@ namespace jlib {
          * @param d2 ending delimiter
          * @return s without d1, d2, or anything between
          */
-        std::string excise(std::string s, std::string d1, std::string d2);
+        std::string excise(const std::string& s, const std::string& d1, const std::string& d2);
         
         /**
          * Remove characters except between passed delimiters
@@ -185,7 +185,7 @@ namespace jlib {
          * @param d2 ending delimiter
          * @return s between d1 and d2, or unchanged if s doesn't contain d1 and d2
          */
-        std::string slice(std::string s, std::string d1, std::string d2);
+        std::string slice(const std::string& s, const std::string& d1, const std::string& d2);
         
         /**
          * Tell if t is a substd::string of s
@@ -194,7 +194,7 @@ namespace jlib {
          * @param t needle
          * @return true if s contains t, ow false
          */
-        bool contains(std::string s, std::string t);
+        bool contains(const std::string& s, const std::string& t);
         
         /**
          * Tell if s begins with t.
@@ -203,7 +203,7 @@ namespace jlib {
          * @param t needle
          * @return true if s begins with t, ow false
          */
-        bool begins(std::string s, std::string t);
+        bool begins(const std::string& s, const std::string& t);
         
         /**
          * Tell if s ends with t.
@@ -212,7 +212,7 @@ namespace jlib {
          * @param t needle
          * @return true if s ends with t, ow false
          */
-        bool ends(std::string s, std::string t);
+        bool ends(const std::string& s, const std::string& t);
         
         /**
          * Tell if t is a substd::string of s
@@ -221,7 +221,7 @@ namespace jlib {
          * @param t needle
          * @return true if s contains t, ow false
          */
-        bool icontains(std::string s, std::string t);
+        bool icontains(const std::string& s, const std::string& t);
         
         /**
          * Tell if s begins with t.
@@ -230,7 +230,7 @@ namespace jlib {
          * @param t needle
          * @return true if s begins with t, ow false
          */
-        bool ibegins(std::string s, std::string t);
+        bool ibegins(const std::string& s, const std::string& t);
         
         /**
          * Tell if s ends with t.
@@ -239,7 +239,7 @@ namespace jlib {
          * @param t needle
          * @return true if s ends with t, ow false
          */
-        bool iends(std::string s, std::string t);
+        bool iends(const std::string& s, const std::string& t);
         
         /**
          * Tell if s equals t, case insensitive.
@@ -248,9 +248,9 @@ namespace jlib {
          * @param t str2
          * @return true if s equals t, ow false
          */
-        bool iequals(std::string s, std::string t);
+        bool iequals(const std::string& s, const std::string& t);
 
-        bool imaps(const std::map<std::string,std::string>& m, std::string key, std::string val);
+        bool imaps(const std::map<std::string,std::string>& m, const std::string& key, const std::string& val);
         
         // These read a T out of a byte buffer at an arbitrary offset, so the
         // address is not generally aligned for T.  Doing that by casting the
@@ -258,7 +258,7 @@ namespace jlib {
         // strict aliasing -- and -fsanitize=alignment traps it.  memcpy
         // expresses the same thing legally and compiles to the same load.
         template<class T>
-        T get(std::string s, unsigned int offset=0) {
+        T get(const std::string& s, unsigned int offset=0) {
             T t;
             std::memcpy(&t, s.data() + offset, sizeof(T));
             return t;
@@ -342,14 +342,14 @@ namespace jlib {
         namespace xml {
             std::string encode(const std::string& s);
             std::string decode(const std::string& s);
-            std::string recode(std::string s, const std::map<std::string,std::string>& codec);
+            std::string recode(const std::string& s, const std::map<std::string,std::string>& codec);
         }
        
         namespace file {
 
-            struct stat getstat(std::string path);
-            long size(std::string path);
-            long mtime(std::string path);
+            struct stat getstat(const std::string& path);
+            long size(const std::string& path);
+            long mtime(const std::string& path);
             
             /**
              * slice out from the file at path the regions marked in pts
@@ -359,7 +359,7 @@ namespace jlib {
              *
              * the idea here is to kget rid of these regions, and keep the rest
              */
-            void kill(std::string path, std::vector<long>& pts);
+            void kill(const std::string& path, std::vector<long>& pts);
 
             /**
              * slice out from the file at path the regions marked in pts
@@ -369,7 +369,7 @@ namespace jlib {
              *
              * the idea here is to keep these regions, and get rid of the rest
              */
-            void keep(std::string path, std::vector<long>& pts);
+            void keep(const std::string& path, std::vector<long>& pts);
 
         }
     }

@@ -73,13 +73,13 @@ namespace jlib {
             
             // node methods
             
-            node::node(std::string name) 
+            node::node(const std::string& name) 
             { 
                 set_type(node::internal);
                 set_name(name);
             }
 
-            node::ptr node::create(std::string name) {
+            node::ptr node::create(const std::string& name) {
                 return node::ptr(new node(name));
             }
 
@@ -184,7 +184,7 @@ namespace jlib {
                 return true;
             }
             
-            std::string node::get_attribute(std::string key) const {
+            std::string node::get_attribute(const std::string& key) const {
                 attributes::const_iterator i=m_attributes.find(key);
                 if(i != m_attributes.end())
                     return i->second;
@@ -192,7 +192,7 @@ namespace jlib {
                     return std::string();
             }
 
-            void node::set_attribute(std::string key, std::string val) {
+            void node::set_attribute(const std::string& key, const std::string& val) {
                 attributes::iterator i=m_attributes.find(key);
                 if(i != m_attributes.end())
                     i->second = val;

@@ -48,7 +48,7 @@ public:
         glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, fcolors);
     }
 
-    void key_pressed(std::string key, int x, int y) {
+    void key_pressed(const std::string& key, int x, int y) {
         HyperPlot<T, PlotType>::key_pressed(key[0], x, y);
     }
 

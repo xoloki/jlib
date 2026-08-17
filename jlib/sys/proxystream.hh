@@ -42,8 +42,8 @@ public:
     
     static const unsigned int BUF_SIZE = 1024;
     
-    basic_proxybuf(std::string host, u_int port,
-                   std::string phost, u_int pport) 
+    basic_proxybuf(const std::string& host, u_int port,
+                   const std::string& phost, u_int pport) 
         : basic_socketbuf<charT,traitT>(phost,pport),
         m_proxy_host(host),
         m_proxy_port(port)
@@ -135,16 +135,16 @@ public:
         : basic_socketstream<charT,traitT>()
     {}
     
-    basic_proxystream(std::string host, unsigned int port,
-                      std::string phost, u_int pport) 
+    basic_proxystream(const std::string& host, unsigned int port,
+                      const std::string& phost, u_int pport) 
         : basic_socketstream<charT,traitT>()
     {
         this->m_buf=new basic_proxybuf<charT,traitT>(host,port,phost,pport);
         this->init(this->m_buf);
     }
             
-    void open(std::string host, unsigned int port,
-              std::string phost, u_int pport) 
+    void open(const std::string& host, unsigned int port,
+              const std::string& phost, u_int pport) 
     {
         this->m_buf=new basic_proxybuf<charT,traitT>(host,port,phost,pport);
         this->init(this->m_buf);

@@ -41,7 +41,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = std::string("jlib::media::basic_databuf::exception")+(msg==""?"":": ")+msg;
                 }
                 virtual ~exception() throw() {}
@@ -59,7 +59,7 @@ namespace jlib {
             static const unsigned int BUF_SIZE = 1024;
             
             basic_databuf();
-            basic_databuf(std::string data);
+            basic_databuf(const std::string& data);
             
             virtual int_type underflow();
             //virtual int_type overflow(int_type c=traits_type::eof());
@@ -72,7 +72,7 @@ namespace jlib {
                                      std::ios_base::openmode = std::ios_base::in | std::ios_base::out);
 
             const std::string& get_data() const; 
-            void set_data(std::string s);
+            void set_data(const std::string& s);
 
         protected:
             std::string m_data;
@@ -82,10 +82,10 @@ namespace jlib {
         class basic_datastream : public basic_stream<charT,traitT> {
         public:
             basic_datastream();
-            basic_datastream(std::string data);
+            basic_datastream(const std::string& data);
             
             const std::string& get_data() const; 
-            void set_data(std::string s);
+            void set_data(const std::string& s);
 
             static basic_datastream<charT,traitT>* create_scaled(basic_stream<charT,traitT>* s);
 
@@ -105,7 +105,7 @@ namespace jlib {
         
         template< typename charT, typename traitT >
         inline
-        basic_databuf<charT,traitT>::basic_databuf(std::string data) 
+        basic_databuf<charT,traitT>::basic_databuf(const std::string& data) 
             : basic_streambuf<charT,traitT>()
         {
             set_data(std::move(data));
@@ -127,7 +127,7 @@ namespace jlib {
 
         template< typename charT, typename traitT >
         inline
-        void basic_databuf<charT,traitT>::set_data(std::string data) {
+        void basic_databuf<charT,traitT>::set_data(const std::string& data) {
             m_data = std::move(data);
             this->set_length(m_data.length());
         }
@@ -296,7 +296,7 @@ namespace jlib {
         
         template< typename charT, typename traitT >
         inline
-        basic_datastream<charT,traitT>::basic_datastream(std::string data) 
+        basic_datastream<charT,traitT>::basic_datastream(const std::string& data) 
             : basic_stream<charT,traitT>()
         {
             this->m_buf.reset(new basic_databuf<charT,traitT>(std::move(data)));
@@ -320,7 +320,7 @@ namespace jlib {
         template< typename charT, typename traitT >
         inline
         void
-        basic_datastream<charT,traitT>::set_data(std::string data) 
+        basic_datastream<charT,traitT>::set_data(const std::string& data) 
         {
             if(!this->m_buf)
                 throw basic_databuf<charT,traitT>::exception("this->m_buf == null");

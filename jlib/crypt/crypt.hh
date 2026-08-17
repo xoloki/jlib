@@ -36,7 +36,7 @@ namespace jlib {
 
         class exception : public std::exception {
         public:
-            exception(std::string msg = "") {
+            exception(const std::string& msg = "") {
                 m_msg = std::string("jlib::crypt exception")+( (msg=="")?"":": ")+msg;
             }
             virtual ~exception() throw() {}
@@ -55,7 +55,7 @@ namespace jlib {
                         std::string(gpg_strsource(err)) + ":" +
                         std::string(gpg_strerror(err));
                 }
-                exception(std::string s) {
+                exception(const std::string& s) {
                     m_msg = ("jlib::crypt::gpg::exception: " + s);
                 }
                 virtual ~exception() throw() {}
@@ -76,14 +76,14 @@ namespace jlib {
                 typedef std::shared_ptr<data> ptr;
 
                 static ptr create(const char* data, size_t n, bool copy = true);
-                static ptr create(std::string data);
-                static ptr create(std::string file, bool copy);
+                static ptr create(const std::string& data);
+                static ptr create(const std::string& file, bool copy);
                 static ptr create();
 
             protected:
                 data(const char* data, size_t n, bool copy = true);
-                data(std::string data);
-                data(std::string file, bool copy);
+                data(const std::string& data);
+                data(const std::string& file, bool copy);
                 data();
 
             public:
@@ -100,7 +100,7 @@ namespace jlib {
                 gpgme_data_encoding_t get_encoding();
 
                 std::string read(int n = -1);
-                void write(std::string data);
+                void write(const std::string& data);
 
                 off_t seek(off_t offset, int whence);
                 void rewind();
@@ -143,7 +143,7 @@ namespace jlib {
                 void set_passphrase_cb(gpgme_passphrase_cb_t cb, void* hook = 0);
                 void set_progress_cb(gpgme_progress_cb_t cb, void* hook = 0);
 
-                void op_keylist_start(std::string ptrn = "", bool secret_only = false);
+                void op_keylist_start(const std::string& ptrn = "", bool secret_only = false);
                 key::ptr op_keylist_next();
                 void op_keylist_end();
 
@@ -168,17 +168,17 @@ namespace jlib {
             void init(gpgme_protocol_t proto = GPGME_PROTOCOL_OpenPGP);
             //GpgmeIdleFunc register_idle(GpgmeIdleFunc idle);
             
-            key::list list_keys(std::string id, bool secret_only = false);
+            key::list list_keys(const std::string& id, bool secret_only = false);
 
-            std::string verify(std::string sig);
-            std::string verify(std::string sig,std::list<std::string> data);
+            std::string verify(const std::string& sig);
+            std::string verify(const std::string& sig,std::list<std::string> data);
 
-            std::string decrypt(std::string text, std::string pass);
-            std::string decrypt(std::string text, std::string pass, std::string& out);
+            std::string decrypt(const std::string& text, const std::string& pass);
+            std::string decrypt(const std::string& text, const std::string& pass, std::string& out);
 
-            std::string sign(std::string from, std::string data, std::string pass);
-            std::string encrypt(std::string to, std::string data);
-            std::string sign_encrypt(std::string from, std::string to, std::string data, std::string pass);
+            std::string sign(const std::string& from, const std::string& data, const std::string& pass);
+            std::string encrypt(const std::string& to, const std::string& data);
+            std::string sign_encrypt(const std::string& from, const std::string& to, const std::string& data, const std::string& pass);
         }
     }
 }

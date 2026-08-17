@@ -74,7 +74,7 @@ const GLdouble H = 2.3;
 
 bool paused = false;
 
-void on_keyboard(std::string key, int x, int y);
+void on_keyboard(const std::string& key, int x, int y);
 void on_mouse(int button, int x, int y);
 void on_idle(glx::Window& window);
 void increment(GLdouble& rad, const GLdouble& inc);
@@ -155,7 +155,7 @@ void on_mouse(int button, int x, int y) {
     
 }
 
-void on_keyboard(std::string key,int x,int y) {
+void on_keyboard(const std::string& key,int x,int y) {
     if(key == "q") {
         std::exit(0);
     } else if(key == " ") {

@@ -45,7 +45,7 @@ namespace jlib {
 
 
         ListItem::ListItem() {}
-        ListItem::ListItem(std::string line) {
+        ListItem::ListItem(const std::string& line) {
             unsigned int i,j;
             i = line.find("(");
             j = line.find(")",i+1);
@@ -301,7 +301,7 @@ namespace jlib {
         }
 
         std::string Imap4::retrieve_headers(unsigned int which, 
-                                       std::string mailbox,
+                                       const std::string& mailbox,
                                        unsigned int& size)
         {
             sys::socketstream* sock;
@@ -319,7 +319,7 @@ namespace jlib {
         }
         std::string Imap4::retrieve_headers(sys::socketstream& sock, 
                                        unsigned int which, 
-                                       std::string mailbox,
+                                       const std::string& mailbox,
                                        unsigned int& size) {
 
             std::string buf;
@@ -364,7 +364,7 @@ namespace jlib {
             return ret;            
         }
 
-        std::string Imap4::retrieve(int which, std::string mailbox) {
+        std::string Imap4::retrieve(int which, const std::string& mailbox) {
             sys::socketstream* sock;
             sock = connect();
             login(*sock);
@@ -379,7 +379,7 @@ namespace jlib {
             return ret;
         }
 
-        std::string Imap4::retrieve(sys::socketstream& sock, int which, std::string mailbox) 
+        std::string Imap4::retrieve(sys::socketstream& sock, int which, const std::string& mailbox) 
         {
             std::string buf;
             //std::vector<std::string> info;
@@ -492,7 +492,7 @@ namespace jlib {
             m_state = UnConnected;
         }
         
-        void Imap4::remove(int which, std::string mailbox) {
+        void Imap4::remove(int which, const std::string& mailbox) {
             sys::socketstream* sock;
             sock = connect();
             login(*sock);
@@ -508,7 +508,7 @@ namespace jlib {
         }
         
         /*
-        bool Imap4::internal(std::string data) {
+        bool Imap4::internal(const std::string& data) {
             return util::contains(data, INTERNAL);
         }
         */
@@ -523,7 +523,7 @@ namespace jlib {
             return true;
         }
 
-        std::vector<std::string> Imap4::handshake(sys::socketstream& sock, std::string data) {
+        std::vector<std::string> Imap4::handshake(sys::socketstream& sock, const std::string& data) {
             std::string buf;
             std::string com = tag(1)+" "+data;
             std::vector<std::string> ret;
@@ -676,10 +676,10 @@ namespace jlib {
             handshake(sock,"LOGOUT");
             m_state = UnConnected;
         }
-        void Imap4::authenticate(sys::socketstream& sock,std::string name) {
+        void Imap4::authenticate(sys::socketstream& sock, const std::string& name) {
             handshake(sock,"AUTHENTICATE "+name);
         }
-        void Imap4::login(sys::socketstream& sock, std::string user, std::string pass) {
+        void Imap4::login(sys::socketstream& sock, const std::string& user, const std::string& pass) {
             if(user!="" && pass != "") {
                 handshake(sock,"LOGIN "+user+" "+pass);
             }
@@ -689,37 +689,37 @@ namespace jlib {
             m_state = Authenticated;
         }
 
-        std::vector<std::string> Imap4::select(sys::socketstream& sock, std::string path) {
+        std::vector<std::string> Imap4::select(sys::socketstream& sock, const std::string& path) {
             std::vector<std::string> config = handshake(sock,"SELECT \""+path+"\"");
             parse(config);
             m_state = Selected;
             return config;
         }
         
-        std::vector<std::string> Imap4::examine(sys::socketstream& sock, std::string path) {
+        std::vector<std::string> Imap4::examine(sys::socketstream& sock, const std::string& path) {
             std::vector<std::string> ret = handshake(sock,"EXAMINE \""+path+"\"");
             parse(ret);
             m_state = Selected;
             return ret;
         }
 
-        void Imap4::create(sys::socketstream& sock, std::string path) {
+        void Imap4::create(sys::socketstream& sock, const std::string& path) {
             handshake(sock,"CREATE \""+path+"\"");
         }
-        void Imap4::remove(sys::socketstream& sock, std::string path) {
+        void Imap4::remove(sys::socketstream& sock, const std::string& path) {
             handshake(sock,"DELETE \""+path+"\"");
         }
-        void Imap4::rename(sys::socketstream& sock, std::string old_name, std::string new_name) {
+        void Imap4::rename(sys::socketstream& sock, const std::string& old_name, const std::string& new_name) {
             handshake(sock,"RENAME \""+old_name+"\" \""+new_name+"\"");
         }
-        void Imap4::subscribe(sys::socketstream& sock, std::string path) {
+        void Imap4::subscribe(sys::socketstream& sock, const std::string& path) {
             handshake(sock,"SUBSCRIBE \""+path+"\"");
         }
-        void Imap4::unsubscribe(sys::socketstream& sock, std::string path) {
+        void Imap4::unsubscribe(sys::socketstream& sock, const std::string& path) {
             handshake(sock,"UNSUBSCRIBE \""+path+"\"");
         }
 
-        std::vector<ListItem> Imap4::list(sys::socketstream& sock, std::string ref, std::string path) {
+        std::vector<ListItem> Imap4::list(sys::socketstream& sock, const std::string& ref, const std::string& path) {
             std::vector<ListItem> ret;
             std::vector<std::string> ls = handshake(sock,"LIST \""+ref+"\" \""+path+"\"");
             for(unsigned int i=0;i<ls.size()-1;i++) {
@@ -728,7 +728,7 @@ namespace jlib {
             return ret;
         }
 
-        std::vector<ListItem> Imap4::lsub(sys::socketstream& sock, std::string ref, std::string path) {
+        std::vector<ListItem> Imap4::lsub(sys::socketstream& sock, const std::string& ref, const std::string& path) {
             std::vector<ListItem> ret;
             std::vector<std::string> ls = handshake(sock,"LIST \""+ref+"\" \""+path+"\"");
             for(unsigned int i=0;i<ls.size()-1;i++) {
@@ -737,9 +737,12 @@ namespace jlib {
             return ret;
         }
 
-        void Imap4::append(sys::socketstream& sock, std::string path, std::string data, std::string flag, std::string date) {
+        void Imap4::append(sys::socketstream& sock, const std::string& path, const std::string& data, const std::string& flag, const std::string& date) {
             std::string buf;
-            path = (path == "INBOX" ? path : (m_url.get_path_no_slash() + path));
+
+            // On a local; this overwrote its own parameter.
+            const std::string box =
+                (path == "INBOX" ? path : (m_url.get_path_no_slash() + path));
             tag(1);
             if(getenv("JLIB_NET_IMAP4_DEBUG")) {
                 std::cout << tag() << " APPEND \""<<path<<"\" ("<<flag<<") {"<<data.length()<<"}"<<std::endl;
@@ -791,7 +794,7 @@ namespace jlib {
             handshake(sock,"EXPUNGE");
         }
 
-        std::vector<std::string> Imap4::search(sys::socketstream& sock, std::string criteria, std::string spec) {
+        std::vector<std::string> Imap4::search(sys::socketstream& sock, const std::string& criteria, const std::string& spec) {
             std::vector<std::string> ret = handshake(sock,"");
             return ret;
         }
@@ -815,7 +818,7 @@ namespace jlib {
             return ret;            
         }
 
-        std::vector<std::string> Imap4::store(sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, std::string key, std::vector<std::string> val) {
+        std::vector<std::string> Imap4::store(sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, const std::string& key, std::vector<std::string> val) {
             std::ostringstream cmd;
             cmd << "STORE "<<set.first<<":"<<set.second<<" "<<key<<" (";
             for(unsigned int i=0;i<val.size();i++) {
@@ -830,14 +833,14 @@ namespace jlib {
             return ret;
         }
 
-        void Imap4::copy(sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, std::string box) {
+        void Imap4::copy(sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, const std::string& box) {
             std::string path = (box == "INBOX" ? box : (m_url.get_path_no_slash() + box));
             std::ostringstream cmd;
             cmd << "COPY " << set.first << ":" << set.second << " \"" << path << "\"";
             std::vector<std::string> ret = handshake(sock,cmd.str());
         }
         
-        std::vector<std::string> Imap4::uid(sys::socketstream& sock, std::string cmd, std::vector<std::string> arg) {
+        std::vector<std::string> Imap4::uid(sys::socketstream& sock, const std::string& cmd, std::vector<std::string> arg) {
             std::vector<std::string> ret = handshake(sock,"");
             return ret;
         }

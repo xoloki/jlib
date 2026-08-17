@@ -36,16 +36,17 @@ namespace jlib {
             
         }
 
-        Headers::Headers(std::string s) 
+        Headers::Headers(const std::string& s) 
             : m_length(0)
         {
             parse(s);
         }
 
         
-        std::string Headers::operator[](std::string key) const {
-            key = upper(key);
-            return get(key);
+        std::string Headers::operator[](const std::string& key) const {
+            // On a local; this overwrote its own parameter.
+            const std::string k = upper(key);
+            return get(k);
         }
 
         Headers::operator std::string() const {
@@ -75,14 +76,15 @@ namespace jlib {
             return o.str();
         }
         
-        std::string Headers::get(std::string key) const {
+        std::string Headers::get(const std::string& key) const {
             std::string charset;
             return get(key, charset);
         }
 
-        std::string Headers::get(std::string key, std::string& charset) const {
-            key = upper(key);
-            map_type::const_iterator i = m_charset_map.find(key);
+        std::string Headers::get(const std::string& key, std::string& charset) const {
+            // On a local; this overwrote its own parameter.
+            const std::string k = upper(key);
+            map_type::const_iterator i = m_charset_map.find(k);
             if(i != m_charset_map.end()) {
                 charset = i->second.front();
             }
@@ -95,16 +97,17 @@ namespace jlib {
             }
         }
 
-        void Headers::set(std::string key, std::string val) {
-            key = upper(key);
+        void Headers::set(const std::string& key, const std::string& val) {
+            // On a local; this overwrote its own parameter.
+            const std::string k = upper(key);
 
-            list_type& l = m_map[key];
+            list_type& l = m_map[k];
             l.clear();
             l.push_back(val);
 
-            list_type::iterator i = std::find(m_keys.begin(),m_keys.end(),key);
+            list_type::iterator i = std::find(m_keys.begin(),m_keys.end(),k);
             if(i == m_keys.end()) {
-                m_keys.push_back(key);
+                m_keys.push_back(k);
             }
             else {
                 i++;
@@ -112,18 +115,20 @@ namespace jlib {
             }
         }
 
-        void Headers::add(std::string key, std::string val) {
-            key = upper(key);
-            m_map[key].push_back(val);
-            m_keys.push_back(key);
+        void Headers::add(const std::string& key, const std::string& val) {
+            // On a local; this overwrote its own parameter.
+            const std::string k = upper(key);
+            m_map[k].push_back(val);
+            m_keys.push_back(k);
         }
 
         
-        void Headers::append(std::string key, std::string val) {
-            key = upper(key);
-            list_type& list = m_map[key];
+        void Headers::append(const std::string& key, const std::string& val) {
+            // On a local; this overwrote its own parameter.
+            const std::string k = upper(key);
+            list_type& list = m_map[k];
             if(list.size() == 0) {
-                add(key,val);
+                add(k,val);
             }
             else {
                 list.front() += val;
@@ -135,10 +140,11 @@ namespace jlib {
             return m_keys;
         }
 
-        Headers::list_type Headers::vals(std::string key) const {
-            key = upper(key);
+        Headers::list_type Headers::vals(const std::string& key) const {
+            // On a local; this overwrote its own parameter.
+            const std::string k = upper(key);
             
-            const_iterator i = find(key);
+            const_iterator i = find(k);
             if(i != end()) {
                 return i->second;
             }
@@ -148,7 +154,7 @@ namespace jlib {
         }
 
         
-        void Headers::parse(std::string s, bool uppercase) {
+        void Headers::parse(const std::string& s, bool uppercase) {
             // Moved into the stream rather than copied.  This took the whole
             // message by value and then copied it again into the istringstream,
             // so parsing a 2M message cost 4M before it read a byte.  Taking by
@@ -337,6 +343,10 @@ namespace jlib {
 
                 */
 
+        /**
+         * By value deliberately: val is the working buffer, decoded in place
+         * and returned.
+         */
         std::string Headers::decode(std::string val, std::string& charset) {
             //static jlib::util::Regex reg("(.*)=\\?(.+)\\?([QqBb])\\?(.+)\\?=(.*)");
             static const std::string BEGIN = "=?", END = "?=";
@@ -398,7 +408,7 @@ namespace jlib {
             return val;
         }
 
-        std::string Headers::encode(std::string val, std::string charset) {
+        std::string Headers::encode(const std::string& val, const std::string& charset) {
             bool high = false;
             std::string::size_type i = 0, p, x;
             std::string ret;
@@ -421,7 +431,7 @@ namespace jlib {
             return ret;
         }
 
-        std::string::size_type Headers::find_high(std::string val, std::string::size_type p) {
+        std::string::size_type Headers::find_high(const std::string& val, std::string::size_type p) {
             for(; p < val.length(); p++) {
                 if(static_cast<u_char>(val[p]) > 127) {
                     return p;
@@ -436,8 +446,8 @@ namespace jlib {
             return m_length;
         }
 
-            Headers::iterator Headers::find(std::string key) { return m_map.find(upper(key)); }
-            Headers::const_iterator Headers::find(std::string key) const { return m_map.find(upper(key)); }
+            Headers::iterator Headers::find(const std::string& key) { return m_map.find(upper(key)); }
+            Headers::const_iterator Headers::find(const std::string& key) const { return m_map.find(upper(key)); }
 
             Headers::iterator Headers::begin() { return m_map.begin(); }
             Headers::const_iterator Headers::begin() const { return m_map.begin(); }
@@ -452,19 +462,19 @@ namespace jlib {
 
             void Headers::clear() { m_map.clear(); }
 
-            Headers::list_type::iterator Headers::begin(std::string key) { return m_map.find(upper(key))->second.begin(); }
-            Headers::list_type::const_iterator Headers::begin(std::string key) const { return m_map.find(upper(key))->second.begin(); }
-            Headers::list_type::iterator Headers::end(std::string key) { return m_map.find(upper(key))->second.end(); }
-            Headers::list_type::const_iterator Headers::end(std::string key) const { return m_map.find(upper(key))->second.end(); }
-            Headers::list_type::reverse_iterator Headers::rbegin(std::string key) { return m_map.find(upper(key))->second.rbegin(); }
-            Headers::list_type::const_reverse_iterator Headers::rbegin(std::string key) const { return m_map.find(upper(key))->second.rbegin(); }
-            Headers::list_type::reverse_iterator Headers::rend(std::string key) { return m_map.find(upper(key))->second.rend(); }
-            Headers::list_type::const_reverse_iterator Headers::rend(std::string key) const { return m_map.find(upper(key))->second.rend(); }
-            bool Headers::empty(std::string key) const { return (m_map.find(upper(key)) == m_map.end() ||
+            Headers::list_type::iterator Headers::begin(const std::string& key) { return m_map.find(upper(key))->second.begin(); }
+            Headers::list_type::const_iterator Headers::begin(const std::string& key) const { return m_map.find(upper(key))->second.begin(); }
+            Headers::list_type::iterator Headers::end(const std::string& key) { return m_map.find(upper(key))->second.end(); }
+            Headers::list_type::const_iterator Headers::end(const std::string& key) const { return m_map.find(upper(key))->second.end(); }
+            Headers::list_type::reverse_iterator Headers::rbegin(const std::string& key) { return m_map.find(upper(key))->second.rbegin(); }
+            Headers::list_type::const_reverse_iterator Headers::rbegin(const std::string& key) const { return m_map.find(upper(key))->second.rbegin(); }
+            Headers::list_type::reverse_iterator Headers::rend(const std::string& key) { return m_map.find(upper(key))->second.rend(); }
+            Headers::list_type::const_reverse_iterator Headers::rend(const std::string& key) const { return m_map.find(upper(key))->second.rend(); }
+            bool Headers::empty(const std::string& key) const { return (m_map.find(upper(key)) == m_map.end() ||
                                                         m_map.find(upper(key))->second.empty()); }
-            Headers::size_type Headers::size(std::string key) const { return m_map.find(upper(key))->second.size(); }
+            Headers::size_type Headers::size(const std::string& key) const { return m_map.find(upper(key))->second.size(); }
 
-            void Headers::clear(std::string key) { if(!empty(upper(key))) m_map.find(upper(key))->second.clear(); }
+            void Headers::clear(const std::string& key) { if(!empty(upper(key))) m_map.find(upper(key))->second.clear(); }
 
             std::string Headers::get_charset() { 
                 return m_charset;

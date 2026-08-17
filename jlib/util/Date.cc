@@ -102,7 +102,7 @@ namespace jlib {
             m_time.tm_isdst = t->tm_isdst;
         }
         
-        int Date::find_month(std::string s, name_format f) const {
+        int Date::find_month(const std::string& s, name_format f) const {
             switch(f) {
             case SHORT:
                 for(int i=0; i<MONTH_MAX; i++) {
@@ -123,7 +123,7 @@ namespace jlib {
             }
         }
         
-        int Date::find_weekday(std::string s, name_format f) const {
+        int Date::find_weekday(const std::string& s, name_format f) const {
             switch(f) {
             case SHORT:
                 for(int i=0; i<WEEK_MAX; i++) {
@@ -152,7 +152,7 @@ namespace jlib {
 
             return mktime(&t);
         }
-        std::string Date::build_date(std::string fmt) const {
+        std::string Date::build_date(const std::string& fmt) const {
             std::ostringstream os;
             std::string::size_type i = fmt.find("%");
             
@@ -289,7 +289,7 @@ namespace jlib {
         }
         
         
-        void Date::build_date(std::istream& is, std::string fmt) {
+        void Date::build_date(std::istream& is, const std::string& fmt) {
             std::string::size_type i = fmt.find("%");
             
             int ibuf;
@@ -524,11 +524,11 @@ namespace jlib {
             build_date(is2,fmt);
         }
         
-        std::string Date::get(std::string fmt) const {
+        std::string Date::get(const std::string& fmt) const {
             return build_date(fmt);
         }
         
-        void Date::set(std::string s, std::string fmt) {
+        void Date::set(const std::string& s, const std::string& fmt) {
             //std::cout << "setting "<<s<<" to format "<<fmt<<std::endl;
             std::memset(&m_time, 0, sizeof(struct tm));
             m_current_tz = "";
@@ -553,7 +553,7 @@ namespace jlib {
             }
         }
         
-        std::string Date::sanitize(std::string s) const {
+        std::string Date::sanitize(const std::string& s) const {
             std::string ret = s;
             std::string bad = "();,\"\'[]";
             std::string::size_type i;
@@ -563,7 +563,7 @@ namespace jlib {
             return ret;
         }
         
-        bool Date::is_alpha(std::string s) const {
+        bool Date::is_alpha(const std::string& s) const {
             for(std::string::size_type i=0; i<s.length(); i++) {
                 if(!isalpha(s[i]))
                     return false;
@@ -571,7 +571,7 @@ namespace jlib {
             return true;
         }
         
-        bool Date::is_digit(std::string s) const {
+        bool Date::is_digit(const std::string& s) const {
             for(std::string::size_type i=0; i<s.length(); i++) {
                 if(!isdigit(s[i]))
                     return false;
@@ -579,7 +579,7 @@ namespace jlib {
             return true;
         }
         
-        std::string Date::first_upper(std::string s) const {
+        std::string Date::first_upper(const std::string& s) const {
             std::string ret = s;
             if(s.length()) {
                 ret[0] = toupper(s[0]);
@@ -590,7 +590,7 @@ namespace jlib {
             return ret;
         }
         
-        bool Date::is_time(std::string s) const {
+        bool Date::is_time(const std::string& s) const {
             return (
                     s.length() == 8 &&
                     isdigit(s[0]) &&
@@ -604,7 +604,7 @@ namespace jlib {
                     );
         }
         
-        bool Date::is_timezone(std::string s) const {
+        bool Date::is_timezone(const std::string& s) const {
             /*
               bool nzone = ( (s.length() == 5) && (s[0] == '-' || s[0] == '+') && (is_digit(s.substr(1,4))) );
               
@@ -624,11 +624,11 @@ namespace jlib {
         }
         
         
-        bool Date::is_date(std::string s) const {
+        bool Date::is_date(const std::string& s) const {
             return true;
         }
         
-        std::string Date::which_date(std::string s) const {
+        std::string Date::which_date(const std::string& s) const {
             return s;
         }
         

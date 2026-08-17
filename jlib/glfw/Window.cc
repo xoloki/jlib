@@ -61,7 +61,7 @@ void require_glfw() {
 
 }
 
-Window::Window(std::string title, int width, int height, bool depth)
+Window::Window(const std::string& title, int width, int height, bool depth)
     : m_window(0),
       m_title(title),
       m_timeout(10000),
@@ -119,7 +119,7 @@ int Window::get_height() const {
     return h;
 }
 
-void Window::set_title(std::string title) {
+void Window::set_title(const std::string& title) {
     m_title = title;
     glfwSetWindowTitle(m_window, title.c_str());
 }

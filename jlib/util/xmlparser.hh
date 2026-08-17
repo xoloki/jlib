@@ -57,7 +57,7 @@ namespace jlib {
                  * get rid of enclosing quotes, and translate 
                  * &amp; etc
                  */
-                static std::string clean(std::string s);
+                static std::string clean(const std::string& s);
 
             protected:
                 std::istream &instream;

@@ -33,7 +33,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string p_msg = "") {
+                exception(const std::string& p_msg = "") {
                     m_msg = "jlib::util::Headers::exception: "+p_msg;
                 }
                 virtual ~exception() throw() {}
@@ -60,7 +60,7 @@ namespace jlib {
             typedef map_type::allocator_type allocator_type;            
 
             Headers();
-            Headers(std::string s);
+            Headers(const std::string& s);
             /**
              * No destructor.
              *
@@ -70,24 +70,24 @@ namespace jlib {
              * doing a copy; measured, moving a 2M Email copied 4M.
              */
 
-            std::string operator[](std::string key) const;
+            std::string operator[](const std::string& key) const;
             operator std::string() const;
 
-            std::string get(std::string key) const;
-            std::string get(std::string key, std::string& charset) const;
-            void set(std::string key, std::string val);
-            void add(std::string key, std::string val);
-            void append(std::string key, std::string val);
+            std::string get(const std::string& key) const;
+            std::string get(const std::string& key, std::string& charset) const;
+            void set(const std::string& key, const std::string& val);
+            void add(const std::string& key, const std::string& val);
+            void append(const std::string& key, const std::string& val);
 
             list_type keys() const;
-            list_type vals(std::string key) const;
+            list_type vals(const std::string& key) const;
 
-            void parse(std::string s,bool uppercase=true);
+            void parse(const std::string& s,bool uppercase=true);
 
             unsigned int get_length() const;
 
-            iterator find(std::string key);
-            const_iterator find(std::string key) const;
+            iterator find(const std::string& key);
+            const_iterator find(const std::string& key) const;
 
             iterator begin();
             const_iterator begin() const;
@@ -102,22 +102,22 @@ namespace jlib {
 
             void clear();
 
-            list_type::iterator begin(std::string key);
-            list_type::const_iterator begin(std::string key) const;
-            list_type::iterator end(std::string key);
-            list_type::const_iterator end(std::string key) const;
-            list_type::reverse_iterator rbegin(std::string key);
-            list_type::const_reverse_iterator rbegin(std::string key) const;
-            list_type::reverse_iterator rend(std::string key);
-            list_type::const_reverse_iterator rend(std::string key) const;
-            bool empty(std::string key) const;
-            size_type size(std::string key) const;
+            list_type::iterator begin(const std::string& key);
+            list_type::const_iterator begin(const std::string& key) const;
+            list_type::iterator end(const std::string& key);
+            list_type::const_iterator end(const std::string& key) const;
+            list_type::reverse_iterator rbegin(const std::string& key);
+            list_type::const_reverse_iterator rbegin(const std::string& key) const;
+            list_type::reverse_iterator rend(const std::string& key);
+            list_type::const_reverse_iterator rend(const std::string& key) const;
+            bool empty(const std::string& key) const;
+            size_type size(const std::string& key) const;
 
-            void clear(std::string key);
+            void clear(const std::string& key);
 
             static std::string decode(std::string val, std::string& charset);
-            static std::string encode(std::string val, std::string charset);
-            static std::string::size_type find_high(std::string val, std::string::size_type p);
+            static std::string encode(const std::string& val, const std::string& charset);
+            static std::string::size_type find_high(const std::string& val, std::string::size_type p);
 
             /**
              * this is from the 'content-type' header

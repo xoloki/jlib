@@ -34,7 +34,7 @@ static int double_buffer[] = { GLX_RGBA,
                                GLX_DEPTH_SIZE, 16,
                                None };
 
-Window::Window(std::string title, int w, int h, bool depth) 
+Window::Window(const std::string& title, int w, int h, bool depth) 
     : x::Window(),
       m_depth(depth)
 {	  

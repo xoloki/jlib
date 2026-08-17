@@ -1344,7 +1344,7 @@ public:
     }
 
     // GLFW reports typed text, as X does; HyperPlot wants a single char.
-    void key_pressed(std::string key, int x, int y) {
+    void key_pressed(const std::string& key, int x, int y) {
         if(key.empty())
             return;
 

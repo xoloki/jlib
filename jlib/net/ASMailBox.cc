@@ -32,7 +32,7 @@ namespace jlib {
             id = master.ref()++;;
         }
 
-        MailBoxRequest::MailBoxRequest(request_type t, std::string p)
+        MailBoxRequest::MailBoxRequest(request_type t, const std::string& p)
             : type(t),
               password(p)
         {
@@ -84,7 +84,7 @@ namespace jlib {
             priority = static_cast<int>(t);
         }
 
-        MailBoxResponse::MailBoxResponse(response_type t, std::string p, float pct)
+        MailBoxResponse::MailBoxResponse(response_type t, const std::string& p, float pct)
             : type(t),
               text(p),
               pct(pct)
@@ -273,7 +273,7 @@ namespace jlib {
             push(MailBoxRequest(MailBoxRequest::INITIALIZE));
         }
 
-        void ASMailBox::set_password(std::string password) {
+        void ASMailBox::set_password(const std::string& password) {
             push(MailBoxRequest(MailBoxRequest::SET_PASSWORD, password));
         }
 

@@ -109,7 +109,7 @@ namespace jlib {
         }
 
 
-        Regex::Regex(std::string pattern, int flags) {
+        Regex::Regex(const std::string& pattern, int flags) {
             init(pattern, flags);
         }
         
@@ -121,7 +121,7 @@ namespace jlib {
             regfree(&m_regex);
         }
          
-        void Regex::init(std::string pattern, int flags) {
+        void Regex::init(const std::string& pattern, int flags) {
             m_pattern = pattern;
             m_flags = flags;
             m_size = (1+std::count(pattern.begin(),pattern.end(),'('));
@@ -133,7 +133,7 @@ namespace jlib {
             }
         }
        
-        Regex::Match Regex::match(std::string p_str) {
+        Regex::Match Regex::match(const std::string& p_str) {
             regmatch_t* match = new regmatch_t[m_size];
             unsigned int len = p_str.length()+1;
             char* text = new char[len];
@@ -157,7 +157,7 @@ namespace jlib {
             return tmp;
         }
         
-        Regex::Match Regex::operator()(std::string str) {
+        Regex::Match Regex::operator()(const std::string& str) {
             return match(str);
         }
 

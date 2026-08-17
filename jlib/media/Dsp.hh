@@ -37,14 +37,14 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = "jlib::media::Dsp exception"+
                         (msg != "" ? (": "+msg):"");
                 }
                 virtual ~exception() throw() {}
                 virtual const char* what() const throw() { return m_msg.c_str(); }
                 
-                static void throw_errno(std::string msg) {
+                static void throw_errno(const std::string& msg) {
                     std::ostringstream o;
                     o << ((msg!="")?(msg+": "):"") << strerror(errno);
                     throw exception(o.str());
@@ -54,10 +54,10 @@ namespace jlib {
                 std::string m_msg;
             };
 
-            Dsp(std::string node="/dev/dsp",bool open=true);
+            Dsp(const std::string& node="/dev/dsp",bool open=true);
             virtual ~Dsp();
 
-            void open(std::string node="");
+            void open(const std::string& node="");
 
             void config(stream& s);
             void config(int bits_per_sample, int samples_per_sec, int channels, int format);
@@ -78,7 +78,7 @@ namespace jlib {
 
             void close();
         protected:
-            void write(std::string data);
+            void write(const std::string& data);
 
             int m_bits_per_sample, m_samples_per_sec, m_channels, m_format;
             int m_fragsize;

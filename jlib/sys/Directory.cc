@@ -27,7 +27,7 @@
 
 namespace jlib {
     namespace sys {
-        Directory::Directory(std::string p_path) {
+        Directory::Directory(const std::string& p_path) {
             m_path = p_path;
             if(m_path != "/" && m_path[m_path.length()-1] == '/') {
                 m_path = m_path.substr(0,m_path.length()-1);
@@ -152,7 +152,7 @@ namespace jlib {
             return ret;
         }
         
-        bool Directory::is(std::string p_file, file_type p_type) const {
+        bool Directory::is(const std::string& p_file, file_type p_type) const {
             std::string file_path = m_path+"/"+p_file;
             struct stat mystat;
             if(stat(file_path.c_str(), &mystat) == -1) {
@@ -181,7 +181,7 @@ namespace jlib {
             }
         }
         
-        Directory Directory::sub(std::string file) const {
+        Directory Directory::sub(const std::string& file) const {
             return Directory(m_path+"/"+file);
         }
         

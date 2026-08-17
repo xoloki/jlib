@@ -46,7 +46,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = "socket exception: "+msg;
                 }
                 virtual ~exception() throw() {}
@@ -63,7 +63,7 @@ namespace jlib {
             
             static const unsigned int BUF_SIZE = 1024;
 
-            basic_socketbuf(std::string host, unsigned int port) {
+            basic_socketbuf(const std::string& host, unsigned int port) {
                 char_type* tmp;
                 
                 tmp = new char_type[BUF_SIZE];
@@ -174,7 +174,7 @@ namespace jlib {
             int get_socket() { return m_sock; }
             
         protected:
-            void open_socket(std::string host, unsigned int port) {
+            void open_socket(const std::string& host, unsigned int port) {
                 m_host = host;
                 m_port = port;
 
@@ -239,7 +239,7 @@ namespace jlib {
                 //exceptions(std::ios_base::badbit);
             }
 
-            basic_socketstream(std::string host, unsigned int port)
+            basic_socketstream(const std::string& host, unsigned int port)
                 : std::basic_iostream<charT,traitT>(NULL)
             {
                 m_buf = 0;
@@ -253,7 +253,7 @@ namespace jlib {
                     delete m_buf;
             }
             
-            void open(std::string host, unsigned int port) {
+            void open(const std::string& host, unsigned int port) {
                 if(m_buf != 0)
                     delete m_buf;
                 m_buf=new basic_socketbuf<charT,traitT>(host,port);

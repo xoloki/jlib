@@ -36,7 +36,7 @@ const int SZ = 64;
 namespace jlib {
 	namespace util {
 
-        std::string studly_caps(std::string s) {
+        std::string studly_caps(const std::string& s) {
             std::string ret = lower(s);
             if(s.length() > 0) {
                 ret[0] = toupper(ret[0]);
@@ -54,7 +54,7 @@ namespace jlib {
         }
 
 
-        std::vector<std::string> tokenize(std::string s, std::string d, bool split_delim) {
+        std::vector<std::string> tokenize(const std::string& s, const std::string& d, bool split_delim) {
             std::vector<std::string> ret;
             
             std::string::size_type i=0, j;
@@ -76,7 +76,7 @@ namespace jlib {
             return ret;
         }
 
-        std::list<std::string> tokenize_list(std::string s, std::string d, bool split_delim) {
+        std::list<std::string> tokenize_list(const std::string& s, const std::string& d, bool split_delim) {
             std::list<std::string> ret;
             
             std::string::size_type i=0, j;
@@ -97,7 +97,7 @@ namespace jlib {
             return ret;
         }
 
-        std::string excise(std::string s, std::string d1, std::string d2) {
+        std::string excise(const std::string& s, const std::string& d1, const std::string& d2) {
             std::string ret = s;
             int i,j=0;
             
@@ -110,7 +110,7 @@ namespace jlib {
             return ret;
         }
         
-        std::string slice(std::string s, std::string d1, std::string d2) {
+        std::string slice(const std::string& s, const std::string& d1, const std::string& d2) {
             std::string::size_type i, j;
             
             if( (i=s.find(d1)) != s.npos && (j=s.find(d2,i+1)) != s.npos ) {
@@ -121,7 +121,7 @@ namespace jlib {
             }
         }
         
-        std::string chip(std::string s) {
+        std::string chip(const std::string& s) {
             std::string::size_type i = s.find_first_not_of(WHITESPACE);
             if(i != s.npos) {
                 return s.substr(i);
@@ -131,7 +131,7 @@ namespace jlib {
             }
         }
         
-        std::string chop(std::string s) {
+        std::string chop(const std::string& s) {
             std::string::size_type i = s.find_last_not_of(WHITESPACE);
             if(i != s.npos) {
                 return s.substr(0,i+1);
@@ -141,7 +141,7 @@ namespace jlib {
             }
         }
         
-        std::string trim(std::string s) {
+        std::string trim(const std::string& s) {
             return chip(chop(s));
         }
         
@@ -168,11 +168,11 @@ namespace jlib {
             }
         }
 
-        bool imaps(const std::map<std::string,std::string>& m, std::string key, std::string val) {
+        bool imaps(const std::map<std::string,std::string>& m, const std::string& key, const std::string& val) {
             return (upper(const_cast< std::map<std::string,std::string>& >(m)[key]) == upper(val));
         }
         
-        std::string upper(std::string s) {
+        std::string upper(const std::string& s) {
             std::string ret = s;
             for(std::string::size_type i=0; i<ret.size(); i++) {
                 ret[i] = toupper(ret[i]);
@@ -180,7 +180,7 @@ namespace jlib {
             return ret;
         }
         
-        std::string lower(std::string s) {
+        std::string lower(const std::string& s) {
             std::string ret = s;
             for(std::string::size_type i=0; i<ret.size(); i++) {
                 ret[i] = tolower(ret[i]);
@@ -281,13 +281,13 @@ namespace jlib {
         }
         */
         
-        int int_value(std::string s, int base) { return intValue(s,base); }
-        int intValue(std::string s, int base) {
+        int int_value(const std::string& s, int base) { return intValue(s,base); }
+        int intValue(const std::string& s, int base) {
             return strtol(s.c_str(), NULL, base);
         }
         
-        double double_value(std::string s) { return doubleValue(s); }
-        double doubleValue(std::string s) {
+        double double_value(const std::string& s) { return doubleValue(s); }
+        double doubleValue(const std::string& s) {
             return strtod(s.c_str(), NULL);
         }
         
@@ -314,7 +314,7 @@ namespace jlib {
 
         }
 
-        std::string hex_value(std::string s, bool upper) {
+        std::string hex_value(const std::string& s, bool upper) {
             std::string ret;
             for(std::string::size_type i=0;i<s.length();i++) {
                 ret += hex_value(static_cast<unsigned char>(s[i]));
@@ -334,31 +334,31 @@ namespace jlib {
             return ret;
         }
 
-        bool contains(std::string s, std::string t) {
+        bool contains(const std::string& s, const std::string& t) {
             return (s.size() >= t.size() && (int)s.find(t) != -1);
         }
         
-        bool begins(std::string s, std::string t) {
+        bool begins(const std::string& s, const std::string& t) {
             return (s.size() >= t.size() && s.find(t) == 0);
         }
         
-        bool ends(std::string s, std::string t) {
+        bool ends(const std::string& s, const std::string& t) {
             return ( s.size() >= t.size() && s.rfind(t) == (s.size()-t.size()) );
         }
         
-        bool icontains(std::string s, std::string t) {
+        bool icontains(const std::string& s, const std::string& t) {
             return (s.size() >= t.size() && (int)upper(s).find(upper(t)) != -1);
         }
         
-        bool ibegins(std::string s, std::string t) {
+        bool ibegins(const std::string& s, const std::string& t) {
             return (s.size() >= t.size() && upper(s).find(upper(t)) == 0);
         }
         
-        bool iends(std::string s, std::string t) {
+        bool iends(const std::string& s, const std::string& t) {
             return ( s.size() >= t.size() && upper(s).rfind(upper(t)) == (s.size()-t.size()) );
         }
         
-        bool iequals(std::string s, std::string t) {
+        bool iequals(const std::string& s, const std::string& t) {
             return ( upper(s) == upper(t) );
         }        
 
@@ -601,7 +601,7 @@ namespace jlib {
                 return recode(s,decref);
             }
 
-            std::string recode(std::string s, const std::map<std::string,std::string>& codec) {
+            std::string recode(const std::string& s, const std::map<std::string,std::string>& codec) {
                 std::string ret = s;
                 /*
                 if(ret.length() > 1) {
@@ -629,22 +629,22 @@ namespace jlib {
         
         namespace file {
 
-            struct stat getstat(std::string path) {
+            struct stat getstat(const std::string& path) {
                 struct stat mystat;
                 if(::stat(path.c_str(), &mystat) == -1)
                     throw util_exception("error running stat(2) on "+path);
                 return mystat;
             }
 
-            long size(std::string path) {
+            long size(const std::string& path) {
                 return getstat(path).st_size;
             }
             
-            long mtime(std::string path) {
+            long mtime(const std::string& path) {
                 return getstat(path).st_mtime;
             }
             
-            void kill(std::string path, std::vector<long>& pts) {
+            void kill(const std::string& path, std::vector<long>& pts) {
                 if(pts.size() == 0) return;
                 std::sort(pts.begin(), pts.end());
                 
@@ -695,7 +695,7 @@ namespace jlib {
                 system(cmd.c_str());
             }
 
-            void keep(std::string path, std::vector<long>& pts) {
+            void keep(const std::string& path, std::vector<long>& pts) {
                 if(pts.size() == 0) return;
                 std::sort(pts.begin(), pts.end());
                 

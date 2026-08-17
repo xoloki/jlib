@@ -32,7 +32,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string p_msg = "") {
+                exception(const std::string& p_msg = "") {
                     m_msg = "jlib::util::URL::exception: "+p_msg;
                 }
                 virtual ~exception() throw() {}
@@ -56,10 +56,10 @@ namespace jlib {
             typedef rep_type::allocator_type allocator_type;            
 
             URL();
-            URL(std::string url);
-            URL(std::string protocol, std::string host, std::string path);
-            URL(std::string protocol, std::string user, std::string pass, 
-                std::string host, std::string port, std::string path, std::string qs);
+            URL(const std::string& url);
+            URL(const std::string& protocol, const std::string& host, const std::string& path);
+            URL(const std::string& protocol, const std::string& user, const std::string& pass, 
+                const std::string& host, const std::string& port, const std::string& path, const std::string& qs);
             /**
              * No destructor.
              *
@@ -69,8 +69,8 @@ namespace jlib {
              * doing a copy; measured, moving a 2M Email copied 4M.
              */
 
-            void parse(std::string url);
-            static std::map<std::string,std::string> parse_qs(std::string qs);
+            void parse(const std::string& url);
+            static std::map<std::string,std::string> parse_qs(const std::string& qs);
             static std::string parse_qs(std::map<std::string,std::string> qs);
 
             std::string get_protocol() const;
@@ -88,19 +88,19 @@ namespace jlib {
 
             unsigned int get_port_val() const;
 
-            std::string operator[](std::string key) const;
+            std::string operator[](const std::string& key) const;
             std::string operator()() const;
             operator std::string() const;
             std::vector<std::string> keys() const;
 
-            void set_protocol(std::string protocol);
-            void set_user(std::string user);
-            void set_pass(std::string pass);
-            void set_host(std::string host);
-            void set_port(std::string port);
-            void set_path(std::string path);
-            void set_delim(std::string delim);
-            void set_qs(std::string qs);
+            void set_protocol(const std::string& protocol);
+            void set_user(const std::string& user);
+            void set_pass(const std::string& pass);
+            void set_host(const std::string& host);
+            void set_port(const std::string& port);
+            void set_path(const std::string& path);
+            void set_delim(const std::string& delim);
+            void set_qs(const std::string& qs);
             void set_qs(std::map<std::string,std::string> qs);
            
             std::string coagulate() const;

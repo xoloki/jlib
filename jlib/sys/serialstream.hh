@@ -34,7 +34,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = "serial exception: "+msg;
                 }
                 virtual ~exception() throw() {}
@@ -51,7 +51,7 @@ namespace jlib {
             
             static const unsigned int BUF_SIZE = 1024;
 
-            basic_serialbuf(std::string dev, std::ios_base::openmode mode);
+            basic_serialbuf(const std::string& dev, std::ios_base::openmode mode);
             virtual ~basic_serialbuf();
 
             virtual int_type underflow();
@@ -61,7 +61,7 @@ namespace jlib {
             void close();
 
         protected:
-            void open_serial(std::string dev, std::ios_base::openmode mode);
+            void open_serial(const std::string& dev, std::ios_base::openmode mode);
 
             std::string m_dev;
             unsigned int m_port;
@@ -72,9 +72,9 @@ namespace jlib {
         class basic_serialstream : public std::basic_iostream<charT> {
         public:
             basic_serialstream();
-            basic_serialstream(std::string dev, std::ios_base::openmode mode);
+            basic_serialstream(const std::string& dev, std::ios_base::openmode mode);
 
-            void open(std::string dev, std::ios_base::openmode mode);
+            void open(const std::string& dev, std::ios_base::openmode mode);
             void close();
         private:
             basic_serialbuf<charT,traitT>* m_buf;

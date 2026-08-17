@@ -102,7 +102,7 @@ namespace jlib {
             handshake(sock,"DELE "+jlib::util::string_value(which), OK);
         }
         
-        std::string Pop3::handshake(jlib::sys::socketstream& sock, std::string data, std::string ok) {
+        std::string Pop3::handshake(jlib::sys::socketstream& sock, const std::string& data, const std::string& ok) {
             if(getenv("JLIB_NET_POP3_DEBUG")) std::cout << data << std::endl;
             sock << data << "\r\n" << std::flush;
             std::string buf;

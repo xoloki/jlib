@@ -77,7 +77,7 @@ bool paused = false;
 
 jlib::glfw::Window* g_window = 0;
 
-void on_keyboard(std::string key, int x, int y);
+void on_keyboard(const std::string& key, int x, int y);
 void on_mouse(int button, int x, int y);
 void on_idle();
 void on_display();
@@ -167,7 +167,7 @@ void on_mouse(int button, int x, int y) {
     
 }
 
-void on_keyboard(std::string k, int x, int y) {
+void on_keyboard(const std::string& k, int x, int y) {
     if(k.empty())
         return;
 

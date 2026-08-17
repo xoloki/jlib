@@ -51,7 +51,7 @@ template<typename T>
 class Plot : public math::Plot<T>, public Window {
 public:
     Plot(uint n, std::vector< std::pair<T,T> > c, uint w = 400, uint h = 400,
-         std::string title = "jlib::glfw::Plot");
+         const std::string& title = "jlib::glfw::Plot");
 
     virtual void draw();
     virtual void draw_point(std::pair<uint,uint> p, uint index);
@@ -72,7 +72,7 @@ protected:
 
 template<typename T>
 inline
-Plot<T>::Plot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h, std::string title)
+Plot<T>::Plot(uint n, std::vector< std::pair<T,T> > c, uint w, uint h, const std::string& title)
     : math::Plot<T>(n, c, w, h),
       Window(title, w, h, true)
 {

@@ -32,7 +32,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = "jlib::sys::Directory exception: "+msg;
                 }
                 virtual ~exception() throw() {}
@@ -41,7 +41,7 @@ namespace jlib {
                 std::string m_msg;
             };
 
-            Directory(std::string p_path = "/");
+            Directory(const std::string& p_path = "/");
             Directory(const Directory& p_copy);
             virtual ~Directory() {}
             
@@ -50,13 +50,13 @@ namespace jlib {
             
             std::string get_path() const;
             std::string get_name() const;
-            Directory sub(std::string file) const;
+            Directory sub(const std::string& file) const;
             
             std::vector<std::string> list_files(bool p_full_path = false) const;
             std::vector<std::string> list_dirs(bool p_full_path = false) const;
             std::vector<Directory> list_subdirs() const;
             
-            bool is(std::string p_file, file_type p_type) const;
+            bool is(const std::string& p_file, file_type p_type) const;
             
             std::vector<std::string> list(file_type p_type = ALL, bool p_full_path=false, bool p_show_dots = false) const;
             

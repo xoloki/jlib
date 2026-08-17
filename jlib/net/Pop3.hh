@@ -41,7 +41,7 @@ namespace jlib {
         public:
             class exception : public std::exception {
             public:
-                exception(std::string msg = "") {
+                exception(const std::string& msg = "") {
                     m_msg = "jlib::net::Pop3::exception: "+msg;
                 }
                 virtual ~exception() throw() {}
@@ -73,7 +73,7 @@ namespace jlib {
              */
             void disconnect(jlib::sys::socketstream& sock);
             
-            std::string handshake(jlib::sys::socketstream& sock, std::string data, std::string ok);
+            std::string handshake(jlib::sys::socketstream& sock, const std::string& data, const std::string& ok);
             
             jlib::util::URL m_url;
             bool m_remove;

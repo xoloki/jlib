@@ -115,9 +115,9 @@ namespace jlib {
 
                 //! ctor
             protected:
-                node(std::string name="");
+                node(const std::string& name="");
             public:
-                static node::ptr create(std::string name="");
+                static node::ptr create(const std::string& name="");
                 //! dtor
                 virtual ~node();
                 
@@ -127,7 +127,7 @@ namespace jlib {
 
                 //! returns the node name, if nodetype != nt_cdata
                 std::string get_name() const { return m_name; }
-                void set_name(std::string n) { m_name = std::move(n); }
+                void set_name(const std::string& n) { m_name = std::move(n); }
 
                 //! returns subnode list
                 list& get_list(){ return m_list; };
@@ -137,13 +137,13 @@ namespace jlib {
                 attributes &get_attributes(){ return m_attributes; };
                 const attributes& get_attributes() const { return m_attributes; };
                 
-                std::string get_attribute(std::string key) const;
-                void set_attribute(std::string key, std::string val);
+                std::string get_attribute(const std::string& key) const;
+                void set_attribute(const std::string& key, const std::string& val);
 
                 //! returns cdata string
                 std::string& get_cdata(){ return m_cdata; };
                 const std::string& get_cdata() const { return m_cdata; };
-                void set_cdata(std::string n) { m_cdata = std::move(n); }
+                void set_cdata(const std::string& n) { m_cdata = std::move(n); }
                 
                 //! loads  node from input stream
                 bool load( std::istream &instream );
@@ -177,10 +177,10 @@ namespace jlib {
             class cdata : public node {
             protected:
                 cdata() { set_name("cdata"); set_type(node::cdata); }
-                cdata(std::string data) { set_name("cdata"); set_type(node::cdata); set_cdata(data); }
+                cdata(const std::string& data) { set_name("cdata"); set_type(node::cdata); set_cdata(data); }
             public:
                 static node::ptr create() { return node::ptr(new cdata()); }
-                static node::ptr create(std::string data) { return node::ptr(new cdata(data)); }
+                static node::ptr create(const std::string& data) { return node::ptr(new cdata(data)); }
 
                 virtual ~cdata() {}
             };

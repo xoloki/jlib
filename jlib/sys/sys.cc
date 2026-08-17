@@ -115,7 +115,7 @@ namespace jlib {
         // to void*(*)(void*) and call through it, which is undefined behaviour,
         // and hand-managed the slot with new/delete.  std::thread does both
         // correctly and needs neither.
-        void thread(const std::function<void()>& slt, std::string s) {
+        void thread(const std::function<void()>& slt, const std::string& s) {
             if(std::getenv("JLIB_SYS_DEBUG"))
                 std::cout << "entering jlib::sys::thread()"<<std::endl;
 
@@ -156,7 +156,7 @@ namespace jlib {
                 std::cout << "leaving jlib::sys::thread()"<<std::endl;
         }
         
-        void lock(std::string s) {
+        void lock(const std::string& s) {
             if(std::getenv("JLIB_SYS_DEBUG"))
                 std::cout << "entering jlib::sys::lock(\""<<s<<"\")"<<std::endl;
             named_mutex(s).lock();
@@ -164,7 +164,7 @@ namespace jlib {
                 std::cout << "leaving jlib::sys::lock(\""<<s<<"\")"<<std::endl;
         }
         
-        void unlock(std::string s) {
+        void unlock(const std::string& s) {
             if(std::getenv("JLIB_SYS_DEBUG"))
                 std::cout << "entering jlib::sys::unlock(\""<<s<<"\")"<<std::endl;
             // As before, unlocking a name that was never locked is a no-op
@@ -178,7 +178,7 @@ namespace jlib {
                 std::cout << "leaving jlib::sys::unlock(\""<<s<<"\")"<<std::endl;
         }
 
-        bool locked(std::string s) {
+        bool locked(const std::string& s) {
             std::mutex& m = named_mutex(s);
             if(m.try_lock()) {
                 m.unlock();
@@ -187,23 +187,23 @@ namespace jlib {
             return true;
         }
 
-        void shell(std::string cmd) {
+        void shell(const std::string& cmd) {
             tfstream stderrstr;
             std::string err;
-            cmd = cmd + " 2>"+stderrstr.get_path();
-            int ret = system(cmd.c_str());
+            const std::string line = cmd + " 2>"+stderrstr.get_path();
+            int ret = system(line.c_str());
             stderrstr.seekg(0,std::ios_base::beg);
             getstring(stderrstr,err);
 
             if(ret != 0) {
-                throw sys_exception("error running shell command '"+cmd+"': '"+err+"'");
+                throw sys_exception("error running shell command '"+line+"': '"+err+"'");
             }
         }
 
-        void shell(std::string cmd, std::string& out, std::string& err) {
+        void shell(const std::string& cmd, std::string& out, std::string& err) {
             tfstream stdoutstr, stderrstr;
-            cmd = cmd + " >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
-            int ret = system(cmd.c_str());
+            const std::string line = cmd + " >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
+            int ret = system(line.c_str());
 
             stdoutstr.seekg(0,std::ios_base::beg);
             stderrstr.seekg(0,std::ios_base::beg);
@@ -212,22 +212,24 @@ namespace jlib {
             getstring(stderrstr,err);
 
             if(ret != 0) {
-                throw sys_exception("error running shell command '"+cmd+"': '"+err+"'");
+                throw sys_exception("error running shell command '"+line+"': '"+err+"'");
             }
         }
 
-        void shell(std::string cmd, std::string in, std::string& out, std::string& err, bool in_file) {
+        void shell(const std::string& cmd, const std::string& in, std::string& out, std::string& err, bool in_file) {
             tfstream stdinstr, stdoutstr, stderrstr;
+            std::string line;
+
             if(in_file) {
                 stdinstr.close();
-                cmd = cmd+" <"+in+" >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
+                line = cmd + " <"+in+" >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
             }
             else {
                 stdinstr << in;
                 stdinstr.close();
-                cmd = cmd+" <"+stdinstr.get_path()+" >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
+                line = cmd + " <"+stdinstr.get_path()+" >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
             }
-            int ret = system(cmd.c_str());
+            int ret = system(line.c_str());
             stdoutstr.seekg(0,std::ios_base::beg);
             stderrstr.seekg(0,std::ios_base::beg);
             
@@ -235,14 +237,14 @@ namespace jlib {
             getstring(stderrstr,err);
 
             if(ret != 0) {
-                throw sys_exception("error running shell command '"+cmd+"': '"+err+"'");
+                throw sys_exception("error running shell command '"+line+"': '"+err+"'");
             }
         }
 
-        void secure_shell(std::string cmd, std::string& out, std::string& err) {
+        void secure_shell(const std::string& cmd, std::string& out, std::string& err) {
             stfstream stdoutstr, stderrstr;
-            cmd = cmd + " >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
-            int ret = system(cmd.c_str());
+            const std::string line = cmd + " >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
+            int ret = system(line.c_str());
             stdoutstr.seekg(0,std::ios_base::beg);
             stderrstr.seekg(0,std::ios_base::beg);
             
@@ -250,22 +252,24 @@ namespace jlib {
             getstring(stderrstr,err);
 
             if(ret != 0) {
-                throw sys_exception("error running shell command '"+cmd+"': '"+err+"'");
+                throw sys_exception("error running shell command '"+line+"': '"+err+"'");
             }
         }
 
-        void secure_shell(std::string cmd, std::string in, std::string& out, std::string& err, bool in_file) {
+        void secure_shell(const std::string& cmd, const std::string& in, std::string& out, std::string& err, bool in_file) {
             stfstream stdinstr, stdoutstr, stderrstr;
+            std::string line;
+
             if(in_file) {
                 stdinstr.close();
-                cmd = cmd+" <"+in+" >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
+                line = cmd + " <"+in+" >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
             }
             else {
                 stdinstr << in;
                 stdinstr.close();
-                cmd = cmd+" <"+stdinstr.get_path()+" >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
+                line = cmd + " <"+stdinstr.get_path()+" >"+stdoutstr.get_path()+" 2>"+stderrstr.get_path();
             }
-            int ret = system(cmd.c_str());
+            int ret = system(line.c_str());
             stdoutstr.seekg(0,std::ios_base::beg);
             stderrstr.seekg(0,std::ios_base::beg);
             
@@ -273,7 +277,7 @@ namespace jlib {
             getstring(stderrstr,err);
 
             if(ret != 0) {
-                throw sys_exception("error running shell command '"+cmd+"': '"+err+"'");
+                throw sys_exception("error running shell command '"+line+"': '"+err+"'");
             }
         }
 

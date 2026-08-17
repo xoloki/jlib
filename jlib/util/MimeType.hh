@@ -37,7 +37,7 @@ namespace jlib {
             
             class exception : public std::exception {
             public:
-                exception(std::string p_msg = "") {
+                exception(const std::string& p_msg = "") {
                     m_msg = "jlib::util::MimeType exception: "+p_msg;
                 }
                 virtual ~exception() throw() {}
@@ -53,7 +53,7 @@ namespace jlib {
              *
              * @return std::string description of data's MIME type
              */
-            static std::string get_type_from_file(std::string path);
+            static std::string get_type_from_file(const std::string& path);
 
             /**
              * Get the Mime-Type from the given filename
@@ -62,12 +62,12 @@ namespace jlib {
              *
              * @return std::string description of data's MIME type
              */
-            static std::string get_type_from_data(std::string data);
+            static std::string get_type_from_data(const std::string& data);
           
             /**
              * parse the text output of the UNIX file command into a mime-type
              */
-            static std::string parse_file_output(std::string data);
+            static std::string parse_file_output(const std::string& data);
         };
         
     }

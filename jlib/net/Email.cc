@@ -40,14 +40,14 @@ namespace jlib {
             m_sort = "DATE"; 
         }
 
-        Email::Email(std::string is) 
+        Email::Email(const std::string& is) 
             : m_is_loaded(false),
               m_indx(-1)
         {
             create(std::move(is));
         }
 
-        void Email::create(std::string is) {
+        void Email::create(const std::string& is) {
             if(getenv("JLIB_NET_EMAIL_DEBUG")) {
                 std::cerr <<"jlib::net::Email::create(): entering"<<std::endl;
             }
@@ -224,7 +224,7 @@ namespace jlib {
             return (s1 < s2);
         }
         
-        void Email::sort(std::string field) {
+        void Email::sort(const std::string& field) {
             m_sort = std::move(field);
         }
         
@@ -246,16 +246,16 @@ namespace jlib {
             build_mime(m_raw, *this);
         }
 
-        std::string Email::operator[](std::string key) const {
+        std::string Email::operator[](const std::string& key) const {
             return m_headers[key];
         }
 
-        void Email::set(std::string key,std::string val) {
+        void Email::set(const std::string& key,std::string val) {
             //std::multimap<std::string,std::string>::const_iterator i = m_headers.lower_bound(key);
             m_headers.set(key,val);
         }
 
-        void Email::add(std::string key,std::string val) {
+        void Email::add(const std::string& key,std::string val) {
             m_headers.add(key,val);
         }
 
@@ -376,7 +376,7 @@ namespace jlib {
             return ret;
         }
 
-        bool Email::is(std::string type) const {
+        bool Email::is(const std::string& type) const {
             std::string ctype = jlib::util::lower(find("CONTENT-TYPE"));
             return (ctype.find(type) != std::string::npos);
         }
@@ -453,7 +453,7 @@ namespace jlib {
             return m_indx;
         }
 
-        Email::reference Email::grep(std::string s, bool recursive) {
+        Email::reference Email::grep(const std::string& s, bool recursive) {
             std::string::size_type i;
             if((i = m_data.find(s)) != std::string::npos) {
                 return *this;

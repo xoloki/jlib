@@ -32,7 +32,7 @@ class Window {
 public:
     typedef enum { DRAW, ERASE, OVERLAY, INVERT } mode_type;
     
-    Window(std::string title, int w, int h);
+    Window(const std::string& title, int w, int h);
     virtual ~Window();
     
     void set_mode(mode_type mode);
@@ -66,9 +66,9 @@ public:
     void draw_point(std::pair<int,int> p);
     
     void draw_string(int s);
-    void draw_string(std::string s);
+    void draw_string(const std::string& s);
     void draw_string(std::pair<int,int> p, int s);
-    void draw_string(std::pair<int,int> p, std::string s);
+    void draw_string(std::pair<int,int> p, const std::string& s);
     
     void draw_line(int x, int y);
     void draw_line(std::pair<int,int> p);
@@ -106,8 +106,8 @@ public:
     void set_line_size(int pixels);
     
     void select_input(long event_mask);
-    void set_font(std::string font);
-    void set_title(std::string title);
+    void set_font(const std::string& font);
+    void set_title(const std::string& title);
 
     void set_timeout(long micro);
     
@@ -117,7 +117,7 @@ public:
     void run();
     virtual void iterate();
     
-    Window& operator<<(std::string msg);
+    Window& operator<<(const std::string& msg);
     Window& operator<<(int value);
     
     sys::signal<void(std::string,int,int)> key_press;
