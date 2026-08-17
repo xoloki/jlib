@@ -52,8 +52,8 @@ namespace jlib {
                 exception(const std::string& msg, int e) {
                     m_msg = "sys::joystick exception: " + msg + std::strerror(e);
                 }
-                virtual ~exception() throw() {}
-                virtual const char* what() const throw() { return m_msg.c_str(); }
+                virtual ~exception() {}
+                virtual const char* what() const noexcept { return m_msg.c_str(); }
             protected:
                 std::string m_msg;
             };

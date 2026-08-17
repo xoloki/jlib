@@ -51,8 +51,8 @@ namespace jlib {
             util_exception(const std::string& p_msg = "") {
                 m_msg = "util exception: "+p_msg;
             }
-            virtual ~util_exception() throw() {}
-            virtual const char* what() const throw() { return m_msg.c_str(); }
+            virtual ~util_exception() {}
+            virtual const char* what() const noexcept { return m_msg.c_str(); }
         protected:
             std::string m_msg;
         };

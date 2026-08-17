@@ -35,8 +35,8 @@ namespace jlib {
             io_exception(const std::string& msg = "") {
                 m_msg = "io exception: "+msg;
             }
-            virtual ~io_exception() throw() {}
-            virtual const char* what() const throw() { return m_msg.c_str(); }
+            virtual ~io_exception() {}
+            virtual const char* what() const noexcept { return m_msg.c_str(); }
         protected:
             std::string m_msg;
         };
@@ -46,8 +46,8 @@ namespace jlib {
             sys_exception(const std::string& msg = "") {
                 m_msg = "sys exception: "+msg;
             }
-            virtual ~sys_exception() throw() {}
-            virtual const char* what() const throw() { return m_msg.c_str(); }
+            virtual ~sys_exception() {}
+            virtual const char* what() const noexcept { return m_msg.c_str(); }
         protected:
             std::string m_msg;
         };

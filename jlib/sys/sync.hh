@@ -39,8 +39,8 @@ public:
     sync_exception(const std::string& msg = "") {
         m_msg = "sys exception: "+msg;
     }
-    virtual ~sync_exception() throw() {}
-    virtual const char* what() const throw() { return m_msg.c_str(); }
+    virtual ~sync_exception() {}
+    virtual const char* what() const noexcept { return m_msg.c_str(); }
 protected:
     std::string m_msg;
 };

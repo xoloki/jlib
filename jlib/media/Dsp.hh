@@ -41,8 +41,8 @@ namespace jlib {
                     m_msg = "jlib::media::Dsp exception"+
                         (msg != "" ? (": "+msg):"");
                 }
-                virtual ~exception() throw() {}
-                virtual const char* what() const throw() { return m_msg.c_str(); }
+                virtual ~exception() {}
+                virtual const char* what() const noexcept { return m_msg.c_str(); }
                 
                 static void throw_errno(const std::string& msg) {
                     std::ostringstream o;
