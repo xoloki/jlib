@@ -42,10 +42,6 @@ namespace jlib {
             parse(s);
         }
 
-        Headers::~Headers() {
-            
-        }
-
         
         std::string Headers::operator[](std::string key) const {
             key = upper(key);

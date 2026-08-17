@@ -24,6 +24,8 @@
 #include <jlib/net/Email.hh>
 
 
+#include <memory>
+#include <utility>
 #include <string>
 #include <iostream>
 #include <map>
@@ -98,8 +100,27 @@ namespace jlib {
             typedef rep_type::difference_type difference_type;
             typedef rep_type::allocator_type allocator_type;
 
+            /** Takes ownership of the buffer. */
             MailFolder(FolderBuffer* buffer);
             virtual ~MailFolder();
+
+            /**
+             * Not copyable, movable.
+             *
+             * This owned its buffer through a raw pointer and deleted it,
+             * with no copy control declared, so copying one copied the
+             * pointer and both destructors freed it -- the same shape as the
+             * Date and streambuf double frees.  Nothing in the tree copies a
+             * MailFolder, and it is a polymorphic base, so a copy would slice
+             * as well as double free.  Deleted rather than fixed.
+             *
+             * Moving is fine and now works: the destructor was suppressing
+             * the implicit move operations, so std::move was a copy.
+             */
+            MailFolder(const MailFolder&) = delete;
+            MailFolder& operator=(const MailFolder&) = delete;
+            MailFolder(MailFolder&&) = default;
+            MailFolder& operator=(MailFolder&&) = default;
 
 
             virtual Email& get(unsigned int i);
@@ -129,11 +150,11 @@ namespace jlib {
             unsigned int get_size(unsigned int i);
             std::set<Email::flag_type> get_flags(unsigned int i);
 
-            void init(FolderBuffer* buffer) { m_rep = buffer; }
+            void init(FolderBuffer* buffer) { m_rep.reset(buffer); }
 
             Email copy(unsigned int i) { return get(i); }
 
-            void sort_field(std::string field) { m_sort_field = field; }
+            void sort_field(std::string field) { m_sort_field = std::move(field); }
             std::string sort_field() { return m_sort_field; }
 
             void filter_rules(std::multimap<std::string,std::string>& rules) { m_filter_rules = rules; }
@@ -154,7 +175,9 @@ namespace jlib {
             size_type size() const { return m_rep->size(); }
 
         protected:
-            FolderBuffer* m_rep;
+            // Owned.  A unique_ptr so the ownership is stated rather than
+            // implied by a delete in the destructor.
+            std::unique_ptr<FolderBuffer> m_rep;
 
             /**
              * field to sort by

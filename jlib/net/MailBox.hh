@@ -21,6 +21,7 @@
 #ifndef JLIB_NET_MAILBOX_HH
 #define JLIB_NET_MAILBOX_HH
 
+#include <utility>
 #include <string>
 #include <iostream>
 #include <map>
@@ -216,7 +217,7 @@ namespace jlib {
 
             MailFolder* get_folder(std::list<std::string> path);
 
-            void set_name(std::string n) { m_name = n; }
+            void set_name(std::string n) { m_name = std::move(n); }
             std::string get_name() { return m_name; }
             
         protected:

@@ -68,8 +68,10 @@ namespace jlib {
             MFolder(std::string path)
                 : MailFolder(NULL)
             {
-                m_rep = new MFolderBuffer(path);
-                init(m_rep);
+                // Straight to init, which owns it.  This assigned the base's
+                // m_rep and then passed the same pointer to init, which
+                // assigned it again.
+                init(new MFolderBuffer(path));
             }
                 
         };

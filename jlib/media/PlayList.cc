@@ -22,6 +22,7 @@
 
 #include <jlib/media/PlayList.hh>
 
+#include <utility>
 #include <iostream>
 
 
@@ -52,10 +53,10 @@ namespace jlib {
         void Roll::set_id(int id) { m_id = id; }
         
         std::string Roll::get_sample() const { return m_sample; }
-        void Roll::set_sample(std::string sample) { m_sample = sample; }
+        void Roll::set_sample(std::string sample) { m_sample = std::move(sample); }
         
         std::string Roll::get_name() const { return m_name; }
-        void Roll::set_name(std::string name) { m_name = name; }
+        void Roll::set_name(std::string name) { m_name = std::move(name); }
         
         Roll::reference Roll::operator[](int i) {
             return m_pattern[i];
@@ -92,7 +93,7 @@ namespace jlib {
         void Pattern::set_id(int id) { m_id = id; }
         
         std::string Pattern::get_name() const { return m_name; }
-        void Pattern::set_name(std::string name) { m_name = name; }
+        void Pattern::set_name(std::string name) { m_name = std::move(name); }
         
         Pattern::reference Pattern::operator[](int i) {
             return m_rolls[i];
@@ -126,7 +127,7 @@ namespace jlib {
         void PlayList::set_id(int id) { m_id = id; }
         
         std::string PlayList::get_name() const { return m_name; }
-        void PlayList::set_name(std::string name) { m_name = name; }
+        void PlayList::set_name(std::string name) { m_name = std::move(name); }
 
         int PlayList::get_bpm() const { return m_bpm; }
         void PlayList::set_bpm(int bpm) { m_bpm = bpm; }

@@ -26,11 +26,10 @@ namespace jlib {
     namespace net {
         
         MailFolder::MailFolder(FolderBuffer* buffer) {
-            m_rep = buffer;
+            m_rep.reset(buffer);
         }
         
         MailFolder::~MailFolder() {
-            delete m_rep;
         }
         
         jlib::util::Headers MailFolder::get_headers(unsigned int i) {

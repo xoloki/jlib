@@ -54,8 +54,8 @@ namespace jlib {
             Imap4Folder(jlib::util::URL url)
                 : MailFolder(NULL)
             {
-                m_rep = new Imap4FolderBuffer(url);
-                init(m_rep);
+                // Straight to init, which owns it; see MFolder.
+                init(new Imap4FolderBuffer(url));
             }
         };
 

@@ -24,6 +24,7 @@
 #define JLIB_UTIL_XML_HH
 
 // needed includes
+#include <utility>
 #include <string>
 #include <list>
 #include <map>
@@ -126,7 +127,7 @@ namespace jlib {
 
                 //! returns the node name, if nodetype != nt_cdata
                 std::string get_name() const { return m_name; }
-                void set_name(std::string n) { m_name = n; }
+                void set_name(std::string n) { m_name = std::move(n); }
 
                 //! returns subnode list
                 list& get_list(){ return m_list; };
@@ -142,7 +143,7 @@ namespace jlib {
                 //! returns cdata string
                 std::string& get_cdata(){ return m_cdata; };
                 const std::string& get_cdata() const { return m_cdata; };
-                void set_cdata(std::string n) { m_cdata = n; }
+                void set_cdata(std::string n) { m_cdata = std::move(n); }
                 
                 //! loads  node from input stream
                 bool load( std::istream &instream );

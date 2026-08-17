@@ -60,8 +60,14 @@ namespace jlib {
             URL(std::string protocol, std::string host, std::string path);
             URL(std::string protocol, std::string user, std::string pass, 
                 std::string host, std::string port, std::string path, std::string qs);
-
-            virtual ~URL();
+            /**
+             * No destructor.
+             *
+             * There was an empty one, and a user-declared destructor -- even
+             * an empty one -- suppresses the implicit move constructor and
+             * move assignment.  Every std::move of one of these was silently
+             * doing a copy; measured, moving a 2M Email copied 4M.
+             */
 
             void parse(std::string url);
             static std::map<std::string,std::string> parse_qs(std::string qs);

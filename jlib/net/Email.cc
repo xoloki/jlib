@@ -207,10 +207,6 @@ namespace jlib {
             }
         }
         
-        Email::~Email() {
-            
-        }
-        
         bool operator<(const Email& j1, const Email& j2) {
             std::string s1 = j1[j1.m_sort];
             std::string s2 = j2[j2.m_sort];
@@ -229,7 +225,7 @@ namespace jlib {
         }
         
         void Email::sort(std::string field) {
-            m_sort = field;
+            m_sort = std::move(field);
         }
         
         std::vector<Email>& Email::attach() {

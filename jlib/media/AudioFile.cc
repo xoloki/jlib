@@ -112,7 +112,7 @@ namespace jlib {
         }
 
         void AudioFile::load(std::string filename) {
-            m_filename = filename;
+            m_filename = std::move(filename);
         }
 
         void AudioFile::save(std::string filename) {

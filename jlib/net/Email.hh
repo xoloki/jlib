@@ -87,7 +87,14 @@ namespace jlib {
             /**
              * Destructor.
              */
-            ~Email();
+            /**
+             * No destructor.
+             *
+             * There was an empty one, and a user-declared destructor -- even
+             * an empty one -- suppresses the implicit move constructor and
+             * move assignment.  Every std::move of one of these was silently
+             * doing a copy; measured, moving a 2M Email copied 4M.
+             */
             
             void set(std::string key,std::string val);
             void add(std::string key,std::string val);

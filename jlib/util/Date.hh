@@ -132,6 +132,20 @@ namespace jlib {
             Date(time_t secs);
             Date(struct tm* t);
             virtual ~Date();
+
+            /**
+             * The rest of the five, explicitly.
+             *
+             * A user-declared destructor -- which a polymorphic class needs,
+             * and which also anchors the vtable -- suppresses the implicit
+             * move constructor and move assignment, so every std::move of a
+             * Date was quietly doing a copy.  Defaulting them says what was
+             * meant and costs nothing now that m_time is a value.
+             */
+            Date(const Date&) = default;
+            Date& operator=(const Date&) = default;
+            Date(Date&&) = default;
+            Date& operator=(Date&&) = default;
             
             /**
              * set from the current time
@@ -156,12 +170,12 @@ namespace jlib {
              */
             time_t time() const;
             
-            int year() const { return m_time->tm_year; }
-            int mon() const { return m_time->tm_mon; }
-            int mday() const { return m_time->tm_mday; }
-            int hour() const { return m_time->tm_hour; }
-            int min() const { return m_time->tm_min; }
-            int sec() const { return m_time->tm_sec; }
+            int year() const { return m_time.tm_year; }
+            int mon() const { return m_time.tm_mon; }
+            int mday() const { return m_time.tm_mday; }
+            int hour() const { return m_time.tm_hour; }
+            int min() const { return m_time.tm_min; }
+            int sec() const { return m_time.tm_sec; }
             
             friend std::istream& operator>>(std::istream& in, Date& d);
             friend std::ostream& operator<<(std::ostream& out, const Date& d);
@@ -255,7 +269,20 @@ namespace jlib {
             struct tm* stm();
             
         private:
-            struct tm* m_time;
+            /**
+             * The broken-down time, by value.
+             *
+             * This was a struct tm* allocated with new in every constructor
+             * and deleted in the destructor -- for a POD of nine ints, which
+             * needs no allocation at all.  Worse, no copy constructor was
+             * declared, so copying a Date copied the pointer and both
+             * destructors freed it: ASan reported the double free at
+             * Date.cc:63.
+             *
+             * As a value the copy is correct and free, and with the
+             * destructor gone the implicit move comes back.
+             */
+            struct tm m_time;
             std::map<std::string,std::string> m_tz_name;
             std::map<std::string,int> m_tz_val;
             

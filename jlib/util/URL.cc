@@ -61,10 +61,6 @@ namespace jlib {
             set_qs(qs);
         }
         
-        URL::~URL() {
-            
-        }
-        
         void URL::parse(std::string url) {
             if(std::getenv("JLIB_UTIL_URL_DEBUG"))
                 std::cerr << "jlib::util::URL::parse(\""<<url<<"\")"<<std::endl;
@@ -223,31 +219,31 @@ namespace jlib {
         }
         
         void URL::set_protocol(std::string protocol) {
-            m_protocol = protocol;
+            m_protocol = std::move(protocol);
         }
 
         void URL::set_user(std::string user) {
-            m_user = user;
+            m_user = std::move(user);
         }
 
         void URL::set_pass(std::string pass) {
-            m_pass = pass;
+            m_pass = std::move(pass);
         }
 
         void URL::set_host(std::string host) {
-            m_host = host;
+            m_host = std::move(host);
         }
 
         void URL::set_port(std::string port) {
-            m_port = port;
+            m_port = std::move(port);
         }
 
         void URL::set_path(std::string path) {
-            m_path = path;
+            m_path = std::move(path);
         }
 
         void URL::set_delim(std::string delim) {
-            m_delim = delim;
+            m_delim = std::move(delim);
         }
 
         void URL::set_qs(std::string qs) {

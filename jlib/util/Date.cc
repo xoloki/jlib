@@ -44,55 +44,62 @@ const int WEEK_MAX=8;
 namespace jlib {
     namespace util {
         Date::Date() {
-            m_time = new struct tm;
             m_tz_name = create_tz_names();
             m_tz_val = create_tz_vals();
             set();
         }
         
         Date::Date(time_t secs) {
-            m_time = new struct tm;
             set(secs);
         }
         
         Date::Date(struct tm* t) {
-            m_time = new struct tm;
             set(t);
         }
         
         Date::~Date() {
-            delete m_time;
         }
-        
+
         void Date::set() {
             time_t now = ::time(0);
-            set(localtime(&now));
-            if(m_time == 0)
+
+            // Checked here rather than after the fact.  This tested m_time for
+            // null once m_time was the thing being written, which said nothing
+            // about whether localtime had failed.
+            struct tm* t = localtime(&now);
+            if(t == 0)
                 throw exception("error calling localtime(time_t*) in xdbc::Date::set()");
+
+            set(t);
         }
         
         /**
          * set from the seconds value passed
          */
         void Date::set(time_t secs) {
-            set(localtime(&secs));
-            if(m_time == 0)
+            struct tm* t = localtime(&secs);
+            if(t == 0)
                 throw exception("error calling localtime(time_t*) in xdbc::Date::set(time_t)");
+
+            set(t);
         }
         
         /**
          * set from the timeval* passed
          */
         void Date::set(struct tm* t) {
-            m_time->tm_sec = t->tm_sec;
-            m_time->tm_min = t->tm_min;
-            m_time->tm_hour = t->tm_hour;
-            m_time->tm_mday = t->tm_mday;
-            m_time->tm_mon = t->tm_mon;
-            m_time->tm_year = t->tm_year;
-            m_time->tm_wday = t->tm_wday;
-            m_time->tm_yday = t->tm_yday;
-            m_time->tm_isdst = t->tm_isdst;
+            if(t == 0)
+                throw exception("set(struct tm*): null");
+
+            m_time.tm_sec = t->tm_sec;
+            m_time.tm_min = t->tm_min;
+            m_time.tm_hour = t->tm_hour;
+            m_time.tm_mday = t->tm_mday;
+            m_time.tm_mon = t->tm_mon;
+            m_time.tm_year = t->tm_year;
+            m_time.tm_wday = t->tm_wday;
+            m_time.tm_yday = t->tm_yday;
+            m_time.tm_isdst = t->tm_isdst;
         }
         
         int Date::find_month(std::string s, name_format f) const {
@@ -137,7 +144,13 @@ namespace jlib {
             }
         }
         time_t Date::time() const {
-            return mktime(m_time);
+            // On a copy.  mktime normalizes the struct it is handed, so this
+            // was writing to the object from a const method -- which compiled
+            // only because m_time was a pointer, and pointing at non-const
+            // data through a const member is not a const member.
+            struct tm t = m_time;
+
+            return mktime(&t);
         }
         std::string Date::build_date(std::string fmt) const {
             std::ostringstream os;
@@ -160,38 +173,38 @@ namespace jlib {
             sfmt.append(fmt[i],1);
             switch(fmt[i]) {
             case 'H':
-                os << std::setw(2) << std::setfill('0') << m_time->tm_hour ;
+                os << std::setw(2) << std::setfill('0') << m_time.tm_hour ;
                 break;
             case 'I':
-                if(m_time->tm_hour == 0) {
+                if(m_time.tm_hour == 0) {
                     os << std::setw(2) << std::setfill('0') << 12 ;
                 }
-                else if(m_time->tm_hour <= 12) {
-                    os << std::setw(2) << std::setfill('0') << m_time->tm_hour ;
+                else if(m_time.tm_hour <= 12) {
+                    os << std::setw(2) << std::setfill('0') << m_time.tm_hour ;
                 }
                 else {
-                    os << std::setw(2) << std::setfill('0') << (m_time->tm_hour - 12) ;
+                    os << std::setw(2) << std::setfill('0') << (m_time.tm_hour - 12) ;
                 }
                 break;
             case 'k':
-                os << std::setw(2) << std::setfill(' ') << m_time->tm_hour ;
+                os << std::setw(2) << std::setfill(' ') << m_time.tm_hour ;
                 break;
             case 'l':
-                if(m_time->tm_hour == 0) {
+                if(m_time.tm_hour == 0) {
                     os << std::setw(2) << std::setfill(' ') << 12 ;
                 }
-                else if(m_time->tm_hour <= 12) {
-                    os << std::setw(2) << std::setfill(' ') << m_time->tm_hour ;
+                else if(m_time.tm_hour <= 12) {
+                    os << std::setw(2) << std::setfill(' ') << m_time.tm_hour ;
                 }
                 else {
-                    os << std::setw(2) << std::setfill(' ') << (m_time->tm_hour - 12) ;
+                    os << std::setw(2) << std::setfill(' ') << (m_time.tm_hour - 12) ;
                 }
                 break;
             case 'M':
-                os << std::setw(2) << std::setfill('0') << m_time->tm_min ;
+                os << std::setw(2) << std::setfill('0') << m_time.tm_min ;
                 break;
             case 'p':
-                if(m_time->tm_hour >= 12) {
+                if(m_time.tm_hour >= 12) {
                     os << "PM" ;
                 }
                 else {
@@ -202,10 +215,13 @@ namespace jlib {
                 os << build_date("%I:%M:%S %p") ;
                 break;
             case 's':
-                os << mktime(m_time) ;
+                {
+                    struct tm t = m_time;
+                    os << mktime(&t);
+                }
                 break;
             case 'S':
-                os << std::setw(2) << std::setfill('0') << m_time->tm_sec ;
+                os << std::setw(2) << std::setfill('0') << m_time.tm_sec ;
                 break;
             case 'T':
                 os << build_date("%H:%M:%S");
@@ -220,39 +236,39 @@ namespace jlib {
                 os << tzname[0] ;
                 break;
             case 'a':
-                os << short_weekdays[m_time->tm_wday] ;
+                os << short_weekdays[m_time.tm_wday] ;
                 break;
             case 'A':
-                os << long_weekdays[m_time->tm_wday] ;
+                os << long_weekdays[m_time.tm_wday] ;
                 break;
             case 'b':
-                os << short_months[m_time->tm_mon] ;
+                os << short_months[m_time.tm_mon] ;
                 break;
             case 'B':
-                os << long_months[m_time->tm_mon] ;
+                os << long_months[m_time.tm_mon] ;
                 break;
             case 'c':
                 os << build_date("%a %b %d %X %Z %Y") ;
                 break;
             case 'd':
-                os <<std::setw(2) <<std::setfill('0') << m_time->tm_mday;
+                os <<std::setw(2) <<std::setfill('0') << m_time.tm_mday;
                 break;
             case 'D':
                 os << build_date("%m/%d/%y") ;
                 break;
             case 'h':
-                os << short_months[m_time->tm_wday] ;
+                os << short_months[m_time.tm_wday] ;
                 break;
             case 'j':
-                os <<std::setw(3) <<std::setfill('0') << m_time->tm_yday;
+                os <<std::setw(3) <<std::setfill('0') << m_time.tm_yday;
                 break;
             case 'm':
-                os <<std::setw(2) <<std::setfill('0') << (m_time->tm_mon+1);
+                os <<std::setw(2) <<std::setfill('0') << (m_time.tm_mon+1);
                 break;
             case 'U':
                 break;
             case 'w':
-                os <<std::setw(2) <<std::setfill('0') << m_time->tm_wday;
+                os <<std::setw(2) <<std::setfill('0') << m_time.tm_wday;
                 break;
             case 'W':
                 break;
@@ -260,10 +276,10 @@ namespace jlib {
                 os << build_date("%D") ;
                 break;
             case 'y':
-                os << std::setw(2) << std::setfill('0') << (m_time->tm_year % 100) ;
+                os << std::setw(2) << std::setfill('0') << (m_time.tm_year % 100) ;
                 break;
             case 'Y':
-                os << (m_time->tm_year + 1900) ;
+                os << (m_time.tm_year + 1900) ;
                 break;
             default:
                 throw exception("bad format std::string '"+fmt+"': the directive that failed was "+sfmt);
@@ -300,11 +316,11 @@ namespace jlib {
             case 'H':
             case 'k':
                 is >> ibuf;
-                m_time->tm_hour = ibuf;
+                m_time.tm_hour = ibuf;
                 break;
             case 'M':
                 is >> ibuf;
-                m_time->tm_min = ibuf;
+                m_time.tm_min = ibuf;
                 break;
             case 'p':
                 is >> sbuf;
@@ -319,7 +335,7 @@ namespace jlib {
                 if(sbuf == "AM") {
                 }
                 else if(sbuf == "PM") {
-                    m_time->tm_hour += 12;
+                    m_time.tm_hour += 12;
                 }
                 else {
                     throw exception("bad AM/PM specifier '"+sbuf+"' in format '"+fmt+"'");
@@ -331,7 +347,7 @@ namespace jlib {
                 break;
             case 'S':
                 is >> ibuf;
-                m_time->tm_sec = ibuf;
+                m_time.tm_sec = ibuf;
                 break;
             case 'T':
                 build_date(is, "%H:%M:%S");
@@ -343,7 +359,7 @@ namespace jlib {
                 is >> sbuf;
                 /*
                   if(m_tz_name[sbuf] != "") {
-                  m_time->tm_hour += m_tz_val[sbuf];
+                  m_time.tm_hour += m_tz_val[sbuf];
                   }
                 */
                 break;
@@ -355,29 +371,29 @@ namespace jlib {
                 break;
             case 'b':
                 is >> sbuf;
-                m_time->tm_mon = find_month(sbuf, SHORT);
+                m_time.tm_mon = find_month(sbuf, SHORT);
                 break;
             case 'B':
                 is >> sbuf;
-                m_time->tm_mon = find_month(sbuf, LONG);
+                m_time.tm_mon = find_month(sbuf, LONG);
                 break;
             case 'c':
                 build_date(is, "%a %b %d %X %Z %Y");
                 break;
             case 'd':
                 is >> ibuf;
-                m_time->tm_mday = ibuf;
+                m_time.tm_mday = ibuf;
                 break;
             case 'D':
                 build_date(is, "%m/%d/%y");
                 break;
             case 'h':
                 is >> sbuf;
-                m_time->tm_mon = find_month(sbuf, SHORT);
+                m_time.tm_mon = find_month(sbuf, SHORT);
                 break;
             case 'm':
                 is >> ibuf;
-                m_time->tm_mon = ibuf-1;
+                m_time.tm_mon = ibuf-1;
                 break;
             case 'x':
                 build_date(is, "%D");
@@ -385,16 +401,16 @@ namespace jlib {
             case 'y':
                 is >> ibuf;
                 if(ibuf < 70) {
-                    m_time->tm_year = 100+ibuf;
+                    m_time.tm_year = 100+ibuf;
                 }
                 else {
-                    m_time->tm_year = ibuf;
+                    m_time.tm_year = ibuf;
                 }
                 
                 break;
             case 'Y':
                 is >> ibuf;
-                m_time->tm_year  = ibuf-1900;
+                m_time.tm_year  = ibuf-1900;
                 break;
             default:
                 throw exception("bad format std::string '"+fmt+"': the directive that failed was "+sfmt);
@@ -514,7 +530,7 @@ namespace jlib {
         
         void Date::set(std::string s, std::string fmt) {
             //std::cout << "setting "<<s<<" to format "<<fmt<<std::endl;
-            std::memset(m_time, 0, sizeof(struct tm));
+            std::memset(&m_time, 0, sizeof(struct tm));
             m_current_tz = "";
             std::istringstream is(s);
             build_date(is,fmt);
@@ -523,16 +539,16 @@ namespace jlib {
             //debug_print();
         }
         void Date::reinit() {
-            int isdst = m_time->tm_isdst;
-            time_t newtime = mktime(m_time);
+            int isdst = m_time.tm_isdst;
+            time_t newtime = mktime(&m_time);
             /*
               if(m_current_tz != "") {
               newtime += (3600*m_tz_val[m_current_tz]);
               }
             */
             set(localtime(&newtime));
-            if(isdst == 0 && m_time->tm_isdst == 1) {
-                m_time->tm_hour--;
+            if(isdst == 0 && m_time.tm_isdst == 1) {
+                m_time.tm_hour--;
                 reinit();
             }
         }
@@ -617,15 +633,15 @@ namespace jlib {
         }
         
         void Date::debug_print() const {
-            std::cout << "m_time->tm_sec = " << m_time->tm_sec << std::endl;
-            std::cout << "m_time->tm_min = " << m_time->tm_min << std::endl;
-            std::cout << "m_time->tm_hour = " << m_time->tm_hour << std::endl;
-            std::cout << "m_time->tm_mday = " << m_time->tm_mday << std::endl;
-            std::cout << "m_time->tm_mon = " << m_time->tm_mon << std::endl;
-            std::cout << "m_time->tm_year = " << m_time->tm_year << std::endl;
-            std::cout << "m_time->tm_wday = " << m_time->tm_wday << std::endl;
-            std::cout << "m_time->tm_yday = " << m_time->tm_yday << std::endl;
-            std::cout << "m_time->tm_isdst = " << m_time->tm_isdst << std::endl;
+            std::cout << "m_time.tm_sec = " << m_time.tm_sec << std::endl;
+            std::cout << "m_time.tm_min = " << m_time.tm_min << std::endl;
+            std::cout << "m_time.tm_hour = " << m_time.tm_hour << std::endl;
+            std::cout << "m_time.tm_mday = " << m_time.tm_mday << std::endl;
+            std::cout << "m_time.tm_mon = " << m_time.tm_mon << std::endl;
+            std::cout << "m_time.tm_year = " << m_time.tm_year << std::endl;
+            std::cout << "m_time.tm_wday = " << m_time.tm_wday << std::endl;
+            std::cout << "m_time.tm_yday = " << m_time.tm_yday << std::endl;
+            std::cout << "m_time.tm_isdst = " << m_time.tm_isdst << std::endl;
             
         }
         
@@ -660,7 +676,7 @@ namespace jlib {
         }
         
         struct tm* Date::stm() {
-            return m_time;
+            return &m_time;
         }
         
         

@@ -61,8 +61,14 @@ namespace jlib {
 
             Headers();
             Headers(std::string s);
-
-            virtual ~Headers();
+            /**
+             * No destructor.
+             *
+             * There was an empty one, and a user-declared destructor -- even
+             * an empty one -- suppresses the implicit move constructor and
+             * move assignment.  Every std::move of one of these was silently
+             * doing a copy; measured, moving a 2M Email copied 4M.
+             */
 
             std::string operator[](std::string key) const;
             operator std::string() const;
