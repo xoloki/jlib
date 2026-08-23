@@ -19,6 +19,9 @@
  */
 
 #include <jlib/sys/sys.hh>
+
+#include <pthread.h>
+#include <cerrno>
 #include <jlib/sys/tfstream.hh>
 
 #include <map>
@@ -57,6 +60,67 @@ namespace jlib {
             }
 
         }
+
+        void nosigpipe(int fd) {
+#ifdef SO_NOSIGPIPE
+            int on = 1;
+
+            // Best effort: a socket that will not take the option still works,
+            // it just leaves the job to sigpipe_guard, and failing the connect
+            // over it would be worse than the problem.
+            ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#else
+            (void)fd;
+#endif
+        }
+
+#ifdef SO_NOSIGPIPE
+
+        sigpipe_guard::sigpipe_guard() {}
+        sigpipe_guard::~sigpipe_guard() {}
+
+#else
+
+        sigpipe_guard::sigpipe_guard()
+            : m_blocked(false)
+        {
+            sigset_t pipe_only;
+            sigemptyset(&pipe_only);
+            sigaddset(&pipe_only, SIGPIPE);
+
+            if(pthread_sigmask(SIG_BLOCK, &pipe_only, &m_old) != 0)
+                return;
+
+            // Only unblock on the way out if it was us who blocked it; a caller
+            // that had already blocked SIGPIPE keeps its own arrangement, and
+            // its pending signal is not ours to consume.
+            m_blocked = !sigismember(&m_old, SIGPIPE);
+        }
+
+        sigpipe_guard::~sigpipe_guard() {
+            if(!m_blocked)
+                return;
+
+            sigset_t pending;
+            sigemptyset(&pending);
+
+            if(sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE)) {
+                sigset_t pipe_only;
+                sigemptyset(&pipe_only);
+                sigaddset(&pipe_only, SIGPIPE);
+
+                // Take it off the pending set before unblocking, or it lands on
+                // the caller the instant the mask is restored -- the same
+                // termination, just later and harder to explain.
+                const struct timespec none = { 0, 0 };
+                while(sigtimedwait(&pipe_only, 0, &none) == -1 && errno == EINTR)
+                    ;
+            }
+
+            pthread_sigmask(SIG_SETMASK, &m_old, 0);
+        }
+
+#endif
 
         void getline(std::istream& is, std::string& s) {
             std::getline(is,s);

@@ -30,6 +30,8 @@
 #include <cstring>
 #include <cstdlib>
 
+#include <jlib/sys/sys.hh>
+
 #include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -134,6 +136,11 @@ namespace jlib {
             virtual int_type sync() {
                 if(std::getenv("JLIB_SYS_SOCKET_DEBUG"))
                     std::cerr << "basic_socketbuf::sync()"<<std::endl;
+                // Where SO_NOSIGPIPE exists this is a no-op and the socket
+                // option has already dealt with it; where it does not, this is
+                // what keeps a dead peer from killing us.
+                sigpipe_guard guard;
+
                 int sofar = 0;
                 int total = this->pptr() - this->pbase();
                 int diff;
@@ -150,6 +157,7 @@ namespace jlib {
                         if(errno == EINTR) {
                             m_eintr = true;
                         }
+                        // EPIPE arrives here now instead of as a signal.
                         return traits_type::eof();
                     }
                     sofar += count;
@@ -214,6 +222,11 @@ namespace jlib {
                     throw exception("error connecting to " + host + ":" + o.str());
                 }
                 
+                // Before anything is written: a write to a peer that has gone
+                // away raises SIGPIPE, whose default action is to kill the
+                // process outright, so the error checking below never runs.
+                nosigpipe(m_sock);
+
                 if(fcntl(m_sock, F_SETFD, 1) == -1) {
                     if(std::getenv("JLIB_SYS_SOCKET_DEBUG"))
                         std::cerr <<"throwing exception from jlib::sys::socketstream::open_socket()"<<std::endl
