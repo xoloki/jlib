@@ -23,6 +23,7 @@
 
 #include <jlib/media/Type.hh>
 #include <jlib/media/instrument.hh>
+#include <jlib/media/source.hh>
 
 #include <cmath>
 
@@ -54,7 +55,7 @@ namespace media {
  * The harmonic count is also a brightness control, for free: ask for four and
  * the saw is dull, ask for everything and it is bright.
  */
-class voice {
+class voice : public source {
 public:
     /**
      * @param i        the instrument, copied
@@ -83,8 +84,35 @@ public:
     }
 
     unsigned long size() const { return m_samples; }
-    bool done() const { return m_pos >= m_samples; }
-    void reset() { m_pos = 0; }
+
+    virtual bool done() const { return m_pos >= m_samples; }
+    virtual void reset() { m_pos = 0; }
+
+    /**
+     * Add this voice to a buffer.
+     *
+     * Block-size independent by construction: everything comes from m_pos,
+     * which counts frames since the voice started, so a call boundary is not
+     * something the output can notice.  See the note on source.
+     */
+    virtual unsigned long render(Type::scaled* out, unsigned long frames,
+                                 unsigned int channels)
+    {
+        unsigned long made = 0;
+
+        while(made < frames && !done()) {
+            const Type::scaled s = next();
+
+            // Mono, spread across the frame.  A voice has no stereo image of
+            // its own; the mixer places it.
+            for(unsigned int c = 0; c < channels; c++)
+                out[made * channels + c] += s;
+
+            ++made;
+        }
+
+        return made;
+    }
 
     /** The next frame, in [-1,1].  Silence once the note is over. */
     Type::scaled next()
