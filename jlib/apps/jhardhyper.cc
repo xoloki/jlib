@@ -955,7 +955,21 @@ void HyperPlot<T,Plot>::initialize(uint n) {
     change(n);
     
     initialize_rotation(n);
-    (*this) * matrix<T>::lookAt(n, eye, up, center);
+    // A translation, not a camera.
+    //
+    // The eye sits at a positive offset on every axis that gets projected away,
+    // so that each step's frustum has the figure wholly in front of it -- see
+    // initialize_glazzies.  That is not a direction to look in: above D=4 it is
+    // diagonal across several axes at once, and a real lookAt would rotate it
+    // onto one of them and leave the others with no offset at all, putting the
+    // figure outside the clip volume.
+    //
+    // This said lookAt(n, eye, up, center) and got a translation because that
+    // was all lookAt did.  Now that lookAt is a camera, say what is meant.
+    vertex<T> back(n);
+    for(uint i = 0; i < n; i++) back[i] = -eye[i];
+
+    (*this) * matrix<T>::translate(n, back);
 
     switch(m_shape) {
     case CUBOID: {

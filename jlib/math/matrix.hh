@@ -991,19 +991,104 @@ template<typename T>
 inline
 matrix<T> matrix<T>::lookAt(uint n, const vertex<T>& eye, 
                             const vertex<T>& up, const vertex<T>& center) {
+    // A camera: rotate the world so the view direction lies along one axis,
+    // then bring the eye to the origin.
+    //
+    // This used to be translate(-eye) alone, with up and center accepted and
+    // discarded.  That is not a look-at, it is a translation, and the callers
+    // relying on it say translate() now.
+    //
+    // There is no cross product above three dimensions, so the basis comes from
+    // Gram-Schmidt instead, which needs none and reproduces the usual one in
+    // three.  Forward goes to -e_(n-1), matching the convention everything else
+    // here follows -- project() yields w = -x_(d-1), so what the camera faces
+    // has to lie along the negative end of the axis being projected away.  Up
+    // goes to e_1, and whatever axes are left are filled by orthonormalizing
+    // the standard basis against what is already fixed.
+    std::vector< vertex<T> > basis;
+    for(uint i = 0; i < n; i++)
+        basis.push_back(vertex<T>(n));
+
+    std::vector<bool> filled(n, false);
+
+    // forward
+    vertex<T> f(n);
+    T len = 0;
+    for(uint i = 0; i < n; i++) {
+        f[i] = center[i] - eye[i];
+        len += f[i] * f[i];
+    }
+    len = std::sqrt(len);
+
+    if(len < 1e-12)
+        throw typename matrix<T>::mismatch();   // eye and centre coincide
+
+    for(uint i = 0; i < n; i++) f[i] /= len;
+
+    for(uint i = 0; i < n; i++) basis[n-1][i] = -f[i];
+    filled[n-1] = true;
+
+    // up, with the part along forward removed
+    if(n > 1) {
+        vertex<T> u(n);
+        T dot = 0;
+        for(uint i = 0; i < n; i++) dot += up[i] * f[i];
+
+        T ulen = 0;
+        for(uint i = 0; i < n; i++) {
+            u[i] = up[i] - dot * f[i];
+            ulen += u[i] * u[i];
+        }
+        ulen = std::sqrt(ulen);
+
+        // An up parallel to the view direction says nothing about roll; leave
+        // the axis to the completion below rather than guessing.
+        if(ulen > 1e-12) {
+            for(uint i = 0; i < n; i++) basis[1][i] = u[i] / ulen;
+            filled[1] = true;
+        }
+    }
+
+    // whatever is left, from the standard basis
+    uint next = 0;
+    for(uint e = 0; e < n && next < n; e++) {
+        while(next < n && filled[next]) next++;
+        if(next >= n) break;
+
+        vertex<T> v(n);
+        for(uint i = 0; i < n; i++) v[i] = (i == e) ? 1 : 0;
+
+        for(uint b = 0; b < n; b++) {
+            if(!filled[b]) continue;
+
+            T dot = 0;
+            for(uint i = 0; i < n; i++) dot += v[i] * basis[b][i];
+            for(uint i = 0; i < n; i++) v[i] -= dot * basis[b][i];
+        }
+
+        T vlen = 0;
+        for(uint i = 0; i < n; i++) vlen += v[i] * v[i];
+        vlen = std::sqrt(vlen);
+
+        // e lay in the span of what is already fixed; try the next one
+        if(vlen < 1e-9)
+            continue;
+
+        for(uint i = 0; i < n; i++) basis[next][i] = v[i] / vlen;
+        filled[next] = true;
+    }
+
     matrix<T> ret = matrix<T>::identity(n+1);
+    for(uint i = 0; i < n; i++)
+        for(uint j = 0; j < n; j++)
+            ret(i,j) = basis[i][j];
+
     const T neg = static_cast<T>(-1);
     vertex<T> neye(n); neye = (eye() * neg);
-    
-    ret *= translate(n, neye);
 
-    /*
-    for(uint i = 0; i <n; i++) {
-        plane p;
-        p.i = i;
-        p.j = 1;
-    }
-    */
+    // Rotate after translating: the eye reaches the origin first, and the
+    // basis then turns the world about it.
+    ret *= translate(n, neye);
 
     return ret;
 }
