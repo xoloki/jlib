@@ -60,10 +60,11 @@ public:
      * none leaves it alone: the sum is the sum, and the levels are whatever the
      * faders say.  Right when somebody is mixing.
      *
-     * automatic divides by the square root of the number of children.
-     * Uncorrelated sources sum in power rather than amplitude, so N of them
-     * give sqrt(N) times the RMS -- dividing by N, which is the intuitive
-     * choice, is what makes a dense mix quieter the more you put in it.
+     * automatic divides by the square root of the number of children, and then
+     * by the headroom.  Uncorrelated sources sum in power rather than
+     * amplitude, so N of them give sqrt(N) times the RMS -- dividing by N,
+     * which is the intuitive choice, is what makes a dense mix quieter the more
+     * you put in it.  See set_headroom() for the rest of it.
      */
     enum class staging { none, automatic };
 
@@ -91,6 +92,41 @@ public:
 
     staging get_staging() const { return m_staging; }
     void set_staging(staging s) { m_staging = s; }
+
+    /**
+     * Room left below the ceiling by automatic staging, in dB.
+     *
+     * Dividing by sqrt(N) holds the RMS and says nothing about peaks, so
+     * without this the sum runs over the ceiling as soon as there are three
+     * voices, and the limiter becomes a routine participant rather than a
+     * safety net.  That costs more than it looks: the limiter engages on dense
+     * material and not on sparse, so a chord comes out quieter than a single
+     * note and the level consistency staging exists to provide is lost exactly
+     * where it was wanted.
+     *
+     * A constant works here, which is not obvious and is why it is worth
+     * measuring rather than reasoning about.  The worst case for N voices is
+     * that they align, giving gain*sqrt(N) and growing without limit -- but
+     * alignment stops happening as N rises, and the peak that actually occurs
+     * plateaus.  Sine voices at the default gain, staged, unlimited:
+     *
+     *     N        1      3      8     16     32     64
+     *     peak  0.666  1.153  1.572  1.777  1.717  1.678
+     *     rms   0.471  0.471  0.469  0.471  0.471  0.472
+     *
+     * So the whole range from a single note to sixty-four of them needs about
+     * 5dB, and any voice count needs no more than that.
+     *
+     * The default is smaller than 5dB deliberately.  It keeps the limiter out
+     * of the path for the sparse material where its engaging would be most
+     * audible as inconsistency, and leaves it to do its job on dense material,
+     * where it is both rarer and better masked.  Headroom is not free -- it is
+     * level, given up -- so this is a balance and not a maximum.  Raise it
+     * toward 5dB to keep the limiter idle at any voice count; set it to zero
+     * for the loudest possible mix and let the limiter earn its keep.
+     */
+    double get_headroom() const { return m_headroom; }
+    void set_headroom(double db) { m_headroom = db; }
 
     /**
      * Drop the children that have finished.
@@ -218,9 +254,12 @@ public:
             return 0;
 
         // The staging divisor comes from how many children there are, not how
-        // many are still sounding; see prune().
+        // many are still sounding; see prune().  Headroom is a constant and so
+        // cancels out of any comparison between voice counts, which is what
+        // keeps the level consistent rather than merely lower.
         const double stage = (m_staging == staging::automatic && !m_children.empty())
-            ? 1.0 / std::sqrt(static_cast<double>(m_children.size()))
+            ? std::pow(10.0, -m_headroom / 20.0) /
+              std::sqrt(static_cast<double>(m_children.size()))
             : 1.0;
 
         const double release = release_coefficient();
@@ -351,6 +390,7 @@ protected:
     double m_gain = 1.0;
     double m_release = 0.25;
     double m_rate = 44100;
+    double m_headroom = 3.0;
 
     Type::scaled m_peak = 0;
     double m_rms_sum = 0;
