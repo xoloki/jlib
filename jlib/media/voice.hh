@@ -92,13 +92,7 @@ public:
         // Harmonics up to Nyquist, and no further.  This is the whole of the
         // band limiting: an aliased partial is one that was generated in the
         // first place.
-        const double nyquist = m_rate / 2;
-
-        m_partials = (m_freq > 0) ? static_cast<unsigned int>(nyquist / m_freq) : 0;
-
-        const unsigned int asked = m_instrument.get_harmonics();
-        if(asked > 0 && asked < m_partials)
-            m_partials = asked;
+        partials_from_pitch();
 
         // The envelope segments, in samples, worked out once.  gain_at() ran
         // this arithmetic per sample, and it depends on nothing that changes.
@@ -107,7 +101,86 @@ public:
         m_release = ramp_samples(m_envelope.release);
     }
 
+    /**
+     * A voice with no end, which sounds until it is released.
+     *
+     * The other constructor makes a note of a known length, which is what a
+     * score is made of.  This one is what a keyboard is made of, and what
+     * jhypermusic wants: something held while a vertex exists, its pitch and
+     * level moving underneath it.
+     *
+     * The envelope runs attack, decay, then holds at sustain for as long as it
+     * takes.  release() starts the last segment, from wherever the level had
+     * got to.
+     */
+    voice(const instrument& i, double freq, double rate)
+        : m_instrument(i),
+          m_freq(freq),
+          m_samples(0),
+          m_rate(rate),
+          m_envelope(i.get_envelope()),
+          m_pos(0),
+          m_sustaining(true)
+    {
+        partials_from_pitch();
+
+        // Not ramp_samples: that clamps to half the note, and there is no note.
+        m_attack  = seconds_to_samples(m_envelope.attack);
+        m_decay   = seconds_to_samples(m_envelope.decay);
+        m_release = seconds_to_samples(m_envelope.release);
+
+        // The ramps still have to reach silence, or releasing clicks.
+        if(m_attack  == 0) m_attack  = seconds_to_samples(instrument::MIN_RAMP);
+        if(m_release == 0) m_release = seconds_to_samples(instrument::MIN_RAMP);
+    }
+
     unsigned long size() const { return m_samples; }
+
+    bool is_sustaining() const { return m_sustaining; }
+    bool is_released() const { return m_released; }
+
+    /**
+     * Let a held voice go, starting its release.
+     *
+     * From wherever the envelope had reached, rather than from the sustain
+     * level -- releasing during the attack would otherwise jump up to sustain
+     * first, which is a click.  Ignored if it is not held, or already let go.
+     */
+    void release()
+    {
+        if(!m_sustaining || m_released)
+            return;
+
+        m_release_from = gain_at(m_pos);
+        m_released_at = m_pos;
+        m_released = true;
+    }
+
+    double get_freq() const { return m_freq; }
+
+    /**
+     * Retune, while it is sounding.
+     *
+     * The phase carries across, so this does not click: what changes is how
+     * fast the phase advances from here, not where it is.  That is why the
+     * oscillator accumulates phase rather than deriving it from the sample
+     * index -- see next().
+     *
+     * The partial count and, in fast quality, the table both depend on the
+     * pitch, so both are worked out again here.  In fast quality that is a
+     * mutex and a map lookup, which is fine once a frame and would not be once
+     * a sample.
+     */
+    void set_freq(double freq)
+    {
+        if(freq == m_freq)
+            return;
+
+        m_freq = freq;
+
+        partials_from_pitch();
+        resolve_table();
+    }
 
     quality get_quality() const { return m_quality; }
 
@@ -120,10 +193,12 @@ public:
     void set_quality(quality q, wavetable_set* set = 0)
     {
         m_quality = q;
+        m_set = set;
         m_table = 0;
 
         if(q != quality::fast || set == 0) {
             m_quality = quality::exact;
+            m_set = 0;
             return;
         }
 
@@ -136,11 +211,25 @@ public:
         //
         // Building it may allocate, so this is also the point a realtime caller
         // must reach before its deadline starts.
-        m_table = &set->get(m_instrument.get_wave(), m_freq, m_rate);
+        resolve_table();
     }
 
-    virtual bool done() const { return m_pos >= m_samples; }
-    virtual void reset() { m_pos = 0; }
+    virtual bool done() const
+    {
+        if(m_sustaining)
+            return m_released && m_pos >= m_released_at + m_release;
+
+        return m_pos >= m_samples;
+    }
+
+    virtual void reset()
+    {
+        m_pos = 0;
+        m_phase = 0;
+        m_released = false;
+        m_released_at = 0;
+        m_release_from = 0;
+    }
 
     /**
      * Add this voice to a buffer.
@@ -176,9 +265,21 @@ public:
 
         const unsigned long i = m_pos++;
 
-        // Phase from the sample index rather than accumulated, so it cannot
-        // drift and so a voice can be restarted exactly.
-        const double phase = (m_rate > 0) ? std::fmod(m_freq * i / m_rate, 1.0) : 0.0;
+        // Accumulated rather than derived from the sample index.  The index
+        // form could not drift, which is why it was written that way, but it
+        // also pins the phase to one frequency for the life of the voice --
+        // retuning would restart fmod(f*i/rate) somewhere unrelated to where
+        // the waveform had got to, and jump.  Accumulating is what makes
+        // set_freq() continuous, and the drift it admits is a rounding error
+        // per frame: about 1e-13 of a cycle after a minute, in a double.
+        const double phase = m_phase;
+
+        if(m_rate > 0) {
+            m_phase += m_freq / m_rate;
+
+            if(m_phase >= 1.0)
+                m_phase -= std::floor(m_phase);
+        }
 
         return static_cast<Type::scaled>(
             gain_at(i) * m_instrument.get_gain() * oscillator(phase));
@@ -224,6 +325,30 @@ protected:
      */
     double gain_at(unsigned long i) const
     {
+        static const double pi = 3.14159265358979323846;
+
+        if(m_sustaining) {
+            if(m_released) {
+                const unsigned long since = i - m_released_at;
+
+                if(m_release == 0 || since >= m_release)
+                    return 0;
+
+                return m_release_from * 0.5 * (1.0 + std::cos(pi * since / m_release));
+            }
+
+            if(m_attack > 0 && i < m_attack)
+                return 0.5 * (1.0 - std::cos(pi * i / m_attack));
+
+            if(m_decay > 0 && i < m_attack + m_decay) {
+                const double through = double(i - m_attack) / m_decay;
+
+                return 1.0 + through * (m_envelope.sustain - 1.0);
+            }
+
+            return m_envelope.sustain;
+        }
+
         if(m_samples == 0)
             return 0;
 
@@ -232,8 +357,6 @@ protected:
         const unsigned long attack  = m_attack;
         const unsigned long decay   = m_decay;
         const unsigned long release = m_release;
-
-        static const double pi = 3.14159265358979323846;
 
         if(attack > 0 && i < attack)
             return 0.5 * (1.0 - std::cos(pi * i / attack));
@@ -251,6 +374,32 @@ protected:
         }
 
         return m_envelope.sustain;
+    }
+
+    /** Harmonics up to Nyquist for the current pitch, and no further. */
+    void partials_from_pitch()
+    {
+        const double nyquist = m_rate / 2;
+
+        m_partials = (m_freq > 0) ? static_cast<unsigned int>(nyquist / m_freq) : 0;
+
+        const unsigned int asked = m_instrument.get_harmonics();
+        if(asked > 0 && asked < m_partials)
+            m_partials = asked;
+    }
+
+    /** Which band-limited table serves the current pitch, if any does. */
+    void resolve_table()
+    {
+        m_table = (m_quality == quality::fast && m_set)
+            ? &m_set->get(m_instrument.get_wave(), m_freq, m_rate)
+            : 0;
+    }
+
+    unsigned long seconds_to_samples(double seconds) const
+    {
+        return (seconds > 0 && m_rate > 0)
+            ? static_cast<unsigned long>(seconds * m_rate) : 0;
     }
 
     unsigned long ramp_samples(double seconds) const
@@ -274,7 +423,15 @@ protected:
     unsigned long m_attack = 0, m_decay = 0, m_release = 0;
     unsigned long m_pos;
 
+    double m_phase = 0;
+
+    bool m_sustaining = false;
+    bool m_released = false;
+    unsigned long m_released_at = 0;
+    double m_release_from = 0;
+
     quality m_quality = quality::exact;
+    wavetable_set* m_set = 0;
 
     /** Resolved by set_quality; not owned, and null when summing directly. */
     const wavetable* m_table = 0;

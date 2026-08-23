@@ -20,7 +20,7 @@ cuda_programs = jcublas
 endif
 
 if HAVE_PORTAUDIO
-media_programs = jnote jmelody
+media_programs = jnote jmelody jhypermusic
 endif
 
 if HAVE_X
@@ -104,6 +104,9 @@ jnote_LDADD   = $(JMEDIA_LA) $(JSYS_LA)
 
 jmelody_SOURCES = jmelody.cc
 jmelody_LDADD   = $(JMEDIA_LA) $(JUTIL_LA) $(JSYS_LA)
+
+jhypermusic_SOURCES = jhypermusic.cc
+jhypermusic_LDADD   = $(JMEDIA_LA) $(JUTIL_LA) $(JSYS_LA)
 
 jpoisoned_SOURCES = jpoisoned.cc
 jpoisoned_LDADD   = $(JX_LA) $(JSYS_LA) $(JUTIL_LA)

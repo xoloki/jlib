@@ -70,7 +70,7 @@ public:
 
     void add(const std::shared_ptr<source>& s, double gain = 1.0)
     {
-        m_children.push_back(child{s, gain});
+        m_children.push_back(child{s, gain, gain});
     }
 
     void remove(const std::shared_ptr<source>& s)
@@ -88,6 +88,25 @@ public:
     std::size_t size() const { return m_children.size(); }
 
     double get_gain(std::size_t i) const { return m_children.at(i).gain; }
+
+    /**
+     * Move a fader.
+     *
+     * Takes effect over the next render rather than at the start of it: a gain
+     * that steps between blocks is a discontinuity in the output, and a
+     * discontinuity is a click.  A live controller setting levels every frame
+     * would otherwise produce one per frame, which is the zipper noise that
+     * gets blamed on the synthesis.
+     *
+     * Nothing ramps unless a gain actually changed, so a mix whose faders are
+     * not being touched -- an offline render, every test here bar one --
+     * renders exactly as it did before this existed.  When one is being moved,
+     * the ramp spans whatever block it lands in, so the result depends on the
+     * block size.  That is inherent to live control rather than a lapse: there
+     * is no single stream to be independent of when something outside is
+     * changing the mix as it plays.  Offline work uses the timeline, where the
+     * gain is a property of the render and not of when someone moved it.
+     */
     void set_gain(std::size_t i, double g) { m_children.at(i).gain = g; }
 
     staging get_staging() const { return m_staging; }
@@ -226,9 +245,9 @@ public:
 
         // Loudest first when there is a cap, so what gets dropped is what would
         // have been least audible.
-        std::vector<const child*> play;
+        std::vector<child*> play;
         play.reserve(m_children.size());
-        for(const child& c : m_children) play.push_back(&c);
+        for(child& c : m_children) play.push_back(&c);
 
         if(m_max > 0 && play.size() > m_max) {
             std::partial_sort(play.begin(), play.begin() + m_max, play.end(),
@@ -240,14 +259,32 @@ public:
 
         unsigned long most = 0;
 
-        for(const child* c : play) {
+        for(child* c : play) {
             m_scratch.assign(frames * channels, 0);
 
             const unsigned long made = c->s->render(m_scratch.data(), frames, channels);
             if(made > most) most = made;
 
-            for(unsigned long i = 0; i < made * channels; i++)
-                m_mix[i] += static_cast<Type::scaled>(m_scratch[i] * c->gain);
+            if(c->applied == c->gain) {
+                for(unsigned long i = 0; i < made * channels; i++)
+                    m_mix[i] += static_cast<Type::scaled>(m_scratch[i] * c->gain);
+            }
+            else {
+                // Slide from where the fader was to where it now is, across
+                // this block, arriving exactly on the new value at its end.
+                const double from = c->applied, to = c->gain;
+
+                for(unsigned long f = 0; f < made; f++) {
+                    const double g = from + (to - from) * double(f + 1) / made;
+
+                    for(unsigned int ch = 0; ch < channels; ch++)
+                        m_mix[f * channels + ch] +=
+                            static_cast<Type::scaled>(m_scratch[f * channels + ch] * g);
+                }
+
+                if(made > 0)
+                    c->applied = to;
+            }
         }
 
         if(most == 0)
@@ -376,7 +413,8 @@ protected:
 
     struct child {
         std::shared_ptr<source> s;
-        double gain;
+        double gain;      /**< where the fader is */
+        double applied;   /**< where it was when this last rendered */
     };
 
     std::vector<child> m_children;
