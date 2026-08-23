@@ -29,6 +29,11 @@
 #include <jlib/media/stream.hh>
 #include <jlib/media/PortAudioSink.hh>
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+
 #include <sys/poll.h>
 
 namespace jlib {
@@ -85,6 +90,25 @@ namespace jlib {
 
             void play_slot();
 
+            /**
+             * The feeder: moves samples from the stream into the sink.
+             *
+             * Its own thread, because the write it makes blocks when the sink's
+             * ring is full.  That used to happen on the Servent worker, which
+             * is also the thread reading the command pipe, so a PAUSE or a STOP
+             * waited behind the device -- #36.  Nothing on this thread reads
+             * commands, so blocking here costs nothing.
+             */
+            void feed();
+
+            /**
+             * Recompute whether the feeder has work, and wake it.
+             *
+             * Call after anything that changes whether there is audio to move:
+             * play, pause, stop, a new stream, end of stream.
+             */
+            void update_feed_state();
+
             void send_pulse(bool force);
 
             stream* m_stream;
@@ -98,6 +122,41 @@ namespace jlib {
 
             PortAudioSink m_sink;
             int m_periods_desired;
+
+            std::thread m_feeder;
+
+            /** False tells the feeder to finish; see ~Player. */
+            std::atomic<bool> m_feeding;
+
+            /**
+             * Whether the feeder has anything to do, as a plain atomic.
+             *
+             * Deliberately not read from m_playing, which is a sync<bool> with
+             * a lock of its own.  The feeder holds m_feed_lock while testing
+             * its predicate, and the setters hold m_playing's lock before
+             * taking m_feed_lock -- reading m_playing inside the predicate
+             * would take the two in opposite orders and could deadlock.  One
+             * atomic, written under the same discipline as the rest, avoids it.
+             */
+            std::atomic<bool> m_feed_go;
+
+            std::mutex m_feed_lock;
+            std::condition_variable m_feed_wake;
+
+            /**
+             * Guards m_stream and the position within it.
+             *
+             * The feeder reads samples out of the stream while the command
+             * worker may be seeking it, swapping it, or rewinding it -- which
+             * were the same thread until the feeder existed, and so needed
+             * nothing.
+             *
+             * Held only across the read, never across the write to the sink.
+             * The write blocks until the device has room, and holding this
+             * over it would make every transport command wait for the device
+             * again -- the very thing the feeder exists to avoid.
+             */
+            std::mutex m_stream_lock;
         };
     }
 }

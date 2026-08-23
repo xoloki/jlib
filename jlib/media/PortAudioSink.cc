@@ -67,7 +67,9 @@ PortAudioSink::PortAudioSink()
       m_rebias(false),
       m_frame(0),
       m_ticks(0),
-      m_underran(false)
+      m_underran(false),
+      m_interrupt(false),
+      m_silence(0)
 {
     require_portaudio();
 }
@@ -145,6 +147,9 @@ void PortAudioSink::config(int samples_per_sec, int channels, int format) {
 
     m_frame = get_frame_size();
 
+    // Unsigned 8-bit puts silence at the middle of the range, not at zero.
+    m_silence = (m_pa_format == paUInt8) ? 0x80 : 0x00;
+
     // Eight periods of slack between write() and the device.
     //
     // The ring is the whole of the tolerance for the feeding thread being late:
@@ -221,7 +226,7 @@ int PortAudioSink::process(void* out, unsigned long frames) noexcept {
         // Silence for the rest.  The ring ran dry while the device wanted
         // samples, so there is a gap either way; filling it with zeroes is the
         // only choice that does not also play whatever was in the buffer.
-        std::memset(dst + got, 0, want - got);
+        std::memset(dst + got, m_silence, want - got);
         m_underran.store(true, std::memory_order_relaxed);
     }
 
@@ -270,6 +275,15 @@ const std::string& PortAudioSink::convert(const std::string& pcm, std::string& s
     return scratch;
 }
 
+void PortAudioSink::interrupt() {
+    m_interrupt.store(true, std::memory_order_release);
+
+    // Bump the counter as well as setting the flag, so a writer already parked
+    // in the wait comes back to look at it.
+    m_ticks.fetch_add(1, std::memory_order_release);
+    m_ticks.notify_all();
+}
+
 void PortAudioSink::resume() {
     if(m_stream == 0)
         return;
@@ -297,8 +311,14 @@ void PortAudioSink::write(const std::string& pcm) {
     // callback can never hand the device a torn frame.
     const std::size_t n = (out.size() / m_frame) * m_frame;
 
+    // A fresh call is not interrupted; only one already in progress can be.
+    m_interrupt.store(false, std::memory_order_release);
+
     std::size_t sent = 0;
     while(sent < n) {
+        if(m_interrupt.load(std::memory_order_acquire))
+            return;
+
         sent += m_ring->write(out.data() + sent, n - sent);
 
         // Start the device once it has something to play, and before waiting on
@@ -343,6 +363,9 @@ void PortAudioSink::reset() {
     // nowhere else, because the abort above has stopped it running.
     m_ring->clear();
     m_underran.store(false, std::memory_order_relaxed);
+
+    // Whoever was writing is now writing into a ring nobody is draining.
+    interrupt();
 
     // Left stopped.  Restarting on an empty ring is the startup underrun all
     // over again; the next write() resumes it.
