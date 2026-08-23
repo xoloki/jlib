@@ -29,7 +29,8 @@ MEDIA_TESTS = media_datastream_test \
               media_wavetable_test \
               media_mixer_test \
               media_sampler_test \
-              media_playlist_test
+              media_playlist_test \
+              media_live_test
 endif
 
 if HAVE_SODIUM
@@ -111,6 +112,9 @@ media_sampler_test_LDADD      = $(JMEDIA_LA) $(JUTIL_LA) $(JSYS_LA)
 
 media_playlist_test_SOURCES   = media_playlist_test.cc
 media_playlist_test_LDADD     = $(JMEDIA_LA) $(JUTIL_LA) $(JSYS_LA)
+
+media_live_test_SOURCES       = media_live_test.cc
+media_live_test_LDADD         = $(JMEDIA_LA) $(JUTIL_LA) $(JSYS_LA)
 
 net_extract_address_test_SOURCES        = net_extract_address_test.cc
 net_extract_address_test_LDADD          = $(JNET_LA)
