@@ -1,12 +1,17 @@
 #include <iostream>
+#include <memory>
 #include <sstream>
 
 #include <cmath>
 
+#include <jlib/media/mixer.hh>
 #include <jlib/media/notestream.hh>
 #include <jlib/media/PortAudioSink.hh>
+#include <jlib/media/source_stream.hh>
+#include <jlib/media/voice.hh>
 
 #include <jlib/sys/sys.hh>
+#include <jlib/util/util.hh>
 
 void play(std::vector<std::string> song, int format, int channels);
 
@@ -17,17 +22,22 @@ int main(int argc, char** argv) {
 
         int format = Type::PCM_FLOAT32;
         int channels = 2;
-        std::string note;
-        double t = 5;
         std::vector<std::string> melody;
 
-        for(int i = 1; i < argc; i++) {
-            // parse the note and play it
-            std::string note = argv[i];
-
-            // note is tone(letter)octave(number):time
-            melody.push_back(note);
+        if(argc < 2) {
+            std::cerr << "usage: " << argv[0] << " NOTE [NOTE ...]\n"
+                      << "  a note is tone(letter)octave(number):beats, "
+                      << "optionally /waveform\n"
+                      << "  join notes with + to sound them together:\n"
+                      << "    " << argv[0] << " C@3:1 E@3:1 G@3:1        "
+                      << "three notes, one after another\n"
+                      << "    " << argv[0] << " C@3:1+E@3:1+G@3:1        "
+                      << "the same three as a chord\n";
+            exit(1);
         }
+
+        for(int i = 1; i < argc; i++)
+            melody.push_back(argv[i]);
 
         play(melody, format, channels);
         
@@ -40,16 +50,52 @@ int main(int argc, char** argv) {
     exit(0);
 }
 
+/**
+ * Sound one entry of the melody, which may be several notes at once.
+ *
+ * Notes joined by + become voices in a mixer, and a mixer is a source like any
+ * other, so a chord reaches the device by exactly the route a single note does.
+ * That is the whole argument for the interface: nothing below here can tell how
+ * many notes are sounding.
+ *
+ * Automatic staging, because this is generated rather than mixed -- there is no
+ * engineer riding faders over a chord, and without it a triad would be louder
+ * than the notes around it purely for having three of something.
+ */
+static void sound(jlib::media::PortAudioSink& dsp, const std::string& entry,
+                  int format, int channels)
+{
+    using namespace jlib::media;
+
+    const std::vector<std::string> notes = jlib::util::tokenize(entry, "+");
+
+    const double rate = 44100;
+
+    mixer m;
+    m.set_staging(mixer::staging::automatic);
+    m.set_rate(rate);     // the limiter turns its release time into samples
+
+    // The voices have to outlive the render, and the mixer holds them, so this
+    // is only here to spell out that they are not stack temporaries.
+    for(const std::string& n : notes) {
+        notestream ns(n);
+
+        m.add(std::make_shared<voice>(ns.get_instrument(), ns.get_freq(),
+                                      static_cast<unsigned long>(rate * ns.get_time()),
+                                      rate));
+    }
+
+    source_stream live(&m);
+    live.set_samples_per_sec(static_cast<unsigned int>(rate));
+    live.set_format(format);
+    live.set_channels(channels);
+
+    dsp.play(live);
+}
+
 void play(std::vector<std::string> song, int format, int channels) {
     jlib::media::PortAudioSink dsp;
 
-    for(auto s : song) {
-        jlib::media::notestream note(s);
-
-        note.set_format(format);
-        note.set_channels(channels);
-
-        dsp.play(note);
-    }
+    for(const std::string& s : song)
+        sound(dsp, s, format, channels);
 }
-

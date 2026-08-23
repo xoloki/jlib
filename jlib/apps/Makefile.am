@@ -103,7 +103,7 @@ jnote_SOURCES = jnote.cc
 jnote_LDADD   = $(JMEDIA_LA) $(JSYS_LA)
 
 jmelody_SOURCES = jmelody.cc
-jmelody_LDADD   = $(JMEDIA_LA) $(JSYS_LA)
+jmelody_LDADD   = $(JMEDIA_LA) $(JUTIL_LA) $(JSYS_LA)
 
 jpoisoned_SOURCES = jpoisoned.cc
 jpoisoned_LDADD   = $(JX_LA) $(JSYS_LA) $(JUTIL_LA)

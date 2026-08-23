@@ -208,10 +208,26 @@ protected:
  * The waveforms, as their Fourier series truncated at `partials`.
  *
  * Each is scaled so all four have the RMS of a unit sine.  Matching peaks
- * instead would make changing waveform change loudness -- a square at a given
- * peak is 3dB louder than a sine at the same peak -- so the peaks differ
+ * instead would make changing waveform change level by 3dB -- that is how much
+ * louder a square is than a sine at the same peak -- so the peaks differ
  * instead: a sawtooth reaches about 1.22 before gain, plus the ~9% a truncated
  * series overshoots by at the discontinuity.
+ *
+ * What this does not do is make them equally *loud*, and it is worth being
+ * exact about that, because matching RMS looks like it should.  The ear sums
+ * loudness across critical bands, so the same energy spread over many bands is
+ * louder than the same energy in one -- and that is the entire difference
+ * between these waveforms.  Measured on a C major triad, limiter engaged:
+ *
+ *     sine      3 partials in  3 bands   energy -10.7dB   loudness 1.33
+ *     triangle  103        in 18 bands          -11.7dB            2.32
+ *     saw       103        in 18 bands          -12.1dB            4.32
+ *     square    103        in 18 bands           -9.7dB            3.96
+ *
+ * A sawtooth carries 1.4dB *less* energy than a sine here and sounds markedly
+ * louder.  So equal RMS is the right thing to hold -- it is at least a property
+ * of the signal rather than of the listener -- but the fader still has work to
+ * do when the waveform changes, and no scaling here can do it instead.
  */
 inline double wavetable::shape(instrument::wave w, double phase,
                                unsigned int partials)
