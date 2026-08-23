@@ -82,6 +82,25 @@ namespace jlib {
             virtual int_type underflow();
             virtual int_type sync();
 
+            /**
+             * Seeking, which this had none of.
+             *
+             * stream::rewind() is clear() followed by seekg(0), and without
+             * these it went to the default streambuf implementations, which
+             * refuse -- so rewind() set failbit on every wavstream and every
+             * read after it returned nothing.  A datastream has always had
+             * them, so the two halves of the same interface behaved
+             * differently, and only the one nothing called was broken.
+             *
+             * PlayList::render calls rewind() on each roll before each hit, so
+             * a wav-backed pattern would have rendered silence.  Nothing calls
+             * PlayList::render, which is why this survived.
+             */
+            virtual pos_type seekoff(off_type, std::ios_base::seekdir,
+                                     std::ios_base::openmode = std::ios_base::in);
+            virtual pos_type seekpos(pos_type,
+                                     std::ios_base::openmode = std::ios_base::in);
+
             /** The file this was loaded from, empty if it was handed a WavFile. */
             std::string get_file() const;
 
@@ -221,6 +240,55 @@ namespace jlib {
             m_p += count;
 
             return traits_type::to_int_type(*this->gptr());
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        typename basic_wavbuf<charT,traitT>::pos_type
+        basic_wavbuf<charT,traitT>::seekoff(off_type o, std::ios_base::seekdir s,
+                                            std::ios_base::openmode m) {
+            // m_p counts what has been handed to the get area, so the position
+            // actually reached is that less whatever is still sitting in it.
+            const off_type held = (this->egptr() > this->gptr())
+                ? (this->egptr() - this->gptr()) : 0;
+
+            off_type pos;
+
+            switch(s) {
+            case std::ios_base::beg:
+                pos = o;
+                break;
+            case std::ios_base::cur:
+                pos = static_cast<off_type>(m_p) - held + o;
+                break;
+            case std::ios_base::end:
+                pos = static_cast<off_type>(m_wav.get_pcm().length()) + o;
+                break;
+            default:
+                return pos_type(off_type(-1));
+            }
+
+            return this->seekpos(pos_type(pos), m);
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        typename basic_wavbuf<charT,traitT>::pos_type
+        basic_wavbuf<charT,traitT>::seekpos(pos_type p,
+                                            std::ios_base::openmode) {
+            const off_type at = static_cast<off_type>(p);
+
+            if(at < 0 ||
+               at > static_cast<off_type>(m_wav.get_pcm().length()))
+                return pos_type(off_type(-1));
+
+            m_p = static_cast<std::string::size_type>(at);
+
+            // Drop whatever was buffered, so the next read comes from the new
+            // position rather than from what was already in hand.
+            this->setg(this->eback(), this->eback(), this->eback());
+
+            return p;
         }
 
         template< typename charT, typename traitT >

@@ -95,6 +95,51 @@ int main(int argc, char** argv) {
             check("from WavFile: identical", other == pcm ? 1 : 0, 1);
         }
 
+        // rewind, which had no implementation behind it.
+        //
+        // stream::rewind() is clear() plus seekg(0), and basic_wavbuf had
+        // neither seekoff nor seekpos -- so it fell through to the streambuf
+        // defaults, which refuse, and rewind() left failbit set on every
+        // wavstream with every subsequent read returning nothing.  A
+        // datastream has always had them, so half the interface worked.
+        //
+        // Nothing in the tree called rewind() on a wavstream, which is how it
+        // survived: PlayList::render does, on every roll before every hit, and
+        // nothing calls PlayList::render either.
+        {
+            wavstream w(path);
+
+            std::string first;
+            while(w.good()) {
+                w.read(buf, sizeof(buf));
+                first.append(buf, w.gcount());
+            }
+            check("read to the end", first == pcm ? 1 : 0, 1);
+
+            w.rewind();
+            check("rewind leaves it usable", w.good() ? 1 : 0, 1);
+
+            std::string second;
+            while(w.good()) {
+                w.read(buf, sizeof(buf));
+                second.append(buf, w.gcount());
+            }
+            check("and it reads the same again", second == pcm ? 1 : 0, 1);
+
+            // partway, too -- rewind is only the seek everything happens to use
+            w.rewind();
+            w.seekg(64);
+            check("seeking partway works", w.good() ? 1 : 0, 1);
+
+            std::string rest;
+            while(w.good()) {
+                w.read(buf, sizeof(buf));
+                rest.append(buf, w.gcount());
+            }
+            check("and lands where it was asked",
+                  rest == pcm.substr(64) ? 1 : 0, 1);
+        }
+
         // read-only: a write must fail rather than vanish
         {
             wavstream w(path);
