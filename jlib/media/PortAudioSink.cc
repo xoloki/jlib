@@ -64,7 +64,10 @@ PortAudioSink::PortAudioSink()
     : m_stream(0),
       m_pa_format(paInt16),
       m_swap(false),
-      m_rebias(false)
+      m_rebias(false),
+      m_frame(0),
+      m_ticks(0),
+      m_underran(false)
 {
     require_portaudio();
 }
@@ -140,6 +143,18 @@ void PortAudioSink::config(int samples_per_sec, int channels, int format) {
     m_format = format;
     m_configured = true;
 
+    m_frame = get_frame_size();
+
+    // Eight periods of slack between write() and the device.
+    //
+    // The ring is the whole of the tolerance for the feeding thread being late:
+    // however long it is, that is how long the writer may be delayed before
+    // the device runs dry and the callback has to pad with silence.  Eight
+    // periods at the device's low-latency default is tens of milliseconds,
+    // which absorbs a scheduling hiccup or a slow read without adding latency
+    // anyone notices, since audio only sits in it when the writer is ahead.
+    m_ring.reset(new jlib::sys::ringbuffer<char>(8 * m_period * m_frame));
+
     start();
 }
 
@@ -160,22 +175,24 @@ void PortAudioSink::start() {
     out.suggestedLatency = info->defaultLowOutputLatency;
     out.hostApiSpecificStreamInfo = 0;
 
-    // A null callback selects the blocking interface, which is what lets
-    // write() keep the same shape Dsp had.
+    // A callback rather than a null one, which is what makes the device drive
+    // the transfer instead of a blocking write; see the note on the class.
     PaError err = Pa_OpenStream(&m_stream, 0, &out,
                                 static_cast<double>(m_samples_per_sec),
-                                m_period, paClipOff, 0, 0);
+                                m_period, paClipOff, &PortAudioSink::trampoline,
+                                this);
     if(err != paNoError) {
         m_stream = 0;
         throw_pa("Pa_OpenStream", err);
     }
 
-    err = Pa_StartStream(m_stream);
-    if(err != paNoError) {
-        Pa_CloseStream(m_stream);
-        m_stream = 0;
-        throw_pa("Pa_StartStream", err);
-    }
+    // Deliberately not started here.
+    //
+    // The device would begin asking for samples with the ring still empty, so
+    // the first callbacks would pad with silence -- a real underrun on every
+    // single playback, which is both a small gap at the start and enough to
+    // make underran() useless as a signal.  write() starts it once there is
+    // something to play; see resume().
 
     if(std::getenv("JLIB_MEDIA_SINK_DEBUG")) {
         std::cerr << "PortAudioSink: " << info->name
@@ -183,6 +200,47 @@ void PortAudioSink::start() {
                   << " " << m_channels << "ch"
                   << " period " << m_period << " frames" << std::endl;
     }
+}
+
+int PortAudioSink::trampoline(const void*, void* out, unsigned long frames,
+                              const PaStreamCallbackTimeInfo*,
+                              PaStreamCallbackFlags, void* user) {
+    return static_cast<PortAudioSink*>(user)->process(out, frames);
+}
+
+int PortAudioSink::process(void* out, unsigned long frames) noexcept {
+    char* dst = static_cast<char*>(out);
+    const std::size_t want = static_cast<std::size_t>(frames) * m_frame;
+
+    // Everything here has to be safe under a realtime deadline: no allocation,
+    // no lock, nothing that can block, and no exception.  A ring read is a
+    // couple of atomic loads and a memcpy, and memset cannot fail.
+    const std::size_t got = m_ring ? m_ring->read(dst, want) : 0;
+
+    if(got < want) {
+        // Silence for the rest.  The ring ran dry while the device wanted
+        // samples, so there is a gap either way; filling it with zeroes is the
+        // only choice that does not also play whatever was in the buffer.
+        std::memset(dst + got, 0, want - got);
+        m_underran.store(true, std::memory_order_relaxed);
+    }
+
+    // Wake anyone waiting for room.  Nearly free when nobody is -- the wait is
+    // registered in the atomic, so notify checks and returns.
+    m_ticks.fetch_add(1, std::memory_order_release);
+    m_ticks.notify_one();
+
+    return paContinue;
+}
+
+void PortAudioSink::wait_for_callback() const {
+    // Read the counter before deciding to wait, so a callback that runs in
+    // between cannot be missed: wait() returns at once when the value has
+    // already moved on.
+    const unsigned seen = m_ticks.load(std::memory_order_acquire);
+
+    if(m_ring->writable() == 0)
+        m_ticks.wait(seen, std::memory_order_acquire);
 }
 
 const std::string& PortAudioSink::convert(const std::string& pcm, std::string& scratch) const {
@@ -212,6 +270,20 @@ const std::string& PortAudioSink::convert(const std::string& pcm, std::string& s
     return scratch;
 }
 
+void PortAudioSink::resume() {
+    if(m_stream == 0)
+        return;
+
+    // Idempotent: this runs on every write, and only the first one after a
+    // stop or an abort has anything to do.
+    if(Pa_IsStreamActive(m_stream) == 1)
+        return;
+
+    PaError err = Pa_StartStream(m_stream);
+    if(err != paNoError && err != paStreamIsNotStopped)
+        throw_pa("Pa_StartStream", err);
+}
+
 void PortAudioSink::write(const std::string& pcm) {
     if(!m_configured)
         throw exception("write() before config()");
@@ -221,49 +293,39 @@ void PortAudioSink::write(const std::string& pcm) {
     std::string scratch;
     const std::string& out = convert(pcm, scratch);
 
-    const int frame = get_frame_size();
-    const unsigned long frames = out.size() / frame;
+    // Whole frames only, so the ring never holds a fraction of one and the
+    // callback can never hand the device a torn frame.
+    const std::size_t n = (out.size() / m_frame) * m_frame;
 
-    if(frames == 0)
-        return;
+    std::size_t sent = 0;
+    while(sent < n) {
+        sent += m_ring->write(out.data() + sent, n - sent);
 
-    PaError err = Pa_WriteStream(m_stream, out.data(), frames);
+        // Start the device once it has something to play, and before waiting on
+        // it -- waiting first would wait for a callback that is not running.
+        resume();
 
-    // An underrun means we were late with the next period; the audio already
-    // played with a gap.  Reporting it as an error would abort playback for
-    // something that has already happened and is recoverable.
-    if(err == paOutputUnderflowed) {
-        if(std::getenv("JLIB_MEDIA_SINK_DEBUG"))
-            std::cerr << "PortAudioSink: output underflowed" << std::endl;
-        return;
+        if(sent < n)
+            wait_for_callback();
     }
-
-    if(err != paNoError)
-        throw_pa("Pa_WriteStream", err);
 }
 
 int PortAudioSink::available() const {
-    if(m_stream == 0)
+    if(!m_ring)
         return 0;
 
-    signed long n = Pa_GetStreamWriteAvailable(m_stream);
-    if(n < 0)
-        throw_pa("Pa_GetStreamWriteAvailable", static_cast<PaError>(n));
-
-    return static_cast<int>(n);
+    return static_cast<int>(m_ring->writable() / m_frame);
 }
 
 int PortAudioSink::queued() const {
-    if(m_stream == 0)
+    if(!m_ring)
         return 0;
 
-    // PortAudio reports free space, not fill.  The device's total buffering
-    // is not directly exposed, so derive the queue depth from how much of the
-    // window we are holding: anything not free is waiting to be played.
-    const int window = m_period * 2;
-    const int free = available();
+    return static_cast<int>(m_ring->readable() / m_frame);
+}
 
-    return (free >= window) ? 0 : (window - free);
+bool PortAudioSink::underran() {
+    return m_underran.exchange(false, std::memory_order_relaxed);
 }
 
 void PortAudioSink::reset() {
@@ -276,29 +338,62 @@ void PortAudioSink::reset() {
     if(err != paNoError && err != paStreamIsStopped)
         throw_pa("Pa_AbortStream", err);
 
-    err = Pa_StartStream(m_stream);
-    if(err != paNoError)
-        throw_pa("Pa_StartStream", err);
+    // Only now.  ringbuffer::clear() moves the read index, which belongs to
+    // the consumer, and the consumer is the callback -- so it is safe here and
+    // nowhere else, because the abort above has stopped it running.
+    m_ring->clear();
+    m_underran.store(false, std::memory_order_relaxed);
+
+    // Left stopped.  Restarting on an empty ring is the startup underrun all
+    // over again; the next write() resumes it.
 }
 
 void PortAudioSink::drain() {
     if(m_stream == 0)
         return;
 
-    // Pa_StopStream waits for queued audio to finish, which is what
-    // SNDCTL_DSP_SYNC did.
+    // Two things hold audio now, and both have to finish.
+    //
+    // First the ring: wait for the callback to take the rest of it, on the same
+    // event write() waits on.  Guarded by the stream being active, or a stopped
+    // or aborted stream would leave this waiting for a callback that is never
+    // going to run.
+    while(Pa_IsStreamActive(m_stream) == 1 && !m_ring->empty()) {
+        const unsigned seen = m_ticks.load(std::memory_order_acquire);
+
+        if(!m_ring->empty())
+            m_ticks.wait(seen, std::memory_order_acquire);
+    }
+
+    // Then the device's own buffer, which is what Pa_StopStream waits for.
     PaError err = Pa_StopStream(m_stream);
     if(err != paNoError && err != paStreamIsStopped)
         throw_pa("Pa_StopStream", err);
 
-    err = Pa_StartStream(m_stream);
-    if(err != paNoError)
-        throw_pa("Pa_StartStream", err);
+    // Left stopped, as in reset(): the next write() resumes it.
 }
 
 void PortAudioSink::close() {
     if(m_stream == 0)
         return;
+
+    // Let the ring finish before stopping.
+    //
+    // Pa_StopStream waits for the device but knows nothing about the ring, so
+    // stopping with samples still in it would cut the tail off -- which is the
+    // last note of a melody, since AudioSink::play() leaves the drain to
+    // close() precisely so there is no gap between notes.
+    try {
+        while(Pa_IsStreamActive(m_stream) == 1 && !m_ring->empty()) {
+            const unsigned seen = m_ticks.load(std::memory_order_acquire);
+
+            if(!m_ring->empty())
+                m_ticks.wait(seen, std::memory_order_acquire);
+        }
+    }
+    catch(...) {
+        // Closing has to happen regardless.
+    }
 
     PaStream* s = m_stream;
     m_stream = 0;   // clear first, so a throw below cannot leave a stale handle
