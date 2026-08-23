@@ -45,8 +45,15 @@ namespace jlib {
         }
         
         Roll::Roll() 
+            : m_stream(0),
+              m_id(0),
+              m_beats(0),
+              m_bpu(0)
         {
-            set_id(0);
+            // m_stream was left uninitialized here, so get_stream() on a
+            // default-constructed Roll returned whatever was on the stack --
+            // which a null check does not catch, and which render() would then
+            // read audio from.  The other constructor sets all of these.
         }
         
         int Roll::get_id() const { return m_id; }

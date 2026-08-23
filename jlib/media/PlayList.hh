@@ -23,11 +23,16 @@
 #ifndef JLIB_MEDIA_PLAYLIST_HH
 #define JLIB_MEDIA_PLAYLIST_HH
 
+#include <map>
+#include <memory>
 #include <vector>
 #include <string>
 
 #include <cmath>
 
+#include <jlib/media/clip.hh>
+#include <jlib/media/mixer.hh>
+#include <jlib/media/sampler.hh>
 #include <jlib/media/stream.hh>
 
 namespace jlib {
@@ -207,90 +212,114 @@ namespace jlib {
             if(getenv("JLIB_MEDIA_PLAYLIST_DEBUG"))
                 std::cerr << "void jlib::media::PlayList::render(): enter" << std::endl;
 
-            int ticks_per_minute = get_measure()*get_bpm();
-            int m_samples_per_sec = 44100;
+            const int ticks_per_minute = get_measure()*get_bpm();
+            const int samples_per_sec = 44100;
 
-            int samples_per_tick = (int)(m_samples_per_sec / (ticks_per_minute / (double)60));
+            const int samples_per_tick = (int)(samples_per_sec / (ticks_per_minute / (double)60));
 
-            const int n = (int)(((double)get_width() / (double)ticks_per_minute)*60*m_samples_per_sec);
+            const int n = (int)(((double)get_width() / (double)ticks_per_minute)*60*samples_per_sec);
 
             // Nothing to render, and every path below would be worse than
-            // useless: the mixing loop takes a remainder modulo n, and a
-            // zero-length array is not something you can declare.
+            // useless: the fold takes a remainder modulo n.
             if(n <= 0)
                 return std::string();
 
-            // Heap, not stack.
-            //
-            // These were declared as arrays of length n, which is not C++ at
-            // all -- a GNU extension the compilers here happen to take -- and
-            // n comes from the playlist rather than from anything bounded.  At
-            // 4/4 and 120bpm the two of them together come to about 33K of
-            // stack per tick of width, so a few hundred ticks of playlist runs
-            // off the end of an 8M stack, and nothing checks.  The commented
-            // out new[] on the old lines says this was on the heap once.
-            //
-            // Value-initialized, which is what the two memsets were for.
-            std::vector<Type::scaled> samples(n);
-            std::vector<typename Type::sample<N>::buf> samples_out(n);
-
-            std::string data;
-            
             if(getenv("JLIB_MEDIA_PLAYLIST_DEBUG")) 
                 std::cerr << "\tnumber of samples: " << n << std::endl
-                          << "\tsamples per sec:   " << m_samples_per_sec << std::endl
+                          << "\tsamples per sec:   " << samples_per_sec << std::endl
                           << "\tsamples per tick:  " << samples_per_tick << std::endl
                           << "\tticks per minute:  " << ticks_per_minute << std::endl
-                          << "\tticks per second:  " << (ticks_per_minute * 60) << std::endl
-                          << "\ttotal seconds:     " << (n / (double)m_samples_per_sec) << std::endl;
-            
+                          << "\ttotal seconds:     " << (n / (double)samples_per_sec) << std::endl;
+
+            // One decode per roll, however many times it is struck.
+            //
+            // This used to rewind the roll's stream and read it again for each
+            // hit, which is the same samples decoded over and over -- and it
+            // did not work at all for a wav-backed roll, because rewind() on a
+            // wavstream set failbit and every read after it returned nothing.
+            // That is fixed in wavstream.hh; this no longer depends on it.
+            std::map<stream*, std::shared_ptr<clip> > decoded;
+
+            // Sources, not a hand-rolled sum.  The gain staging and the limiter
+            // replace what used to be here: the peak over the whole pattern,
+            // with everything divided by it if it came out above one.  That is
+            // the shape of mistake this library has made before -- one loud hit
+            // anywhere quietly dropped the level of the entire bar, and nothing
+            // put it back -- and the mixer holds the level steady instead.
+            mixer mix;
+            mix.set_staging(mixer::staging::automatic);
+            mix.set_rate(samples_per_sec);
+
+            unsigned long len = (unsigned long)n;
+
             slice_type::iterator i = slice.begin();
             for(;i!=slice.end();i++) {
-                int r = 0;
                 Pattern::iterator j = i->begin();
                 for(;j!=i->end();j++) {
-                    Pattern::reference roll = *j;
                     stream* s = j->get_stream();
 
-                    for(u_int k=0;k<get_width();k++) {
-                        if(roll[k]) {
-                            s->rewind();
+                    if(s == 0)
+                        continue;
 
-                            int sample_begin = samples_per_tick * k;
-                            int sample_count = (s->get_length() / (s->get_bits_per_sample() / 8));
-                            
-                            if(getenv("JLIB_MEDIA_PLAYLIST_DEBUG")) 
-                                std::cerr << "\t\tbeat: " << k << std::endl
-                                          << "\t\tbegin:  " << sample_begin  << std::endl
-                                          << "\t\tcount:  " << sample_count  << std::endl;
-                            
-                            for(int x=0;x<(sample_count) && (*s);x++) {
-                                samples[(x+sample_begin)%n] += s->get_scaled();
-                            }
-                        }
+                    std::shared_ptr<clip>& c = decoded[s];
+                    if(!c)
+                        c = std::make_shared<clip>(*s);
+
+                    if(c->empty())
+                        continue;
+
+                    for(u_int k=0;k<get_width();k++) {
+                        if(!(*j)[k])
+                            continue;
+
+                        const unsigned long begin = (unsigned long)samples_per_tick * k;
+
+                        std::shared_ptr<sampler> hit = std::make_shared<sampler>(c);
+                        hit->set_rate(samples_per_sec);
+                        hit->set_start(begin);
+                        mix.add(hit);
+
+                        if(begin + c->frames() > len)
+                            len = begin + c->frames();
+
+                        if(getenv("JLIB_MEDIA_PLAYLIST_DEBUG")) 
+                            std::cerr << "\t\tbeat: " << k << std::endl
+                                      << "\t\tbegin:  " << begin  << std::endl
+                                      << "\t\tcount:  " << c->frames()  << std::endl;
                     }
-                    
-                    r++;
                 }
             }
 
-            Type::scaled max = 1.0;
-            
-            for(int z=0;z<n;z++)
-                if(std::abs(samples[z]) > max)
-                    max = std::abs(samples[z]);
-            
-            // scale to 
-            if(max > 1.0) {
-                if(getenv("JLIB_MEDIA_PLAYLIST_DEBUG")) 
-                    std::cerr << "\tmax > 1.0: " << max << std::endl;
-                for(int z=0;z<n;z++)
-                    samples[z] /= max;
-            }
-            
-            for(int z=0;z<n;z++)
-                samples_out[z] = Type::sample<N>::descale(samples[z]);
+            std::vector<Type::scaled> samples(len, 0);
+            mix.render(samples.data(), len, 1);
 
+            // A hit late in the pattern runs past the end of it, and has always
+            // wrapped round to the start rather than being cut off, so that a
+            // pattern loops seamlessly.  Kept -- but folded after the mix
+            // rather than during it, so that the staging sees each hit once.
+            for(unsigned long z = (unsigned long)n; z < len; z++)
+                samples[z % n] += samples[z];
+
+            std::vector<typename Type::sample<N>::buf> samples_out(n);
+
+            // descale multiplies by 2^(bits-1), so exactly 1.0 lands one past
+            // the top of a signed buffer and wraps -- which is a full-scale
+            // sample of the wrong sign, and audible.  Clamp to what it can
+            // actually represent.  The fold above can put a sample over the
+            // ceiling the limiter held it under, so this is not theoretical.
+            const double full = std::pow(2.0, 8.0*sizeof(typename Type::sample<N>::buf) - 1);
+            const double top = (full - 1) / full;
+
+            for(int z=0;z<n;z++) {
+                double v = samples[z];
+
+                if(v >  top) v =  top;
+                if(v < -1.0) v = -1.0;
+
+                samples_out[z] = Type::sample<N>::descale((Type::scaled)v);
+            }
+
+            std::string data;
             data.assign((const char*)samples_out.data(),
                         n*sizeof(typename Type::sample<N>::buf));
             
