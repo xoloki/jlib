@@ -70,11 +70,28 @@ namespace jlib {
 
         
         Player::~Player() {
-            // The worker touches m_sink and m_stream, both members of Player.
-            // Leaving this empty meant those were destroyed -- closing the
-            // audio device -- while the worker was potentially still inside
-            // play_slot(), because ~Servent only runs after ~Player returns.
-            stop();
+            // Both threads have to stop before any member does.
+            //
+            // The feeder and the Servent worker each touch m_sink and
+            // m_stream, which are Player's, and ~Servent runs after Player's
+            // members are already gone -- so its own stop() is too late to
+            // help.  This used to call stop(), which resolves to Player::stop()
+            // and merely posts a STOP command before returning; the worker was
+            // still running when the members went away.  Servent::stop() is the
+            // one that joins, and it has to be named explicitly because the
+            // transport stop() hides it.
+            //
+            // The feeder goes first: it is the one that blocks, and it blocks
+            // inside the sink, so it has to be let out before anything closes
+            // the device.
+            m_feeding.store(false, std::memory_order_release);
+            m_sink.interrupt();
+            update_feed_state();
+
+            if(m_feeder.joinable())
+                m_feeder.join();
+
+            Servent::stop();
         }
             
         
@@ -100,11 +117,11 @@ namespace jlib {
             map(FFWD, [this](auto&&... a) { return this->ffwd_signal(a...); });
             map(RELOAD, [this](auto&&... a) { return this->reload_signal(a...); });
 
-            // Built as the pair's own type rather than with std::make_pair,
-            // which would deduce the two lambda types and leave no conversion
-            // to pair<function<bool()>, function<void()>>.
-            add(condition_list_type::value_type([this]() { return is_playing(); },
-                                                [this]() { play_slot(); }));
+            // Audio moves on its own thread, not as a condition of the
+            // command loop.  play_slot() blocks while the sink's ring is full,
+            // and the command loop is the one thing that must not.
+            m_feeding.store(true, std::memory_order_release);
+            m_feeder = std::thread([this]() { feed(); });
 
             run();
         }
@@ -129,6 +146,8 @@ namespace jlib {
             m_playing = !m_playing;
             if(!m_playing)
                 m_sink.reset();
+
+            update_feed_state();
         }
 
         void Player::pause_signal() { 
@@ -136,9 +155,14 @@ namespace jlib {
                 std::cerr << "\treceived PAUSE command" << std::endl;
             m_playing = false;
             m_sink.reset();
+
+            update_feed_state();
         }
 
         void Player::stop_signal() { 
+            // The feeder is reading this stream on its own thread now.
+            std::lock_guard<std::mutex> lock(m_stream_lock);
+
             if(getenv("JLIB_MEDIA_PLAYER_DEBUG")) 
                 std::cerr << "\treceived STOP command" << std::endl;
             m_playing = false;
@@ -149,9 +173,14 @@ namespace jlib {
                 send_pulse(true);
             }
 
+
+            update_feed_state();
         }
 
         void Player::rewind_signal() { 
+            // The feeder is reading this stream on its own thread now.
+            std::lock_guard<std::mutex> lock(m_stream_lock);
+
             if(getenv("JLIB_MEDIA_PLAYER_DEBUG")) 
                 std::cerr << "\treceived REWIND command" << std::endl;
 
@@ -170,9 +199,14 @@ namespace jlib {
                 send_pulse(true);
             }
 
+
+            update_feed_state();
         }
 
         void Player::ffwd_signal() { 
+            // The feeder is reading this stream on its own thread now.
+            std::lock_guard<std::mutex> lock(m_stream_lock);
+
             if(getenv("JLIB_MEDIA_PLAYER_DEBUG")) 
                 std::cerr << "\treceived FFWD command" << std::endl;
             
@@ -192,9 +226,14 @@ namespace jlib {
                 send_pulse(true);
             }
 
+
+            update_feed_state();
         }
 
         void Player::reload_signal() { 
+            // The feeder is reading this stream on its own thread now.
+            std::lock_guard<std::mutex> lock(m_stream_lock);
+
             if(getenv("JLIB_MEDIA_PLAYER_DEBUG")) 
                 std::cerr << "\treceived RELOAD command" << std::endl;
 
@@ -207,6 +246,8 @@ namespace jlib {
 
             m_sink.config(*m_stream);
             m_sink.reset();
+
+            update_feed_state();
         }
 
         void Player::send_pulse(bool force) {
@@ -222,36 +263,96 @@ namespace jlib {
         }
 
 
+        void Player::feed() {
+            while(m_feeding.load(std::memory_order_acquire)) {
+                {
+                    std::unique_lock<std::mutex> lock(m_feed_lock);
+                    m_feed_wake.wait(lock, [this]() {
+                        return !m_feeding.load(std::memory_order_acquire) ||
+                               m_feed_go.load(std::memory_order_acquire);
+                    });
+                }
+
+                if(!m_feeding.load(std::memory_order_acquire))
+                    break;
+
+                try {
+                    play_slot();
+                }
+                catch(std::exception& e) {
+                    // An exception leaving a thread function calls terminate,
+                    // and the sink throws readily enough -- there being no
+                    // device at all is the ordinary case in a container.  Stop
+                    // playing rather than retrying, or a persistent failure
+                    // becomes a spin.
+                    std::cerr << "jlib::media::Player::feed(): "
+                              << e.what() << std::endl;
+
+                    m_playing = false;
+                    update_feed_state();
+                }
+            }
+        }
+
+        void Player::update_feed_state() {
+            m_feed_go.store(is_playing() && m_stream != 0,
+                            std::memory_order_release);
+
+            // Taking the feeder's lock before notifying, even though what it
+            // waits on is an atomic held elsewhere.  If the feeder is between
+            // testing its predicate and going to sleep it holds this lock, so
+            // this blocks until it is genuinely waiting -- which is what keeps
+            // the wakeup from being lost.
+            {
+                std::lock_guard<std::mutex> lock(m_feed_lock);
+            }
+
+            m_feed_wake.notify_all();
+        }
+
         void Player::play_slot() {
             if(getenv("JLIB_MEDIA_PLAYER_DEBUG")) {
                 std::cerr << "enter jlib::media::Player::play_slot()" << std::endl;
             }
 
-            if(!m_stream->eof()) {
-                send_pulse(false);
+            std::string buf;
+            bool ended = false;
 
-                // Top the device up to m_periods_desired periods queued.  This
-                // is counted in frames now rather than OSS fragments, which
-                // were a byte count unrelated to frame size.
-                const int want = m_periods_desired * m_sink.get_period();
-                const int have = m_sink.queued();
+            {
+                // The stream, briefly.  A command may be seeking or replacing
+                // it, and until the feeder existed that could not happen while
+                // it was being read.
+                std::lock_guard<std::mutex> lock(m_stream_lock);
 
-                if(have < want) {
-                    const int periods = (want - have + m_sink.get_period() - 1) / m_sink.get_period();
-                    m_sink.play_frag(*m_stream, periods);
+                if(m_stream == 0)
+                    return;
+
+                if(!m_stream->eof()) {
+                    send_pulse(false);
+
+                    jlib::sys::getstring(*m_stream, buf,
+                                         m_periods_desired * m_sink.get_period() *
+                                         m_sink.get_frame_size());
                 }
 
-                if(getenv("JLIB_MEDIA_PLAYER_DEBUG")) {
-                    std::cerr << "\t" << have << "/" << want << " frames queued" << std::endl;
+                if(m_stream->eof()) {
+                    if(m_loop)
+                        m_stream->rewind();
+                    else
+                        ended = true;
                 }
             }
-            
-            if(m_stream->eof()) {
-                if(m_loop)
-                    m_stream->rewind();
-                else
-                    m_playing = false;
+
+            // Outside the lock, because this blocks until the sink's ring has
+            // room -- and a transport command must not wait on that.
+            if(!buf.empty())
+                m_sink.write(buf);
+
+            if(ended) {
+                m_playing = false;
+                update_feed_state();
             }
+
             if(getenv("JLIB_MEDIA_PLAYER_DEBUG")) {
                 std::cerr << "leave jlib::media::Player::play_slot()" << std::endl;
             }

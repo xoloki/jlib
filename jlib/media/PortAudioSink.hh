@@ -98,6 +98,20 @@ public:
      */
     bool underran();
 
+    /**
+     * Abandon a write() that is waiting for room.
+     *
+     * write() parks until the callback frees space, and the callback stops
+     * running when the stream does -- so a thread blocked in it would wait for
+     * a wakeup that is never coming.  reset() calls this, and anything that
+     * stops the device while another thread might be writing needs to.
+     *
+     * The write gives up where it is; the samples it had not placed are lost.
+     * That is the right outcome for the things that call it, which are stop,
+     * pause and shutdown, all of which discard the ring anyway.
+     */
+    void interrupt();
+
     virtual void reset();
     virtual void drain();
     virtual void close();
@@ -173,6 +187,19 @@ protected:
 
     /** Set by the callback when it padded with silence. */
     std::atomic<bool> m_underran;
+
+    /** Tells a waiting write() to give up; see interrupt(). */
+    std::atomic<bool> m_interrupt;
+
+    /**
+     * The byte that means silence in the configured format.
+     *
+     * Zero for every signed and floating format, and 0x80 for unsigned 8-bit,
+     * where zero is full-scale negative rather than the middle.  The callback
+     * pads underruns with this, and padding an unsigned stream with zeroes is
+     * a loud click rather than a gap.
+     */
+    unsigned char m_silence;
 };
 
 }
