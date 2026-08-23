@@ -20,7 +20,11 @@ cuda_programs = jcublas
 endif
 
 if HAVE_PORTAUDIO
-media_programs = jnote jmelody jhypermusic
+media_programs = jnote jmelody
+# jhypermusic draws what it plays, so it wants a window as well as a device.
+if HAVE_GLFW
+media_programs += jhypermusic
+endif
 endif
 
 if HAVE_X
@@ -105,8 +109,10 @@ jnote_LDADD   = $(JMEDIA_LA) $(JSYS_LA)
 jmelody_SOURCES = jmelody.cc
 jmelody_LDADD   = $(JMEDIA_LA) $(JUTIL_LA) $(JSYS_LA)
 
-jhypermusic_SOURCES = jhypermusic.cc
-jhypermusic_LDADD   = $(JMEDIA_LA) $(JUTIL_LA) $(JSYS_LA)
+jhypermusic_SOURCES  = jhypermusic.cc
+jhypermusic_CPPFLAGS = $(AM_CPPFLAGS) $(GLFW_CFLAGS)
+jhypermusic_LDADD    = $(JGLFW_LA) $(JGLU_LA) $(JGL_LA) $(JMEDIA_LA) \
+                       $(JUTIL_LA) $(JSYS_LA) $(GLFW_LIBS) $(GLU_LIBS) $(GL_LIBS)
 
 jpoisoned_SOURCES = jpoisoned.cc
 jpoisoned_LDADD   = $(JX_LA) $(JSYS_LA) $(JUTIL_LA)

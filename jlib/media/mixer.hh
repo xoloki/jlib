@@ -290,13 +290,23 @@ public:
         if(most == 0)
             return 0;
 
-        // The staging divisor comes from how many children there are, not how
-        // many are still sounding; see prune().  Headroom is a constant and so
-        // cancels out of any comparison between voice counts, which is what
-        // keeps the level consistent rather than merely lower.
-        const double stage = (m_staging == staging::automatic && !m_children.empty())
+        // From how many are being sounded, which is not the same as how many
+        // are still making a noise and not the same as how many there are.
+        //
+        // Finished children still count, and deliberately: reaping them inside
+        // a render would make the divisor depend on where block boundaries fell
+        // (see prune()).  But a child the voice cap has excluded is not being
+        // rendered at all, and counting it divided a mix by voices that
+        // contributed nothing -- a 10-cube in jhypermusic has 1024 corners and
+        // sounds 64 of them, so it came out four times quieter than the 8-cube
+        // beside it, sounding the same 64.  Eight dB between two dimensions of
+        // the same figure, from an argument about book-keeping.
+        //
+        // play.size() is fixed before any rendering happens and does not depend
+        // on the block size, so this keeps what prune() is protecting.
+        const double stage = (m_staging == staging::automatic && !play.empty())
             ? std::pow(10.0, -m_headroom / 20.0) /
-              std::sqrt(static_cast<double>(m_children.size()))
+              std::sqrt(static_cast<double>(play.size()))
             : 1.0;
 
         const double release = release_coefficient();
