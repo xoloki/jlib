@@ -21,7 +21,9 @@ MEDIA_TESTS = media_datastream_test \
               media_wavfile_test \
               media_wavstream_test \
               sys_ringbuffer_test \
-              math_lookat_test
+              math_lookat_test \
+              sys_sigpipe_test \
+              sys_tls_sigpipe_test
 endif
 
 if HAVE_SODIUM
@@ -79,6 +81,12 @@ sys_ringbuffer_test_LDADD     = $(JSYS_LA)
 
 math_lookat_test_SOURCES      = math_lookat_test.cc
 math_lookat_test_LDADD        = $(JSYS_LA)
+
+sys_sigpipe_test_SOURCES      = sys_sigpipe_test.cc
+sys_sigpipe_test_LDADD        = $(JSYS_LA)
+
+sys_tls_sigpipe_test_SOURCES  = sys_tls_sigpipe_test.cc
+sys_tls_sigpipe_test_LDADD    = $(JSYS_LA) $(OPENSSL_LIBS)
 
 net_extract_address_test_SOURCES        = net_extract_address_test.cc
 net_extract_address_test_LDADD          = $(JNET_LA)

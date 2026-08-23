@@ -27,6 +27,9 @@
 
 #include <functional>
 
+#include <signal.h>
+#include <sys/socket.h>
+
 namespace jlib {
     namespace sys {
 
@@ -55,6 +58,52 @@ namespace jlib {
         /**
          * read a line from is into s, doing intelligent buffering
          */
+        /**
+         * Stop writes to this socket from killing the process.
+         *
+         * Writing to a socket whose peer has closed raises SIGPIPE, and the
+         * default disposition of SIGPIPE is to terminate -- so the error return
+         * the caller is carefully checking never arrives.  For a mail client
+         * that is not an exotic case: a server dropping an idle IMAP connection
+         * is routine, and the symptom is the program vanishing without a word.
+         *
+         * Where the platform has SO_NOSIGPIPE this sets it, which covers every
+         * write on the descriptor including the ones OpenSSL makes internally.
+         * Where it does not -- Linux -- this does nothing and sigpipe_guard is
+         * what does the work.
+         */
+        void nosigpipe(int fd);
+
+        /**
+         * Blocks SIGPIPE for the calling thread, and consumes one if it comes.
+         *
+         * For platforms without SO_NOSIGPIPE, where the alternatives are worse:
+         * MSG_NOSIGNAL is per-call and so cannot cover OpenSSL's own writes, and
+         * ignoring SIGPIPE process-wide is not a library's decision to make.
+         *
+         * Blocking it is, since the block is per-thread and undone on the way
+         * out.  A SIGPIPE raised while blocked stays pending, so the destructor
+         * drains it before unblocking; otherwise it would be delivered to the
+         * caller the moment the mask was restored, which is the same crash a
+         * little later.
+         *
+         * A no-op where nosigpipe() has already dealt with it.
+         */
+        class sigpipe_guard {
+        public:
+            sigpipe_guard();
+            ~sigpipe_guard();
+
+            sigpipe_guard(const sigpipe_guard&) = delete;
+            sigpipe_guard& operator=(const sigpipe_guard&) = delete;
+
+        private:
+#ifndef SO_NOSIGPIPE
+            sigset_t m_old;
+            bool m_blocked;   // we are the ones who blocked it
+#endif
+        };
+
         void getline(std::istream& is, std::string& s);
 
         /**

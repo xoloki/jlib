@@ -93,6 +93,11 @@ namespace jlib {
             }
 
             virtual int_type sync() {
+                // OpenSSL writes to the socket itself, so MSG_NOSIGNAL cannot
+                // reach it; on a platform without SO_NOSIGPIPE the guard is the
+                // only thing standing between a dead peer and the process.
+                sigpipe_guard guard;
+
                 if(m_delay)
                     return basic_socketbuf<charT,traitT>::sync();
 
