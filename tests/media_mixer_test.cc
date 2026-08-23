@@ -357,6 +357,49 @@ static void level_does_not_depend_on_voice_count() {
               << " balance, not a guarantee)\n";
 }
 
+/**
+ * A capped mix is as loud as the voices it sounds, not as the ones it holds.
+ *
+ * Automatic staging divides by how many are being sounded.  Dividing by how
+ * many exist instead sounds reasonable and is wrong once the voice cap is doing
+ * anything: jhypermusic's 10-cube holds 1024 corners and sounds 64, and came
+ * out four times quieter than the 8-cube next to it sounding the same 64 --
+ * eight dB between two dimensions of one figure, from book-keeping.
+ *
+ * Finished children are a separate question and still count; see prune().
+ */
+static void the_cap_sets_the_divisor() {
+    std::cout << "\nlevel against the voice cap:\n";
+
+    const double rate = 44100;
+    const unsigned long len = 8192;
+
+    auto few = build(8, len, rate, mixer::staging::automatic, false);
+    const double small = rms_of(*few, len, 1);
+
+    auto many = build(64, len, rate, mixer::staging::automatic, false);
+    many->set_max_voices(8);
+    const double capped = rms_of(*many, len, 1);
+
+    auto all = build(64, len, rate, mixer::staging::automatic, false);
+    const double whole = rms_of(*all, len, 1);
+
+    std::cout << "     8 voices              rms " << std::fixed
+              << std::setprecision(4) << small << "\n"
+              << "     64 capped to 8        rms " << capped << "\n"
+              << "     64 voices             rms " << whole << "\n";
+
+    ok("64 capped to 8 sounds like 8",
+       std::fabs(capped / small - 1.0) < 0.15,
+       std::to_string(capped / small) + "x");
+
+    // Not a contrast -- the staging is meant to hold the level for 64 as well,
+    // and does.  It is here so the first assertion cannot pass by everything
+    // being the same level for some reason unrelated to the divisor.
+    ok("and 64 uncapped holds that level too",
+       std::fabs(whole / small - 1.0) < 0.2, std::to_string(whole / small) + "x");
+}
+
 static void metering() {
     std::cout << "\nmetering:\n";
 
@@ -468,6 +511,7 @@ int main() {
     the_limiter();
     not_a_tremolo_pedal();
     level_does_not_depend_on_voice_count();
+    the_cap_sets_the_divisor();
     metering();
     housekeeping();
     block_size_independence();
