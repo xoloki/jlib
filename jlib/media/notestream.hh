@@ -43,6 +43,8 @@
 #include <netinet/in.h>
 
 #include <jlib/media/datastream.hh>
+#include <jlib/media/instrument.hh>
+#include <jlib/media/voice.hh>
 #include <jlib/util/util.hh>
 
 namespace jlib {
@@ -114,13 +116,23 @@ namespace jlib {
             virtual void set_format(int s); 
 
             static double get_freq(int step, double base);
+
+            /**
+             * How the note sounds, as against which note it is.
+             *
+             * Setting it regenerates, like the other setters here.  A note
+             * string may override parts of it for itself; see set_note.
+             */
+            const instrument& get_instrument() const;
+            void set_instrument(const instrument& i);
+
         protected:
             std::string create_data(double freq) const;
 
+            instrument m_instrument;
             double m_freq;
             double m_time;
             std::string m_note;
-            std::string m_data;
         };
         
         template<typename charT, typename traitT=std::char_traits<charT> >
@@ -140,7 +152,14 @@ namespace jlib {
             void set_time(double time);
             void set_nearest_time(double time);
 
+            double get_freq() const;
+
+            const instrument& get_instrument() const;
+            void set_instrument(const instrument& i);
+
         protected:
+            /** The buffer, or throw.  Every forwarder below wants this. */
+            basic_notebuf<charT,traitT>* buf() const;
         };
         
         typedef basic_notestream<char> notestream;
@@ -149,16 +168,24 @@ namespace jlib {
         template< typename charT, typename traitT >
         inline
         basic_notebuf<charT,traitT>::basic_notebuf() 
-            : basic_databuf<charT,traitT>()
+            : basic_databuf<charT,traitT>(),
+              m_freq(0),
+              m_time(1)
         {
-            set_note("A1");
-            set_time(1);
+            // "A" and not "A1".  The grammar became STEP@OCTAVE:BEATS, so "A1"
+            // reaches the two-character check and throws "two char notes must
+            // be either 'Ab' or 'C#'" -- this constructor could not be called
+            // at all.  It never was, in the tree or the tests, which is why
+            // nobody noticed.
+            set_note("A");
         }
         
         template< typename charT, typename traitT >
         inline
         basic_notebuf<charT,traitT>::basic_notebuf(std::string note) 
-            : basic_databuf<charT,traitT>()
+            : basic_databuf<charT,traitT>(),
+              m_freq(0),
+              m_time(1)
         {
             set_note(note);
         }
@@ -166,19 +193,85 @@ namespace jlib {
         template< typename charT, typename traitT >
         inline
         basic_notebuf<charT,traitT>::basic_notebuf(double freq) 
-            : basic_databuf<charT,traitT>()
+            : basic_databuf<charT,traitT>(),
+              m_freq(0),
+              m_time(1)
         {
+            // m_time initialized before this, not after.  set_note(double)
+            // generates immediately, and it used to read an m_time that nothing
+            // had written -- so the sample count came from whatever was on the
+            // stack, and could be negative (generating nothing) or enormous
+            // (allocating a string to match).  Every notestream note(440.0) in
+            // the tests went through it.
             set_note(freq);
-            set_time(1);
         }
         
         template< typename charT, typename traitT >
         inline
         basic_notebuf<charT,traitT>::basic_notebuf(int step, double base) 
-            : basic_databuf<charT,traitT>()
+            : basic_databuf<charT,traitT>(),
+              m_freq(0),
+              m_time(1)
         {
+            // as above: m_time before, not after
             set_note(step,base);
-            set_time(1);
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        basic_notebuf<charT,traitT>* basic_notestream<charT,traitT>::buf() const {
+            typedef typename basic_notebuf<charT,traitT>::exception oops;
+
+            if(!this->m_buf)
+                throw oops("m_buf == null");
+
+            basic_notebuf<charT,traitT>* b =
+                dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf.get());
+
+            if(!b)
+                throw oops("buf == null");
+
+            return b;
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        double basic_notestream<charT,traitT>::get_freq() const {
+            return buf()->get_freq();
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        const instrument& basic_notestream<charT,traitT>::get_instrument() const {
+            return buf()->get_instrument();
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        void basic_notestream<charT,traitT>::set_instrument(const instrument& i) {
+            buf()->set_instrument(i);
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        double basic_notebuf<charT,traitT>::get_freq() const {
+            // Declared since forever and never defined, so any call failed to
+            // link -- which is why set_nearest_time() below has never been
+            // usable and jnote.cc:72 has its call commented out.
+            return m_freq;
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        const instrument& basic_notebuf<charT,traitT>::get_instrument() const {
+            return m_instrument;
+        }
+
+        template< typename charT, typename traitT >
+        inline
+        void basic_notebuf<charT,traitT>::set_instrument(const instrument& i) {
+            m_instrument = i;
+            this->set_data(create_data(m_freq));
         }
 
         template< typename charT, typename traitT >
@@ -190,11 +283,31 @@ namespace jlib {
         template< typename charT, typename traitT >
         inline
         void basic_notebuf<charT,traitT>::set_note(std::string note) {
-            // note format is STEP@OCTAVE:BEATS
+            // note format is STEP@OCTAVE:BEATS[/WAVE]
 
             // default to third octave and one beat
             int octave = 3;
             double beats = 1;
+
+            // A waveform for this note only, overriding the instrument's:
+            //
+            //     A#@4:2/saw
+            //
+            // Taken off the front of the parse rather than the back of it, so
+            // the delimiters below see the string they always did.  Only the
+            // waveform is expressible here on purpose -- it is the one thing
+            // worth saying per note, and an ADSR written out as four numbers in
+            // a string is the point at which this wants escaping and a grammar,
+            // rather than a suffix.  Everything else is a setter.
+            std::size_t wpos = note.find("/");
+            if(wpos != std::string::npos) {
+                const std::string w = note.substr(wpos+1);
+
+                note = note.substr(0, wpos);
+
+                // throws by name, as the step parser below does
+                m_instrument.set_wave(instrument::wave_from_name(w));
+            }
             
             // first parse the beats
             std::size_t bpos = note.find(":");
@@ -252,10 +365,19 @@ namespace jlib {
                 throw std::runtime_error("unknown step '" + note + "' must be [ABCDEFGR]");
             }
             
-            if(note.size() == 2) {
+            if(note.size() > 1) {
                 // was "!note[1] == 'b'": the ! binds to note[1] alone, so this
                 // compared a bool against 'b' and was always false, meaning
                 // the whole condition was false and the throw never fired.
+                //
+                // And the test was == 2 rather than > 1, so anything longer
+                // fell through with its accidental silently ignored: "C##" was
+                // a C, not a D.  Reject the length as well as the character.
+                if(note.size() > 2) {
+                    throw std::runtime_error("note '" + note +
+                                             "' has more than one accidental");
+                }
+
                 if(note[1] != '#' && note[1] != 'b') {
                     throw std::runtime_error("two char notes must be either 'Ab' or 'C#'");
                 }
@@ -327,8 +449,6 @@ namespace jlib {
             const int samples = (int)(this->get_samples_per_sec() * this->get_time());
             const int bytes_per_sample = (this->get_bits_per_sample()/8);
             const int size = samples * bytes_per_sample * this->get_channels();
-            double vol = 0.666;
-            static const long double pi = 3.14159265358979323846264338;
 
             u_int64_t amp = (u_int64_t)pow(2,this->get_bits_per_sample()-1);
 
@@ -346,35 +466,39 @@ namespace jlib {
                 std::cerr << "channels         " << this->get_channels() << std::endl;
             }
 
-            // A note lasts get_time() seconds whatever its frequency, so
-            // freq*time is hardly ever a whole number of cycles: the waveform
-            // stops wherever it happens to be and drops straight to silence.
-            // At 443.7Hz for one second that last sample is -20287 out of a
-            // 21823 peak -- a 93% full-scale step, which is a click, and a
-            // melody is a train of them.
+            // The instrument makes the sound; this function only writes it
+            // down.  What used to be here was a sine and a fixed 5ms fade --
+            // that fade being a degenerate envelope, instant attack, no decay,
+            // full sustain, 5ms release, and it existed because a note lasts
+            // get_time() seconds whatever its frequency, so freq*time is hardly
+            // ever a whole number of cycles.  The waveform stopped wherever it
+            // happened to be and dropped straight to silence: at 443.7Hz for
+            // one second the last sample was -20287 out of a 21823 peak, a 93%
+            // full-scale step, which is a click, and a melody is a train of
+            // them.
             //
-            // Ramp the first and last few milliseconds instead.  That is
-            // short enough to be inaudible as a volume change and long
-            // enough to remove the discontinuity at any frequency, without
-            // altering the note's duration the way set_nearest_time() would.
-            const int fade = std::min(samples / 2,
-                                      static_cast<int>(this->get_samples_per_sec() * 0.005));
+            // The ADSR subsumes it and inherits the requirement -- see
+            // instrument::clamped(), which will not let attack or release go
+            // below the 5ms that made this work.
+            voice v(m_instrument, freq, static_cast<unsigned long>(samples),
+                    static_cast<double>(this->get_samples_per_sec()));
 
             for(int i=0;i<samples;i++) {
-
-                double envelope = 1.0;
-                if(fade > 0) {
-                    if(i < fade)
-                        envelope = 0.5 * (1.0 - cos(pi * i / fade));
-                    else if(i >= samples - fade)
-                        envelope = 0.5 * (1.0 - cos(pi * (samples - 1 - i) / fade));
-                }
 
                 // The waveform in [-1,1], before it is committed to any
                 // particular sample format.  PCM_FLOAT32 wants exactly this;
                 // the integer formats scale and quantize it below.
-                const double raw =
-                    envelope*vol*sin(freq*this->get_time()*(2*pi)*(i/double(samples)));
+                //
+                // Clamped, because it is not guaranteed to arrive in range: a
+                // truncated Fourier series overshoots at a discontinuity by
+                // about 9%, and the waveforms are scaled to match each other in
+                // RMS rather than in peak, so a sawtooth reaches about 1.43
+                // before gain.  At the default gain that is 0.95 and nothing
+                // happens, but at a gain of 1 it would wrap rather than clip --
+                // llround of an out-of-range value straight into an int16.
+                double raw = v.next();
+                if(raw >  1.0) raw =  1.0;
+                if(raw < -1.0) raw = -1.0;
 
                 // Round rather than truncate.  A cast truncates toward zero,
                 // which both doubles the worst-case quantization error and
@@ -556,12 +680,12 @@ namespace jlib {
         basic_notestream<charT,traitT>::get_note() const
         {
             if(!this->m_buf)
-                throw basic_notebuf<charT,traitT>::exception("this->m_buf == null");
+                throw typename basic_notebuf<charT,traitT>::exception("this->m_buf == null");
             basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 return buf->get_note();
             else
-                throw basic_notebuf<charT,traitT>::exception("buf == null");
+                throw typename basic_notebuf<charT,traitT>::exception("buf == null");
         }
 
         template< typename charT, typename traitT >
@@ -570,12 +694,12 @@ namespace jlib {
         basic_notestream<charT,traitT>::set_note(std::string note) 
         {
             if(!this->m_buf)
-                throw basic_notebuf<charT,traitT>::exception("this->m_buf == null");
+                throw typename basic_notebuf<charT,traitT>::exception("this->m_buf == null");
             basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 buf->set_note(note);
             else
-                throw basic_notebuf<charT,traitT>::exception("buf == null");
+                throw typename basic_notebuf<charT,traitT>::exception("buf == null");
         }
 
         template< typename charT, typename traitT >
@@ -584,12 +708,12 @@ namespace jlib {
         basic_notestream<charT,traitT>::set_note(double freq) 
         {
             if(!this->m_buf)
-                throw basic_notebuf<charT,traitT>::exception("this->m_buf == null");
+                throw typename basic_notebuf<charT,traitT>::exception("this->m_buf == null");
             basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 buf->set_note(freq);
             else
-                throw basic_notebuf<charT,traitT>::exception("buf == null");
+                throw typename basic_notebuf<charT,traitT>::exception("buf == null");
         }
 
         template< typename charT, typename traitT >
@@ -598,12 +722,12 @@ namespace jlib {
         basic_notestream<charT,traitT>::set_note(int step, double base) 
         {
             if(!this->m_buf)
-                throw basic_notebuf<charT,traitT>::exception("this->m_buf == null");
+                throw typename basic_notebuf<charT,traitT>::exception("this->m_buf == null");
             basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 buf->set_note(step,base);
             else
-                throw basic_notebuf<charT,traitT>::exception("buf == null");
+                throw typename basic_notebuf<charT,traitT>::exception("buf == null");
         }
 
         template< typename charT, typename traitT >
@@ -612,12 +736,12 @@ namespace jlib {
         basic_notestream<charT,traitT>::get_time() const
         {
             if(!this->m_buf)
-                throw basic_notebuf<charT,traitT>::exception("this->m_buf == null");
+                throw typename basic_notebuf<charT,traitT>::exception("this->m_buf == null");
             basic_notebuf<charT,traitT>* buf = dynamic_cast< basic_notebuf<charT,traitT>* >(this->m_buf.get());
             if(buf)
                 return buf->get_time();
             else
-                throw basic_notebuf<charT,traitT>::exception("buf == null");
+                throw typename basic_notebuf<charT,traitT>::exception("buf == null");
         }
 
         template< typename charT, typename traitT >
