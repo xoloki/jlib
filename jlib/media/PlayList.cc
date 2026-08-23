@@ -21,6 +21,7 @@
  */
 
 #include <jlib/media/PlayList.hh>
+#include <jlib/media/notestream.hh>
 
 #include <utility>
 #include <iostream>
@@ -29,8 +30,41 @@
 namespace jlib {
     namespace media {
         
+        Roll::Roll(int id, const std::string& note, const std::string& name, const std::string& data)
+            : m_pattern(data.length()),
+              m_stream(0),
+              m_beats(0),
+              m_bpu(0),
+              m_is_note(true)
+        {
+            set_id(id);
+            set_sample(note);
+            set_name(name);
+
+            // notestream owns the note grammar, so a pattern names pitches the
+            // same way jnote and jmelody do rather than inventing a second
+            // spelling.  Parsed once, here, so a bad note is a construction
+            // error and not a surprise at render time.
+            notestream parse(note);
+
+            m_instrument = parse.get_instrument();
+            m_freq = parse.get_freq();
+            m_seconds = parse.get_time();
+
+            for(u_int i=0;i<data.length();i++) {
+                if(data[i] != '0' && data[i] != '1')
+                    std::cerr << "invalid data["<<i<<"]: " << data[i] << std::endl;
+                m_pattern[i] = (data[i] == '1');
+            }
+        }
+
         Roll::Roll(int id, stream* s, const std::string& name, const std::string& sample, const std::string& data) 
-            : m_pattern(data.length())
+            : m_pattern(data.length()),
+              m_beats(0),
+              m_bpu(0),
+              m_is_note(false),
+              m_freq(0),
+              m_seconds(0)
         {
             set_id(id);
             set_sample(sample);
@@ -48,7 +82,10 @@ namespace jlib {
             : m_stream(0),
               m_id(0),
               m_beats(0),
-              m_bpu(0)
+              m_bpu(0),
+              m_is_note(false),
+              m_freq(0),
+              m_seconds(0)
         {
             // m_stream was left uninitialized here, so get_stream() on a
             // default-constructed Roll returned whatever was on the stack --
@@ -84,6 +121,14 @@ namespace jlib {
         void Roll::set_stream(stream* s) {
             m_stream = s;
         }
+        
+        bool Roll::is_note() const { return m_is_note; }
+        
+        const instrument& Roll::get_instrument() const { return m_instrument; }
+        void Roll::set_instrument(const instrument& i) { m_instrument = i; }
+        
+        double Roll::get_freq() const { return m_freq; }
+        double Roll::get_seconds() const { return m_seconds; }
         
         
         Pattern::Pattern(int id, const std::string& name) {

@@ -31,9 +31,12 @@
 #include <cmath>
 
 #include <jlib/media/clip.hh>
+#include <jlib/media/delayed.hh>
+#include <jlib/media/instrument.hh>
 #include <jlib/media/mixer.hh>
 #include <jlib/media/sampler.hh>
 #include <jlib/media/stream.hh>
+#include <jlib/media/voice.hh>
 
 namespace jlib {
     namespace media {
@@ -55,6 +58,22 @@ namespace jlib {
             typedef rep_type::allocator_type allocator_type;            
             
             Roll(int id, stream* s, const std::string& name, const std::string& sample, const std::string& data);
+
+            /**
+             * A roll that sounds a synthesized note rather than a recording.
+             *
+             * note is a note string as notestream reads them -- "C@2", "A#@3:2",
+             * "G@2/saw" -- so a pattern can name a pitch, a length and a
+             * waveform the same way the rest of the library does, and an
+             * unknown one throws here rather than at render time.
+             *
+             * The point of this is that the two kinds of roll are the same kind
+             * of thing by the time they reach the mixer: one becomes a sampler
+             * and the other a voice, both wrapped in a delayed to put them on
+             * their beat, and nothing downstream can tell them apart.
+             */
+            Roll(int id, const std::string& note, const std::string& name, const std::string& data);
+
             Roll();
             
             int get_id() const;
@@ -72,6 +91,16 @@ namespace jlib {
             stream* get_stream();
             const stream* get_stream() const;
             void set_stream(stream* s);
+
+            /** Whether this sounds a note rather than a recording. */
+            bool is_note() const;
+
+            const instrument& get_instrument() const;
+            void set_instrument(const instrument& i);
+
+            /** Hz, and seconds, both taken from the note string. */
+            double get_freq() const;
+            double get_seconds() const;
             
         private:
             rep_type m_pattern;
@@ -83,6 +112,11 @@ namespace jlib {
             std::string m_name;
             int m_beats;
             int m_bpu;
+
+            bool m_is_note;
+            instrument m_instrument;
+            double m_freq;
+            double m_seconds;
         };
         
         class Pattern {
@@ -256,17 +290,35 @@ namespace jlib {
             for(;i!=slice.end();i++) {
                 Pattern::iterator j = i->begin();
                 for(;j!=i->end();j++) {
-                    stream* s = j->get_stream();
+                    // A roll is either a recording or a note.  Both come out
+                    // of here as sources wrapped in a delayed, and nothing
+                    // below can tell which it has -- which is the whole reason
+                    // the source interface exists.
+                    std::shared_ptr<clip> c;
+                    unsigned long length = 0;
 
-                    if(s == 0)
-                        continue;
+                    if(j->is_note()) {
+                        length = (unsigned long)(j->get_seconds() * samples_per_sec);
 
-                    std::shared_ptr<clip>& c = decoded[s];
-                    if(!c)
-                        c = std::make_shared<clip>(*s);
+                        if(length == 0)
+                            continue;
+                    }
+                    else {
+                        stream* s = j->get_stream();
 
-                    if(c->empty())
-                        continue;
+                        if(s == 0)
+                            continue;
+
+                        std::shared_ptr<clip>& cached = decoded[s];
+                        if(!cached)
+                            cached = std::make_shared<clip>(*s);
+
+                        if(cached->empty())
+                            continue;
+
+                        c = cached;
+                        length = c->frames();
+                    }
 
                     for(u_int k=0;k<get_width();k++) {
                         if(!(*j)[k])
@@ -274,18 +326,29 @@ namespace jlib {
 
                         const unsigned long begin = (unsigned long)samples_per_tick * k;
 
-                        std::shared_ptr<sampler> hit = std::make_shared<sampler>(c);
-                        hit->set_rate(samples_per_sec);
-                        hit->set_start(begin);
-                        mix.add(hit);
+                        std::shared_ptr<source> hit;
 
-                        if(begin + c->frames() > len)
-                            len = begin + c->frames();
+                        if(c) {
+                            std::shared_ptr<sampler> play = std::make_shared<sampler>(c);
+                            play->set_rate(samples_per_sec);
+                            hit = play;
+                        }
+                        else {
+                            hit = std::make_shared<voice>(j->get_instrument(),
+                                                          j->get_freq(),
+                                                          length,
+                                                          samples_per_sec);
+                        }
+
+                        mix.add(std::make_shared<delayed>(hit, begin));
+
+                        if(begin + length > len)
+                            len = begin + length;
 
                         if(getenv("JLIB_MEDIA_PLAYLIST_DEBUG")) 
                             std::cerr << "\t\tbeat: " << k << std::endl
                                       << "\t\tbegin:  " << begin  << std::endl
-                                      << "\t\tcount:  " << c->frames()  << std::endl;
+                                      << "\t\tcount:  " << length  << std::endl;
                     }
                 }
             }

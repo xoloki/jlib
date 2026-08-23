@@ -10,6 +10,7 @@
 #include <jlib/media/wavstream.hh>
 
 #include <cmath>
+#include <complex>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -204,6 +205,130 @@ static void the_tail_wraps() {
        std::to_string(tick_peak(v, 7, per_tick)));
 }
 
+/** How much of one frequency sits in a stretch of the render. */
+static double energy_at(const std::vector<float>& v, int from, int count, double f) {
+    std::complex<double> a = 0;
+    for(int i = from; i < from + count && i < (int)v.size(); i++)
+        a += double(v[i]) * std::exp(std::complex<double>(0, -2*M_PI*f*i/44100));
+    return std::abs(a) / count;
+}
+
+/**
+ * A roll can sound an instrument instead of a recording.
+ *
+ * Which is the whole of the timeline claim: a pattern names a note the same way
+ * jnote and jmelody do, it becomes a voice rather than a sampler, and nothing
+ * from the mixer down can tell the difference.
+ */
+static void notes_as_well_as_recordings() {
+    std::cout << "\nrolls that sound notes:\n";
+
+    const int per_tick = 44100 / 8;
+
+    {
+        PlayList list = make_list();
+        Pattern p(1, "p");
+        // a tenth of a second, so a note fits inside its eighth-second tick
+        p.push_back(Roll(1, "A@2:0.1", "note", "10001000"));
+
+        PlayList::slice_type slice;
+        slice.push_back(p);
+
+        const std::vector<float> v = as_floats(list.render(Type::PCM_FLOAT32, slice));
+        ok("renders one second", v.size() == 44100, std::to_string(v.size()));
+        if(v.size() != 44100) return;
+
+        for(int t = 0; t < 8; t++) {
+            const bool want = (t == 0 || t == 4);
+            const double p2 = tick_peak(v, t, per_tick);
+            ok(std::string("tick ") + std::to_string(t) +
+               (want ? " sounds" : " is silent"),
+               want ? (p2 > 0.05) : (p2 < 0.001), std::to_string(p2));
+        }
+
+        // and it is the pitch that was asked for, not merely a noise
+        const double at220 = energy_at(v, 0, per_tick, 220);
+        const double at330 = energy_at(v, 0, per_tick, 330);
+        ok("and it is an A at 220Hz", at220 > at330 * 20,
+           std::to_string(at220) + " at 220 against " + std::to_string(at330) + " at 330");
+    }
+
+    {
+        // the waveform override survives the trip through the pattern
+        PlayList list = make_list();
+        Pattern sine(1, "sine"), saw(2, "saw");
+        sine.push_back(Roll(1, "A@2:0.1", "n", "10000000"));
+        saw.push_back(Roll(1, "A@2:0.1/saw", "n", "10000000"));
+
+        PlayList::slice_type a, b;
+        a.push_back(sine);
+        b.push_back(saw);
+
+        const std::vector<float> vs = as_floats(list.render(Type::PCM_FLOAT32, a));
+        const std::vector<float> vw = as_floats(list.render(Type::PCM_FLOAT32, b));
+
+        // a sawtooth has a second harmonic and a sine has essentially none
+        const double sine440 = energy_at(vs, 0, per_tick, 440);
+        const double saw440  = energy_at(vw, 0, per_tick, 440);
+
+        ok("/saw reaches the voice", saw440 > sine440 * 20,
+           std::to_string(saw440) + " against " + std::to_string(sine440) + " at 440");
+    }
+
+    {
+        PlayList list = make_list();
+        bool threw = false;
+        try { Roll(1, "H@9", "bad", "10000000"); }
+        catch(std::exception&) { threw = true; }
+        ok("a note it cannot read throws when the roll is made", threw);
+    }
+}
+
+/**
+ * The two kinds of roll in one pattern.
+ *
+ * Not asserted by comparing against the two rendered separately and added:
+ * automatic staging divides by the number of rolls, so one pattern of two is
+ * deliberately not the sum of two patterns of one.  What is checked instead is
+ * that each lands on its own beat and sounds like itself, with the pattern
+ * holding one of each.
+ */
+static void a_recording_and_a_note_together() {
+    std::cout << "\na recording and a note in one pattern:\n";
+
+    make_wav("playlist_test_a.wav", 0.6, 0.05);
+
+    const int per_tick = 44100 / 8;
+
+    std::vector<float> both;
+
+    {
+        wavstream s("playlist_test_a.wav");
+        PlayList list = make_list();
+        Pattern p(1, "p");
+        p.push_back(Roll(1, &s, "drum", "a", "10000000"));
+        p.push_back(Roll(2, "A@2:0.1", "note", "00001000"));
+
+        PlayList::slice_type slice;
+        slice.push_back(p);
+        both = as_floats(list.render(Type::PCM_FLOAT32, slice));
+    }
+
+    ok("renders one second", both.size() == 44100, std::to_string(both.size()));
+    if(both.size() != 44100) return;
+
+    ok("the recording is on its beat", tick_peak(both, 0, per_tick) > 0.05,
+       std::to_string(tick_peak(both, 0, per_tick)));
+    ok("and the note is on its own", tick_peak(both, 4, per_tick) > 0.05,
+       std::to_string(tick_peak(both, 4, per_tick)));
+    ok("with silence between them", tick_peak(both, 2, per_tick) < 0.001,
+       std::to_string(tick_peak(both, 2, per_tick)));
+
+    ok("the note is a 220Hz A",
+       energy_at(both, 4*per_tick, per_tick, 220) >
+       energy_at(both, 4*per_tick, per_tick, 330) * 20);
+}
+
 static void nothing_to_play() {
     std::cout << "\ndegenerate patterns:\n";
 
@@ -237,6 +362,8 @@ int main() {
         hits_land_on_their_ticks();
         a_loud_hit_late_does_not_reach_back();
         the_tail_wraps();
+        notes_as_well_as_recordings();
+        a_recording_and_a_note_together();
         nothing_to_play();
     }
     catch(std::exception& e) {

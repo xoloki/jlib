@@ -17,7 +17,7 @@ libjmedia_la_LIBADD = $(top_builddir)/jlib/sys/libjsys.la \
 
 jmedia_hdrs = Player.hh AudioFile.hh WavFile.hh PlayList.hh stream.hh \
               datastream.hh notestream.hh Type.hh wavstream.hh \
-              instrument.hh voice.hh source.hh source_stream.hh wavetable.hh mixer.hh clip.hh sampler.hh \
+              instrument.hh voice.hh source.hh source_stream.hh wavetable.hh mixer.hh clip.hh sampler.hh delayed.hh \
               audiofilestream.hh AudioSink.hh PortAudioSink.hh
 
 libjmediaincludedir = $(includedir)/jlib-1.2/jlib/media
