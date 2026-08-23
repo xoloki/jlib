@@ -10,6 +10,7 @@
 #include <jlib/sys/Directory.hh>
 #include <jlib/sys/sys.hh>
 #include <jlib/ai/neural.hh>
+#include <jlib/apps/magick.hh>
 
 #include <functional>
 #include <random>
@@ -372,7 +373,7 @@ math::matrix<T> load(const std::string& path, uint r, uint c, bool greyscale) {
     for(uint y = 0; y < image.rows(); y++) {
         for(uint x = 0; x < image.columns(); x++) {
             Magick::Color color = image.pixelColor(x, y);
-            input(y*image.columns() + x, 0) = ((QMAX - color.intensity()) / double(QMAX)) * 0.99 + 0.01;
+            input(y*image.columns() + x, 0) = ((QMAX - jlib::apps::luma(color)) / double(QMAX)) * 0.99 + 0.01;
             //std::cout << "Setting color intensity to " << input(y*image.columns() + x, 0) << std::endl;
         }
     }

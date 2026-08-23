@@ -158,6 +158,38 @@ PKG_CHECK_MODULES([MAGICK], [Magick++-7.Q16HDRI], [have_magick=yes],
   [PKG_CHECK_MODULES([MAGICK], [Magick++-6.Q16], [have_magick=yes],
     [PKG_CHECK_MODULES([MAGICK], [ImageMagick++ >= 6.0.0],
                        [have_magick=yes], [have_magick=no])])])
+
+dnl ImageMagick installs libtool archives naming -lltdl in dependency_libs, so
+dnl libtool puts it on the link line even though pkg-config never mentions it.
+dnl Homebrew keeps libltdl in a keg it does not link into the default search
+dnl path, and the link then fails with "library 'ltdl' not found" -- on the
+dnl jneural apps only, which is enough to stop make and therefore make check.
+dnl
+dnl So: ask the linker, and only go looking if it says no.
+AS_IF([test "x$have_magick" = xyes], [
+  AC_MSG_CHECKING([whether the linker can find ltdl])
+  jlib_save_LIBS="$LIBS"
+  LIBS="-lltdl $LIBS"
+  AC_LINK_IFELSE([AC_LANG_PROGRAM([], [])],
+    [AC_MSG_RESULT([yes])
+     LIBS="$jlib_save_LIBS"],
+    [LIBS="$jlib_save_LIBS"
+     jlib_ltdl_dir=
+     for jlib_d in `brew --prefix libtool 2>/dev/null`/lib \
+                    /opt/homebrew/opt/libtool/lib \
+                    /usr/local/opt/libtool/lib \
+                    /opt/local/lib; do
+       AS_IF([test -f "$jlib_d/libltdl.dylib" -o -f "$jlib_d/libltdl.so"],
+             [jlib_ltdl_dir="$jlib_d"; break])
+     done
+     AS_IF([test -n "$jlib_ltdl_dir"],
+       [AC_MSG_RESULT([no, using $jlib_ltdl_dir])
+        MAGICK_LIBS="$MAGICK_LIBS -L$jlib_ltdl_dir"],
+       [AC_MSG_RESULT([no])
+        AC_MSG_WARN([libltdl was not found, and ImageMagick asks for it: the jneural apps may fail to link])])
+    ])
+])
+
 AM_CONDITIONAL([HAVE_MAGICK], [test "x$have_magick" = xyes])
 
 dnl ------------------------------------------------------------------
