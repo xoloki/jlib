@@ -25,7 +25,8 @@ MEDIA_TESTS = media_datastream_test \
               sys_sigpipe_test \
               sys_tls_sigpipe_test \
               media_voice_test \
-              media_source_test
+              media_source_test \
+              media_wavetable_test
 endif
 
 if HAVE_SODIUM
@@ -95,6 +96,9 @@ media_voice_test_LDADD        = $(JMEDIA_LA) $(JSYS_LA)
 
 media_source_test_SOURCES     = media_source_test.cc
 media_source_test_LDADD       = $(JMEDIA_LA) $(JSYS_LA)
+
+media_wavetable_test_SOURCES  = media_wavetable_test.cc
+media_wavetable_test_LDADD    = $(JMEDIA_LA) $(JSYS_LA)
 
 net_extract_address_test_SOURCES        = net_extract_address_test.cc
 net_extract_address_test_LDADD          = $(JNET_LA)

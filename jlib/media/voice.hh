@@ -24,6 +24,7 @@
 #include <jlib/media/Type.hh>
 #include <jlib/media/instrument.hh>
 #include <jlib/media/source.hh>
+#include <jlib/media/wavetable.hh>
 
 #include <cmath>
 
@@ -58,6 +59,23 @@ namespace media {
 class voice : public source {
 public:
     /**
+     * Exact, or fast.
+     *
+     * exact sums the harmonics every sample: no interpolation, no banding,
+     * nothing approximated.  Right for an offline render, where the cost is
+     * paid once and quality is the whole point.
+     *
+     * fast reads a band-limited table -- about a thousand times cheaper, which
+     * is the difference between fifty voices and sixteen thousand, at the cost
+     * of interpolation error 117dB down and a slightly soft top octave.  Right
+     * for anything generating under a deadline.
+     *
+     * Same instrument, same envelope, same band limiting either way; the only
+     * difference is whether the sum is done now or was done earlier.
+     */
+    enum class quality { exact, fast };
+
+    /**
      * @param i        the instrument, copied
      * @param freq     Hz; zero or less is a rest and produces silence
      * @param samples  how long the note is, in frames
@@ -81,9 +99,45 @@ public:
         const unsigned int asked = m_instrument.get_harmonics();
         if(asked > 0 && asked < m_partials)
             m_partials = asked;
+
+        // The envelope segments, in samples, worked out once.  gain_at() ran
+        // this arithmetic per sample, and it depends on nothing that changes.
+        m_attack  = ramp_samples(m_envelope.attack);
+        m_decay   = ramp_samples(m_envelope.decay);
+        m_release = ramp_samples(m_envelope.release);
     }
 
     unsigned long size() const { return m_samples; }
+
+    quality get_quality() const { return m_quality; }
+
+    /**
+     * @param q     exact or fast
+     * @param set   where fast gets its tables; not owned, and it must outlive
+     *              this.  Building a table allocates and takes milliseconds, so
+     *              a realtime caller should prime() it first.
+     */
+    void set_quality(quality q, wavetable_set* set = 0)
+    {
+        m_quality = q;
+        m_table = 0;
+
+        if(q != quality::fast || set == 0) {
+            m_quality = quality::exact;
+            return;
+        }
+
+        // Resolved once, here, rather than per sample.  Which table serves a
+        // voice depends on its waveform and its pitch, and neither changes
+        // after construction -- looking it up in oscillator() meant taking a
+        // mutex and walking a map for every sample, which cost most of what the
+        // table was supposed to save: 45 times faster than summing instead of
+        // about a thousand.
+        //
+        // Building it may allocate, so this is also the point a realtime caller
+        // must reach before its deadline starts.
+        m_table = &set->get(m_instrument.get_wave(), m_freq, m_rate);
+    }
 
     virtual bool done() const { return m_pos >= m_samples; }
     virtual void reset() { m_pos = 0; }
@@ -147,44 +201,12 @@ protected:
         if(m_freq <= 0 || m_partials == 0)
             return 0;
 
-        static const double pi = 3.14159265358979323846;
-        const double w = 2 * pi * phase;
+        if(m_table)
+            return m_table->at(phase);
 
-        switch(m_instrument.get_wave()) {
-        case instrument::wave::sine:
-            return std::sin(w);
-
-        case instrument::wave::saw: {
-            // (2/pi) * sum sin(k w)/k, alternating, peak 1 -> scaled to sine RMS
-            double sum = 0;
-            for(unsigned int k = 1; k <= m_partials; k++)
-                sum += ((k % 2) ? 1.0 : -1.0) * std::sin(k * w) / k;
-
-            return SAW_RMS * (2.0 / pi) * sum;
-        }
-
-        case instrument::wave::square: {
-            // (4/pi) * sum over odd k of sin(k w)/k
-            double sum = 0;
-            for(unsigned int k = 1; k <= m_partials; k += 2)
-                sum += std::sin(k * w) / k;
-
-            return SQUARE_RMS * (4.0 / pi) * sum;
-        }
-
-        case instrument::wave::triangle: {
-            // (8/pi^2) * sum over odd k of (-1)^((k-1)/2) sin(k w)/k^2
-            double sum = 0;
-            for(unsigned int k = 1; k <= m_partials; k += 2) {
-                const double sign = (((k - 1) / 2) % 2) ? -1.0 : 1.0;
-                sum += sign * std::sin(k * w) / (double(k) * k);
-            }
-
-            return TRIANGLE_RMS * (8.0 / (pi * pi)) * sum;
-        }
-        }
-
-        return 0;
+        // Summed here rather than duplicated: wavetable::shape is what fills a
+        // table, so the exact path and the cached one cannot drift apart.
+        return wavetable::shape(m_instrument.get_wave(), phase, m_partials);
     }
 
     /**
@@ -205,11 +227,11 @@ protected:
         if(m_samples == 0)
             return 0;
 
-        const double last = (m_samples > 1) ? double(m_samples - 1) : 1.0;
+        const unsigned long last = m_samples - 1;
 
-        const unsigned long attack  = ramp_samples(m_envelope.attack);
-        const unsigned long decay   = ramp_samples(m_envelope.decay);
-        const unsigned long release = ramp_samples(m_envelope.release);
+        const unsigned long attack  = m_attack;
+        const unsigned long decay   = m_decay;
+        const unsigned long release = m_release;
 
         static const double pi = 3.14159265358979323846;
 
@@ -217,7 +239,7 @@ protected:
             return 0.5 * (1.0 - std::cos(pi * i / attack));
 
         // from the end, so the last sample is exactly silent
-        const unsigned long from_end = static_cast<unsigned long>(last) - i;
+        const unsigned long from_end = last - i;
 
         if(release > 0 && from_end < release)
             return m_envelope.sustain * 0.5 * (1.0 - std::cos(pi * from_end / release));
@@ -243,18 +265,19 @@ protected:
         return (n > m_samples / 2) ? m_samples / 2 : n;
     }
 
-    /** Peak scaling that gives each waveform the RMS of a unit sine. */
-    static constexpr double SAW_RMS      = 1.2247448713915890;   // sqrt(3/2)
-    static constexpr double SQUARE_RMS   = 0.7071067811865476;   // 1/sqrt(2)
-    static constexpr double TRIANGLE_RMS = 1.2247448713915890;   // sqrt(3/2)
-
     instrument m_instrument;
     double m_freq;
     unsigned long m_samples;
     double m_rate;
     instrument::envelope m_envelope;
     unsigned int m_partials = 0;
+    unsigned long m_attack = 0, m_decay = 0, m_release = 0;
     unsigned long m_pos;
+
+    quality m_quality = quality::exact;
+
+    /** Resolved by set_quality; not owned, and null when summing directly. */
+    const wavetable* m_table = 0;
 };
 
 }
