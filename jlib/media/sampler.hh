@@ -40,6 +40,10 @@ namespace media {
  *
  * The clip is shared and never modified, so any number of these can play the
  * same recording at once, at different positions, speeds and gains.
+ *
+ * Starting at a particular moment is delayed's job rather than this one's --
+ * see delayed.hh.  It lived here first, which was enough for patterns made of
+ * recordings and no use for a pattern with notes in it.
  */
 class sampler : public source {
 public:
@@ -68,21 +72,6 @@ public:
     void set_looping(bool l) { m_looping = l; }
 
     /**
-     * Frames of silence before the clip starts.
-     *
-     * A sampler is usually wanted at a particular moment rather than
-     * immediately -- a drum hit lands on a beat -- and without this the only
-     * way to place one is to start rendering it late, which a mixer has no way
-     * to do.  Counted in output frames, so it does not move when the speed
-     * changes.
-     *
-     * This is the smallest piece of a timeline, not a timeline: there is no
-     * tempo here and no ordering beyond what the offsets say.
-     */
-    unsigned long get_start() const { return m_start; }
-    void set_start(unsigned long frames) { m_start = frames; }
-
-    /**
      * Frames per second wanted out.
      *
      * A clip records its own rate, so playing a 22kHz recording into a 44.1kHz
@@ -108,15 +97,6 @@ public:
         unsigned long made = 0;
 
         while(made < frames) {
-            // Silence until the start, which still counts as rendered: the
-            // frames exist, they are just empty, and a mixer needs to be told
-            // they happened or it will stop early.
-            if(m_waited < m_start) {
-                ++m_waited;
-                ++made;
-                continue;
-            }
-
             if(m_pos >= len) {
                 if(!m_looping)
                     break;
@@ -142,13 +122,12 @@ public:
         if(!m_clip || m_clip->empty())
             return true;
 
-        return !m_looping && m_waited >= m_start && m_pos >= m_clip->frames();
+        return !m_looping && m_pos >= m_clip->frames();
     }
 
     virtual void reset()
     {
         m_pos = 0;
-        m_waited = 0;
     }
 
 protected:
@@ -190,9 +169,6 @@ protected:
     double m_speed = 1.0;
     double m_rate = 44100;
     bool m_looping = false;
-
-    unsigned long m_start = 0;
-    unsigned long m_waited = 0;
     double m_pos = 0;
 };
 

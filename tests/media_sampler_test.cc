@@ -5,6 +5,7 @@
 // two of them and nothing else.
 #include <jlib/media/WavFile.hh>
 #include <jlib/media/clip.hh>
+#include <jlib/media/delayed.hh>
 #include <jlib/media/instrument.hh>
 #include <jlib/media/mixer.hh>
 #include <jlib/media/notestream.hh>
@@ -133,37 +134,45 @@ static void block_size_independence() {
     auto c = make_clip("sampler_test_mono.wav", 440, 0.25, 1);
     const unsigned long total = c->frames();
 
-    struct { const char* name; double speed; bool loop; unsigned long start; }
-    cases[] = {
-        { "plain",           1.0,  false, 0    },
-        { "resampled",       0.63, false, 0    },
-        { "looping",         1.0,  true,  0    },
-        { "delayed",         1.0,  false, 977  },
-        { "delayed+resampled", 1.37, false, 513 },
+    struct spec { const char* name; double speed; bool loop; unsigned long start; };
+
+    const spec cases[] = {
+        { "plain",             1.0,  false, 0    },
+        { "resampled",         0.63, false, 0    },
+        { "looping",           1.0,  true,  0    },
+        { "delayed",           1.0,  false, 977  },
+        { "delayed+resampled", 1.37, false, 513  },
     };
 
-    for(const auto& k : cases) {
-        sampler whole(c);
-        whole.set_speed(k.speed);
-        whole.set_looping(k.loop);
-        whole.set_start(k.start);
+    // The delay is a wrapper now rather than a field on the sampler, so it has
+    // its own state to carry across a block boundary and belongs in here.
+    auto build_one = [&](const spec& k) -> std::shared_ptr<source> {
+        auto one = std::make_shared<sampler>(c);
+        one->set_speed(k.speed);
+        one->set_looping(k.loop);
+
+        if(k.start)
+            return std::make_shared<delayed>(one, k.start);
+
+        return one;
+    };
+
+    for(const spec& k : cases) {
+        std::shared_ptr<source> whole = build_one(k);
 
         std::vector<Type::scaled> one(total, 0);
-        whole.render(one.data(), total, 1);
+        whole->render(one.data(), total, 1);
 
         unsigned long differ = 0;
 
         for(unsigned long block : {1UL, 7UL, 333UL}) {
-            sampler part(c);
-            part.set_speed(k.speed);
-            part.set_looping(k.loop);
-            part.set_start(k.start);
+            std::shared_ptr<source> part = build_one(k);
 
             std::vector<Type::scaled> split(total, 0);
             unsigned long at = 0;
             while(at < total) {
                 const unsigned long want = std::min(block, total - at);
-                const unsigned long made = part.render(&split[at], want, 1);
+                const unsigned long made = part->render(&split[at], want, 1);
                 if(!made) break;
                 at += made;
             }
@@ -235,12 +244,11 @@ static void starting_late() {
     auto c = make_clip("sampler_test_mono.wav", 440, 0.1, 1);
 
     const unsigned long start = 1000;
-    sampler s(c, 1.0);
-    s.set_start(start);
+    delayed d(std::make_shared<sampler>(c), start);
 
     const unsigned long n = start + c->frames();
     std::vector<Type::scaled> out(n, 0);
-    const unsigned long made = s.render(out.data(), n, 1);
+    const unsigned long made = d.render(out.data(), n, 1);
 
     ok("renders the wait as well as the clip", made == n,
        std::to_string(made) + " of " + std::to_string(n));
@@ -254,6 +262,37 @@ static void starting_late() {
         if(out[start + i] != c->at(i, 0)) ++differ;
     ok("and then exactly the clip", differ == 0,
        differ ? (std::to_string(differ) + " differ") : "");
+
+    ok("and is done when the clip is", d.done());
+
+    // The wait must not erase what is already in the buffer.  render() adds,
+    // so a delay that wrote zeros over its silent stretch would silently
+    // delete every source mixed in before it -- and with a mixer that zeroes
+    // first, which is the usual case, nothing would ever notice.
+    {
+        std::vector<Type::scaled> shared(n, 0.5);
+        delayed again(std::make_shared<sampler>(c), start);
+        again.render(shared.data(), n, 1);
+
+        bool kept = true;
+        for(unsigned long i = 0; i < start; i++)
+            if(shared[i] != 0.5f) kept = false;
+
+        ok("and adds to the buffer rather than clearing it", kept);
+    }
+
+    // A delay of nothing is the source itself.
+    {
+        std::vector<Type::scaled> plain(c->frames(), 0);
+        sampler bare(c);
+        bare.render(plain.data(), c->frames(), 1);
+
+        std::vector<Type::scaled> wrapped(c->frames(), 0);
+        delayed none(std::make_shared<sampler>(c), 0);
+        none.render(wrapped.data(), c->frames(), 1);
+
+        ok("a delay of zero changes nothing", plain == wrapped);
+    }
 }
 
 static void channels() {
