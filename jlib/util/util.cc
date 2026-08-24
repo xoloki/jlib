@@ -620,10 +620,24 @@ namespace jlib {
 
                 std::map<std::string,std::string>::const_iterator j = codec.begin();
                 std::string::size_type i;
+
                 while(j != codec.end()) {
-                    while( (i=ret.find(j->first)) != std::string::npos ) {
+                    // Resume after what was just written, not from the start.
+                    //
+                    // This searched from position 0 every time, so encoding
+                    // anything containing "&" never terminated: "&" became
+                    // "&amp;", whose own "&" was then found at the same
+                    // position and replaced again, and again, until the
+                    // process ran out of memory.  xml::encode() was therefore
+                    // unusable on any text with an ampersand in it -- which is
+                    // to say, on exactly the text it exists for.
+                    std::string::size_type at = 0;
+
+                    while( (i=ret.find(j->first, at)) != std::string::npos ) {
                         ret.replace(i,j->first.length(),j->second);
+                        at = i + j->second.length();
                     }
+
                     j++;
                 }
                 

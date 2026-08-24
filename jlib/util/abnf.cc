@@ -47,11 +47,24 @@ struct arena {
     std::vector<capture_record> records;
 };
 
-/** Where a node that something back-references last matched. */
+/**
+ * Where a node that something back-references last matched.
+ *
+ * depth is the rule nesting the match was made at, and it is what makes this
+ * work under recursion.  Without it, a grammar like
+ *
+ *     elem = "<" name ">" *elem "</" backref(name) ">"
+ *
+ * cannot parse <a><b/></a>: name is one node shared by every level, so after
+ * the inner element closes, the most recent match of it is still "b" and the
+ * outer end tag is compared against the wrong thing.  A record made deeper
+ * than the position asking for it belongs to a scope that has already closed.
+ */
 struct tracked_record {
     const expr* source;
     std::size_t begin;
     std::size_t end;
+    std::size_t depth;
 };
 
 /**
@@ -677,11 +690,18 @@ protected:
 
 // ------------------------------------------------------- context sensitivity
 
-/** The most recent extent of source that has not been backtracked away. */
+/**
+ * The most recent extent of source that is still in scope.
+ *
+ * Backtracking has already removed anything from a branch that lost; this
+ * additionally skips matches made inside a nesting level that has since
+ * closed.  See tracked_record.
+ */
 static const tracked_record* last(const context& ctx, const expr* source)
 {
     for(std::size_t i = ctx.tracked.size(); i > 0; i--) {
-        if(ctx.tracked[i-1].source == source) {
+        if(ctx.tracked[i-1].source == source &&
+           ctx.tracked[i-1].depth <= ctx.depth) {
             return &ctx.tracked[i-1];
         }
     }
@@ -896,7 +916,7 @@ static bool run(const expr* e, context& ctx, std::size_t& pos)
     const bool ok = e->parse(ctx, pos);
 
     if(ok && e->m_tracked) {
-        ctx.tracked.push_back(tracked_record{e, start, pos});
+        ctx.tracked.push_back(tracked_record{e, start, pos, ctx.depth});
     }
 
     return ok;

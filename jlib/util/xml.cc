@@ -1,240 +1,383 @@
-/* -*- mode:C++ c-basic-offset:4 -*-
- * xmlpp - an xml file parser and validator
- * Copyright (C) 2000 Michael Fink
- * Copyright (C) 2000 Joe Yandle
+/* -*- mode: C++ c-basic-offset: 4  -*-
+ *
+ * Copyright (c) 2026 Joey Yandle <xoloki@gmail.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
  * of the License, or (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
- * 
+ *
  */
 
+#include <jlib/util/xml.hh>
+
+#include <jlib/util/abnf.hh>
 #include <jlib/util/util.hh>
 
-#include <jlib/util/xml.hh>
-#include <jlib/util/xmlparser.hh>
+#include <istream>
+#include <ostream>
+#include <sstream>
 
-#include <cstdio>
-#include <cstdarg>
-
-// namespace declaration
 namespace jlib {
-    namespace util {
-        namespace xml {
-            
-            
-            // error methods
-            
-            const char* error::what() const throw () {
-                switch(m_code) {
-                case unknown:
-                    return "unknown";
-                case instream_error:
-                    return "instream_error";
-                case opentag_expected:
-                    return "opentag_expected";
-                case opentag_cdata_expected:
-                    return "opentag_cdata_expected";
-                case closetag_expected:
-                    return "closetag_expected";
-                case qmark_expected:
-                    return "qmark_expected";
-                case tagname_expected:
-                    return "tagname_expected";
-                case closetag_slash_expected:
-                    return "closetag_slash_expected";
-                case tagname_close_mismatch:
-                    return "tagname_close_mismatch";
-                case attr_equal_expected:
-                    return "attr_equal_expected";
-                case attr_value_expected:
-                    return "attr_value_expected";
-                case dummy:
-                    return "dummy";
-                default:
-                    return "unknown error";
-                }
-            }
-            
-            std::string error::get_strerror() {
-                return what();
-            }
-            
-            
-            // node methods
-            
-            node::node(const std::string& name) 
-            { 
-                set_type(node::internal);
-                set_name(name);
+namespace util {
+namespace xml {
+
+// -------------------------------------------------------------------- error
+
+error::error(const std::string& msg, std::size_t line, std::size_t column)
+    : std::runtime_error("jlib::util::xml::error: " + msg +
+                         " at line " + std::to_string(line) +
+                         ", column " + std::to_string(column)),
+      m_line(line),
+      m_column(column)
+{
+}
+
+// --------------------------------------------------------------------- node
+
+node::node(kind k, std::string name, std::string content)
+    : m_kind(k),
+      m_name(std::move(name)),
+      m_content(std::move(content))
+{
+}
+
+namespace {
+
+/**
+ * shared_ptr needs a public constructor to use make_shared, and node's is
+ * protected on purpose -- the static makers are the only way in.  This is the
+ * usual way to have both.
+ */
+struct makeable : public node {
+    makeable(kind k, std::string name, std::string content)
+        : node(k, std::move(name), std::move(content)) {}
+};
+
+}
+
+ptr node::element(std::string name)
+{
+    return std::make_shared<makeable>(kind::element, std::move(name),
+                                      std::string());
+}
+
+ptr node::text(std::string content)
+{
+    return std::make_shared<makeable>(kind::text, std::string(),
+                                      std::move(content));
+}
+
+ptr node::instruction(std::string target, std::string body)
+{
+    return std::make_shared<makeable>(kind::instruction, std::move(target),
+                                      std::move(body));
+}
+
+bool node::has(std::string_view name) const
+{
+    for(const attribute& a : m_attributes) {
+        if(a.first == name) return true;
+    }
+
+    return false;
+}
+
+std::string node::get(std::string_view name, const std::string& fallback) const
+{
+    for(const attribute& a : m_attributes) {
+        if(a.first == name) return a.second;
+    }
+
+    return fallback;
+}
+
+void node::set(std::string name, std::string value)
+{
+    m_attributes.push_back(attribute(std::move(name), std::move(value)));
+}
+
+ptr node::add(ptr child)
+{
+    m_children.push_back(child);
+
+    return child;
+}
+
+ptr node::first(std::string_view name) const
+{
+    for(const ptr& c : m_children) {
+        if(c->type() == kind::element && c->name() == name) return c;
+    }
+
+    return ptr();
+}
+
+node::child_list node::all(std::string_view name) const
+{
+    child_list out;
+
+    for(const ptr& c : m_children) {
+        if(c->type() == kind::element && c->name() == name) out.push_back(c);
+    }
+
+    return out;
+}
+
+std::string node::text_content() const
+{
+    if(m_kind == kind::text) return m_content;
+
+    std::string out;
+
+    for(const ptr& c : m_children) out += c->text_content();
+
+    return out;
+}
+
+void node::write(std::ostream& os) const
+{
+    switch(m_kind) {
+    case kind::text:
+        os << xml::encode(m_content);
+        return;
+
+    case kind::instruction:
+        os << "<?" << m_name << m_content << "?>";
+        return;
+
+    case kind::element:
+        break;
+    }
+
+    os << "<" << m_name;
+
+    for(const attribute& a : m_attributes) {
+        os << " " << a.first << "=\"" << xml::encode(a.second) << "\"";
+    }
+
+    if(m_children.empty() && m_empty_tag) {
+        os << "/>";
+        return;
+    }
+
+    os << ">";
+
+    for(const ptr& c : m_children) c->write(os);
+
+    os << "</" << m_name << ">";
+}
+
+std::string node::str() const
+{
+    std::ostringstream o;
+    write(o);
+
+    return o.str();
+}
+
+// ------------------------------------------------------------- the grammar
+
+namespace {
+
+using namespace jlib::util::abnf;
+
+/**
+ * XML, as much of it as this reads.
+ *
+ * Built once, on first use, for the reason recorded in crypt/curve.hh: a
+ * namespace-scope object here would be constructed while the library loads,
+ * before anything could have gone wrong in a way anyone could see.
+ *
+ * The end tag is backref(name) -- the grammar itself requires the close to
+ * match the open, so there is no separate check to forget.  That needs the
+ * scope-aware backref, since name is one node shared by every level of the
+ * recursion; see the note on tracked_record in abnf.cc.
+ */
+class xml_grammar {
+public:
+    xml_grammar()
+    {
+        const rule ws = anyof(" \t\r\n");
+        const rule name_start = core::ALPHA() | anyof("_:");
+        const rule name_rest = core::ALPHA() | core::DIGIT() | anyof(".-_:");
+
+        m_name = as("name", name_start >> *name_rest);
+
+        // A comment is skipped entirely, not captured.  Not in the original
+        // scope for this, and added anyway: a hand-edited config file with a
+        // comment in it is not an exotic document, and refusing to read one
+        // would be a worse failure than the feature is worth.
+        const rule comment = lit("<!--") >> until(lit("-->")) >> lit("-->");
+
+        const rule quoted =
+            (core::DQUOTE() >> as("value", *anyof_but("\"")) >> core::DQUOTE()) |
+            (lit("'") >> as("value", *anyof_but("'")) >> lit("'"));
+
+        const rule attribute =
+            as("attribute", +ws >> as("attribute-name", name_start >> *name_rest)
+                            >> *ws >> lit("=") >> *ws >> quoted);
+
+        const rule text = as("text", +anyof_but("<"));
+
+        // element = "<" name *attribute *ws ( "/>" / ">" content "</" name ">" )
+        m_grammar.define("element",
+            as("element",
+               lit("<") >> m_name >> *attribute >> *ws
+               >> ( as("self-closing", lit("/>"))
+                  | ( lit(">")
+                      >> *( m_grammar["element"] | comment | text )
+                      >> lit("</") >> backref(m_name) >> *ws >> lit(">") ) )));
+
+        const rule instruction =
+            as("instruction", lit("<?") >> as("target", name_start >> *name_rest)
+                              >> as("body", until(lit("?>"))) >> lit("?>"));
+
+        m_grammar.define("document",
+            *ws >> -(instruction >> *ws) >> *(comment >> *ws)
+                >> m_grammar["element"] >> *ws);
+
+        m_grammar.check();
+    }
+
+    const rule document() const { return m_grammar.at("document"); }
+
+protected:
+    /** Every octet except these.  XML's negated character classes. */
+    static rule anyof_but(std::string_view chars)
+    {
+        std::string keep;
+
+        for(unsigned int c = 0; c < 256; c++) {
+            bool skip = false;
+
+            for(char x : chars) {
+                if(static_cast<unsigned char>(x) == c) skip = true;
             }
 
-            node::ptr node::create(const std::string& name) {
-                return node::ptr(new node(name));
-            }
+            if(!skip) keep += static_cast<char>(c);
+        }
 
-            node::~node() {
-                clear();
-            }
+        return anyof(keep);
+    }
 
+    mutable grammar m_grammar;
+    rule m_name;
+};
 
-            bool node::load(std::istream &instream) {
-                parser parser(instream);
-                
-                try {
-                    node *pnode = this;
-                    xml::document *pdoc = dynamic_cast<xml::document*>(pnode);
-                    
-                    if ( get_type() == node::root  && pdoc!=NULL ) {
-                        pdoc->clear();
-                        parser.parse_document( *pdoc );
-                    }
-                    else
-                        parser.parse_node( *pnode );
-                }
-                catch(error e) {
-                    e.get_error();
-                    return false;
-                }
-                return true;
-            }
-            
-            bool node::save( std::ostream &outstream, int indent ) const {
-                // output indendation spaces
-                for(int i=0;i<indent;i++)
-                    outstream << ' ';
-                
-                // output cdata
-                if (m_type == node::cdata) {
-                    outstream << trim(m_cdata) << std::endl;
-                    return true;   
-                }
-                
-                // output document process information
-                if (m_type == node::root) {
-                    //outstream << cdata.c_str() << std::endl;
-                    //return true;   
-                }
-                
-                // output tag name
-                
-                if (m_type == node::root) {
-                    outstream << "<?";
-                }
-                else {
-                    outstream << '<';
-                }
+const xml_grammar& reader()
+{
+    static const xml_grammar g;
 
-                outstream << get_name();
-                
-                attributes::const_iterator i, stop;
-                i = m_attributes.begin();
-                
-                for(;i!=m_attributes.end();i++) {
-                    outstream << ' ' << i->first << '='
-                              << '\"' << jlib::util::xml::encode(i->second) << '\"';
-                }
-                
-                switch(m_type) {
-                case node::root:
-                    //      break;
-                case node::internal:
-                    {
-                        if(m_type == root) {
-                            outstream << '?';
-                        }
-                        outstream << '>' << std::endl;
-                        
-                        node::list::const_iterator i = m_list.begin();
-                        
-                        for(;i!=m_list.end();i++)
-                            if(m_type == node::root)
-                                (*i)->save(outstream,indent);
-                            else
-                                (*i)->save(outstream,indent+1);
-                        
-                        // output indendation spaces
-                        for(int i=0;i<indent;i++)
-                            outstream << ' ';
+    return g;
+}
 
-                        if(m_type != node::root) {
-                            outstream << '<' << '/'
-                                      << get_name()
-                                      << '>' << std::endl;
-                        }
-                    }
-                    break;
-                case node::leaf:
-                    outstream << '/' << '>' << std::endl;
-                    return true;
-                default:
-                    return false;
-                }
-                
-                return true;
-            }
-            
-            std::string node::get_attribute(const std::string& key) const {
-                attributes::const_iterator i=m_attributes.find(key);
-                if(i != m_attributes.end())
-                    return i->second;
-                else
-                    return std::string();
-            }
+// ------------------------------------------------------------- tree building
 
-            void node::set_attribute(const std::string& key, const std::string& val) {
-                attributes::iterator i=m_attributes.find(key);
-                if(i != m_attributes.end())
-                    i->second = val;
-                else
-                    m_attributes.insert(std::make_pair(key,val));
-            }
+ptr build(const match& m);
 
-            void node::add(node::ptr n) {
-                m_list.push_back(n);
-            }
+void add_children(const match& m, const ptr& into)
+{
+    for(const match& c : m.children()) {
+        const std::string what = c.name();
 
-            void node::clear() {
-                for(list::iterator i=m_list.begin();i!=m_list.end();i++) {
-                    node::ptr nodeptr = *i;
-                    clear(nodeptr);
-                }
-                m_list.clear();
-            }
-            
-            void node::clear(node::ptr n) {
-                for(list::iterator i=n->get_list().begin();i!=n->get_list().end();i++) {
-                    node::ptr nodeptr = *i;
-                    clear(nodeptr);
-                }
-            }
-
-
-            document::document() 
-            { 
-                set_type(node::root); 
-                set_name("xml");
-                set_attribute("version","1.0");
-            }
-
-            document::~document() {
-                clear();
-            }
-
-            
+        if(what == "element") {
+            into->add(build(c));
+        }
+        else if(what == "text") {
+            into->add(node::text(decode(c.str())));
         }
     }
 }
-// namespace end
 
+ptr build(const match& m)
+{
+    const match n = m.child("name");
 
+    ptr e = node::element(n ? n.str() : std::string());
+
+    // <a/> and <a></a> both have no children; only this tells them apart.
+    e->set_empty_tag(static_cast<bool>(m.child("self-closing")));
+
+    for(const match& a : m.children()) {
+        if(a.name() != "attribute") continue;
+
+        const match an = a.child("attribute-name");
+        const match av = a.child("value");
+
+        e->set(an ? an.str() : std::string(),
+               av ? decode(av.str()) : std::string());
+    }
+
+    add_children(m, e);
+
+    return e;
+}
+
+}  // namespace
+
+// -------------------------------------------------------------------- parse
+
+ptr parse(std::string_view text)
+{
+    const parse_result r = reader().document().try_parse(text);
+
+    if(!r) {
+        const abnf::error& e = r.why();
+
+        // Built from the parts rather than from what(), which already
+        // carries abnf's own prefix and would give a message naming two
+        // libraries for one failure.
+        std::string wanted;
+
+        for(std::size_t i = 0; i < e.expected().size() && i < 3; i++) {
+            wanted += (i ? " or " : "") + e.expected()[i];
+        }
+
+        throw error(wanted.empty() ? "unexpected input" : "expected " + wanted,
+                    e.line(), e.column());
+    }
+
+    const match root = r.root();
+    const match top = root["element"];
+
+    if(!top) {
+        throw error("no root element", 1, 1);
+    }
+
+    return build(top);
+}
+
+ptr parse(std::istream& is)
+{
+    std::ostringstream o;
+    o << is.rdbuf();
+
+    return parse(o.str());
+}
+
+void write(std::ostream& os, const ptr& root)
+{
+    if(root) root->write(os);
+}
+
+std::string to_string(const ptr& root)
+{
+    std::ostringstream o;
+    write(o, root);
+
+    return o.str();
+}
+
+}
+}
+}
