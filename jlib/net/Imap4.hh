@@ -49,8 +49,13 @@ namespace jlib {
             std::vector<std::string> m_attr;
             std::string m_delim;
             std::string m_name;
-            bool m_is_folder;
-            bool m_is_parent;
+
+            // Initialized here because ListItem() is an empty body: a
+            // default-constructed item reported whatever was on the stack for
+            // both of these, and one of them decides whether a mailbox is
+            // shown at all.
+            bool m_is_folder = false;
+            bool m_is_parent = false;
         };
 
         /**

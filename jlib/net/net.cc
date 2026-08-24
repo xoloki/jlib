@@ -204,7 +204,17 @@ namespace jlib {
                 }
                 
                 count += buf.length();
-                newline_tail = (buf[buf.length()-2] == '\n');
+
+                // The *last* byte of this chunk, so the next one can tell
+                // whether a divider at its position 0 was preceded by a
+                // newline.  This read length()-2, which is the byte before
+                // that, and read out of range entirely whenever a chunk came
+                // back shorter than two bytes -- including the zero-length
+                // read at end of file.  A "From " landing exactly on a 16K
+                // chunk boundary was therefore either missed or accepted when
+                // it should not have been, depending on what happened to be
+                // in memory.
+                newline_tail = (!buf.empty() && buf[buf.length()-1] == '\n');
             }
 
             if(getenv("JLIB_NET_DEBUG")) {
@@ -277,17 +287,28 @@ namespace jlib {
         }
 
         bool same_address(const std::string& p_addr1, const std::string& p_addr2) {
-            std::string addr1, addr2;
-            
-            try {
-                addr1 = util::upper(extract_address(p_addr1));
-                addr2 = util::upper(extract_address(p_addr2));
-            }
-            catch(exception& e) {
+            const std::string addr1 = extract_address(p_addr1);
+            const std::string addr2 = extract_address(p_addr2);
+
+            // An address that could not be read is not the same as anything,
+            // and that includes another address that could not be read.
+            //
+            // This used to uppercase both results and compare them.
+            // extract_address returns "" for anything with no @ in it, so both
+            // sides came back empty and equal: same_address("Joe Yandle",
+            // "Bob Smith") was true, and so was same_address("", "garbage").
+            // A function whose whole job is "is this the same person" answered
+            // yes for two different people whenever it failed to read either
+            // one of them, silently, which in a mail client is a misfiled
+            // message or a reply to the wrong recipient.
+            if(addr1.empty() || addr2.empty()) {
                 return false;
             }
-            
-            return (addr1 == addr2);
+
+            // Case folding is left as it was for now -- see the note on
+            // RFC 5321 2.4 in net.hh.  The catch(exception&) that used to wrap
+            // this is gone with it: extract_address does not throw.
+            return util::iequals(addr1, addr2);
         }
         
         std::string extract_address(const std::string& p_addr) {
@@ -458,11 +479,55 @@ namespace jlib {
         }
 
         bool is_addr(const std::string& s) {
-            for(std::string::size_type i=0;i<s.length();i++) {
-                if(!isdigit(s[i]) && s[i] != '.')
+            // Four decimal octets separated by dots, and nothing else.
+            //
+            // This used to accept any string of digits and dots, which meant
+            // it could only ever return false and never true by mistake -- so
+            // "" and "...." were both addresses, the loop having nothing to
+            // reject.  get_host calls it to decide whether to attempt a
+            // reverse lookup.
+            int octets = 0;
+            std::string::size_type i = 0;
+
+            while(i < s.length()) {
+                std::string::size_type digits = 0;
+                int value = 0;
+
+                // isdigit takes an int that must be representable as unsigned
+                // char; a plain char is signed here, so a high-bit byte would
+                // be undefined behaviour.
+                while(i < s.length() &&
+                      isdigit(static_cast<unsigned char>(s[i]))) {
+                    value = value * 10 + (s[i] - '0');
+                    digits++;
+                    i++;
+                }
+
+                if(digits == 0 || digits > 3 || value > 255) {
                     return false;
+                }
+
+                octets++;
+
+                if(i == s.length()) {
+                    break;
+                }
+
+                if(s[i] != '.') {
+                    return false;
+                }
+
+                i++;
+
+                // A dot has to be followed by another octet.  Without this,
+                // "1.2.3.4." consumed the trailing dot, fell out of the loop
+                // with four octets counted, and was accepted.
+                if(i == s.length()) {
+                    return false;
+                }
             }
-            return true;
+
+            return (octets == 4);
         }
 
         std::pair< std::string, std::vector<std::string> > get_host(const std::string& s) {
