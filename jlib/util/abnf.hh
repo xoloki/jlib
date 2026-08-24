@@ -39,10 +39,17 @@ namespace util {
  * Grammars, and the machinery to run them against input.
  *
  * This is the layer the RFCs are eventually written in.  Two of them, in fact:
- * these combinators, and -- built on top, in a later branch -- a reader for
- * ABNF grammar text, so an RFC's own grammar can be pasted in as it stands.
- * Both are public, because ABNF cannot express everything the RFCs need.
- * RFC 3501 says
+ * these combinators, and -- built on top, see compile() -- a reader for ABNF
+ * grammar text, so an RFC's own grammar can be pasted in as it stands:
+ *
+ *     grammar g = abnf::compile(
+ *         "addr-spec  = local-part \"@\" domain\r\n"
+ *         "local-part = 1*atext\r\n"
+ *         "domain     = 1*atext *(\".\" 1*atext)\r\n"
+ *         "atext      = ALPHA / DIGIT / \"+\" / \"-\" / \"_\"\r\n");
+ *
+ * Both layers are public, because ABNF cannot express everything the RFCs
+ * need.  RFC 3501 says
  *
  *     literal = "{" number "}" CRLF *CHAR8
  *             ; Number represents the number of CHAR8s
@@ -476,6 +483,8 @@ rule where_pure(std::string description,
  * Rules declared outside a grammar and made recursive by hand will leak, and
  * that is the reason to keep them in one of these.
  */
+struct compile_options;
+
 class grammar {
 public:
     grammar();
@@ -497,8 +506,31 @@ public:
     void define(std::string name, const rule& body);
     void define_alternative(std::string name, const rule& more);
 
+    /**
+     * Predefine RFC 5234 Appendix B.
+     *
+     * Marked so that a grammar may redefine one with "=" without that being
+     * the redefinition error it would otherwise be -- RFC 3501 defines its own
+     * CHAR8, and grammars do reach for a core name and mean something slightly
+     * different by it.  A seeded rule that nothing uses does not appear in
+     * rules() or to_abnf().
+     */
+    void seed_core();
+
     /** Defined rules, in the order they were defined. */
     std::vector<std::string> rules() const;
+
+    /**
+     * Rules whose definition contains a prose-val with no implementation.
+     *
+     * A grammar read from an RFC often has one or two productions the RFC
+     * describes in words rather than in ABNF, and compile() lets those through
+     * so that the other two hundred rules are usable.  This is how to find out
+     * which they are before relying on the result, rather than when a parse
+     * reaches one.  Empty for a grammar built in combinators, and for one
+     * whose prose was all supplied through compile_options::prose.
+     */
+    std::vector<std::string> prose_rules() const;
 
     /** Referenced and never defined. */
     std::vector<std::string> undefined() const;
@@ -517,9 +549,102 @@ public:
 protected:
     friend class rule;
 
+    // The one thing outside this class that reaches into impl: compile() has
+    // to record which rules it left as unimplemented prose, and a public
+    // setter for that would be a wart on an API nobody else should call.
+    friend grammar compile(std::string_view, const compile_options&);
+
     class impl;
     std::unique_ptr<impl> m_impl;
 };
+
+// ------------------------------------------------------------- the ABNF text
+
+/**
+ * Strip the indentation an RFC prints its grammar with.
+ *
+ * RFC 5234's rulelist wants a rulename at column zero, and grammars in an RFC
+ * are indented three spaces.  Removing the *common* prefix rather than
+ * trimming every line is what keeps line folding working: a continuation is a
+ * line that begins with more whitespace than the rule it continues, and that
+ * relationship has to survive.
+ *
+ * Exposed because it is worth being able to test on its own.
+ */
+std::string dedent(std::string_view text);
+
+/** How to read grammar text. */
+struct compile_options {
+    /** Remove the common leading indent first.  See dedent(). */
+    bool dedent = true;
+
+    /** Predefine RFC 5234 Appendix B.  A grammar may still redefine them. */
+    bool seed_core_rules = true;
+
+    /**
+     * Accept a bare LF where the grammar says CRLF.
+     *
+     * RFC 5234 is written in terms of CRLF, and grammar text pasted out of a
+     * browser or an RFC has bare LFs in it.  Refusing that would defeat the
+     * entire purpose of reading ABNF text.
+     */
+    bool allow_bare_lf = true;
+
+    /**
+     * What to do with a prose-val -- the <...> that means "described in
+     * words, elsewhere".
+     *
+     * Null means: compile it, and fail at *parse* time with a position saying
+     * which prose rule has no implementation.  Refusing to compile a
+     * two-hundred rule grammar because one obsolete production is prose would
+     * defeat the purpose; failing when it is actually reached does not.
+     *
+     * Supplying one is the seam this layer exists to provide: the RFC's own
+     * words, implemented in combinators.
+     */
+    std::function<rule(std::string_view)> prose;
+};
+
+/**
+ * Read RFC 5234 ABNF, and return the grammar it describes.
+ *
+ * Paste it out of the RFC:
+ *
+ *     grammar g = abnf::compile(
+ *         "addr-spec   = local-part \"@\" domain\r\n"
+ *         "local-part  = dot-atom / quoted-string\r\n");
+ *
+ * Throws grammar_error, with a position in the grammar text, for ABNF that
+ * does not parse.  Rules referenced and never defined are *not* an error here
+ * -- a grammar is often built from several calls -- but grammar::check() and
+ * the first parse will both refuse them.
+ *
+ * ## A compiled grammar is still this engine's
+ *
+ * The text is RFC 5234's; what runs it is ordered choice and possessive
+ * repetition, as described at the top of this header.  So a pasted grammar
+ * means what *this* reads it as, which is not always what the RFC intended --
+ * and RFC 5234's own section 4 is an example.  Written as published, its
+ *
+ *     defined-as = *c-wsp ("=" / "=/") *c-wsp
+ *     repeat     = 1*DIGIT / (*DIGIT "*" *DIGIT)
+ *
+ * both commit to the wrong branch here: "=" matches the first character of
+ * "=/" and wins, and 1*DIGIT eats the "3" of "3*5" and wins.  Swapping the two
+ * alternatives in each makes them behave as the RFC means them to, and that is
+ * the form the bootstrap uses.  Grammars needing this are uncommon, and the
+ * symptom is always the same -- a longer alternative that a shorter prefix of
+ * it shadows.
+ *
+ * ## Case
+ *
+ * A quoted string in ABNF is case *insensitive* (RFC 5234 2.3), so "HELO"
+ * here compiles to ilit(), not lit(); RFC 7405's %s asks for the other thing.
+ * That is the reverse of what a handwritten lit() does, and deliberately so at
+ * both ends -- see the note on lit().
+ */
+grammar compile(std::string_view abnf_text);
+grammar compile(std::string_view abnf_text, const compile_options& o);
 
 // ----------------------------------------------------------------- core rules
 
