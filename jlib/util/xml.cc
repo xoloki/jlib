@@ -42,6 +42,177 @@ error::error(const std::string& msg, std::size_t line, std::size_t column)
 {
 }
 
+// ---------------------------------------------------------------- escaping
+
+namespace {
+
+/**
+ * XML's five predefined entities, plus numeric references.
+ *
+ * Not util::xml::encode/decode, which knows three of the five and nothing
+ * about &#65;.  Escaping here is also context sensitive -- an attribute value
+ * is delimited by a quote, so the quote has to go, and text is not -- which a
+ * single table cannot express.
+ */
+std::string escape(std::string_view s, bool attribute)
+{
+    std::string out;
+    out.reserve(s.size());
+
+    for(char c : s) {
+        switch(c) {
+        case '&':  out += "&amp;";  break;
+        case '<':  out += "&lt;";   break;
+        case '>':  out += "&gt;";   break;
+        case '"':
+            // Only inside an attribute, where it would end the value.  This
+            // was missing, so an attribute holding a quote was written as
+            // <a x="say "hi""/> -- output this parser could not read back.
+            if(attribute) out += "&quot;";
+            else          out += c;
+            break;
+        default:   out += c;        break;
+        }
+    }
+
+    return out;
+}
+
+/** XML 1.0 2.2: the codepoints a document may contain at all. */
+bool is_char(unsigned long c)
+{
+    return c == 0x9 || c == 0xA || c == 0xD ||
+           (c >= 0x20    && c <= 0xD7FF) ||
+           (c >= 0xE000  && c <= 0xFFFD) ||
+           (c >= 0x10000 && c <= 0x10FFFF);
+}
+
+/** Line and column of an offset, counting from one. */
+std::pair<std::size_t, std::size_t> where(std::string_view in, std::size_t at)
+{
+    std::size_t line = 1, start = 0;
+
+    for(std::size_t i = 0; i < at && i < in.size(); i++) {
+        if(in[i] == '\n') { line++; start = i + 1; }
+    }
+
+    return std::make_pair(line, at - start + 1);
+}
+
+[[noreturn]] void fail(std::string_view input, std::size_t at,
+                       const std::string& why)
+{
+    const std::pair<std::size_t, std::size_t> p = where(input, at);
+
+    throw error(why, p.first, p.second);
+}
+
+void append_utf8(std::string& out, unsigned long c)
+{
+    if(c < 0x80) {
+        out += static_cast<char>(c);
+    }
+    else if(c < 0x800) {
+        out += static_cast<char>(0xC0 | (c >> 6));
+        out += static_cast<char>(0x80 | (c & 0x3F));
+    }
+    else if(c < 0x10000) {
+        out += static_cast<char>(0xE0 | (c >> 12));
+        out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (c & 0x3F));
+    }
+    else {
+        out += static_cast<char>(0xF0 | (c >> 18));
+        out += static_cast<char>(0x80 | ((c >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (c & 0x3F));
+    }
+}
+
+/**
+ * Turn references back into the characters they stand for.
+ *
+ * base is where s sits in input, so a bad reference can be reported at the
+ * place it actually occurs rather than at the start of the document.
+ */
+std::string unescape(std::string_view s, std::string_view input, std::size_t base)
+{
+    std::string out;
+    out.reserve(s.size());
+
+    for(std::size_t i = 0; i < s.size(); i++) {
+        if(s[i] != '&') {
+            out += s[i];
+            continue;
+        }
+
+        const std::size_t semi = s.find(';', i);
+
+        if(semi == std::string_view::npos) {
+            fail(input, base + i, "an & that starts no reference");
+        }
+
+        const std::string_view ref = s.substr(i + 1, semi - i - 1);
+
+        if(ref == "amp")       out += '&';
+        else if(ref == "lt")   out += '<';
+        else if(ref == "gt")   out += '>';
+        else if(ref == "apos") out += '\'';
+        else if(ref == "quot") out += '"';
+        else if(!ref.empty() && ref[0] == '#') {
+            const bool hex = ref.size() > 1 && (ref[1] == 'x' || ref[1] == 'X');
+            const std::string_view digits = ref.substr(hex ? 2 : 1);
+
+            if(digits.empty()) {
+                fail(input, base + i, "a character reference with no digits");
+            }
+
+            unsigned long c = 0;
+
+            for(char d : digits) {
+                int v;
+
+                if(d >= '0' && d <= '9')                v = d - '0';
+                else if(hex && d >= 'a' && d <= 'f')    v = d - 'a' + 10;
+                else if(hex && d >= 'A' && d <= 'F')    v = d - 'A' + 10;
+                else fail(input, base + i,
+                          "a character reference with \"" + std::string(1, d) +
+                          "\" in it");
+
+                c = c * (hex ? 16 : 10) + static_cast<unsigned long>(v);
+
+                if(c > 0x10FFFF) {
+                    fail(input, base + i,
+                         "a character reference past the end of Unicode");
+                }
+            }
+
+            // XML 1.0 2.2: a reference may only name a character the document
+            // could have contained anyway, so &#0; is not a way in.
+            if(!is_char(c)) {
+                fail(input, base + i,
+                     "character reference &" + std::string(ref) +
+                     "; is not a character XML allows");
+            }
+
+            append_utf8(out, c);
+        }
+        else {
+            // Without a DTD there is nothing that could have declared it, so
+            // this is a well-formedness error rather than text.  Passing it
+            // through would make the document say something else.
+            fail(input, base + i,
+                 "no entity named \"" + std::string(ref) + "\" is declared");
+        }
+
+        i = semi;
+    }
+
+    return out;
+}
+
+}
+
 // --------------------------------------------------------------------- node
 
 node::node(kind k, std::string name, std::string content)
@@ -71,10 +242,13 @@ node::ptr node::element(std::string name)
                                       std::string());
 }
 
-node::ptr node::text(std::string content)
+node::ptr node::text(std::string content, bool cdata)
 {
-    return std::make_shared<makeable>(kind::text, std::string(),
-                                      std::move(content));
+    node::ptr n = std::make_shared<makeable>(kind::text, std::string(),
+                                             std::move(content));
+    n->set_cdata(cdata);
+
+    return n;
 }
 
 node::ptr node::instruction(std::string target, std::string body)
@@ -172,7 +346,8 @@ void node::write(std::ostream& os) const
 {
     switch(m_kind) {
     case kind::text:
-        os << xml::encode(m_content);
+        if(m_cdata) os << "<![CDATA[" << m_content << "]]>";
+        else        os << escape(m_content, false);
         return;
 
     case kind::instruction:
@@ -186,7 +361,7 @@ void node::write(std::ostream& os) const
     os << "<" << m_name;
 
     for(const attribute& a : m_attributes) {
-        os << " " << a.first << "=\"" << xml::encode(a.second) << "\"";
+        os << " " << a.first << "=\"" << escape(a.second, true) << "\"";
     }
 
     if(m_children.empty() && m_empty_tag) {
@@ -253,13 +428,18 @@ public:
 
         const rule text = as("text", +anyof_but("<"));
 
+        // Literal text, entities and all.  Its own capture so the writer can
+        // put it back as a CDATA section rather than as a run of escapes.
+        const rule cdata =
+            lit("<![CDATA[") >> as("cdata", until(lit("]]>"))) >> lit("]]>");
+
         // element = "<" name *attribute *ws ( "/>" / ">" content "</" name ">" )
         m_grammar.define("element",
             as("element",
                lit("<") >> m_name >> *attribute >> *ws
                >> ( as("self-closing", lit("/>"))
                   | ( lit(">")
-                      >> *( m_grammar["element"] | comment | text )
+                      >> *( m_grammar["element"] | comment | cdata | text )
                       >> lit("</") >> backref(m_name) >> *ws >> lit(">") ) )));
 
         const rule instruction =
@@ -309,18 +489,6 @@ const xml_grammar& reader()
 
 node::ptr build(const match& m, std::string_view input);
 
-/** Line and column of an offset, counting from one. */
-std::pair<std::size_t, std::size_t> where(std::string_view in, std::size_t at)
-{
-    std::size_t line = 1, start = 0;
-
-    for(std::size_t i = 0; i < at && i < in.size(); i++) {
-        if(in[i] == '\n') { line++; start = i + 1; }
-    }
-
-    return std::make_pair(line, at - start + 1);
-}
-
 void add_children(const match& m, const node::ptr& into, std::string_view input)
 {
     for(const match& c : m.children()) {
@@ -330,7 +498,11 @@ void add_children(const match& m, const node::ptr& into, std::string_view input)
             into->add(build(c, input));
         }
         else if(what == "text") {
-            into->add(node::text(decode(c.str())));
+            into->add(node::text(unescape(c.str(), input, c.begin())));
+        }
+        else if(what == "cdata") {
+            // Literal by definition: nothing inside is a reference.
+            into->add(node::text(c.str(), true));
         }
     }
 }
@@ -364,7 +536,7 @@ node::ptr build(const match& m, std::string_view input)
                         e->name() + ">", at.first, at.second);
         }
 
-        e->set(key, av ? decode(av.str()) : std::string());
+        e->set(key, av ? unescape(av.str(), input, av.begin()) : std::string());
     }
 
     add_children(m, e, input);

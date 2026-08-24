@@ -43,18 +43,29 @@ namespace util {
  *
  * ## What it handles
  *
- * Elements, attributes, character data, comments, the processing instruction,
- * self-closing tags, and the three predefined entities &amp; &lt; &gt; through
- * the codec that already lives in util.hh.
+ * Elements, attributes, character data, CDATA sections, comments, the
+ * processing instruction, self-closing tags, all five predefined entities
+ * (&amp; &lt; &gt; &apos; &quot;) and numeric character references in decimal
+ * and hex.
+ *
+ * A reference it does not recognise is an error, not text: without a DTD to
+ * declare one, &nbsp; is not well-formed XML, and passing it through would
+ * produce a document that says something different from what was read.
  *
  * ## What it does not
  *
- * No namespaces, no DTD or DOCTYPE, no CDATA sections, no numeric character
- * references, no encoding declarations -- the declared encoding is parsed as
- * an ordinary attribute and then ignored, so input is whatever bytes it was.
- * These are not oversights to be fixed quietly later; a document using any of
- * them is rejected with a position rather than half-read, and the test says so
- * as plainly as this does.
+ * No namespaces, no DTD or DOCTYPE, no entity declarations, and no encoding
+ * handling -- the declared encoding is parsed and then ignored, so the input
+ * is read as whatever bytes it was.  **This is not a conforming XML
+ * processor** and is not trying to be: XML 1.0 4.3.3 requires UTF-8 and UTF-16
+ * both, 5.1 requires the internal DTD subset, and the Char and Name
+ * productions are defined over Unicode codepoints rather than octets.  Getting
+ * there is weeks of work against a 2000-file test suite, for a library whose
+ * XML reads config files it wrote itself.  If real XML is ever needed, wrap
+ * libxml2 behind this interface rather than growing this into it.
+ *
+ * What it does instead is refuse what it cannot represent, with a position,
+ * rather than half-reading it.
  *
  * ## Whitespace
  *
@@ -165,7 +176,11 @@ public:
     typedef std::vector<attribute> attribute_list;
 
     static ptr element(std::string name);
-    static ptr text(std::string content);
+
+    /**
+     * @param cdata  write it back as <![CDATA[...]]> rather than escaping it
+     */
+    static ptr text(std::string content, bool cdata = false);
     static ptr instruction(std::string target, std::string body);
 
     kind type() const { return m_kind; }
@@ -210,6 +225,16 @@ public:
     bool empty_tag() const { return m_empty_tag; }
     void set_empty_tag(bool b) { m_empty_tag = b; }
 
+    /**
+     * Whether this text was written as a CDATA section.
+     *
+     * Carried for the same reason as empty_tag(): the two spellings mean the
+     * same thing, and turning somebody's <![CDATA[...]]> into a run of escapes
+     * is a change to their file that they did not ask for.
+     */
+    bool cdata() const { return m_cdata; }
+    void set_cdata(bool b) { m_cdata = b; }
+
     /** Appends, and returns what was added so calls can be chained. */
     ptr add(ptr child);
 
@@ -236,6 +261,7 @@ protected:
     attribute_list m_attributes;
     child_list m_children;
     bool m_empty_tag = true;
+    bool m_cdata = false;
 };
 
 /**

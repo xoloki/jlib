@@ -168,20 +168,75 @@ static void end_tags_have_to_match() {
 }
 
 static void entities() {
-    std::cout << "\nthe three predefined entities:\n";
+    std::cout << "\nreferences:\n";
 
     xml::document r = xml::parse("<a t=\"&lt;q&gt;\">x &amp; y</a>");
 
-    ok("decoded in text",      r->text_content() == "x & y", r->text_content());
-    ok("and in attributes",    r->get("t") == "<q>", r->get("t"));
-    ok("and encoded on the way out",
-       r->str() == "<a t=\"&lt;q&gt;\">x &amp; y</a>", r->str());
+    ok("decoded in text",   r->text_content() == "x & y", r->text_content());
+    ok("and in attributes", r->get("t") == "<q>", r->get("t"));
+    ok("and encoded again", r->str() == "<a t=\"&lt;q&gt;\">x &amp; y</a>",
+       r->str());
 
-    // Not supported, and it passes through rather than being decoded.  Stated
-    // here so nobody assumes otherwise from a green run.
-    xml::document n = xml::parse("<a>&#65;</a>");
-    ok("a numeric reference is NOT decoded", n->text_content() == "&#65;",
-       n->text_content());
+    // All five, not the three the generic codec in util.hh knows.
+    xml::document five = xml::parse("<a>&amp;&lt;&gt;&apos;&quot;</a>");
+    ok("all five predefined entities", five->text_content() == "&<>'\"",
+       five->text_content());
+
+    // Numeric character references, decimal and hex.
+    ok("a decimal reference", xml::parse("<a>&#65;</a>")->text_content() == "A");
+    ok("a hex reference",     xml::parse("<a>&#x41;</a>")->text_content() == "A");
+    ok("and an upper case x", xml::parse("<a>&#X41;</a>")->text_content() == "A");
+
+    ok("one outside ASCII becomes UTF-8",
+       xml::parse("<a>&#233;</a>")->text_content() == "\xc3\xa9",
+       xml::parse("<a>&#233;</a>")->text_content());
+
+    // XML 1.0 2.2: a reference may only name a character the document could
+    // have held anyway, so this is not a way to smuggle a NUL in.
+    ok("&#0; is refused",       rejects("<a>&#0;</a>"));
+    ok("and one past Unicode",  rejects("<a>&#x110000;</a>"));
+    ok("and a lone surrogate",  rejects("<a>&#xD800;</a>"));
+
+    // Without a DTD there is nothing that could declare one, so an unknown
+    // reference is a well-formedness error rather than text.  Passing it
+    // through would make the document say something other than it does.
+    ok("an unknown entity is refused", rejects("<a>&nbsp;</a>"));
+    ok("and a bare ampersand",         rejects("<a>a & b</a>"));
+
+    // The writer had this wrong: a quote in an attribute was written out
+    // unescaped, producing <a x="say "hi""/>, which this parser could not
+    // read back.
+    xml::document q = xml::node::element("a");
+    q->set("x", "say \"hi\"");
+    ok("a quote in an attribute is escaped",
+       q->str() == "<a x=\"say &quot;hi&quot;\"/>", q->str());
+    ok("and survives a round trip",
+       xml::parse(q->str())->get("x") == "say \"hi\"");
+}
+
+static void cdata_sections() {
+    std::cout << "\nCDATA:\n";
+
+    xml::document r = xml::parse("<a><![CDATA[x < y & z]]></a>");
+
+    ok("the content is literal", r->text_content() == "x < y & z",
+       r->text_content());
+
+    // Written back as a section rather than as a run of escapes.  Same reason
+    // <a/> is not rewritten to <a></a>: it means the same thing, and changing
+    // it is a change to somebody's file they did not ask for.
+    ok("and it is written back as one",
+       r->str() == "<a><![CDATA[x < y & z]]></a>", r->str());
+
+    ok("markup inside is not markup",
+       xml::parse("<a><![CDATA[<b>not an element</b>]]></a>")->children().size() == 1);
+
+    ok("an empty one",     xml::parse("<a><![CDATA[]]></a>")->text_content() == "");
+    ok("an unclosed one",  rejects("<a><![CDATA[x</a>"));
+
+    ok("beside ordinary text",
+       xml::parse("<a>one <![CDATA[two]]> three</a>")->text_content() ==
+       "one two three");
 }
 
 static void comments_and_the_processing_instruction() {
@@ -278,8 +333,8 @@ static void what_it_refuses() {
     // Each of these is rejected outright rather than half-read.  That is the
     // point: a document this cannot represent should fail loudly, not parse
     // into something that quietly means something else.
-    ok("a DOCTYPE",   rejects("<!DOCTYPE a><a/>"));
-    ok("a CDATA section", rejects("<a><![CDATA[x]]></a>"));
+    ok("a DOCTYPE",          rejects("<!DOCTYPE a><a/>"));
+    ok("an entity declaration", rejects("<!DOCTYPE a [<!ENTITY x \"y\">]><a/>"));
 
     // A namespace prefix is not resolved -- it is simply part of the name.
     // Accepted, but it means nothing to this parser, and a caller treating
@@ -300,6 +355,7 @@ int main() {
         setting_an_attribute_means_setting_it();
         end_tags_have_to_match();
         entities();
+        cdata_sections();
         comments_and_the_processing_instruction();
         writing_gives_back_what_was_read();
         building_a_tree_by_hand();
@@ -314,11 +370,19 @@ int main() {
     // What a green run does NOT establish.
     //
     // Not that this reads XML.  It reads the subset listed in xml.hh, and
-    // what_it_refuses() names the parts it does not: no DTD, no CDATA
-    // sections, no numeric character references, no namespace resolution, and
-    // no encoding handling at all -- the encoding attribute of a processing
-    // instruction is parsed and then ignored, so a UTF-16 document is read as
-    // bytes and will not work.
+    // what_it_refuses() names the parts it does not: no DTD or entity
+    // declarations, no namespace resolution, and no encoding handling at all
+    // -- the encoding attribute of a processing instruction is parsed and then
+    // ignored, so a UTF-16 document is read as bytes and will not work, even
+    // though XML 1.0 4.3.3 requires a processor to handle it.
+    //
+    // Nor is the input validated as UTF-8.  A numeric character reference is
+    // checked against the Char production, because that costs six comparisons
+    // -- but a raw invalid byte in the document is passed straight through,
+    // and Name is matched over ASCII rather than over the Unicode ranges the
+    // specification gives.  So &#xD800; is refused and the same codepoint
+    // written directly is not, which is an inconsistency worth knowing about
+    // rather than a line that has been drawn deliberately.
     //
     // Not conformance to the XML specification.  There is no test here derived
     // from the W3C test suite, and the grammar was written from the shape of
