@@ -1,6 +1,6 @@
 /* -*- mode: C++ c-basic-offset: 4  -*-
  * 
- * Copyright (c) 2010 Joe Yandle <xoloki@gmail.com>
+ * Copyright (c) 2010 Joey Yandle <xoloki@gmail.com>
  * 
  */
 

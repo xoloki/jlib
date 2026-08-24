@@ -1,6 +1,6 @@
 /* -*- mode: C++ c-basic-offset: 4 -*-
  * 
- * Copyright (c) 1999 Joe Yandle <joey@divisionbyzero.com>
+ * Copyright (c) 1999 Joey Yandle <xoloki@gmail.com>
  * 
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
