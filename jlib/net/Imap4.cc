@@ -46,12 +46,33 @@ namespace jlib {
 
         ListItem::ListItem() {}
         ListItem::ListItem(const std::string& line) {
-            unsigned int i,j;
+            // These were unsigned int, which truncates npos to 0xFFFFFFFF: a
+            // reply with no "(" left i as that, i+1 wrapped to 0, and the
+            // find(")") that followed searched from the start of the line.
+            // line.substr(j+1) then threw, or returned a slice of something
+            // unrelated.  This is the same bug class already fixed and
+            // regression-tested in net::extract_address.
+            std::string::size_type i, j;
+
             i = line.find("(");
-            j = line.find(")",i+1);
-            
+            j = (i == line.npos) ? line.npos : line.find(")", i+1);
+
+            if(i == line.npos || j == line.npos) {
+                return;
+            }
+
             std::string ending = line.substr(j+1);
             std::vector<std::string> etokens = util::tokenize(ending," ",false);
+
+            // A truncated reply used to index etokens[0] and etokens[1] with
+            // no size check.  Leaving the item as it is means the caller sees
+            // a nameless non-folder and skips it, which is the same outcome as
+            // a mailbox it cannot select -- rather than a crash from the
+            // network.  Reading LIST properly needs the grammar, not more
+            // guards; that is a later branch.
+            if(etokens.empty() || etokens[0].empty()) {
+                return;
+            }
             if(getenv("JLIB_NET_IMAP4_DEBUG")) {
                 std::cout << "ending = '"<<ending<<"'"<<std::endl;
                 for(unsigned int i=0;i<etokens.size();i++) {
@@ -73,6 +94,9 @@ namespace jlib {
             }
             else {
                 m_delim = etokens[0];
+                if(etokens.size() < 2 || etokens[1].empty()) {
+                    return;
+                }
                 if(etokens[1][0] == '"') {
                     std::string b = ending;
                     b = b.substr(b.find(m_delim)+m_delim.length()+1);

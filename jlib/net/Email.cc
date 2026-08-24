@@ -146,7 +146,19 @@ namespace jlib {
                         // intermediate boundary, go for it
                         //cout << "intermediate boundary, go for it"<<endl;
 
-                        unsigned int pos = istr.tellg();
+                        // tellg() returns a streampos, which this narrowed to
+                        // 32 bits -- wrong for any message past 4GB, and it
+                        // also swallows the -1 tellg() returns on a failed
+                        // stream, turning it into a huge offset that substr
+                        // then throws on.
+                        const std::istream::pos_type where = istr.tellg();
+
+                        if(where == std::istream::pos_type(-1)) {
+                            break;
+                        }
+
+                        const std::string::size_type pos =
+                            static_cast<std::string::size_type>(where);
                         // last case, have to get jiggy
                         if(i+1 == attach_divide.size()) {
                             buf = m_raw.substr(pos);

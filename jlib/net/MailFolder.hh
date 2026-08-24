@@ -38,7 +38,28 @@ namespace jlib {
 
         class FolderBuffer {
         public:
-            
+            /**
+             * Needed, and it was missing.
+             *
+             * MailFolder holds its buffer as a shared_ptr<FolderBuffer> and
+             * init() takes a FolderBuffer*, so the deleter the shared_ptr
+             * stores is typed to this class.  Destroying an MFolder therefore
+             * deleted an MFolderBuffer through a base pointer with no virtual
+             * destructor -- undefined behaviour, which libc++ turns into a
+             * trap, so every mbox folder crashed on the way out.  Declaring
+             * ~MFolderBuffer virtual in the derived class did not help: what
+             * matters is the static type at the delete.
+             *
+             * The other four are defaulted because declaring this one
+             * suppresses the implicit moves.
+             */
+            FolderBuffer() = default;
+            FolderBuffer(const FolderBuffer&) = default;
+            FolderBuffer(FolderBuffer&&) = default;
+            FolderBuffer& operator=(const FolderBuffer&) = default;
+            FolderBuffer& operator=(FolderBuffer&&) = default;
+            virtual ~FolderBuffer() = default;
+
             typedef std::vector<Email> rep_type;
 
             typedef rep_type::pointer pointer;

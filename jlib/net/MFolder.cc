@@ -188,10 +188,22 @@ namespace jlib {
 
                 u_int size = buf.length();
 
-                // don't try to parse the whole email, just grab the headers
-                unsigned int p = buf.find("\n\n");
+                // Don't try to parse the whole email, just grab the headers.
+                //
+                // Two faults here, and they compounded.  p was an unsigned
+                // int, so npos truncated to 0xFFFFFFFF and the "did we find
+                // it" guard could never fire -- buf.erase(0xFFFFFFFF) then
+                // threw out_of_range.  And the separator searched for was
+                // "\n\n", which does not occur in a CRLF mailbox at all: the
+                // bytes there are "\r\n\r\n".  So every CRLF mbox took the
+                // path that throws.
+                std::string::size_type p = buf.find("\r\n\r\n");
+
+                if(p == buf.npos) {
+                    p = buf.find("\n\n");
+                }
+
                 if(p != buf.npos) {
-                    //buf.erase(p+2);
                     buf.erase(p);
                 }
 

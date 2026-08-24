@@ -99,9 +99,14 @@ namespace jlib {
 
         std::string excise(const std::string& s, const std::string& d1, const std::string& d2) {
             std::string ret = s;
-            int i,j=0;
-            
-            while( (i=ret.find(d1,j)) != -1 && (j=ret.find(d2,i+1)) != -1 ) {
+
+            // These were ints compared against -1.  find() returns a
+            // size_type, so npos survived only as an implementation-defined
+            // narrowing that happens to give -1 -- and stops doing so the
+            // moment the string is longer than INT_MAX.
+            std::string::size_type i, j = 0;
+
+            while( (i=ret.find(d1,j)) != ret.npos && (j=ret.find(d2,i+1)) != ret.npos ) {
                 ret.erase(i,j+1-i);
                 j = i;
                 //cout << "Excising '" << ret.c_str() << "' between '" << d1.c_str() << "' and '" << d2.c_str() << "' = '" << ret.c_str() << "'\n";
@@ -347,7 +352,8 @@ namespace jlib {
         }
         
         bool icontains(const std::string& s, const std::string& t) {
-            return (s.size() >= t.size() && (int)upper(s).find(upper(t)) != -1);
+            // The cast to int truncated npos; see excise() above.
+            return (s.size() >= t.size() && upper(s).find(upper(t)) != std::string::npos);
         }
         
         bool ibegins(const std::string& s, const std::string& t) {
