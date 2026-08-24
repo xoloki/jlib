@@ -82,9 +82,6 @@ enum class kind { element, text, instruction };
 
 class node;
 
-typedef std::shared_ptr<node> ptr;
-typedef std::shared_ptr<const node> const_ptr;
-
 /**
  * An element, a run of text, or the leading <?...?>.
  *
@@ -94,17 +91,37 @@ typedef std::shared_ptr<const node> const_ptr;
  */
 class node {
 public:
+    /**
+     * Nested, as json::object::ptr and crypt::key::ptr are.
+     *
+     * Those are nested because their namespaces hold more than one pointed-to
+     * type and had to disambiguate; this one does not, so either would work.
+     * It is here anyway because it stays right if a second kind of pointed-to
+     * thing ever appears, and because a bare ptr says only that it points at
+     * something.  See xml::document below for the name that says what.
+     */
+    typedef std::shared_ptr<node> ptr;
+    typedef std::shared_ptr<const node> const_ptr;
+
     typedef std::vector<ptr> child_list;
     typedef std::pair<std::string, std::string> attribute;
 
     /**
-     * Attributes in document order, duplicates and all.
+     * Attributes, in the order they were written.
      *
-     * A vector rather than a map on purpose.  A map loses the order they were
-     * written in, which makes writing a document back out reorder it, and it
-     * silently drops a repeated attribute instead of letting a caller notice
-     * that the document is malformed.  Both are correctness properties, and
-     * neither is recoverable once the storage has thrown them away.
+     * A vector rather than a map so that writing a document back out does not
+     * reorder them.  That is the whole of the reason, and it is enough: a
+     * hand-edited config file should come back the way it went in.
+     *
+     * It is not to hold duplicates.  XML 1.0 3.1 makes a repeated attribute
+     * name a well-formedness violation -- "An attribute name MUST NOT appear
+     * more than once in the same start-tag or empty-element tag" -- and a
+     * fatal error a conforming processor must report.  parse() rejects one,
+     * so a tree read from a document cannot contain one, and set() is the only
+     * way to add an attribute, so a tree built by hand cannot either.  An
+     * earlier draft here preserved duplicates on the theory that a caller
+     * should be told rather than have one silently dropped; the mistake was
+     * accepting a document that no other parser will.
      *
      * The cost is that get() and has() are a linear scan.  Measured, in
      * nanoseconds per lookup averaged over every key:
@@ -166,8 +183,17 @@ public:
     std::string get(std::string_view name,
                     const std::string& fallback = std::string()) const;
 
-    /** Appends; it does not replace an attribute of the same name. */
+    /**
+     * Set the attribute of this name, adding it if it is not there.
+     *
+     * Replaces in place, so setting one does not move it to the end and
+     * reorder the document.  There is never more than one to choose between:
+     * see the note on attribute_list.
+     */
     void set(std::string name, std::string value);
+
+    /** Drop the attribute of this name.  Returns how many went, so 0 or 1. */
+    std::size_t remove(std::string_view name);
 
     const attribute_list& attributes() const { return m_attributes; }
 
@@ -213,6 +239,16 @@ protected:
 };
 
 /**
+ * A parsed document.
+ *
+ * There is no separate document type, because the root element is the
+ * document.  This names that so a caller can say what it holds -- xml::ptr
+ * would have said only that it points at something, and node::ptr says the
+ * mechanism rather than the meaning.
+ */
+typedef node::ptr document;
+
+/**
  * Read a document, and return its root element.
  *
  * The processing instruction, if there is one, is not the root and is not
@@ -221,12 +257,12 @@ protected:
  *
  * Throws xml::error, which carries a line and a column.
  */
-ptr parse(std::string_view text);
-ptr parse(std::istream& is);
+document parse(std::string_view text);
+document parse(std::istream& is);
 
 /** Write a document.  Adds no whitespace of its own. */
-void write(std::ostream& os, const ptr& root);
-std::string to_string(const ptr& root);
+void write(std::ostream& os, const document& root);
+std::string to_string(const document& root);
 
 }
 }

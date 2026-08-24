@@ -23,9 +23,10 @@
 // The old one was xmlpp, third-party GPL code, and was the only thing in this
 // repository the author did not own outright.  This replaces it without
 // reference to it, which is why the tree looks different: attributes are an
-// ordered vector rather than a map, parse() is a free function returning a
-// node rather than a bool-returning member, and errors carry a position, which
-// the old ones did not carry at all.
+// ordered vector rather than a map so a rewrite does not rearrange them,
+// parse() is a free function returning a document rather than a bool-returning
+// member, and errors carry a position, which the old ones did not carry at
+// all.
 
 #include <jlib/util/xml.hh>
 
@@ -54,7 +55,7 @@ static bool rejects(const std::string& doc) {
 static void elements_attributes_and_text() {
     std::cout << "reading:\n";
 
-    xml::ptr r = xml::parse("<config name=\"main\" version='2'>hello</config>");
+    xml::document r = xml::parse("<config name=\"main\" version='2'>hello</config>");
 
     ok("the root element",     r->name() == "config", r->name());
     ok("it is an element",     r->type() == xml::kind::element);
@@ -64,7 +65,7 @@ static void elements_attributes_and_text() {
     ok("has()",                r->has("name") && !r->has("nope"));
     ok("the text",             r->text_content() == "hello", r->text_content());
 
-    xml::ptr nested = xml::parse("<a><b>one</b><c>two</c><b>three</b></a>");
+    xml::document nested = xml::parse("<a><b>one</b><c>two</c><b>three</b></a>");
 
     ok("children are found by name",
        nested->first("b") && nested->first("b")->text_content() == "one");
@@ -75,22 +76,77 @@ static void elements_attributes_and_text() {
        nested->text_content() == "onetwothree", nested->text_content());
 }
 
-static void attributes_keep_their_order_and_their_duplicates() {
+static void attributes_keep_their_order() {
     std::cout << "\nattributes:\n";
 
-    // A map would reorder these and silently drop one.  Both matter: the
-    // reorder makes a rewritten file diff against itself, and the drop hides
-    // a malformed document from the caller instead of letting it decide.
-    xml::ptr r = xml::parse("<a z=\"1\" m=\"2\" a=\"3\" m=\"4\"/>");
-
-    ok("all four are kept", r->attributes().size() == 4,
-       std::to_string(r->attributes().size()));
+    // Order is why these are a vector and not a map: a map would rewrite the
+    // document with them rearranged, which turns editing a config file into a
+    // diff against itself.
+    xml::document r = xml::parse("<a z=\"1\" m=\"2\" a=\"3\"/>");
 
     ok("in the order written",
        r->attributes()[0].first == "z" && r->attributes()[1].first == "m" &&
-       r->attributes()[2].first == "a" && r->attributes()[3].first == "m");
+       r->attributes()[2].first == "a");
 
-    ok("and get() returns the first", r->get("m") == "2", r->get("m"));
+    ok("and they survive a rewrite in that order",
+       r->str() == "<a z=\"1\" m=\"2\" a=\"3\"/>", r->str());
+}
+
+static void a_repeated_attribute_is_not_xml() {
+    std::cout << "\na repeated attribute:\n";
+
+    // XML 1.0 3.1, Unique Att Spec: "An attribute name MUST NOT appear more
+    // than once in the same start-tag or empty-element tag", and a violation
+    // is a fatal error a conforming processor must report.  An earlier version
+    // of this parser kept both, on the theory that a caller should be told
+    // rather than have one dropped silently.  That was wrong in a way worth
+    // recording: it accepted documents that no other parser will, so a config
+    // file jlib read happily would fail everywhere else.
+    bool threw = false;
+    std::string msg;
+
+    try { xml::parse("<a m=\"2\" x=\"1\" m=\"4\"/>"); }
+    catch(xml::error& e) { threw = true; msg = e.what(); }
+
+    ok("it is rejected", threw);
+    ok("and named",      msg.find("\"m\"") != std::string::npos, msg);
+
+    ok("in a child too", [] {
+        try { xml::parse("<a><b p=\"1\" p=\"2\"/></a>"); }
+        catch(xml::error&) { return true; }
+        return false;
+    }());
+
+    // Same name, different element, is fine.
+    ok("but the same name on two elements is fine",
+       xml::parse("<a m=\"1\"><b m=\"2\"/></a>")->first("b")->get("m") == "2");
+}
+
+static void setting_an_attribute_means_setting_it() {
+    std::cout << "\nset and remove:\n";
+
+    xml::document r = xml::parse("<a x=\"1\" y=\"2\"/>");
+
+    r->set("y", "changed");
+    ok("set replaces an existing one", r->get("y") == "changed", r->get("y"));
+    ok("without adding another",       r->attributes().size() == 2);
+    ok("and in place, not at the end", r->attributes()[1].first == "y",
+       r->attributes()[1].first);
+
+    r->set("z", "new");
+    ok("set adds one that is not there", r->get("z") == "new");
+    ok("at the end",                     r->attributes()[2].first == "z");
+
+    ok("remove takes it",              r->remove("y") == 1);
+    ok("leaving the others",           r->attributes().size() == 2 &&
+                                       r->has("x") && r->has("z"));
+    ok("and removing nothing says so", r->remove("nope") == 0);
+
+    // set() is the only way to add one, so a tree built by hand cannot hold a
+    // duplicate any more than a parsed one can.
+    r->set("x", "a"); r->set("x", "b"); r->set("x", "c");
+    ok("setting the same name repeatedly keeps one",
+       r->attributes().size() == 2 && r->get("x") == "c");
 }
 
 static void end_tags_have_to_match() {
@@ -114,7 +170,7 @@ static void end_tags_have_to_match() {
 static void entities() {
     std::cout << "\nthe three predefined entities:\n";
 
-    xml::ptr r = xml::parse("<a t=\"&lt;q&gt;\">x &amp; y</a>");
+    xml::document r = xml::parse("<a t=\"&lt;q&gt;\">x &amp; y</a>");
 
     ok("decoded in text",      r->text_content() == "x & y", r->text_content());
     ok("and in attributes",    r->get("t") == "<q>", r->get("t"));
@@ -123,7 +179,7 @@ static void entities() {
 
     // Not supported, and it passes through rather than being decoded.  Stated
     // here so nobody assumes otherwise from a green run.
-    xml::ptr n = xml::parse("<a>&#65;</a>");
+    xml::document n = xml::parse("<a>&#65;</a>");
     ok("a numeric reference is NOT decoded", n->text_content() == "&#65;",
        n->text_content());
 }
@@ -131,7 +187,7 @@ static void entities() {
 static void comments_and_the_processing_instruction() {
     std::cout << "\ncomments and <?...?>:\n";
 
-    xml::ptr r = xml::parse("<a><!-- gone --><b/></a>");
+    xml::document r = xml::parse("<a><!-- gone --><b/></a>");
 
     ok("a comment is skipped",  r->children().size() == 1);
     ok("leaving the element",   r->first("b") != 0);
@@ -173,9 +229,9 @@ static void writing_gives_back_what_was_read() {
 static void building_a_tree_by_hand() {
     std::cout << "\nbuilding:\n";
 
-    xml::ptr root = xml::node::element("addressbook");
+    xml::document root = xml::node::element("addressbook");
 
-    xml::ptr e = root->add(xml::node::element("address"));
+    xml::document e = root->add(xml::node::element("address"));
     e->set("key", "joey");
     e->add(xml::node::text("Joey Yandle"));
 
@@ -229,7 +285,7 @@ static void what_it_refuses() {
     // Accepted, but it means nothing to this parser, and a caller treating
     // <x:a> and <y:a> as the same element because the local names match will
     // be wrong.
-    xml::ptr r = xml::parse("<x:a x:b=\"1\"/>");
+    xml::document r = xml::parse("<x:a x:b=\"1\"/>");
     ok("a namespace prefix stays part of the name", r->name() == "x:a", r->name());
     ok("and so does an attribute's",  r->has("x:b"));
 }
@@ -239,7 +295,9 @@ int main() {
 
     try {
         elements_attributes_and_text();
-        attributes_keep_their_order_and_their_duplicates();
+        attributes_keep_their_order();
+        a_repeated_attribute_is_not_xml();
+        setting_an_attribute_means_setting_it();
         end_tags_have_to_match();
         entities();
         comments_and_the_processing_instruction();

@@ -65,19 +65,19 @@ struct makeable : public node {
 
 }
 
-ptr node::element(std::string name)
+node::ptr node::element(std::string name)
 {
     return std::make_shared<makeable>(kind::element, std::move(name),
                                       std::string());
 }
 
-ptr node::text(std::string content)
+node::ptr node::text(std::string content)
 {
     return std::make_shared<makeable>(kind::text, std::string(),
                                       std::move(content));
 }
 
-ptr node::instruction(std::string target, std::string body)
+node::ptr node::instruction(std::string target, std::string body)
 {
     return std::make_shared<makeable>(kind::instruction, std::move(target),
                                       std::move(body));
@@ -103,17 +103,41 @@ std::string node::get(std::string_view name, const std::string& fallback) const
 
 void node::set(std::string name, std::string value)
 {
+    for(attribute& a : m_attributes) {
+        if(a.first == name) {
+            // In place: replacing must not move it to the end and reorder the
+            // document.
+            a.second = std::move(value);
+            return;
+        }
+    }
+
     m_attributes.push_back(attribute(std::move(name), std::move(value)));
 }
 
-ptr node::add(ptr child)
+std::size_t node::remove(std::string_view name)
+{
+    const std::size_t was = m_attributes.size();
+
+    attribute_list keep;
+
+    for(const attribute& a : m_attributes) {
+        if(a.first != name) keep.push_back(a);
+    }
+
+    m_attributes.swap(keep);
+
+    return was - m_attributes.size();
+}
+
+node::ptr node::add(ptr child)
 {
     m_children.push_back(child);
 
     return child;
 }
 
-ptr node::first(std::string_view name) const
+node::ptr node::first(std::string_view name) const
 {
     for(const ptr& c : m_children) {
         if(c->type() == kind::element && c->name() == name) return c;
@@ -283,15 +307,27 @@ const xml_grammar& reader()
 
 // ------------------------------------------------------------- tree building
 
-ptr build(const match& m);
+node::ptr build(const match& m, std::string_view input);
 
-void add_children(const match& m, const ptr& into)
+/** Line and column of an offset, counting from one. */
+std::pair<std::size_t, std::size_t> where(std::string_view in, std::size_t at)
+{
+    std::size_t line = 1, start = 0;
+
+    for(std::size_t i = 0; i < at && i < in.size(); i++) {
+        if(in[i] == '\n') { line++; start = i + 1; }
+    }
+
+    return std::make_pair(line, at - start + 1);
+}
+
+void add_children(const match& m, const node::ptr& into, std::string_view input)
 {
     for(const match& c : m.children()) {
         const std::string what = c.name();
 
         if(what == "element") {
-            into->add(build(c));
+            into->add(build(c, input));
         }
         else if(what == "text") {
             into->add(node::text(decode(c.str())));
@@ -299,11 +335,11 @@ void add_children(const match& m, const ptr& into)
     }
 }
 
-ptr build(const match& m)
+node::ptr build(const match& m, std::string_view input)
 {
     const match n = m.child("name");
 
-    ptr e = node::element(n ? n.str() : std::string());
+    node::ptr e = node::element(n ? n.str() : std::string());
 
     // <a/> and <a></a> both have no children; only this tells them apart.
     e->set_empty_tag(static_cast<bool>(m.child("self-closing")));
@@ -314,11 +350,24 @@ ptr build(const match& m)
         const match an = a.child("attribute-name");
         const match av = a.child("value");
 
-        e->set(an ? an.str() : std::string(),
-               av ? decode(av.str()) : std::string());
+        const std::string key = an ? an.str() : std::string();
+
+        // XML 1.0 3.1, Unique Att Spec: an attribute name must not appear more
+        // than once in the same tag, and a violation is a fatal error a
+        // conforming processor has to report.  Accepting one would mean
+        // reading documents that no other parser will.
+        if(e->has(key)) {
+            const std::pair<std::size_t, std::size_t> at =
+                where(input, an ? an.begin() : a.begin());
+
+            throw error("attribute \"" + key + "\" appears more than once on <" +
+                        e->name() + ">", at.first, at.second);
+        }
+
+        e->set(key, av ? decode(av.str()) : std::string());
     }
 
-    add_children(m, e);
+    add_children(m, e, input);
 
     return e;
 }
@@ -327,7 +376,7 @@ ptr build(const match& m)
 
 // -------------------------------------------------------------------- parse
 
-ptr parse(std::string_view text)
+document parse(std::string_view text)
 {
     const parse_result r = reader().document().try_parse(text);
 
@@ -354,10 +403,10 @@ ptr parse(std::string_view text)
         throw error("no root element", 1, 1);
     }
 
-    return build(top);
+    return build(top, text);
 }
 
-ptr parse(std::istream& is)
+document parse(std::istream& is)
 {
     std::ostringstream o;
     o << is.rdbuf();
@@ -365,12 +414,12 @@ ptr parse(std::istream& is)
     return parse(o.str());
 }
 
-void write(std::ostream& os, const ptr& root)
+void write(std::ostream& os, const document& root)
 {
     if(root) root->write(os);
 }
 
-std::string to_string(const ptr& root)
+std::string to_string(const document& root)
 {
     std::ostringstream o;
     write(o, root);
