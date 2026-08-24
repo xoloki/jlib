@@ -66,6 +66,7 @@ TESTS = \
 	util_headers_fold_test \
 	util_headers_angie_test \
 	util_xml_test \
+	util_abnf_test \
  \
 	$(X_TESTS) \
 	$(MEDIA_TESTS) \
@@ -152,6 +153,9 @@ util_headers_fold_test_SOURCES = util_headers_fold_test.cc
 util_headers_fold_test_LDADD   = $(JUTIL_LA)
 util_headers_angie_test_SOURCES = util_headers_angie_test.cc
 util_headers_angie_test_LDADD   = $(JUTIL_LA)
+util_abnf_test_SOURCES = util_abnf_test.cc
+util_abnf_test_LDADD   = $(JUTIL_LA)
+
 util_xml_test_SOURCES = util_xml_test.cc
 util_xml_test_LDADD   = $(JUTIL_LA)
 
