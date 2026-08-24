@@ -47,11 +47,24 @@ struct arena {
     std::vector<capture_record> records;
 };
 
-/** Where a node that something back-references last matched. */
+/**
+ * Where a node that something back-references last matched.
+ *
+ * depth is the rule nesting the match was made at, and it is what makes this
+ * work under recursion.  Without it, a grammar like
+ *
+ *     elem = "<" name ">" *elem "</" backref(name) ">"
+ *
+ * cannot parse <a><b/></a>: name is one node shared by every level, so after
+ * the inner element closes, the most recent match of it is still "b" and the
+ * outer end tag is compared against the wrong thing.  A record made deeper
+ * than the position asking for it belongs to a scope that has already closed.
+ */
 struct tracked_record {
     const expr* source;
     std::size_t begin;
     std::size_t end;
+    std::size_t depth;
 };
 
 /**
@@ -677,11 +690,18 @@ protected:
 
 // ------------------------------------------------------- context sensitivity
 
-/** The most recent extent of source that has not been backtracked away. */
+/**
+ * The most recent extent of source that is still in scope.
+ *
+ * Backtracking has already removed anything from a branch that lost; this
+ * additionally skips matches made inside a nesting level that has since
+ * closed.  See tracked_record.
+ */
 static const tracked_record* last(const context& ctx, const expr* source)
 {
     for(std::size_t i = ctx.tracked.size(); i > 0; i--) {
-        if(ctx.tracked[i-1].source == source) {
+        if(ctx.tracked[i-1].source == source &&
+           ctx.tracked[i-1].depth <= ctx.depth) {
             return &ctx.tracked[i-1];
         }
     }
@@ -870,7 +890,22 @@ public:
 
     virtual void write(std::ostream& os, int) const { os << "<" << m_desc << ">"; }
 
-    virtual bool nullable(std::set<const slot*>&) const { return true; }
+    /**
+     * Assumed to consume something.
+     *
+     * A predicate is opaque, so this is a guess either way.  It guessed the
+     * other way at first, on the theory that the safe answer for something
+     * unknown is "it might match nothing" -- and that turned out to block the
+     * ordinary use.  A rule like *NameChar, where the predicate decodes one
+     * codepoint, is an unbounded repetition of a predicate and was rejected by
+     * the grammar check as a guaranteed infinite loop.
+     *
+     * Guessing this way round is also the cheaper mistake.  If a predicate
+     * really can match nothing, repeat::parse stops as soon as an iteration
+     * consumes nothing, so the failure is a repetition that ends early rather
+     * than one that never ends.
+     */
+    virtual bool nullable(std::set<const slot*>&) const { return false; }
     virtual void leftmost(std::set<const slot*>&, std::set<const slot*>&) const {}
     virtual bool pure() const { return m_pure; }
 
@@ -896,7 +931,7 @@ static bool run(const expr* e, context& ctx, std::size_t& pos)
     const bool ok = e->parse(ctx, pos);
 
     if(ok && e->m_tracked) {
-        ctx.tracked.push_back(tracked_record{e, start, pos});
+        ctx.tracked.push_back(tracked_record{e, start, pos, ctx.depth});
     }
 
     return ok;

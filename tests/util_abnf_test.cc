@@ -375,6 +375,33 @@ static void a_back_reference_matches_what_came_before() {
     ok("matching tags parse", m["content"].str() == "hello", m["content"].str());
 
     ok("mismatched tags do not", !matches(element, "<b>hello</i>"));
+
+    // Nesting, which is where the first version of backref() was wrong.
+    //
+    // name is one node shared by every level of the recursion, so after the
+    // inner element closed, the most recent match of it was still the inner
+    // name and the outer end tag was compared against that.  <a><b/></a> was
+    // rejected.  A tracked match now carries the rule depth it was made at,
+    // and one made deeper than the position asking for it is out of scope.
+    {
+        grammar g;
+        const rule tag = as("tag", +rng('a','z'));
+
+        g.define("elem", lit("<") >> tag >> lit(">")
+                       >> *(g["elem"] | +rng('0','9'))
+                       >> lit("</") >> backref(tag) >> lit(">"));
+
+        const rule e = g.at("elem");
+
+        ok("a nested element does not steal the outer end tag",
+           matches(e, "<a><b>1</b></a>"));
+
+        ok("nor does a sibling after it",
+           matches(e, "<a><b>1</b>2</a>"));
+
+        ok("and the outer tag still has to match",
+           !matches(e, "<a><b>1</b></c>"));
+    }
 }
 
 static void the_depth_guard_fires_instead_of_the_stack() {

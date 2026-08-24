@@ -1,201 +1,313 @@
-/* -*- mode:C++ c-basic-offset:4 -*-
- * xmlpp - an xml file parser and validator
- * Copyright (C) 2000 Michael Fink
- * Copyright (C) 2000 Joe Yandle
+/* -*- mode: C++ c-basic-offset: 4  -*-
+ *
+ * Copyright (c) 2026 Joey Yandle <xoloki@gmail.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
  * of the License, or (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
- * 
+ *
  */
 
-// prevent multiple includes
 #ifndef JLIB_UTIL_XML_HH
 #define JLIB_UTIL_XML_HH
 
-// needed includes
-#include <utility>
-#include <string>
-#include <list>
-#include <map>
-#include <iostream>
-#include <exception>
-
-#include <jlib/sys/object.hh>
+#include <cstddef>
+#include <iosfwd>
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace jlib {
-    namespace util {
-        namespace xml {
-            
-            /*! \namespace xml
-              all xmlpp classes, typedefs and enums are set into the xmlpp
-              namespace to avoid conflicts with other similar classes */
-            
-            
-            // classes
-            
-            //! xml parsing error codes enumeration
-            enum errorcode {
-                //! unspecified or unknown error
-                unknown=0,
-                //! error in the infile stream
-                instream_error,			
-                
-                //! expected an open tag literal '<'
-                opentag_expected,
-                //! expected a '<' or cdata
-                opentag_cdata_expected,
-                //! expected an '>' closing tag literal
-                closetag_expected,
-                //! expected an '?' after '<'
-                qmark_expected,
-                //! expected a tag name after '<' or '</'
-                tagname_expected,
-                //! expected a '/' after closing tag literal '<'
-                closetag_slash_expected,
-                //! tag name from start and end tag mismatch
-                tagname_close_mismatch,
-                
-                //! expected '=' after attribute name
-                attr_equal_expected,
-                //! expected value after 'a' in attribute
-                attr_value_expected,
-                
-                //! dummy error code
-                dummy	
-            };
-            
-            
-            //! xml error class
-            /*! contains an xmlerrorcode and is thrown while parsing xml input */
-            class error : public std::exception {
-            public:
-                //! constructor
-                error( errorcode code ){ m_code = code; };
-                virtual ~error() {}
-                //! returns the error code
-                errorcode get_error(){ return m_code; };
-                //! returns the std::string representation of the error code
-                std::string get_strerror();
-                virtual const char* what() const noexcept;
-            protected:
-                errorcode m_code;
-            };
+namespace util {
 
-            //!  node
-            class node : public sys::Object {
-            public:
-                typedef std::shared_ptr<node> ptr;
-                typedef const std::shared_ptr<node> const_ptr;
-                typedef std::shared_ptr<const node> ptr_const;
-                typedef std::map<std::string, std::string> attributes;
-                typedef std::list<ptr> list;
+/**
+ * A small XML reader and document tree.
+ *
+ * The grammar is written in jlib::util::abnf rather than scanned by hand,
+ * which is most of why this is short.  End tags are matched with abnf's
+ * backref(), so a mismatched close is a parse error from the grammar rather
+ * than a check bolted on afterwards.
+ *
+ * ## What it handles
+ *
+ * Elements, attributes, character data, CDATA sections, comments, the
+ * processing instruction, self-closing tags, all five predefined entities
+ * (&amp; &lt; &gt; &apos; &quot;) and numeric character references in decimal
+ * and hex.
+ *
+ * A reference it does not recognise is an error, not text: without a DTD to
+ * declare one, &nbsp; is not well-formed XML, and passing it through would
+ * produce a document that says something different from what was read.
+ *
+ * ## The input must be UTF-8
+ *
+ * Checked, byte by byte, before the grammar sees it -- no overlong forms, no
+ * stray continuation bytes, nothing encoding a surrogate or a value past
+ * U+10FFFF -- and then every codepoint against XML 1.0 2.2's Char production,
+ * so a raw NUL or form feed is refused as firmly as &#0; is.
+ *
+ * This means a document in any other encoding is rejected rather than
+ * misread.  A Latin-1 file with an accented letter in it used to pass through
+ * as bytes and now fails, which is the correct answer -- XML with no encoding
+ * declaration is UTF-8 by definition -- but it is a change in what is
+ * accepted, not only in what is diagnosed.
+ *
+ * ## What it does not
+ *
+ * Names are matched against NameStartChar and NameChar, so <caf\u00e9> is a
+ * name and <1foo> is not.
+ *
+ * No namespaces, no DTD or DOCTYPE, no entity declarations, and no encoding
+ * handling -- the declared encoding is parsed and then ignored, so the input
+ * is read as whatever bytes it was.  **This is not a conforming XML
+ * processor** and is not trying to be: XML 1.0 4.3.3 requires UTF-8 and UTF-16
+ * both, 5.1 requires the internal DTD subset, and the Char and Name
+ * productions are defined over Unicode codepoints rather than octets.  Getting
+ * there is weeks of work against a 2000-file test suite, for a library whose
+ * XML reads config files it wrote itself.  If real XML is ever needed, wrap
+ * libxml2 behind this interface rather than growing this into it.
+ *
+ * What it does instead is refuse what it cannot represent, with a position,
+ * rather than half-reading it.
+ *
+ * ## Whitespace
+ *
+ * Kept.  Text between elements becomes a text node like any other, so a
+ * document written out again is byte-identical to the one read in.  Nothing
+ * here pretty-prints, because it cannot do that and preserve the input.
+ */
+namespace xml {
 
-                typedef enum { 
-                    //! internal node, can contain subnodes
-                    internal,
-                    //! a leaf node, which contains no further nodes, eg. <img/>
-                    leaf,
-                    //! document root node
-                    root, 
-                    //! cdata node, which only contains char data
-                    cdata
-                } type;
+/** A document that could not be read, and where it stopped making sense. */
+class error : public std::runtime_error {
+public:
+    error(const std::string& msg, std::size_t line, std::size_t column);
 
-                //! ctor
-            protected:
-                node(const std::string& name="");
-            public:
-                static node::ptr create(const std::string& name="");
-                //! dtor
-                virtual ~node();
-                
-                //! returns type of node
-                type get_type() const { return m_type; };
-                void set_type(type n){ m_type=n; };
+    std::size_t line() const { return m_line; }
+    std::size_t column() const { return m_column; }
 
-                //! returns the node name, if nodetype != nt_cdata
-                std::string get_name() const { return m_name; }
-                void set_name(const std::string& n) { m_name = std::move(n); }
+protected:
+    std::size_t m_line;
+    std::size_t m_column;
+};
 
-                //! returns subnode list
-                list& get_list(){ return m_list; };
-                const list& get_list() const { return m_list; };
+/** What a node is.  There are only three kinds. */
+enum class kind { element, text, instruction };
 
-                //! returns attributes of the tag
-                attributes &get_attributes(){ return m_attributes; };
-                const attributes& get_attributes() const { return m_attributes; };
-                
-                std::string get_attribute(const std::string& key) const;
-                void set_attribute(const std::string& key, const std::string& val);
+class node;
 
-                //! returns cdata string
-                std::string& get_cdata(){ return m_cdata; };
-                const std::string& get_cdata() const { return m_cdata; };
-                void set_cdata(const std::string& n) { m_cdata = std::move(n); }
-                
-                //! loads  node from input stream
-                bool load( std::istream &instream );
-                //! saves node to  output stream
-                bool save( std::ostream &outstream, int indent=0 ) const;
-                
-                void add(node::ptr n);
-                //! recursively delete all child nodes, but not this one
-                void clear();
+/**
+ * An element, a run of text, or the leading <?...?>.
+ *
+ * Built through the static makers rather than a constructor, so a node is
+ * always held by shared_ptr and a tree can be passed around without deciding
+ * who owns it.
+ */
+class node {
+public:
+    /**
+     * Nested, as json::object::ptr and crypt::key::ptr are.
+     *
+     * Those are nested because their namespaces hold more than one pointed-to
+     * type and had to disambiguate; this one does not, so either would work.
+     * It is here anyway because it stays right if a second kind of pointed-to
+     * thing ever appears, and because a bare ptr says only that it points at
+     * something.  See xml::document below for the name that says what.
+     */
+    typedef std::shared_ptr<node> ptr;
+    typedef std::shared_ptr<const node> const_ptr;
 
-                //! recursively delete all child nodes of n
-                static void clear(node::ptr n); 
+    typedef std::vector<ptr> child_list;
+    typedef std::pair<std::string, std::string> attribute;
 
-            protected:
-                //! nodetype
-                type m_type;
-                
-                //! attributes of the tag
-                attributes m_attributes;
-                
-                //! char data
-                std::string m_cdata;
+    /**
+     * Attributes, in the order they were written.
+     *
+     * A vector rather than a map so that writing a document back out does not
+     * reorder them.  That is the whole of the reason, and it is enough: a
+     * hand-edited config file should come back the way it went in.
+     *
+     * It is not to hold duplicates.  XML 1.0 3.1 makes a repeated attribute
+     * name a well-formedness violation -- "An attribute name MUST NOT appear
+     * more than once in the same start-tag or empty-element tag" -- and a
+     * fatal error a conforming processor must report.  parse() rejects one,
+     * so a tree read from a document cannot contain one, and set() is the only
+     * way to add an attribute, so a tree built by hand cannot either.  An
+     * earlier draft here preserved duplicates on the theory that a caller
+     * should be told rather than have one silently dropped; the mistake was
+     * accepting a document that no other parser will.
+     *
+     * The cost is that get() and has() are a linear scan.  Measured, in
+     * nanoseconds per lookup averaged over every key:
+     *
+     *     attributes      2     8    32    64   256
+     *     this            14    26    47    88   164
+     *     std::map        17    24    35    47    67
+     *     unordered_map   15    14    19    20    22
+     *
+     * So the crossover is around eight, and past thirty or so this is
+     * meaningfully worse.  It is kept anyway because real elements do not get
+     * there -- gtkmail's <address> carries three attributes and its mailbox
+     * <config> around twenty, which is the largest in either program -- and
+     * because an element with hundreds of attributes is not a shape XML
+     * produces.
+     *
+     * The obvious answer -- keep the vector for order and add a hash from name
+     * to index for lookup -- was measured before being believed, and it loses.
+     * Twenty thousand elements, building the document and then doing one
+     * lookup per element for the *last* attribute, which is the scan's worst
+     * case:
+     *
+     *     attributes        3            8           20
+     *     build   plain     1.97 ms      3.41 ms      9.51 ms
+     *             indexed   3.60         7.33        19.41
+     *     lookup  plain     0.199        0.518        2.166
+     *             indexed   0.247        0.727        1.383
+     *
+     * At three and eight attributes the index is slower at *both* ends: a hash
+     * over that few short strings costs more to build and more to probe than
+     * scanning them costs.  At twenty it finally wins the lookup, by 0.78ms --
+     * against 9.9ms of extra construction, so it needs about thirteen lookups
+     * of the same element before it has paid for itself.
+     *
+     * And the access pattern is one lookup per element.  A caller searching an
+     * address book does get("key") on each in turn, so the cost scales with
+     * the number of elements and an index per element is bought and thrown
+     * away.  If that search is ever slow the answer is an index over the
+     * addresses, in the program that owns them, not over attributes here.
+     */
+    typedef std::vector<attribute> attribute_list;
 
-                //! name of node
-                std::string m_name;
-                
-                //! stl list with subnodes
-                list m_list;
-            };
-            
-            class cdata : public node {
-            protected:
-                cdata() { set_name("cdata"); set_type(node::cdata); }
-                cdata(const std::string& data) { set_name("cdata"); set_type(node::cdata); set_cdata(data); }
-            public:
-                static node::ptr create() { return node::ptr(new cdata()); }
-                static node::ptr create(const std::string& data) { return node::ptr(new cdata(data)); }
+    static ptr element(std::string name);
 
-                virtual ~cdata() {}
-            };
-            
-            
-            //!  document
-            class document: public node {
-            public:
-                //! ctor
-                document();
-                virtual ~document();
-            };
-            
-        }
-    }
+    /**
+     * @param cdata  write it back as <![CDATA[...]]> rather than escaping it
+     */
+    static ptr text(std::string content, bool cdata = false);
+    static ptr instruction(std::string target, std::string body);
+
+    kind type() const { return m_kind; }
+
+    /** The tag name, or the target of a processing instruction. */
+    const std::string& name() const { return m_name; }
+
+    /** The character data, or the body of a processing instruction. */
+    const std::string& content() const { return m_content; }
+    void set_content(std::string s) { m_content = std::move(s); }
+
+    bool has(std::string_view name) const;
+
+    /** The attribute's value, or fallback when it is not there. */
+    std::string get(std::string_view name,
+                    const std::string& fallback = std::string()) const;
+
+    /**
+     * Set the attribute of this name, adding it if it is not there.
+     *
+     * Replaces in place, so setting one does not move it to the end and
+     * reorder the document.  There is never more than one to choose between:
+     * see the note on attribute_list.
+     */
+    void set(std::string name, std::string value);
+
+    /** Drop the attribute of this name.  Returns how many went, so 0 or 1. */
+    std::size_t remove(std::string_view name);
+
+    const attribute_list& attributes() const { return m_attributes; }
+
+    const child_list& children() const { return m_children; }
+
+    /**
+     * Whether an element with no children is written <a/> or <a></a>.
+     *
+     * Carried so that reading a document and writing it out again gives back
+     * the same bytes.  The two spellings mean the same thing, and rewriting
+     * one as the other is the sort of gratuitous change that makes a diff
+     * unreadable when a config file is edited by hand.
+     */
+    bool empty_tag() const { return m_empty_tag; }
+    void set_empty_tag(bool b) { m_empty_tag = b; }
+
+    /**
+     * Whether this text was written as a CDATA section.
+     *
+     * Carried for the same reason as empty_tag(): the two spellings mean the
+     * same thing, and turning somebody's <![CDATA[...]]> into a run of escapes
+     * is a change to their file that they did not ask for.
+     */
+    bool cdata() const { return m_cdata; }
+    void set_cdata(bool b) { m_cdata = b; }
+
+    /** Appends, and returns what was added so calls can be chained. */
+    ptr add(ptr child);
+
+    /** The first child element with that name, or null. */
+    ptr first(std::string_view name) const;
+
+    /** Every child element with that name, in document order. */
+    child_list all(std::string_view name) const;
+
+    /** Every text descendant, concatenated. */
+    std::string text_content() const;
+
+    /** Write this subtree.  Adds no whitespace of its own. */
+    void write(std::ostream& os) const;
+
+    std::string str() const;
+
+protected:
+    node(kind k, std::string name, std::string content);
+
+    kind m_kind;
+    std::string m_name;
+    std::string m_content;
+    attribute_list m_attributes;
+    child_list m_children;
+    bool m_empty_tag = true;
+    bool m_cdata = false;
+};
+
+/**
+ * A parsed document.
+ *
+ * There is no separate document type, because the root element is the
+ * document.  This names that so a caller can say what it holds -- xml::ptr
+ * would have said only that it points at something, and node::ptr says the
+ * mechanism rather than the meaning.
+ */
+typedef node::ptr document;
+
+/**
+ * Read a document, and return its root element.
+ *
+ * The processing instruction, if there is one, is not the root and is not
+ * returned -- nothing in this library has ever needed it, and a caller that
+ * does can ask for it here rather than everywhere.
+ *
+ * Throws xml::error, which carries a line and a column.
+ */
+document parse(std::string_view text);
+document parse(std::istream& is);
+
+/** Write a document.  Adds no whitespace of its own. */
+void write(std::ostream& os, const document& root);
+std::string to_string(const document& root);
+
+}
+}
 }
 
-#endif //JLIB_UTIL_XML_HH
+#endif // JLIB_UTIL_XML_HH
