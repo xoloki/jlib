@@ -890,7 +890,22 @@ public:
 
     virtual void write(std::ostream& os, int) const { os << "<" << m_desc << ">"; }
 
-    virtual bool nullable(std::set<const slot*>&) const { return true; }
+    /**
+     * Assumed to consume something.
+     *
+     * A predicate is opaque, so this is a guess either way.  It guessed the
+     * other way at first, on the theory that the safe answer for something
+     * unknown is "it might match nothing" -- and that turned out to block the
+     * ordinary use.  A rule like *NameChar, where the predicate decodes one
+     * codepoint, is an unbounded repetition of a predicate and was rejected by
+     * the grammar check as a guaranteed infinite loop.
+     *
+     * Guessing this way round is also the cheaper mistake.  If a predicate
+     * really can match nothing, repeat::parse stops as soon as an iteration
+     * consumes nothing, so the failure is a repetition that ends early rather
+     * than one that never ends.
+     */
+    virtual bool nullable(std::set<const slot*>&) const { return false; }
     virtual void leftmost(std::set<const slot*>&, std::set<const slot*>&) const {}
     virtual bool pure() const { return m_pure; }
 

@@ -239,6 +239,83 @@ static void cdata_sections() {
        "one two three");
 }
 
+static void the_bytes_have_to_be_utf8() {
+    std::cout << "\nUTF-8 and the Char production:\n";
+
+    // Valid multibyte text is read as it stands.
+    ok("two byte",   xml::parse("<a>\xc3\xa9</a>")->text_content() == "\xc3\xa9");
+    ok("three byte", xml::parse("<a>\xe2\x82\xac</a>")->text_content() ==
+                     "\xe2\x82\xac");
+    ok("four byte",  xml::parse("<a>\xf0\x9f\x92\xa9</a>")->text_content() ==
+                     "\xf0\x9f\x92\xa9");
+
+    // Malformed encodings.  An overlong form is the classic way a filter and a
+    // consumer end up disagreeing about what a document says, so the strict
+    // reading is the only safe one.
+    ok("an overlong two byte form",  rejects("<a>\xc0\x80</a>"));
+    ok("an overlong three byte form", rejects("<a>\xe0\x80\x80</a>"));
+    ok("a lone continuation byte",   rejects("<a>\x80</a>"));
+    ok("a truncated sequence",       rejects("<a>\xc3</a>"));
+    ok("a bad continuation byte",    rejects("<a>\xc3\x28</a>"));
+    ok("a byte that starts nothing", rejects("<a>\xff</a>"));
+
+    // A surrogate has no UTF-8 encoding, and one past the end of Unicode has
+    // no encoding at all.
+    ok("a surrogate spelled in bytes", rejects("<a>\xed\xa0\x80</a>"));
+    ok("and one past U+10FFFF",        rejects("<a>\xf5\x80\x80\x80</a>"));
+
+    // The Char production, applied to raw bytes rather than only to
+    // references.  Before this the two disagreed: &#xD800; was refused while
+    // the same codepoint written directly went straight through.
+    ok("a raw NUL",       rejects(std::string("<a>x\0y</a>", 10)));
+    ok("a raw form feed", rejects("<a>\x0c</a>"));
+    ok("a raw escape",    rejects("<a>\x1b</a>"));
+
+    ok("but tab, newline and return are fine",
+       xml::parse("<a>\t\n\r</a>")->text_content() == "\t\n\r");
+
+    // The two halves agree now.
+    ok("&#xD800; and its bytes are both refused",
+       rejects("<a>&#xD800;</a>") && rejects("<a>\xed\xa0\x80</a>"));
+}
+
+static void names_are_unicode() {
+    std::cout << "\nnames:\n";
+
+    // NameStartChar and NameChar are defined over codepoints, so these are
+    // legal XML.  They were rejected while names were matched over ASCII.
+    ok("an accented letter",
+       xml::parse("<caf\xc3\xa9/>")->name() == "caf\xc3\xa9",
+       xml::parse("<caf\xc3\xa9/>")->name());
+
+    ok("a name outside the Latin alphabet",
+       xml::parse("<\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e/>")->name() ==
+       "\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e");
+
+    ok("and in an attribute name",
+       xml::parse("<a \xc3\xa9=\"1\"/>")->get("\xc3\xa9") == "1");
+
+    // The two productions differ, which is the whole reason there are two: a
+    // name may contain a digit, a hyphen or a stop, and may not begin with
+    // one.
+    ok("a digit inside a name",  xml::parse("<foo1/>")->name() == "foo1");
+    ok("a hyphen and a stop",    xml::parse("<a-b.c/>")->name() == "a-b.c");
+    ok("a leading digit is not a name",  rejects("<1foo/>"));
+    ok("nor a leading hyphen",           rejects("<-foo/>"));
+    ok("nor a leading stop",             rejects("<.foo/>"));
+
+    // The gaps in the ranges are real.  U+00D7 (multiplication sign) sits
+    // between [#xC0-#xD6] and [#xD8-#xF6], and U+00F7 (division sign) between
+    // [#xD8-#xF6] and [#xF8-#x2FF).  Both are letters to look at and neither
+    // is a name character.
+    ok("U+00D7 is not a name character", rejects("<a\xc3\x97" "b/>"));
+    ok("nor is U+00F7",                  rejects("<a\xc3\xb7" "b/>"));
+
+    // Still not namespace resolution: a colon is simply a name character.
+    ok("a colon is just a character in a name",
+       xml::parse("<x:a/>")->name() == "x:a");
+}
+
 static void comments_and_the_processing_instruction() {
     std::cout << "\ncomments and <?...?>:\n";
 
@@ -356,6 +433,8 @@ int main() {
         end_tags_have_to_match();
         entities();
         cdata_sections();
+        the_bytes_have_to_be_utf8();
+        names_are_unicode();
         comments_and_the_processing_instruction();
         writing_gives_back_what_was_read();
         building_a_tree_by_hand();
@@ -376,13 +455,11 @@ int main() {
     // ignored, so a UTF-16 document is read as bytes and will not work, even
     // though XML 1.0 4.3.3 requires a processor to handle it.
     //
-    // Nor is the input validated as UTF-8.  A numeric character reference is
-    // checked against the Char production, because that costs six comparisons
-    // -- but a raw invalid byte in the document is passed straight through,
-    // and Name is matched over ASCII rather than over the Unicode ranges the
-    // specification gives.  So &#xD800; is refused and the same codepoint
-    // written directly is not, which is an inconsistency worth knowing about
-    // rather than a line that has been drawn deliberately.
+    // The input is validated as UTF-8 and against Char, and names are matched
+    // against NameStartChar and NameChar, so the character model is the
+    // specification's throughout.  What is left out is structural: DTDs and
+    // entity declarations, namespace resolution, and encodings other than
+    // UTF-8 -- including UTF-16, which 4.3.3 requires and this does not do.
     //
     // Not conformance to the XML specification.  There is no test here derived
     // from the W3C test suite, and the grammar was written from the shape of

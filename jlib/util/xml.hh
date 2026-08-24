@@ -52,7 +52,23 @@ namespace util {
  * declare one, &nbsp; is not well-formed XML, and passing it through would
  * produce a document that says something different from what was read.
  *
+ * ## The input must be UTF-8
+ *
+ * Checked, byte by byte, before the grammar sees it -- no overlong forms, no
+ * stray continuation bytes, nothing encoding a surrogate or a value past
+ * U+10FFFF -- and then every codepoint against XML 1.0 2.2's Char production,
+ * so a raw NUL or form feed is refused as firmly as &#0; is.
+ *
+ * This means a document in any other encoding is rejected rather than
+ * misread.  A Latin-1 file with an accented letter in it used to pass through
+ * as bytes and now fails, which is the correct answer -- XML with no encoding
+ * declaration is UTF-8 by definition -- but it is a change in what is
+ * accepted, not only in what is diagnosed.
+ *
  * ## What it does not
+ *
+ * Names are matched against NameStartChar and NameChar, so <caf\u00e9> is a
+ * name and <1foo> is not.
  *
  * No namespaces, no DTD or DOCTYPE, no entity declarations, and no encoding
  * handling -- the declared encoding is parsed and then ignored, so the input

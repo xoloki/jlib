@@ -130,6 +130,140 @@ void append_utf8(std::string& out, unsigned long c)
 }
 
 /**
+ * Walk the document as UTF-8, and refuse anything XML cannot contain.
+ *
+ * Two separate checks, and it is worth keeping them apart.
+ *
+ * The first is that the bytes are UTF-8 at all: no overlong form, no
+ * continuation byte on its own, no truncated sequence, nothing encoding a
+ * surrogate or a value past U+10FFFF.  A decoder that accepts overlong forms
+ * is the classic way a filter and a consumer end up disagreeing about what a
+ * document says, so the strict reading is the only safe one.
+ *
+ * The second is XML 1.0 2.2's Char production: of the codepoints UTF-8 can
+ * carry, a document may only contain tab, newline, carriage return, and
+ * everything from space up bar the surrogates and U+FFFE/U+FFFF.  A raw NUL
+ * or a form feed means the input is not XML.
+ *
+ * Until this existed the two halves disagreed: &#xD800; was refused, while the
+ * same codepoint spelled out in bytes went straight through.
+ *
+ * The column reported is a byte column, not a character one.  For a malformed
+ * sequence there is no character to count.
+ */
+void validate_utf8(std::string_view in)
+{
+    std::size_t i = 0;
+
+    while(i < in.size()) {
+        const unsigned char c = static_cast<unsigned char>(in[i]);
+
+        std::size_t len = 0;
+        unsigned long cp = 0;
+        unsigned char lo = 0x80, hi = 0xBF;   // range for the *second* byte
+
+        if(c < 0x80)                  { len = 1; cp = c; }
+        else if(c >= 0xC2 && c <= 0xDF) { len = 2; cp = c & 0x1F; }
+        else if(c == 0xE0)            { len = 3; cp = c & 0x0F; lo = 0xA0; }
+        else if(c == 0xED)            { len = 3; cp = c & 0x0F; hi = 0x9F; }
+        else if(c >= 0xE1 && c <= 0xEF) { len = 3; cp = c & 0x0F; }
+        else if(c == 0xF0)            { len = 4; cp = c & 0x07; lo = 0x90; }
+        else if(c == 0xF4)            { len = 4; cp = c & 0x07; hi = 0x8F; }
+        else if(c >= 0xF1 && c <= 0xF3) { len = 4; cp = c & 0x07; }
+        else if(c >= 0x80 && c <= 0xBF) {
+            fail(in, i, "a UTF-8 continuation byte with nothing before it");
+        }
+        else {
+            // C0 and C1 could only ever begin an overlong form; F5 and up
+            // could only encode something past the end of Unicode.
+            fail(in, i, "a byte that cannot start a UTF-8 sequence");
+        }
+
+        if(i + len > in.size()) {
+            fail(in, i, "a UTF-8 sequence that runs off the end of the input");
+        }
+
+        for(std::size_t k = 1; k < len; k++) {
+            const unsigned char n = static_cast<unsigned char>(in[i + k]);
+            const unsigned char low = (k == 1) ? lo : 0x80;
+            const unsigned char high = (k == 1) ? hi : 0xBF;
+
+            if(n < low || n > high) {
+                fail(in, i, "a malformed UTF-8 sequence");
+            }
+
+            cp = (cp << 6) | (n & 0x3F);
+        }
+
+        if(!is_char(cp)) {
+            fail(in, i, "a character XML does not allow in a document");
+        }
+
+        i += len;
+    }
+}
+
+/**
+ * One codepoint, assuming the bytes are already known to be UTF-8.
+ *
+ * parse() validates the whole document before the grammar runs, so this can
+ * skip every check validate_utf8() has already made.
+ */
+unsigned long decode_at(std::string_view s, std::size_t& pos)
+{
+    const unsigned char c = static_cast<unsigned char>(s[pos]);
+
+    std::size_t len = 1;
+    unsigned long cp = c;
+
+    if(c >= 0xF0)      { len = 4; cp = c & 0x07; }
+    else if(c >= 0xE0) { len = 3; cp = c & 0x0F; }
+    else if(c >= 0xC0) { len = 2; cp = c & 0x1F; }
+
+    for(std::size_t k = 1; k < len; k++) {
+        cp = (cp << 6) | (static_cast<unsigned char>(s[pos + k]) & 0x3F);
+    }
+
+    pos += len;
+
+    return cp;
+}
+
+/** XML 1.0 2.3, NameStartChar: what may begin a name. */
+bool is_name_start(unsigned long c)
+{
+    return c == ':' || c == '_' ||
+           (c >= 'A'     && c <= 'Z') ||
+           (c >= 'a'     && c <= 'z') ||
+           (c >= 0xC0    && c <= 0xD6) ||
+           (c >= 0xD8    && c <= 0xF6) ||
+           (c >= 0xF8    && c <= 0x2FF) ||
+           (c >= 0x370   && c <= 0x37D) ||
+           (c >= 0x37F   && c <= 0x1FFF) ||
+           (c >= 0x200C  && c <= 0x200D) ||
+           (c >= 0x2070  && c <= 0x218F) ||
+           (c >= 0x2C00  && c <= 0x2FEF) ||
+           (c >= 0x3001  && c <= 0xD7FF) ||
+           (c >= 0xF900  && c <= 0xFDCF) ||
+           (c >= 0xFDF0  && c <= 0xFFFD) ||
+           (c >= 0x10000 && c <= 0xEFFFF);
+}
+
+/**
+ * XML 1.0 2.3, NameChar: what may follow.
+ *
+ * The extra pieces are what a name may contain but not begin with, which is
+ * why the two are separate productions -- <foo1> is a name and <1foo> is not.
+ */
+bool is_name_char(unsigned long c)
+{
+    return is_name_start(c) || c == '-' || c == '.' || c == 0xB7 ||
+           (c >= '0'    && c <= '9') ||
+           (c >= 0x300  && c <= 0x36F) ||
+           (c >= 0x203F && c <= 0x2040);
+}
+
+/**
  * Turn references back into the characters they stand for.
  *
  * base is where s sits in input, so a bad reference can be reported at the
@@ -407,8 +541,38 @@ public:
     xml_grammar()
     {
         const rule ws = anyof(" \t\r\n");
-        const rule name_start = core::ALPHA() | anyof("_:");
-        const rule name_rest = core::ALPHA() | core::DIGIT() | anyof(".-_:");
+        // NameStartChar and NameChar are defined over codepoints, and the
+        // combinators match octets, so this is what where() is for.  The
+        // input has already been checked as UTF-8 by the time the grammar
+        // runs, so the decoding here cannot fail.
+        //
+        // where_pure because the answer depends on nothing but the input at
+        // that position -- no capture, no earlier match.
+        const rule name_start =
+            where_pure("NameStartChar", [](std::string_view in, std::size_t& pos) {
+                if(pos >= in.size()) return false;
+
+                std::size_t at = pos;
+                const unsigned long c = decode_at(in, at);
+
+                if(!is_name_start(c)) return false;
+
+                pos = at;
+                return true;
+            });
+
+        const rule name_rest =
+            where_pure("NameChar", [](std::string_view in, std::size_t& pos) {
+                if(pos >= in.size()) return false;
+
+                std::size_t at = pos;
+                const unsigned long c = decode_at(in, at);
+
+                if(!is_name_char(c)) return false;
+
+                pos = at;
+                return true;
+            });
 
         m_name = as("name", name_start >> *name_rest);
 
@@ -550,6 +714,10 @@ node::ptr build(const match& m, std::string_view input)
 
 document parse(std::string_view text)
 {
+    // Before the grammar sees it: the grammar matches octets, so it would
+    // happily accept a malformed sequence as ordinary character data.
+    validate_utf8(text);
+
     const parse_result r = reader().document().try_parse(text);
 
     if(!r) {
