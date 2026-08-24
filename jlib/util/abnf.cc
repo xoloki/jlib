@@ -1596,6 +1596,9 @@ public:
     std::map<std::string, std::shared_ptr<slot>, iless> slots;
     std::vector<std::string> order;
 
+    // Set by compile() only; see grammar::prose_rules().
+    std::vector<std::string> prose;
+
     std::shared_ptr<slot> cell(std::string_view name)
     {
         auto i = slots.find(name);
@@ -1681,7 +1684,38 @@ void grammar::define_alternative(std::string name, const rule& more)
     rule(std::make_shared<detail::reference>(i->second)).define_alternative(more);
 }
 
+void grammar::seed_core()
+{
+    struct seed { const char* name; const rule& (*get)(); };
+
+    static const seed cores[] = {
+        { "ALPHA",  core::ALPHA  }, { "BIT",    core::BIT    },
+        { "CHAR",   core::CHAR   }, { "CR",     core::CR     },
+        { "CRLF",   core::CRLF   }, { "CTL",    core::CTL    },
+        { "DIGIT",  core::DIGIT  }, { "DQUOTE", core::DQUOTE },
+        { "HEXDIG", core::HEXDIG }, { "HTAB",   core::HTAB   },
+        { "LF",     core::LF     }, { "LWSP",   core::LWSP   },
+        { "OCTET",  core::OCTET  }, { "SP",     core::SP     },
+        { "VCHAR",  core::VCHAR  }, { "WSP",    core::WSP    },
+    };
+
+    for(const seed& c : cores) {
+        std::shared_ptr<slot> s = m_impl->cell(c.name);
+
+        if(s->body) continue;
+
+        s->body = c.get().node();
+        s->seeded = true;
+    }
+
+    // Deliberately not added to m_impl->order: a core rule nothing referenced
+    // is not part of the grammar anyone wrote, and printing sixteen of them
+    // above every to_abnf() would bury it.
+}
+
 std::vector<std::string> grammar::rules() const { return m_impl->order; }
+
+std::vector<std::string> grammar::prose_rules() const { return m_impl->prose; }
 
 /** Everything reachable from e, following references into their bodies. */
 static void reachable(const expr* e,
@@ -1812,6 +1846,428 @@ std::string grammar::to_abnf() const
     }
 
     return o.str();
+}
+
+
+// ------------------------------------------------------------- the ABNF text
+
+std::string dedent(std::string_view text)
+{
+    std::size_t common = std::string::npos;
+    std::size_t i = 0;
+
+    while(i <= text.size()) {
+        std::size_t eol = text.find('\n', i);
+        if(eol == std::string_view::npos) eol = text.size();
+
+        std::size_t j = i;
+        while(j < eol && (text[j] == ' ' || text[j] == '\t')) j++;
+
+        // Blank lines say nothing about the common indent.
+        if(j < eol && (common == std::string::npos || j - i < common)) {
+            common = j - i;
+        }
+
+        if(eol == text.size()) break;
+        i = eol + 1;
+    }
+
+    if(common == std::string::npos || common == 0) {
+        return std::string(text);
+    }
+
+    std::string out;
+    i = 0;
+
+    while(i <= text.size()) {
+        std::size_t eol = text.find('\n', i);
+        const bool last = (eol == std::string_view::npos);
+        if(last) eol = text.size();
+
+        std::size_t skip = 0;
+        while(skip < common && i + skip < eol &&
+              (text[i + skip] == ' ' || text[i + skip] == '\t')) {
+            skip++;
+        }
+
+        out.append(text.substr(i + skip, eol - (i + skip)));
+
+        if(last) break;
+
+        out += '\n';
+        i = eol + 1;
+    }
+
+    return out;
+}
+
+namespace {
+
+/**
+ * RFC 5234 section 4, written in the combinators of section... this file.
+ *
+ * The bootstrap: ABNF's own grammar, by hand, once -- and everything after it
+ * is read rather than written.  It is also the strongest test available, since
+ * the result can be asked to parse the text it was built from.
+ *
+ * Two deliberate departures from the RFC's own text, both noted where they
+ * occur: repeat's alternatives are reordered, because ordered choice would
+ * commit to the wrong one, and c-nl may be a bare LF, because grammar text
+ * pasted out of a browser is not CRLF.
+ */
+class abnf_grammar {
+public:
+    explicit abnf_grammar(bool bare_lf)
+    {
+        const rule ALPHA = core::ALPHA();
+        const rule DIGIT = core::DIGIT();
+        const rule HEXDIG = core::HEXDIG();
+        const rule WSP = core::WSP();
+        const rule VCHAR = core::VCHAR();
+        const rule DQUOTE = core::DQUOTE();
+
+        // RFC 5234 says CRLF.  Text pasted from a browser or an RFC .txt file
+        // has bare LFs, and refusing it would defeat the point of reading ABNF
+        // text at all.
+        const rule nl = bare_lf
+            ? (core::CRLF() | core::LF() | core::CR())
+            : core::CRLF();
+
+        const rule comment = lit(";") >> *(WSP | VCHAR) >> nl;
+        const rule c_nl = comment | nl;
+        const rule c_wsp = WSP | (c_nl >> WSP);
+
+        const rule rulename = ALPHA >> *(ALPHA | DIGIT | lit("-"));
+
+        // char-val, with RFC 7405's %s and %i.  Case insensitive by default,
+        // per 5234 2.3 -- which is the opposite of lit() and is why the two
+        // layers differ there.
+        const rule quoted =
+            DQUOTE >> as("cv-text", *(rng(0x20, 0x21) | rng(0x23, 0x7E)))
+                   >> DQUOTE;
+
+        const rule char_val = as("char-val",
+            (as("cv-sensitive", ilit("%s")) >> quoted) |
+            (-ilit("%i") >> quoted));
+
+        // The body is taken whole and read in C++: splitting 1*BIT from
+        // 1*DIGIT from 1*HEXDIG in the grammar buys nothing when the value has
+        // to be converted anyway, and the base is right there.
+        const rule num_val = as("num-val",
+            lit("%") >> as("nv-base", anyof("bdxBDX"))
+                     >> as("nv-body", +(HEXDIG | anyof(".-"))));
+
+        const rule prose_val = as("prose-val",
+            lit("<") >> as("prose-text", *(rng(0x20, 0x3D) | rng(0x3F, 0x7E)))
+                     >> lit(">"));
+
+        m_grammar.define("element",
+            as("ref", rulename)
+          | as("group",  lit("(") >> *c_wsp >> m_grammar["alternation"]
+                                  >> *c_wsp >> lit(")"))
+          | as("option", lit("[") >> *c_wsp >> m_grammar["alternation"]
+                                  >> *c_wsp >> lit("]"))
+          | char_val | num_val | prose_val);
+
+        // RFC 5234 writes this as
+        //
+        //     repeat = 1*DIGIT / (*DIGIT "*" *DIGIT)
+        //
+        // which cannot work under ordered choice: against "3*5" the first
+        // alternative takes the 3 and the enclosing rule then fails on the
+        // "*", with the choice already committed.  Longest first.
+        m_grammar.define("repetition",
+            as("repetition",
+               -as("repeat", (*DIGIT >> lit("*") >> *DIGIT) | +DIGIT)
+               >> m_grammar["element"]));
+
+        m_grammar.define("concatenation",
+            as("concatenation",
+               m_grammar["repetition"] >> *(+c_wsp >> m_grammar["repetition"])));
+
+        m_grammar.define("alternation",
+            as("alternation",
+               m_grammar["concatenation"]
+               >> *(*c_wsp >> lit("/") >> *c_wsp >> m_grammar["concatenation"])));
+
+        // "=/" before "=", or the choice commits to "=" and leaves a stray "/".
+        m_grammar.define("rule",
+            as("rule",
+               as("defined-name", rulename) >> *c_wsp
+               >> as("op", lit("=/") | lit("=")) >> *c_wsp
+               >> m_grammar["alternation"] >> *c_wsp >> c_nl));
+
+        m_grammar.define("rulelist",
+            +( m_grammar["rule"] | (*c_wsp >> c_nl) ));
+
+        m_grammar.check();
+    }
+
+    rule rulelist() const { return m_grammar.at("rulelist"); }
+
+protected:
+    mutable grammar m_grammar;
+};
+
+const abnf_grammar& bootstrap(bool bare_lf)
+{
+    static const abnf_grammar strict(false);
+    static const abnf_grammar loose(true);
+
+    return bare_lf ? loose : strict;
+}
+
+// ------------------------------------------------------ reading the tree back
+
+rule build_alternation(const match& m, grammar& g, const compile_options& o);
+
+unsigned long digits_of(std::string_view s, int base)
+{
+    unsigned long v = 0;
+
+    for(char c : s) {
+        int d;
+
+        if(c >= '0' && c <= '9')      d = c - '0';
+        else if(c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if(c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else throw grammar_error(std::string("\"") + c +
+                                 "\" is not a digit in that base");
+
+        if(d >= base) {
+            throw grammar_error(std::string("\"") + c +
+                                "\" is not a digit in base " +
+                                std::to_string(base));
+        }
+
+        v = v * static_cast<unsigned long>(base) + static_cast<unsigned long>(d);
+
+        if(v > 0xFF && base != 0) {
+            // Checked as it accumulates, so a long run of digits cannot wrap.
+            // ABNF is octet based; a value that does not fit in one is a
+            // mistake in the grammar rather than something to truncate.
+            throw grammar_error("numeric value above %xFF; ABNF is octets");
+        }
+    }
+
+    return v;
+}
+
+rule build_num_val(const match& m)
+{
+    const std::string base_text = m.child("nv-base").str();
+    const std::string body = m.child("nv-body").str();
+
+    const char b = static_cast<char>(std::tolower(
+        static_cast<unsigned char>(base_text[0])));
+
+    const int base = (b == 'b') ? 2 : (b == 'd') ? 10 : 16;
+
+    const std::size_t dash = body.find('-');
+
+    if(dash != std::string::npos) {
+        const unsigned long lo = digits_of(body.substr(0, dash), base);
+        const unsigned long hi = digits_of(body.substr(dash + 1), base);
+
+        return rng(static_cast<unsigned char>(lo), static_cast<unsigned char>(hi));
+    }
+
+    // A dotted run is a sequence of octets, and never case folded.
+    std::string bytes_out;
+    std::size_t at = 0;
+
+    while(at <= body.size()) {
+        std::size_t dot = body.find('.', at);
+        if(dot == std::string::npos) dot = body.size();
+
+        bytes_out += static_cast<char>(digits_of(body.substr(at, dot - at), base));
+
+        if(dot == body.size()) break;
+        at = dot + 1;
+    }
+
+    if(bytes_out.size() == 1) {
+        return chr(static_cast<unsigned char>(bytes_out[0]));
+    }
+
+    return lit(bytes_out);
+}
+
+rule build_element(const match& m, grammar& g, const compile_options& o)
+{
+    const std::string k = m.name();
+
+    if(k == "ref") {
+        return g[m.str()];
+    }
+
+    if(k == "group") {
+        return build_alternation(m.child("alternation"), g, o);
+    }
+
+    if(k == "option") {
+        return opt(build_alternation(m.child("alternation"), g, o));
+    }
+
+    if(k == "char-val") {
+        const match t = m.child("cv-text");
+        const std::string text = t ? t.str() : std::string();
+
+        // RFC 5234 2.3: a quoted string is case insensitive.  RFC 7405's %s
+        // is the way to ask for the other thing.
+        return m.child("cv-sensitive") ? lit(text) : ilit(text);
+    }
+
+    if(k == "num-val") {
+        return build_num_val(m);
+    }
+
+    if(k == "prose-val") {
+        const match t = m.child("prose-text");
+        const std::string text = t ? t.str() : std::string();
+
+        if(o.prose) {
+            return o.prose(text);
+        }
+
+        // Compiles; fails when reached.  Refusing to compile a grammar because
+        // one obsolete production is prose would defeat the purpose of being
+        // able to paste one in.
+        return where("prose <" + text + ">",
+                     [text](std::string_view, std::size_t&) -> bool {
+                         throw grammar_error("prose-val <" + text + "> has no "
+                                             "implementation; supply one with "
+                                             "compile_options::prose");
+                     });
+    }
+
+    throw grammar_error("unrecognised element \"" + k + "\" in the grammar text");
+}
+
+rule build_repetition(const match& m, grammar& g, const compile_options& o)
+{
+    match repeat, element;
+
+    for(const match& c : m.children()) {
+        if(c.name() == "repeat") repeat = c;
+        else                     element = c;
+    }
+
+    if(!element) {
+        throw grammar_error("a repetition with nothing to repeat");
+    }
+
+    rule e = build_element(element, g, o);
+
+    if(!repeat) {
+        return e;
+    }
+
+    const std::string r = repeat.str();
+    const std::size_t star = r.find('*');
+
+    if(star == std::string::npos) {
+        const unsigned long n = digits_of(r, 10);
+
+        return rep(e, n, n);
+    }
+
+    const std::string lo = r.substr(0, star);
+    const std::string hi = r.substr(star + 1);
+
+    return rep(e,
+               lo.empty() ? 0 : digits_of(lo, 10),
+               hi.empty() ? rule::unbounded : digits_of(hi, 10));
+}
+
+rule build_concatenation(const match& m, grammar& g, const compile_options& o)
+{
+    rule out;
+    bool first = true;
+
+    for(const match& c : m.children()) {
+        if(c.name() != "repetition") continue;
+
+        rule r = build_repetition(c, g, o);
+
+        out = first ? r : (out >> r);
+        first = false;
+    }
+
+    return first ? empty() : out;
+}
+
+rule build_alternation(const match& m, grammar& g, const compile_options& o)
+{
+    rule out;
+    bool first = true;
+
+    for(const match& c : m.children()) {
+        if(c.name() != "concatenation") continue;
+
+        rule r = build_concatenation(c, g, o);
+
+        out = first ? r : (out | r);
+        first = false;
+    }
+
+    return first ? empty() : out;
+}
+
+}  // namespace
+
+grammar compile(std::string_view text)
+{
+    return compile(text, compile_options());
+}
+
+grammar compile(std::string_view text, const compile_options& o)
+{
+    std::string src = o.dedent ? dedent(text) : std::string(text);
+
+    // rulelist ends every rule with a c-nl, and grammar text routinely does
+    // not end with a newline.  Supplying one is kinder than making every
+    // caller remember.
+    if(src.empty() || (src.back() != '\n' && src.back() != '\r')) {
+        src += "\r\n";
+    }
+
+    grammar g;
+
+    if(o.seed_core_rules) {
+        g.seed_core();
+    }
+
+    options po;
+    po.captures = options::capture_policy::named;
+
+    const parse_result r = bootstrap(o.allow_bare_lf).rulelist().try_parse(src, po);
+
+    if(!r) {
+        const error& e = r.why();
+
+        throw grammar_error("the grammar text does not parse at line " +
+                            std::to_string(e.line()) + ", column " +
+                            std::to_string(e.column()) + ": " + e.context_line());
+    }
+
+    for(const match& rl : r.root().all("rule")) {
+        const std::string name = rl.child("defined-name").str();
+        const std::string op = rl.child("op").str();
+
+        rule body = build_alternation(rl.child("alternation"), g, o);
+
+        if(op == "=/") g.define_alternative(name, body);
+        else           g.define(name, body);
+
+        // Recorded rather than derived: once a prose-val has been lowered to a
+        // rule there is nothing left in the tree that says it was one.
+        if(!o.prose && !rl.all("prose-val").empty()) {
+            g.m_impl->prose.push_back(name);
+        }
+    }
+
+    return g;
 }
 
 // ----------------------------------------------------------------- core rules
