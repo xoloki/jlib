@@ -54,7 +54,37 @@ namespace jlib {
             Pop3(jlib::util::URL url, bool remove=true);
 
             /**
+             * Does this URL's scheme mean TLS?
+             *
+             * "pop3s" and "spop", compared whole.  It used to be
+             * find("spop") != npos, and "pop3s" does not contain "spop" -- so
+             * the standard scheme chose port 110 and a plain socket.
+             */
+            static bool is_secure(const jlib::util::URL& url);
+
+            /**
+             * Was STARTTLS asked for?
+             *
+             *     pop3://mail.example.com/?tls=starttls
+             *
+             * RFC 2595 4 calls the command STLS: connect in the clear on the
+             * ordinary port, then upgrade in place.  A query parameter rather
+             * than a third scheme, matching Imap4.
+             *
+             * If it is asked for and the server does not offer it, connect()
+             * throws rather than carrying on in the clear.
+             */
+            static bool use_starttls(const jlib::util::URL& url);
+
+            /**
              * Retrieve all email
+             */
+            /**
+             * Every message in the maildrop, as raw text.
+             *
+             * Deletes each one after reading it unless the constructor was
+             * told otherwise -- which is what POP3 is for, and what the
+             * `remove` flag has always claimed to control.
              */
             std::list<std::string> retrieve();
 
@@ -75,6 +105,21 @@ namespace jlib {
             static std::string read_body(std::istream& is);
 
         protected:
+            /**
+             * The capabilities the server advertises.  RFC 2449, CAPA.
+             *
+             * Empty when the server does not implement CAPA at all, which is
+             * legal -- it postdates RFC 1939 -- and which is why asking for
+             * STARTTLS against such a server is an error rather than a guess.
+             */
+            std::list<std::string> capa(jlib::sys::socketstream& sock);
+
+            /** Negotiate STLS on an already-connected plaintext stream. */
+            void upgrade(jlib::sys::socketstream& sock);
+
+            /** How many messages the maildrop holds.  RFC 1939 5, STAT. */
+            unsigned int count(jlib::sys::socketstream& sock);
+
             std::string retrieve(jlib::sys::socketstream& sock, unsigned int which);
             
             void remove(jlib::sys::socketstream& sock,unsigned int which);

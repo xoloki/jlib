@@ -35,7 +35,10 @@
 
 const int PORT = 143;
 const int SSL_PORT = 993;
-const std::string SSL_PROTOCOL = "simap";
+// Both spellings.  "imaps" is what IANA registered and what anyone would
+// write; "simap" is the older convention this library was written with and is
+// in config files that predate the other.
+const std::string SSL_PROTOCOLS[] = { "imaps", "simap" };
 const std::string OK = "* OK";
 const std::string INTERNAL = "Subject: DON'T DELETE THIS MESSAGE -- FOLDER INTERNAL DATA";
 const int TAG_WIDTH = 5;
@@ -145,7 +148,44 @@ namespace jlib {
         }
         
         bool Imap4::is_secure() {
-            return (util::lower(m_url.get_protocol()).find(SSL_PROTOCOL) != std::string::npos);
+            // A whole-scheme comparison, not find().  "imaps" does not contain
+            // "simap", so the substring test said an imaps:// URL was not
+            // secure -- and the caller then opened a plain socketstream to
+            // port 143 and sent LOGIN with the password on it.  The standard
+            // scheme downgraded silently to no encryption at all.
+            const std::string scheme = util::lower(m_url.get_protocol());
+
+            for(const std::string& s : SSL_PROTOCOLS) {
+                if(scheme == s) return true;
+            }
+
+            return false;
+        }
+
+        bool Imap4::use_starttls() {
+            return util::lower(m_url["tls"]) == "starttls";
+        }
+
+        const std::vector<std::string>& Imap4::capability(sys::socketstream& sock) {
+            m_capabilities.clear();
+
+            for(const imap::response& r : command(sock, "CAPABILITY")) {
+                if(r.name() != "CAPABILITY") continue;
+
+                m_capabilities = r.capabilities();
+            }
+
+            return m_capabilities;
+        }
+
+        bool Imap4::has_capability(const std::string& name) const {
+            const std::string want = util::upper(name);
+
+            for(const std::string& c : m_capabilities) {
+                if(util::upper(c) == want) return true;
+            }
+
+            return false;
         }
 
         Email Imap4::get(sys::socketstream& sock, 
@@ -345,6 +385,43 @@ namespace jlib {
             return ret;
         }
         
+        void Imap4::upgrade(sys::socketstream& sock) {
+            // RFC 2595 3 and RFC 3501 6.2.1.
+            capability(sock);
+
+            if(!has_capability("STARTTLS")) {
+                throw exception("the server does not offer STARTTLS, and "
+                                "?tls=starttls asked for it");
+            }
+
+            command(sock, "STARTTLS");
+
+            sys::tlsstream* tls = dynamic_cast<sys::tlsstream*>(&sock);
+
+            if(tls == 0) {
+                throw exception("STARTTLS on a stream that cannot be upgraded");
+            }
+
+            // The handshake, with the same verification an imaps:// connection
+            // gets: SSL_VERIFY_PEER, the default trust store, and
+            // SSL_set1_host on the name that was connected to.
+            tls->start();
+
+            // 6.2.1: "The client MUST discard the cached CAPABILITY
+            // information and re-issue the command."  Everything read before
+            // the handshake was unauthenticated, so a man in the middle could
+            // have removed STARTTLS from that list or added an AUTH mechanism
+            // to it.  Re-issuing is what makes the list worth having, and it
+            // is load-bearing here: login() refuses to send LOGIN when the
+            // list says LOGINDISABLED.
+            capability(sock);
+
+            if(has_capability("STARTTLS")) {
+                throw exception("the server still offers STARTTLS after "
+                                "negotiating it, which RFC 3501 6.2.1 forbids");
+            }
+        }
+
         sys::socketstream* Imap4::connect() {
             sys::socketstream* sock = 0;
             if(getenv("JLIB_NET_IMAP4_DEBUG")) 
@@ -373,6 +450,19 @@ namespace jlib {
                         } else {
                             sock = new sys::sslstream(m_host,m_port);
                         }
+                    }
+                    else if(use_starttls()) {
+                        // Plaintext for now: a tlsstream with delay set
+                        // connects without handshaking, and start() does the
+                        // handshake in place once the upgrade is negotiated.
+                        // The same primitive smtp::send_tls has used all
+                        // along.  No proxy variant, because there is no
+                        // tlsproxystream.
+                        if(m_url["proxy"] != "") {
+                            throw exception("STARTTLS through a proxy is not implemented");
+                        }
+
+                        sock = new sys::tlsstream(m_host, m_port, true);
                     }
                     else {
                         if(m_url["proxy"] != "") {
@@ -410,7 +500,19 @@ namespace jlib {
             if(!util::begins(buf, OK)) {
                 throw exception("error connecting: expected '"+OK+"', received "+buf);
             }
+
             m_state = NonAuthenticated;
+
+            if(use_starttls()) {
+                try {
+                    upgrade(*sock);
+                }
+                catch(...) {
+                    delete sock;
+                    throw;
+                }
+            }
+
             return sock;
             //handshake(sock"LOGIN "+m_user+" "+m_pass);
         }
@@ -563,12 +665,6 @@ namespace jlib {
         }
 
 
-        std::vector<std::string> Imap4::capability(sys::socketstream& sock) {
-            std::vector<std::string> cap = handshake(sock,"CAPABILITY");
-            std::vector<std::string> ret = util::tokenize(cap[0]);
-            ret.erase(ret.begin(),ret.begin()+2);
-            return ret;
-        }
 
         std::vector<std::string> Imap4::noop(sys::socketstream& sock) {
             std::vector<std::string> ret = handshake(sock,"NOOP");
@@ -643,6 +739,16 @@ namespace jlib {
             handshake(sock,"AUTHENTICATE "+name);
         }
         void Imap4::login(sys::socketstream& sock, const std::string& user, const std::string& pass) {
+            // RFC 3501 6.2.3: a server advertising LOGINDISABLED will refuse
+            // LOGIN, and a client that sends it anyway has put the password on
+            // the wire for nothing.  The list this consults is the one taken
+            // *after* any STARTTLS, which is the whole reason 6.2.1 requires
+            // it be re-issued.
+            if(has_capability("LOGINDISABLED")) {
+                throw exception("the server advertises LOGINDISABLED; refusing "
+                                "to send a password it will not accept");
+            }
+
             if(user!="" && pass != "") {
                 handshake(sock, "LOGIN " + imap::quote(user) + " " + imap::quote(pass));
             }

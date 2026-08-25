@@ -94,7 +94,50 @@ namespace jlib {
              */
             ~Imap4();
             
+            /** Is the scheme one that means TLS from the first byte? */
             bool is_secure();
+
+            /**
+             * Was STARTTLS asked for?
+             *
+             *     imap://mail.example.com/INBOX?tls=starttls
+             *
+             * RFC 2595 3: connect in the clear on the ordinary port, then
+             * upgrade in place.  A query parameter rather than a third scheme
+             * because that is how this class already takes a connection
+             * option -- see m_url["proxy"] -- and because there is no
+             * registered scheme for it.
+             *
+             * If it is asked for and the server does not offer it, connect()
+             * throws.  Carrying on in the clear is the bug this branch exists
+             * to fix, wearing a different hat.
+             */
+            bool use_starttls();
+
+            /** The server's capabilities, as of the last CAPABILITY. */
+            const std::vector<std::string>& capabilities() const { return m_capabilities; }
+
+            /**
+             * CAPABILITY, and remember the answer.
+             *
+             * It used to be tokenize(handshake(...)[0]) with the first two
+             * tokens erased, which indexes an empty vector when the server
+             * says nothing and takes the capabilities out of whatever the
+             * first response happened to be.
+             */
+            const std::vector<std::string>& capability(jlib::sys::socketstream& sock);
+
+            /** Does the capability list hold this, compared whole? */
+            bool has_capability(const std::string& name) const;
+
+            /**
+             * Negotiate STARTTLS on an already-connected plaintext stream.
+             *
+             * Called by connect() when ?tls=starttls was asked for.  Throws if
+             * the server does not offer it, rather than carrying on in the
+             * clear.
+             */
+            void upgrade(jlib::sys::socketstream& sock);
 
             jlib::sys::socketstream* connect();
             void disconnect(jlib::sys::socketstream& sock);
@@ -102,11 +145,9 @@ namespace jlib {
             // 6.1.    Client Commands - Any State
             /**
              * The CAPABILITY command requests a listing of capabilities that the
-             * server supports.
-             *
-             * @return vector containing the capabilities offered
+             * server supports.  Declared with the rest of the capability
+             * handling above; this comment is where the RFC ordering put it.
              */
-            std::vector<std::string> capability(jlib::sys::socketstream& sock);
 
             /**
              * Since any command can return a status update as untagged data, the
@@ -580,6 +621,7 @@ namespace jlib {
             unsigned int m_exists, m_recent, m_unseen;
             std::mutex m_exists_mutex, m_recent_mutex, m_unseen_mutex;
             int m_num;
+            std::vector<std::string> m_capabilities;
             std::mutex m_num_mutex;
             int m_width;
             State m_state;

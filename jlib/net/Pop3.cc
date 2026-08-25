@@ -26,6 +26,8 @@
 
 #include <jlib/util/util.hh>
 
+#include <cctype>
+#include <sstream>
 #include <memory>
 
 const int PORT = 110;
@@ -35,32 +37,140 @@ const std::string OK = "+OK";
 namespace jlib {
     namespace net {
         
+        bool Pop3::is_secure(const jlib::util::URL& url) {
+            // A whole-scheme comparison, not find().  "pop3s" contains "pop"
+            // and does not contain "spop", so the old test read the standard
+            // scheme as *plain* POP3: it chose port 110, opened a plain
+            // socketstream, and sent the password over it.  Silently, and for
+            // the one spelling anybody outside this library would use.
+            //
+            // Both spellings are here: "pop3s" is what IANA registered,
+            // "spop" is the older convention this library was written with.
+            const std::string scheme = jlib::util::lower(url.get_protocol());
+
+            return scheme == "pop3s" || scheme == "spop" || scheme == "spop3";
+        }
+
+        bool Pop3::use_starttls(const jlib::util::URL& url) {
+            return jlib::util::lower(url["tls"]) == "starttls";
+        }
+
         Pop3::Pop3(jlib::util::URL url, bool remove) 
             : m_remove(remove)
         {
             m_url = url;
+
+            const std::string scheme = jlib::util::lower(m_url.get_protocol());
+
+            if(!is_secure(m_url) && scheme != "pop3" && scheme != "pop") {
+                throw exception("bad protocol in jlib::net::Pop3::Pop3(), m_url = "+m_url());
+            }
+
             if(m_url.get_port() == "") {
-                if(jlib::util::lower(m_url.get_protocol()).find("spop") != std::string::npos) {
-                    m_url.set_port(jlib::util::string_value(SPORT));
-                }
-                else if(jlib::util::lower(m_url.get_protocol()).find("pop") != std::string::npos) {
-                    m_url.set_port(jlib::util::string_value(PORT));
-                }
-                else {
-                    throw exception("bad protocol in jlib::net::Pop3::Pop3(), m_url = "+m_url());
-                }
+                m_url.set_port(jlib::util::string_value(is_secure(m_url) ? SPORT : PORT));
             }
         }
         
         
+        std::list<std::string> Pop3::capa(jlib::sys::socketstream& sock) {
+            std::list<std::string> ret;
+
+            try {
+                handshake(sock, "CAPA", OK);
+            }
+            catch(exception&) {
+                // RFC 2449 postdates RFC 1939 and a server need not implement
+                // it.  An empty list rather than an error -- the caller
+                // decides what not knowing means.
+                return ret;
+            }
+
+            // A multi-line response, terminated by "." on a line of its own,
+            // exactly as a message body is.
+            std::istringstream body(read_body(sock));
+            std::string line;
+
+            while(std::getline(body, line)) {
+                if(!line.empty() && line.back() == '\r') line.pop_back();
+                if(!line.empty()) ret.push_back(line);
+            }
+
+            return ret;
+        }
+
+        void Pop3::upgrade(jlib::sys::socketstream& sock) {
+            // RFC 2595 4.
+            bool offered = false;
+
+            for(const std::string& c : capa(sock)) {
+                if(jlib::util::upper(c) == "STLS") offered = true;
+            }
+
+            if(!offered) {
+                throw exception("the server does not offer STLS, and "
+                                "?tls=starttls asked for it");
+            }
+
+            handshake(sock, "STLS", OK);
+
+            jlib::sys::tlsstream* tls = dynamic_cast<jlib::sys::tlsstream*>(&sock);
+
+            if(tls == 0) {
+                throw exception("STLS on a stream that cannot be upgraded");
+            }
+
+            // The same verification an implicit-TLS connection gets:
+            // SSL_VERIFY_PEER, the default trust store, and SSL_set1_host on
+            // the name that was connected to.
+            tls->start();
+
+            // 2595 4: the client must discard what CAPA said before the
+            // handshake.  Everything read then was unauthenticated, so a man
+            // in the middle could have taken STLS out of that list, or put an
+            // authentication mechanism into it.
+            capa(sock);
+        }
+
+        unsigned int Pop3::count(jlib::sys::socketstream& sock) {
+            // RFC 1939 5: "+OK nn mm" -- the number of messages and the size
+            // of the maildrop.  Read as a number rather than as tokenize()[1],
+            // so that a server answering "+OK" with nothing after it is an
+            // error here rather than an out-of-range index somewhere later.
+            const std::string stat = handshake(sock, "STAT", OK);
+            std::string::size_type i = stat.find_first_of("0123456789");
+
+            if(i == stat.npos) {
+                throw exception("no message count in the STAT reply: " + stat);
+            }
+
+            unsigned int n = 0;
+
+            for(; i < stat.size() && std::isdigit(static_cast<unsigned char>(stat[i])); i++) {
+                n = n * 10 + static_cast<unsigned int>(stat[i] - '0');
+            }
+
+            return n;
+        }
+
         std::list<std::string> Pop3::retrieve() {
-            std::list<std::string> buf;
+            // This connected, disconnected and returned an empty list: the
+            // loop was commented out, so the only public way to get mail out
+            // of a POP3 account has never got any.  It reported success while
+            // doing it, which is why nobody noticed.
+            std::list<std::string> ret;
             std::unique_ptr<jlib::sys::socketstream> sock(connect());
 
-            //std::string buf = retrieve(sock,which);
+            const unsigned int n = count(*sock);
+
+            for(unsigned int i = 1; i <= n; i++) {
+                ret.push_back(retrieve(*sock, i));
+
+                if(m_remove) remove(*sock, i);
+            }
 
             disconnect(*sock);
-            return buf;
+
+            return ret;
         }
 
         std::string Pop3::read_body(std::istream& is) {
@@ -105,14 +215,22 @@ namespace jlib {
         
         jlib::sys::socketstream* Pop3::connect() {
             jlib::sys::socketstream* sock;
-            if(jlib::util::lower(m_url.get_protocol()).find("spop") != std::string::npos) {
+            // The constructor already refused a scheme that is neither, so
+            // there is no third case to fall through to -- and the one that
+            // used to be here tested find("pop"), which is how "pop3s" ended
+            // up on a plain socket.
+            if(is_secure(m_url)) {
                 sock = new jlib::sys::sslstream(m_url.get_host(), m_url.get_port_val());
             }
-            else if(jlib::util::lower(m_url.get_protocol()).find("pop") != std::string::npos) {
-                sock = new jlib::sys::socketstream(m_url.get_host(), m_url.get_port_val());
+            else if(use_starttls(m_url)) {
+                // A tlsstream with delay set connects without handshaking;
+                // start() does the handshake in place once STLS has been
+                // negotiated.  The primitive smtp::send_tls has used all along.
+                sock = new jlib::sys::tlsstream(m_url.get_host(),
+                                                m_url.get_port_val(), true);
             }
             else {
-                throw exception("bad protocol in jlib::net::Pop3::connect(), m_url = "+m_url());
+                sock = new jlib::sys::socketstream(m_url.get_host(), m_url.get_port_val());
             }
 
 
@@ -121,6 +239,10 @@ namespace jlib {
             if(!jlib::util::begins(buf, OK)) {
                 throw exception(buf);
             }
+            if(use_starttls(m_url)) {
+                upgrade(*sock);
+            }
+
             handshake(*sock,"USER "+m_url.get_user(), OK);
             handshake(*sock,"PASS "+m_url.get_pass(), OK);
 

@@ -13,9 +13,9 @@
 # Dependencies are installed in their own layer so edits to the source do not
 # re-run apt.
 #
-# dovecot-imapd is here for tests/net_imap_live_test, which starts a real IMAP
-# server on a high port with a seeded Maildir and drives jlib::net::Imap4
-# against it.  It is the only way to exercise the literal handling end to end:
+# dovecot is here for tests/net_{imap,pop3}_live_test, which start a real
+# server on high ports with a seeded Maildir and drive jlib::net::Imap4 and
+# jlib::net::Pop3 against it.  It is the only way to exercise the literal handling end to end:
 # a std::istringstream can be made to produce any response, but only a server
 # decides when to send a literal.
 
@@ -46,6 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libglu1-mesa-dev \
         freeglut3-dev \
         dovecot-imapd \
+        dovecot-pop3d \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/jlib

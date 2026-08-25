@@ -28,6 +28,8 @@
 // Exit 77 (SKIP) when there is no dovecot to start, which is every machine
 // that is not the build container.
 
+#include "mailserver.hh"
+
 #include <jlib/net/Imap4.hh>
 #include <jlib/net/imap_response.hh>
 
@@ -37,14 +39,12 @@
 #include <jlib/util/URL.hh>
 #include <jlib/util/util.hh>
 
-#include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
-#include <unistd.h>
 
-namespace fs = std::filesystem;
+using mailserver::PASSWORD;
+using mailserver::impersonating_body;
 
 static int failures = 0;
 
@@ -66,156 +66,6 @@ static std::string show(const std::string& s) {
 
     return out;
 }
-
-// A password that is exactly what the old code could not send.  A space ends
-// an argument, a quote ends a quoted one, and a backslash escapes whatever
-// follows -- so "LOGIN " + user + " " + pass produced a malformed command and
-// the server said BAD.
-static const char* const PASSWORD = "pa ss \"quoted\" back\\slash";
-
-/**
- * A message body that impersonates every tag jlib is going to use.
- *
- * Imap4::tag() counts up from A00001, so a body containing all twenty of the
- * first tags followed by "OK FETCH completed" looks, line by line, exactly
- * like the completion the client is waiting for.  Reading lines stops at the
- * first of them; reading responses does not.
- */
-static std::string impersonating_body()
-{
-    std::string s = "From: b@c.d\r\nSubject: two\r\n\r\n";
-
-    for(int i = 1; i <= 20; i++) {
-        char tag[16];
-
-        std::snprintf(tag, sizeof tag, "A%05d", i);
-
-        s += std::string(tag) + " OK FETCH completed\r\n";
-    }
-
-    return s;
-}
-
-namespace {
-
-struct server {
-    fs::path dir;
-    unsigned int port = 0;
-    bool running = false;
-
-    ~server() { stop(); }
-
-    bool start()
-    {
-        // A port derived from the pid, so two builds on one machine do not
-        // collide.
-        port = 14000 + static_cast<unsigned int>(::getpid() % 900);
-
-        dir = fs::temp_directory_path() / ("jlib-imap-" + std::to_string(::getpid()));
-
-        fs::remove_all(dir);
-        fs::create_directories(dir / "run");
-        fs::create_directories(dir / "mail" / "Maildir" / "cur");
-        fs::create_directories(dir / "mail" / "Maildir" / "new");
-        fs::create_directories(dir / "mail" / "Maildir" / "tmp");
-
-        // Dovecot refuses a mail uid of 0, and refuses to run imap-login as
-        // root at all, so the Maildir belongs to an ordinary uid and the login
-        // process keeps the package's own unprivileged user.
-        const unsigned int uid = 1000;
-
-        {
-            std::ofstream f(dir / "users");
-
-            f << "joe:{PLAIN}" << PASSWORD << ":" << uid << ":" << uid
-              << "::" << (dir / "mail").string() << "\n";
-        }
-
-        {
-            std::ofstream f(dir / "conf");
-
-            f << "protocols = imap\n"
-              << "listen = 127.0.0.1\n"
-              << "base_dir = " << (dir / "run").string() << "\n"
-              << "log_path = " << (dir / "log").string() << "\n"
-              << "ssl = no\n"
-              << "disable_plaintext_auth = no\n"
-              << "mail_location = maildir:" << (dir / "mail" / "Maildir").string() << "\n"
-              << "service imap-login {\n"
-              << "  inet_listener imap {\n    port = " << port << "\n  }\n"
-              << "  chroot =\n"
-              << "}\n"
-              << "passdb {\n  driver = passwd-file\n  args = "
-              << (dir / "users").string() << "\n}\n"
-              << "userdb {\n  driver = passwd-file\n  args = "
-              << (dir / "users").string() << "\n}\n";
-        }
-
-        {
-            std::ofstream f(dir / "mail" / "Maildir" / "new" / "1", std::ios::binary);
-            f << "From: a@b.c\r\nSubject: one\r\n\r\nhello\r\n";
-        }
-
-        {
-            std::ofstream f(dir / "mail" / "Maildir" / "new" / "2", std::ios::binary);
-            f << impersonating_body();
-        }
-
-        std::string out, err;
-
-        jlib::sys::run({ "chown", "-R", std::to_string(uid) + ":" + std::to_string(uid),
-                         (dir / "mail").string() }, out, err);
-
-        // dovecot daemonizes, so this returns once it has forked.
-        if(jlib::sys::run({ "dovecot", "-c", (dir / "conf").string() }, out, err) != 0) {
-            std::cerr << "dovecot would not start: " << err << out << "\n";
-
-            return false;
-        }
-
-        running = true;
-
-        // Wait for the listener rather than sleeping a guessed interval.
-        for(int i = 0; i < 100; i++) {
-            try {
-                jlib::sys::socketstream probe("127.0.0.1", port);
-
-                return true;
-            }
-            catch(std::exception&) {
-                ::usleep(50000);
-            }
-        }
-
-        std::cerr << "dovecot never listened on " << port << "\n";
-
-        return false;
-    }
-
-    void stop()
-    {
-        if(running) {
-            std::string out, err;
-
-            jlib::sys::run({ "dovecot", "-c", (dir / "conf").string(), "stop" }, out, err);
-            running = false;
-        }
-
-        std::error_code ec;
-
-        fs::remove_all(dir, ec);
-    }
-
-    std::string log() const
-    {
-        std::ifstream f(dir / "log");
-
-        return std::string(std::istreambuf_iterator<char>(f), {});
-    }
-};
-
-}
-
 int main() {
     std::cout << std::unitbuf;
 
@@ -234,7 +84,7 @@ int main() {
         }
     }
 
-    server s;
+    mailserver::server s;
 
     if(!s.start()) {
         std::cerr << s.log();
@@ -467,6 +317,119 @@ int main() {
         ok("the session ran without throwing", false, e.what());
         std::cerr << s.log();
     }
+
+    // The same again over TLS, which is the difference between this library
+    // being usable with a real account and not.
+    //
+    // "imaps" is the scheme IANA registered, and Imap4::is_secure() tested
+    // find("simap") -- which "imaps" does not contain.  So an imaps:// URL was
+    // not secure: the client opened a plain socket to port 143 and sent LOGIN
+    // with the password on it.
+    std::cout << "\nover TLS:\n";
+
+    for(const char* scheme : { "imaps", "simap" }) {
+        jlib::util::URL tls(std::string(scheme) + "://joe@localhost:"
+                            + std::to_string(s.tls_port) + "/INBOX");
+
+        tls.set_pass(PASSWORD);
+
+        jlib::net::Imap4 secure(tls);
+
+        ok(std::string(scheme) + ":// is a secure scheme", secure.is_secure());
+
+        try {
+            std::unique_ptr<jlib::sys::socketstream> sock(secure.connect());
+
+            secure.login(*sock, "", "");
+            secure.select(*sock, "INBOX");
+
+            const std::string raw = secure.get(*sock, 1, false).raw();
+
+            ok(std::string(scheme) + ":// handshakes, logs in and fetches",
+               raw == impersonating_body(),
+               raw == impersonating_body() ? std::string()
+                                           : std::to_string(raw.size()) + " octets");
+
+            secure.logout(*sock);
+        }
+        catch(std::exception& e) {
+            ok(std::string(scheme) + ":// works", false, e.what());
+            std::cerr << s.log();
+        }
+    }
+
+    // STARTTLS, RFC 2595 3: the ordinary port, in the clear, upgraded in
+    // place.  The same tlsstream primitive smtp::send_tls has used all along.
+    std::cout << "\nSTARTTLS:\n";
+
+    {
+        jlib::util::URL up("imap://joe@localhost:" + std::to_string(s.port)
+                           + "/INBOX?tls=starttls");
+
+        up.set_pass(PASSWORD);
+
+        jlib::net::Imap4 imap(up);
+
+        ok("?tls=starttls asks for it", imap.use_starttls());
+        ok("and it is not the same as a secure scheme", !imap.is_secure());
+
+        try {
+            std::unique_ptr<jlib::sys::socketstream> sock(imap.connect());
+
+            // RFC 3501 6.2.1 requires the capability list be taken again after
+            // the handshake, and a server must not still be offering STARTTLS
+            // once it has been negotiated.
+            ok("STARTTLS is gone from the list afterwards",
+               !imap.has_capability("STARTTLS"));
+            ok("and the list is not empty, so it was really re-issued",
+               !imap.capabilities().empty(),
+               std::to_string(imap.capabilities().size()) + " capabilities");
+
+            imap.login(*sock, "", "");
+            imap.select(*sock, "INBOX");
+
+            const std::string raw = imap.get(*sock, 1, false).raw();
+
+            ok("the session works over the upgraded connection",
+               raw == impersonating_body(),
+               raw == impersonating_body() ? std::string()
+                                           : std::to_string(raw.size()) + " octets");
+
+            imap.logout(*sock);
+        }
+        catch(std::exception& e) {
+            ok("STARTTLS works", false, e.what());
+            std::cerr << s.log();
+        }
+    }
+
+    // Asked for and not offered is an error.  Carrying on in the clear is the
+    // bug the top of this branch exists to fix, wearing a different hat -- so
+    // the imaps port, which does not offer STARTTLS because it is already TLS,
+    // has to be refused rather than used.
+    {
+        jlib::util::URL nope("imap://joe@localhost:" + std::to_string(s.tls_port)
+                             + "/INBOX?tls=starttls");
+
+        nope.set_pass(PASSWORD);
+
+        bool threw = false;
+
+        try {
+            jlib::net::Imap4 imap(nope);
+            std::unique_ptr<jlib::sys::socketstream> sock(imap.connect());
+        }
+        catch(std::exception&) { threw = true; }
+
+        ok("asking for STARTTLS where it is not offered fails", threw);
+    }
+
+    // The port it picks when it is not told one.
+    ok("imaps:// with no port is still secure",
+       jlib::net::Imap4(jlib::util::URL("imaps://joe@localhost/INBOX")).is_secure());
+
+    ok("and imap:// is not",
+       !jlib::net::Imap4(jlib::util::URL("imap://joe@localhost/INBOX")).is_secure());
 
     // What a green run does NOT establish.
     //
