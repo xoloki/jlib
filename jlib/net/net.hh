@@ -51,27 +51,32 @@ namespace jlib {
         };
         
         
-        void parse_headers(std::istream& is, std::multimap<std::string,std::string>& m, bool uppercase=true);
-
-        /**
-         * get a vector of the headers whose key is header
-         */
-        std::vector<std::string> parse_header(std::istream& stream, const std::string& header);
-
         void parse_divide(std::istream& is, std::vector<long>& divide, const std::string& div);
 
         /**
-         * parse through s, looking for the first occurance of something in ends
-         * when it's found, return the std::string up to that point
+         * Make a body safe to send inside a dot-terminated stream.
+         *
+         * RFC 5321 4.5.2, and RFC 1939 3 says the same thing from the other
+         * end: a line beginning with "." gets a second "." in front of it, so
+         * that the "." on a line by itself which ends the body can only ever
+         * be the end of the body.  Both protocols call it transparency and
+         * both mean this; it is one function because it is one mechanism.
+         *
+         * Expects CRLF line endings -- run convert_to_crlf() first.
+         *
+         * By value deliberately: data is modified and returned.
          */
-        std::string parse_end(const std::string& s, const std::vector<std::string>& ends);
+        std::string dot_stuff(std::string data);
 
         /**
-         * parse through is, looking for the first occurance of something in ends
-         * when it's found, copy the std::string up to that point into raw, then set 
-         * the streampos to the end (actually, the beginning of the next line)
+         * Undo dot_stuff() on a body just received.
+         *
+         * The terminating "." is not part of the body and is not expected
+         * here; Pop3::read_body() takes it off.
+         *
+         * By value deliberately: data is modified and returned.
          */
-        void parse_end(std::istream& is, std::vector<std::string> ends, std::string& raw);
+        std::string dot_unstuff(std::string data);
 
         /**
          * Are these two the same person?

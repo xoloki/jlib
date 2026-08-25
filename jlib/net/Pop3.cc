@@ -19,6 +19,7 @@
  */
 
 #include <jlib/net/Pop3.hh>
+#include <jlib/net/net.hh>
 
 #include <jlib/sys/sys.hh>
 #include <jlib/sys/sslstream.hh>
@@ -62,12 +63,44 @@ namespace jlib {
             return buf;
         }
 
+        std::string Pop3::read_body(std::istream& is) {
+            std::string body, line;
+
+            for(;;) {
+                if(!std::getline(is, line)) {
+                    throw exception("connection ended before the \".\" that ends "
+                                    "a multi-line response");
+                }
+
+                // Exactly one CRLF comes off, not every trailing CR.
+                // sys::getline() erases all of them, which is right for a
+                // command response and wrong for message content: a body line
+                // that genuinely ends in CR would come back a byte short and
+                // the message would no longer be what was sent.
+                if(!line.empty() && line.back() == '\r') line.pop_back();
+
+                if(line == ".") return dot_unstuff(std::move(body));
+
+                body += line;
+                body += "\r\n";
+            }
+        }
+
         std::string Pop3::retrieve(jlib::sys::socketstream& sock, unsigned int which) {
-            std::string buf = handshake(sock,"RETR "+jlib::util::string_value(which), OK);
-            std::vector<std::string> bufvec = jlib::util::tokenize(buf);
-            int n = jlib::util::int_value(bufvec[1]);
-            jlib::sys::getstring(sock, buf, n);
-            return buf;
+            // Read to the terminating ".", not to the octet count in the +OK.
+            //
+            // This used to tokenize the "+OK 1234 octets" line and read
+            // exactly 1234 bytes.  That count is optional in RFC 1939 -- the
+            // response is "+OK message follows" and the size is a courtesy --
+            // and where it is sent it is a maildrop size that counts CRLF as
+            // one octet on some servers and two on others.  Reading the wrong
+            // number leaves the rest of the message sitting in the socket, and
+            // every command after it reads somebody else's mail as its
+            // response.  On a server that omits the number entirely,
+            // bufvec[1] was out of range.
+            handshake(sock, "RETR " + jlib::util::string_value(which), OK);
+
+            return read_body(sock);
         }
         
         jlib::sys::socketstream* Pop3::connect() {

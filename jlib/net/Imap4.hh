@@ -26,6 +26,7 @@
 #include <jlib/util/URL.hh>
 #include <jlib/net/Email.hh>
 
+#include <cstddef>
 #include <vector>
 #include <mutex>
 #include <map>
@@ -345,20 +346,28 @@ namespace jlib {
              */
             void expunge(jlib::sys::socketstream& sock);
 
-            /**
-             * The SEARCH command searches the mailbox for messages that match
-             * the given searching criteria.  Searching criteria consist of one
-             * or more search keys.  The untagged SEARCH response from the server
-             * contains a listing of message sequence numbers corresponding to
-             * those messages that match the searching criteria.
-             * 
-             * @param criteria searching criteria
-             * @param spec optional character set specification
-             *
-             * @return vector with server response
-             */
-            std::vector<std::string> search(jlib::sys::socketstream& sock, const std::string& criteria, const std::string& spec="");
             
+            /**
+             * The octet count of the literal a response line ends with.
+             *
+             * RFC 3501 4.3: a literal is "{" number "}" CRLF followed by that
+             * many octets, and RFC 7888 adds the non-synchronising "{n+}".
+             * The count is the only way to know where the literal ends, so
+             * getting it wrong desynchronises the connection for good.
+             *
+             * Returns false when the line does not end in a literal, which is
+             * the case the old code got wrong: it took the last token of the
+             * line and asked util::slice for what was between "{" and "}",
+             * and slice returns its whole input when the delimiters are not
+             * there.  int_value of that is 0, so a response with no literal --
+             * an error, a NIL, a server that answered something else -- read
+             * zero octets and then consumed the message body as though it were
+             * protocol.
+             *
+             * Static and public because it is worth testing without a server.
+             */
+            static bool literal_size(const std::string& line, std::size_t& n);
+
             /**
              * The FETCH command retrieves data associated with a message in the
              * mailbox.  The data items to be fetched may be either a single atom
@@ -372,23 +381,6 @@ namespace jlib {
              */
             std::vector<std::string> fetch(jlib::sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, std::vector<std::string> n);
             
-            /**
-             * The PARTIAL command is equivalent to the associated FETCH command,
-             * with the added functionality that only the specified number of
-             * octets, beginning at the specified starting octet, are returned.
-             * Only a single message can be fetched at a time.  The first octet
-             * of a message, and hence the minimum for the starting octet, is
-             * octet 1.
-             * 
-             * @param set message set
-             * @param n vector of message data item names
-             * @param p position of first octet
-             * @param o number of octets
-             * 
-             * @return vector containing sever response
-             */
-            std::vector<std::string> partial(jlib::sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, std::vector<std::string> n, 
-                                   unsigned int p, unsigned int o);
             
             /**
              * The STORE command alters data associated with a message in the
@@ -416,66 +408,6 @@ namespace jlib {
              */
             void copy(jlib::sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, const std::string& box);
 
-            /**
-             * The UID command has two forms.  In the first form, it takes as its
-             * arguments a COPY, FETCH, or STORE command with arguments
-             * appropriate for the associated command.  However, the numbers in
-             * the message set argument are unique identifiers instead of message
-             * sequence numbers.
-             * 
-             * In the second form, the UID command takes a SEARCH command with
-             * SEARCH command arguments.  The interpretation of the arguments is
-             * the same as with SEARCH; however, the numbers returned in a SEARCH
-             * response for a UID SEARCH command are unique identifiers instead
-             * of message sequence numbers.  For example, the command UID SEARCH
-             * 1:100 UID 443:557 returns the unique identifiers corresponding to
-             * the intersection of the message sequence number set 1:100 and the
-             * UID set 443:557.
-             * 
-             * A unique identifier of a message is a number, and is guaranteed
-             * not to refer to any other message in the mailbox.  Unique
-             * identifiers are assigned in a strictly ascending fashion for each
-             * message added to the mailbox.  Unlike message sequence numbers,
-             * unique identifiers persist across sessions.  This permits a client
-             * to resynchronize its state from a previous session with the server
-             * (e.g.  disconnected or offline access clients); this is discussed
-             * further in [IMAP-DISC].
-             * 
-             * Associated with every mailbox is a unique identifier validity
-             * value, which is sent in an UIDVALIDITY response code in an OK
-             * untagged response at message selection time.  If unique
-             * identifiers from an earlier session fail to persist to this
-             * session, the unique identifier validity value MUST be greater than
-             * in the earlier session.
-             * 
-             * Note: An example of a good value to use for the unique
-             * identifier validity value would be a 32-bit
-             * representation of the creation date/time of the mailbox.
-             * It is alright to use a constant such as 1, but only if
-             * it guaranteed that unique identifers will never be
-             * reused, even in the case of a mailbox being deleted and
-             * a new mailbox by the same name created at some future
-             * time.
-             * 
-             * 
-             * Message set ranges are permitted; however, there is no guarantee
-             * that unique identifiers be contiguous.  A non-existent unique
-             * identifier within a message set range is ignored without any error
-             * message generated.
-             * 
-             * The number after the "*" in an untagged FETCH response is always a
-             * message sequence number, not a unique identifier, even for a UID
-             * command response.  However, server implementations MUST implicitly
-             * include the UID message data item as part of any FETCH response
-             * caused by a UID command, regardless of whether UID was specified
-             * as a message data item to the FETCH.
-             * 
-             * @param cmd command
-             * @param arg args to cmd
-             * 
-             * @return result of cmd
-             */
-            std::vector<std::string> uid(jlib::sys::socketstream& sock, const std::string& cmd, std::vector<std::string> arg);
 
             /**
              * Any command prefixed with an X is an experimental command.

@@ -53,6 +53,7 @@ TESTS = \
 	net_email_received_test \
 	net_email_multipart_test \
 	net_mbox_crlf_test \
+	net_protocol_test \
 	net_same_address_test \
  \
 	sys_sync_test \
@@ -124,6 +125,9 @@ net_email_test_SOURCES          = net_email_test.cc
 net_email_test_LDADD            = $(JNET_LA)
 net_email_received_test_SOURCES = net_email_received_test.cc
 net_email_received_test_LDADD   = $(JNET_LA)
+net_protocol_test_SOURCES       = net_protocol_test.cc
+net_protocol_test_LDADD         = $(JNET_LA) $(JUTIL_LA)
+
 net_mbox_crlf_test_SOURCES      = net_mbox_crlf_test.cc
 net_mbox_crlf_test_LDADD        = $(JNET_LA)
 
