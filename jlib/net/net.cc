@@ -57,124 +57,6 @@ namespace jlib {
 
         long parse_size = 16384;
 
-        void parse_headers(std::istream& is, std::map<std::string,std::string>& m, bool uppercase) {
-            std::string buf, key, val;
-            bool bunny = true;
-            while(bunny && !is.eof()) {
-                sys::getline(is,buf);
-                if(buf == "") {
-                    bunny = false;
-                }
-                else {
-                    if(isspace(buf[0])) {
-                        if(key != "" && val != "") {
-                            m[key] = m[key]+" "+util::trim(buf);
-                        }
-                    }
-                    else {
-                        /* do decoding of previous header */
-                        if(key != "") {
-                            std::string buffer = m[key];
-                            if(buffer.find("=") != std::string::npos) {
-                                static util::Regex reg("(.*)=\\?(.+)\\?([QqBb])\\?(.+)\\?=(.*)");
-                                util::Regex::Match match(reg.match(buffer));
-                                if(match.size() > 0) {
-                                    std::string enc = match[4];
-                                    std::string dec;
-                                    if(util::upper(match[3]) == "B") {
-                                        dec = util::base64::decode(enc);
-                                    }
-                                    else if(util::upper(match[3]) == "Q") {
-                                        dec = util::qp::decode(enc);
-                                    }
-
-                                    m[key] = match[1]+dec+match[5];
-                                }
-                            }
-                        }
-
-                        std::string::size_type j;
-                        if( (j=buf.find(":")) != buf.npos ) {
-                            key = buf.substr(0,j);
-                            if(uppercase)
-                                key = util::upper(key);
-                            val = buf.substr(j+1);
-                            if(key.find("FROM ") == 0) {
-                                key = "";
-                            }
-                            else {
-                                //cerr << "setting m[\""<<key<<"\"] = "<<val<<endl;
-                                m[key] = util::trim(val);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        std::vector<std::string> parse_header(std::istream& stream, const std::string& header) {
-            std::vector<std::string> ret;
-            std::string buf, key, val;
-            std::vector<std::string>::iterator current = ret.end();
-            bool bunny = true;
-            while(bunny && !stream.eof()) {
-                sys::getline(stream,buf);
-                if(buf == "") {
-                    bunny = false;
-                }
-                else {
-                    /* wrapped header */
-                    if(isspace(buf[0])) {
-                        if(current != ret.end()) {
-                            val += util::trim(buf);
-                            *current = val;
-                        }
-                    }
-                    else {
-                        /* do decoding of previous header */
-                        if(current != ret.end()) {
-                            std::string buffer = *current;
-                            if(buffer.find("=") != std::string::npos) {
-                                static util::Regex reg("(.*)=\\?(.+)\\?([QqBb])\\?(.+)\\?=(.*)");
-                                util::Regex::Match match(reg.match(buffer));
-                                if(match.size() > 0) {
-                                    std::string enc = match[4];
-                                    std::string dec;
-                                    if(util::upper(match[3]) == "B") {
-                                        dec = util::base64::decode(enc);
-                                    }
-                                    else if(util::upper(match[3]) == "Q") {
-                                        dec = util::qp::decode(enc);
-                                    }
-
-                                    *current = match[1]+dec+match[5];
-                                }
-                            }
-                        }
-
-                        key = "";
-                        val = "";
-                        current = ret.end();
-                        std::string::size_type j;
-                        if( (j=buf.find(":")) != buf.npos ) {
-                            key = buf.substr(0,j);
-                            if(util::upper(key) == util::upper(header)) {
-                                val = util::trim(buf.substr(j+1));
-                                ret.push_back(val);
-                                current = (ret.end()-1);
-                            }
-                            else {
-                                key = "";
-                                val = "";
-                            }
-                        }
-                    }
-                }
-            }
-
-            return ret;
-        }
-        
         void parse_divide(std::istream& is, std::vector<long>& divide, const std::string& div) {
             if(getenv("JLIB_NET_DEBUG")) {
                 std::cerr <<"net::parse_divide(is,divide,\""<<div<<"\"): entering"<<std::endl;
@@ -226,65 +108,51 @@ namespace jlib {
         // Returns size_type rather than long so that npos survives the round
         // trip.  Callers used to store the result in a u_int, which truncates
         // npos (SIZE_MAX) to 0xFFFFFFFF and so never compares equal to it.
-        std::string::size_type find_end(const std::string& s, const std::vector<std::string>& e) {
-            std::string::size_type ret = s.npos;
-            std::string::size_type p;
-            for(std::string::size_type i=0;i<e.size();i++) {
-                if( (p=s.find(e[i])) != s.npos ) {
-                    if(ret == s.npos) {
-                        ret = p;
-                    }
-                    else {
-                        if(p < ret)
-                            ret = p;
-                    }
+        std::string dot_stuff(std::string data) {
+            // RFC 5321 4.5.2.  Every line that begins with "." gets another,
+            // including the first, because "the first line of the body" is
+            // still a line.
+            //
+            // This used to do something else entirely: it searched the body
+            // for the terminator "\r\n.\r\n" and rewrote it as "\r\n. \r\n",
+            // inserting a *space* into the message.  That is transparency
+            // backwards -- it silently altered the sender's content, and it
+            // did nothing at all for a line like ".signature" that does not
+            // happen to be a lone dot, which is the case the mechanism exists
+            // for.  Such a line ended the DATA command early and the rest of
+            // the message was fed to the server as SMTP commands.
+            std::string::size_type p = 0;
+
+            while(p < data.size()) {
+                if(data[p] == '.') {
+                    data.insert(p, 1, '.');
+                    p++;
                 }
+
+                const std::string::size_type nl = data.find("\r\n", p);
+                if(nl == data.npos) break;
+
+                p = nl + 2;
             }
-            return ret;
+
+            return data;
         }
 
-        std::string parse_end(const std::string& s, const std::vector<std::string>& ends) {
-            if(ends.size() == 0) {
-                return s;
-            }
-            
-            std::string::size_type p = find_end(s,ends);
-            if(p != s.npos) {
-                return s.substr(0,p);
-            }
-            else {
-                return s;
-            }
-            
-        }
+        std::string dot_unstuff(std::string data) {
+            std::string::size_type p = 0;
 
-        void parse_end(std::istream& is, std::vector<std::string> ends, std::string& raw) {
-            // if we don't have any ends, just grab it all
-            if(ends.size() == 0) {
-                sys::getstring(is,raw);
-                return;
-            }
-            long beg = is.tellg();
-            std::string buf;
-            std::string tmp;
-            int count=0;
-            std::string::size_type p, q;
-            while(!is.eof()) {
-                sys::getstring(is, buf, parse_size);
-                
-                p=0;q=0;
-                if( (p=find_end(buf,ends)) != buf.npos  ) {
-                    tmp += buf.substr(0,p);
-                    is.seekg(beg+count+p, std::ios_base::beg);
-                    raw = tmp;
-                    return;
+            while(p < data.size()) {
+                if(data[p] == '.') {
+                    data.erase(p, 1);
                 }
-                else {
-                    tmp += buf;
-                    count += buf.length();
-                }
+
+                const std::string::size_type nl = data.find("\r\n", p);
+                if(nl == data.npos) break;
+
+                p = nl + 2;
             }
-            raw = tmp;
+
+            return data;
         }
 
         bool same_address(const std::string& p_addr1, const std::string& p_addr2) {
@@ -896,17 +764,20 @@ namespace jlib {
                 }
                
                 // On a local: this rewrote its own parameter, first to
-                // canonical line endings and then to escape any end-of-message
-                // sequence in the body.
-                std::string body = convert_to_crlf(data);
-                std::string eom = "\r\n.\r\n";
-                std::string neom = "\r\n. \r\n";
-                while(body.find(eom) != body.npos) {
-                    body.replace(body.find(eom), eom.length(), neom);
+                // canonical line endings and then to make the body safe to
+                // send inside a dot-terminated stream.
+                std::string body = dot_stuff(convert_to_crlf(data));
+
+                // The terminator is CRLF "." CRLF, and the leading CRLF is the
+                // one that ends the last line of the body -- so a body that
+                // already ends in CRLF must not get another, or the message
+                // gains a blank line every time it is sent.
+                if(body.size() < 2 || body.compare(body.size() - 2, 2, "\r\n") != 0) {
+                    body += "\r\n";
                 }
-                
+
                 handshake(stream, "DATA", "354");
-                handshake(stream, body+eom, "250");
+                handshake(stream, body + ".\r\n", "250");
                 
                 stream.close();
             }

@@ -57,7 +57,23 @@ namespace jlib {
              * Retrieve all email
              */
             std::list<std::string> retrieve();
-            
+
+            /**
+             * Read a multi-line response body, up to the "." that ends it.
+             *
+             * RFC 1939 3: a multi-line response ends with CRLF "." CRLF, and
+             * nothing else terminates it.  The dot transparency is undone on
+             * the way past, so what comes back is the message as it was sent.
+             *
+             * Public and static because it is the whole of what is worth
+             * testing here, and a std::istringstream is a POP3 server for the
+             * purpose.
+             *
+             * Throws Pop3::exception if the stream ends before the "." does --
+             * a truncated message is not a short message.
+             */
+            static std::string read_body(std::istream& is);
+
         protected:
             std::string retrieve(jlib::sys::socketstream& sock, unsigned int which);
             

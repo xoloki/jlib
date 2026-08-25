@@ -21,6 +21,8 @@
 #include <jlib/net/net.hh>
 #include <jlib/net/Imap4.hh>
 
+#include <jlib/util/abnf.hh>
+
 #include <jlib/sys/sys.hh>
 #include <jlib/sys/sslstream.hh>
 #include <jlib/sys/sslproxystream.hh>
@@ -143,6 +145,72 @@ namespace jlib {
         }
 
 
+
+        namespace {
+
+            /**
+             * RFC 3501's literal introducer, and RFC 7888's.
+             *
+             * Two productions, so this is a small thing to reach for a grammar
+             * over -- but it is the RFC's own two productions, which is the
+             * point: what is accepted here can be checked by reading 4.3
+             * rather than by reading this.  Built once, on first use, for the
+             * reason in crypt/curve.hh:42.
+             */
+            const util::abnf::grammar& imap_literal() {
+                static util::abnf::grammar g = [] {
+                    util::abnf::grammar g = util::abnf::compile(
+                        "literal-introducer = \"{\" number [\"+\"] \"}\"\r\n"
+                        "number             = 1*DIGIT\r\n");
+                    g.check();
+
+                    return g;
+                }();
+
+                return g;
+            }
+
+        }
+
+        bool Imap4::literal_size(const std::string& line, std::size_t& n) {
+            // The introducer is the last thing on the line, so this is where
+            // it has to start if it is anywhere.
+            const std::string::size_type b = line.rfind('{');
+
+            if(b == line.npos) return false;
+
+            util::abnf::options o;
+            o.captures = util::abnf::options::capture_policy::listed;
+            o.capture_only = { "number" };
+
+            const util::abnf::parse_result r =
+                imap_literal().at("literal-introducer").try_parse(line.substr(b), o);
+
+            // A whole-input match, so "{12} more words" is not a literal and
+            // neither is "{}", "{-1}" or "{12x}".
+            if(!r) return false;
+
+            const std::string digits = r.root()["number"].str();
+
+            // A count from the network decides how many octets to read, so it
+            // is refused rather than clamped when it is absurd.  Two gigabytes
+            // is past anything a mail server will send in one literal and is
+            // also where the long this used to be held in would have gone
+            // negative.
+            try {
+                const unsigned long long v = std::stoull(digits);
+
+                if(v > 0x7FFFFFFFull) return false;
+
+                n = static_cast<std::size_t>(v);
+            }
+            catch(std::exception&) {
+                return false;
+            }
+
+            return true;
+        }
+
         Imap4::Imap4(util::URL url) 
             : m_url(url)
         {
@@ -258,8 +326,13 @@ namespace jlib {
             if(getenv("JLIB_NET_IMAP4_DEBUG")) 
                 std::cout << "Parse header size from token" << info.back() << std::endl;
 
-            //header_size = util::int_value(util::slice(info[info.size()-1], "{", "}"));
-            header_size = util::int_value(util::slice(info.back(), "{", "}"));
+            std::size_t literal = 0;
+
+            if(!literal_size(buf, literal)) {
+                throw exception("expected a literal at the end of: " + buf);
+            }
+
+            header_size = static_cast<long>(literal);
             if(getenv("JLIB_NET_IMAP4_DEBUG")) 
                 std::cout << "Header size:" << header_size << std::endl;
             
@@ -368,7 +441,13 @@ namespace jlib {
                 size = 0;
             }
 
-            long n = util::intValue(util::slice(bufvec[bufvec.size()-1], "{", "}"));
+            std::size_t literal = 0;
+
+            if(!literal_size(buf, literal)) {
+                throw exception("expected a literal at the end of: " + buf);
+            }
+
+            const long n = static_cast<long>(literal);
             
             if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "DEBUG: reading " << n << " bytes from server...\n";            
             std::string ret;
@@ -415,7 +494,13 @@ namespace jlib {
                 throw exception(buf.substr(tag().length()+1));
             }
             std::vector<std::string> bufvec = util::tokenize(buf);
-            long n = util::intValue(util::slice(bufvec[bufvec.size()-1], "{", "}"));
+            std::size_t literal = 0;
+
+            if(!literal_size(buf, literal)) {
+                throw exception("expected a literal at the end of: " + buf);
+            }
+
+            const long n = static_cast<long>(literal);
             
             if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "DEBUG: reading " << n << " bytes from server...\n";            
             std::string ret;
@@ -818,12 +903,7 @@ namespace jlib {
             handshake(sock,"EXPUNGE");
         }
 
-        std::vector<std::string> Imap4::search(sys::socketstream& sock, const std::string& criteria, const std::string& spec) {
-            std::vector<std::string> ret = handshake(sock,"");
-            return ret;
-        }
-
-        std::vector<std::string> Imap4::fetch(sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, std::vector<std::string> n) {
+                std::vector<std::string> Imap4::fetch(sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, std::vector<std::string> n) {
             std::ostringstream cmd;
             cmd << "FETCH "<<set.first<<":"<<set.second<<" (";
             for(unsigned int i=0;i<n.size();i++) {
@@ -837,12 +917,7 @@ namespace jlib {
             return ret;
         }
 
-        std::vector<std::string> Imap4::partial(sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, std::vector<std::string> n,unsigned int p, unsigned int o) {
-            std::vector<std::string> ret = handshake(sock,"");
-            return ret;            
-        }
-
-        std::vector<std::string> Imap4::store(sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, const std::string& key, std::vector<std::string> val) {
+                std::vector<std::string> Imap4::store(sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, const std::string& key, std::vector<std::string> val) {
             std::ostringstream cmd;
             cmd << "STORE "<<set.first<<":"<<set.second<<" "<<key<<" (";
             for(unsigned int i=0;i<val.size();i++) {
@@ -864,10 +939,6 @@ namespace jlib {
             std::vector<std::string> ret = handshake(sock,cmd.str());
         }
         
-        std::vector<std::string> Imap4::uid(sys::socketstream& sock, const std::string& cmd, std::vector<std::string> arg) {
-            std::vector<std::string> ret = handshake(sock,"");
-            return ret;
-        }
-       
+               
     }
 }
