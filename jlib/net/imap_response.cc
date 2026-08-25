@@ -118,6 +118,44 @@ std::string text_of(const match& m)
 
 }
 
+// ------------------------------------------------------------------ writing
+
+std::string quote(std::string_view s)
+{
+    // ASTRING-CHAR, as rfc3501.hh works it out: the run that needs no quoting
+    // at all.  The empty string is not one of them -- "" is how an empty
+    // astring is written.
+    const auto bare = [](unsigned char c) {
+        return c == 0x21 || (c >= 0x23 && c <= 0x24) || (c >= 0x26 && c <= 0x27) ||
+               (c >= 0x2B && c <= 0x5B) || (c >= 0x5D && c <= 0x7A) ||
+               (c >= 0x7C && c <= 0x7E);
+    };
+
+    bool plain = !s.empty();
+
+    for(unsigned char c : s) {
+        if(c == '\r' || c == '\n' || c == '\0') {
+            throw error("a CR, LF or NUL cannot go in an IMAP command argument");
+        }
+
+        if(!bare(c)) plain = false;
+    }
+
+    if(plain) return std::string(s);
+
+    std::string out = "\"";
+
+    for(char c : s) {
+        // RFC 3501 4.3: inside a quoted string these two, and only these two,
+        // are escaped.
+        if(c == '"' || c == '\\') out += '\\';
+
+        out += c;
+    }
+
+    return out + "\"";
+}
+
 // ------------------------------------------------------------------ reading
 
 bool literal_size(const std::string& line, std::size_t& n)

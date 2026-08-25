@@ -27,5 +27,17 @@ autogen/configure/make steps.  A .dockerignore keeps the host's build trees
 and generated autotools output out of the image so the container always
 bootstraps for its own platform.
 
+The image also installs dovecot-imapd, for tests/net_imap_live_test.  That
+test starts a Dovecot on a high port with a Maildir it seeds, drives
+jlib::net::Imap4 against it, and stops it again -- it is the only thing in the
+suite that talks to a server rather than to a std::istringstream, and the only
+way to exercise a literal, because only a server decides when to send one.
+
+Outside the container there is usually no dovecot, and the test reports SKIP
+(exit 77) rather than failing.  It needs to run as root: Dovecot refuses to
+start imap-login as root, so the config leaves that process on the package's
+own unprivileged user, and the seeded Maildir has to be chowned to an ordinary
+uid because Dovecot also refuses a mail uid of 0.
+
 Note: the crypt_groth_test allocates heavily.  If it is killed with exit 137
 the container hit its memory ceiling -- raise the Docker VM's RAM allocation.

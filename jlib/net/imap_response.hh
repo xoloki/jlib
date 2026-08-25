@@ -56,6 +56,35 @@ namespace net {
 namespace imap {
 
 /**
+ * A string as an IMAP command may carry it: bare, or quoted and escaped.
+ *
+ * The inverse of RFC 3501 4.3's `quoted` production, which the response
+ * parser here reads -- a quoted string is the same thing in both directions,
+ * which is why this lives beside the reader.
+ *
+ * Every command in Imap4 used to build its arguments by hand:
+ *
+ *     handshake(sock, "LOGIN " + user + " " + pass);
+ *     handshake(sock, "SELECT \"" + path + "\"");
+ *
+ * A password or a mailbox name containing a space produced a malformed
+ * command; one containing a quote or a backslash produced a differently
+ * malformed one.  And one containing "{5}" produced a *literal introducer* --
+ * the server answers "+" and then reads the next five octets as data, which
+ * desynchronises the connection for good.
+ *
+ * Throws imap::error on a value containing CR, LF or NUL.  None of the three
+ * can appear in a quoted string at all, and a CR is how a command becomes two
+ * commands.
+ *
+ * Not modified UTF-7.  RFC 3501 5.1.3 says a mailbox name with a non-ASCII
+ * character in it is encoded that way, and jlib does not do it -- the octets
+ * go out as they came in, which is what most servers accept in practice and
+ * is a gap rather than a decision.
+ */
+std::string quote(std::string_view s);
+
+/**
  * The octet count of the literal a response line ends with.
  *
  * RFC 3501 4.3: "{" number "}" CRLF, then that many octets.  Returns false
