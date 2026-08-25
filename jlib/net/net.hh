@@ -162,36 +162,21 @@ namespace jlib {
         }
 
         namespace http {
-            typedef enum { v10, v11 } version;
-            
-            class Request {
-            public:
-                typedef enum { get, head, post, put, connect } method;
-
-                Request(method m, util::URL u);
-                
-                version m_version;
-                method m_method;
-                util::URL m_url;
-                util::Headers m_headers;
-                std::string m_data;
-            };
-
-            class Response {
-            public:
-                std::string get_text() const;
-                static std::string get_text(int status);
-
-                int m_status;
-                version m_version;
-                util::Headers m_headers;
-                std::string m_data;
-            };
-
+            // Request, Response and request() were declared here and defined
+            // nowhere -- no constructor, no get_text(), no request(), in any
+            // file in the tree.  Twenty-odd years of a header promising an HTTP
+            // client that did not exist; the only thing here that ever ran is
+            // get(), below.  They are gone rather than kept as a sketch,
+            // because the sketch had already started to constrain the real
+            // thing: Request held a util::Headers, which is an RFC 5322 header
+            // set that decodes encoded-words, and HTTP fields are not that.
+            //
+            // get() is HTTP/1.0, plaintext-only, and treats any status but 200
+            // as an error, so it cannot follow a redirect or read the body of a
+            // 400 -- which is precisely what an OAuth2 token endpoint answers
+            // with when it has something to tell you.  Nothing in the tree
+            // calls it.  It goes when there is something to replace it with.
             std::string get(jlib::util::URL url);
-            
-            Response request(const Request& r);
-
         }
 
         namespace html {

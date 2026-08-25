@@ -36,6 +36,7 @@
 // genuinely trusted for this run.
 #include "certificate.hh"
 
+#include <jlib/sys/listener.hh>
 #include <jlib/sys/sslstream.hh>
 #include <jlib/sys/sys.hh>
 
@@ -54,6 +55,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <string>
 
 static int failures = 0;
@@ -63,29 +65,6 @@ static void check(const char* what, long got, long want) {
     if(!ok) ++failures;
     std::cout << (ok ? "  ok   " : "  FAIL ") << what
               << ": got " << got << ", expected " << want << "\n";
-}
-
-static int listener(unsigned short* port) {
-    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if(fd < 0) return -1;
-
-    int on = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-
-    struct sockaddr_in a;
-    std::memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-
-    if(::bind(fd, reinterpret_cast<struct sockaddr*>(&a), sizeof(a)) < 0) return -1;
-    if(::listen(fd, 1) < 0) return -1;
-
-    socklen_t len = sizeof(a);
-    if(::getsockname(fd, reinterpret_cast<struct sockaddr*>(&a), &len) < 0) return -1;
-
-    *port = ntohs(a.sin_port);
-    return fd;
 }
 
 int main() {
@@ -100,13 +79,22 @@ int main() {
     // What the client will trust, and only for this run.
     ::setenv("SSL_CERT_FILE", cert.c_str(), 1);
 
-    unsigned short port = 0;
-    const int lfd = listener(&port);
-    if(lfd < 0) {
-        std::cerr << "could not set up a loopback socket, skipping" << std::endl;
+    // This used to be twenty lines of socket/bind/listen/getsockname written
+    // out here.  sys::listener is that code, generalised, and this is the
+    // caller it was generalised from.
+    std::unique_ptr<jlib::sys::listener> l;
+
+    try {
+        l = std::make_unique<jlib::sys::listener>();
+    }
+    catch(std::exception& e) {
+        std::cerr << "could not set up a loopback socket, skipping: " << e.what() << std::endl;
         std::remove(cert.c_str()); std::remove(key.c_str());
         return 77;
     }
+
+    const unsigned short port = l->port();
+    const int lfd = l->get_socket();
 
     const pid_t pid = ::fork();
     if(pid < 0) {
@@ -147,7 +135,7 @@ int main() {
         SSL_CTX_use_certificate_file(ctx, cert.c_str(), SSL_FILETYPE_PEM);
         SSL_CTX_use_PrivateKey_file(ctx, key.c_str(), SSL_FILETYPE_PEM);
 
-        const int peer = ::accept(lfd, 0, 0);
+        const int peer = l->accept();
         if(peer >= 0) {
             SSL* ssl = SSL_new(ctx);
             if(ssl) {
@@ -163,7 +151,7 @@ int main() {
         SSL_CTX_free(ctx);
     }
 
-    ::close(lfd);
+    l->close();
 
     int status = 0;
     ::waitpid(pid, &status, 0);
