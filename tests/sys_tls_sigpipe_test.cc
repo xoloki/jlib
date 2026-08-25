@@ -34,6 +34,8 @@
 // weakening of the verification the client normally does: the handshake is
 // real, the hostname is checked, and it succeeds because the certificate is
 // genuinely trusted for this run.
+#include "certificate.hh"
+
 #include <jlib/sys/sslstream.hh>
 #include <jlib/sys/sys.hh>
 
@@ -61,50 +63,6 @@ static void check(const char* what, long got, long want) {
     if(!ok) ++failures;
     std::cout << (ok ? "  ok   " : "  FAIL ") << what
               << ": got " << got << ", expected " << want << "\n";
-}
-
-/** A self-signed certificate for localhost, written to cert_path and key_path. */
-static bool make_cert(const std::string& cert_path, const std::string& key_path) {
-    EVP_PKEY* key = EVP_RSA_gen(2048);
-    if(key == 0) return false;
-
-    X509* x = X509_new();
-    if(x == 0) { EVP_PKEY_free(key); return false; }
-
-    ASN1_INTEGER_set(X509_get_serialNumber(x), 1);
-    X509_gmtime_adj(X509_getm_notBefore(x), 0);
-    X509_gmtime_adj(X509_getm_notAfter(x), 60 * 60);
-    X509_set_pubkey(x, key);
-
-    X509_NAME* name = X509_get_subject_name(x);
-    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-                               reinterpret_cast<const unsigned char*>("localhost"),
-                               -1, -1, 0);
-    X509_set_issuer_name(x, name);
-
-    // A subject alternative name, not just a CN: SSL_set1_host checks the SAN,
-    // and modern OpenSSL will not fall back to the common name.
-    X509V3_CTX ctx;
-    X509V3_set_ctx_nodb(&ctx);
-    X509V3_set_ctx(&ctx, x, x, 0, 0, 0);
-
-    X509_EXTENSION* san = X509V3_EXT_conf_nid(0, &ctx, NID_subject_alt_name,
-                                              "DNS:localhost,IP:127.0.0.1");
-    if(san) { X509_add_ext(x, san, -1); X509_EXTENSION_free(san); }
-
-    if(!X509_sign(x, key, EVP_sha256())) { X509_free(x); EVP_PKEY_free(key); return false; }
-
-    bool ok = false;
-    FILE* cf = std::fopen(cert_path.c_str(), "wb");
-    FILE* kf = std::fopen(key_path.c_str(), "wb");
-    if(cf && kf)
-        ok = PEM_write_X509(cf, x) && PEM_write_PrivateKey(kf, key, 0, 0, 0, 0, 0);
-    if(cf) std::fclose(cf);
-    if(kf) std::fclose(kf);
-
-    X509_free(x);
-    EVP_PKEY_free(key);
-    return ok;
 }
 
 static int listener(unsigned short* port) {

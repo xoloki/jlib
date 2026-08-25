@@ -28,6 +28,8 @@
 // Exit 77 (SKIP) when there is no dovecot to start, which is every machine
 // that is not the build container.
 
+#include "certificate.hh"
+
 #include <jlib/net/Imap4.hh>
 #include <jlib/net/imap_response.hh>
 
@@ -101,6 +103,7 @@ namespace {
 struct server {
     fs::path dir;
     unsigned int port = 0;
+    unsigned int tls_port = 0;
     bool running = false;
 
     ~server() { stop(); }
@@ -110,6 +113,7 @@ struct server {
         // A port derived from the pid, so two builds on one machine do not
         // collide.
         port = 14000 + static_cast<unsigned int>(::getpid() % 900);
+        tls_port = port + 1000;
 
         dir = fs::temp_directory_path() / ("jlib-imap-" + std::to_string(::getpid()));
 
@@ -131,6 +135,23 @@ struct server {
               << "::" << (dir / "mail").string() << "\n";
         }
 
+        // A certificate for localhost, and the client's trust store pointed
+        // at it.  Not a way around the verification -- sslstream still checks
+        // the hostname with SSL_set1_host -- but a way to make it succeed
+        // without a real CA.  The SAN says DNS:localhost, which is why the TLS
+        // side of this test connects to "localhost" and the plain side to
+        // 127.0.0.1.
+        const std::string cert = (dir / "cert.pem").string();
+        const std::string key = (dir / "key.pem").string();
+
+        if(!make_cert(cert, key)) {
+            std::cerr << "could not generate a certificate\n";
+
+            return false;
+        }
+
+        ::setenv("SSL_CERT_FILE", cert.c_str(), 1);
+
         {
             std::ofstream f(dir / "conf");
 
@@ -138,11 +159,15 @@ struct server {
               << "listen = 127.0.0.1\n"
               << "base_dir = " << (dir / "run").string() << "\n"
               << "log_path = " << (dir / "log").string() << "\n"
-              << "ssl = no\n"
+              << "ssl = yes\n"
+              << "ssl_cert = <" << cert << "\n"
+              << "ssl_key = <" << key << "\n"
               << "disable_plaintext_auth = no\n"
               << "mail_location = maildir:" << (dir / "mail" / "Maildir").string() << "\n"
               << "service imap-login {\n"
               << "  inet_listener imap {\n    port = " << port << "\n  }\n"
+              << "  inet_listener imaps {\n    port = " << tls_port
+              << "\n    ssl = yes\n  }\n"
               << "  chroot =\n"
               << "}\n"
               << "passdb {\n  driver = passwd-file\n  args = "
@@ -467,6 +492,53 @@ int main() {
         ok("the session ran without throwing", false, e.what());
         std::cerr << s.log();
     }
+
+    // The same again over TLS, which is the difference between this library
+    // being usable with a real account and not.
+    //
+    // "imaps" is the scheme IANA registered, and Imap4::is_secure() tested
+    // find("simap") -- which "imaps" does not contain.  So an imaps:// URL was
+    // not secure: the client opened a plain socket to port 143 and sent LOGIN
+    // with the password on it.
+    std::cout << "\nover TLS:\n";
+
+    for(const char* scheme : { "imaps", "simap" }) {
+        jlib::util::URL tls(std::string(scheme) + "://joe@localhost:"
+                            + std::to_string(s.tls_port) + "/INBOX");
+
+        tls.set_pass(PASSWORD);
+
+        jlib::net::Imap4 secure(tls);
+
+        ok(std::string(scheme) + ":// is a secure scheme", secure.is_secure());
+
+        try {
+            std::unique_ptr<jlib::sys::socketstream> sock(secure.connect());
+
+            secure.login(*sock, "", "");
+            secure.select(*sock, "INBOX");
+
+            const std::string raw = secure.get(*sock, 1, false).raw();
+
+            ok(std::string(scheme) + ":// handshakes, logs in and fetches",
+               raw == impersonating_body(),
+               raw == impersonating_body() ? std::string()
+                                           : std::to_string(raw.size()) + " octets");
+
+            secure.logout(*sock);
+        }
+        catch(std::exception& e) {
+            ok(std::string(scheme) + ":// works", false, e.what());
+            std::cerr << s.log();
+        }
+    }
+
+    // The port it picks when it is not told one.
+    ok("imaps:// with no port is still secure",
+       jlib::net::Imap4(jlib::util::URL("imaps://joe@localhost/INBOX")).is_secure());
+
+    ok("and imap:// is not",
+       !jlib::net::Imap4(jlib::util::URL("imap://joe@localhost/INBOX")).is_secure());
 
     // What a green run does NOT establish.
     //

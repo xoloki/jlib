@@ -3,7 +3,7 @@
 AM_CPPFLAGS = -I$(top_srcdir) \
 	$(GPGME_CFLAGS) $(GPGERROR_CFLAGS) $(SODIUM_CFLAGS) $(OPENSSL_CFLAGS) $(JSONC_CFLAGS) $(PORTAUDIO_CFLAGS)
 
-EXTRA_DIST = audio_test.hh
+EXTRA_DIST = audio_test.hh certificate.hh
 
 JSYS_LA   = $(top_builddir)/jlib/sys/libjsys.la
 JUTIL_LA  = $(top_builddir)/jlib/util/libjutil.la
@@ -137,7 +137,7 @@ net_mime_test_SOURCES           = net_mime_test.cc
 net_mime_test_LDADD             = $(JNET_LA) $(JUTIL_LA)
 
 net_imap_live_test_SOURCES      = net_imap_live_test.cc
-net_imap_live_test_LDADD        = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA)
+net_imap_live_test_LDADD        = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
 net_imap_test_SOURCES           = net_imap_test.cc
 net_imap_test_LDADD             = $(JNET_LA) $(JUTIL_LA)

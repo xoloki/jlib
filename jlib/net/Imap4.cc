@@ -35,7 +35,10 @@
 
 const int PORT = 143;
 const int SSL_PORT = 993;
-const std::string SSL_PROTOCOL = "simap";
+// Both spellings.  "imaps" is what IANA registered and what anyone would
+// write; "simap" is the older convention this library was written with and is
+// in config files that predate the other.
+const std::string SSL_PROTOCOLS[] = { "imaps", "simap" };
 const std::string OK = "* OK";
 const std::string INTERNAL = "Subject: DON'T DELETE THIS MESSAGE -- FOLDER INTERNAL DATA";
 const int TAG_WIDTH = 5;
@@ -145,7 +148,18 @@ namespace jlib {
         }
         
         bool Imap4::is_secure() {
-            return (util::lower(m_url.get_protocol()).find(SSL_PROTOCOL) != std::string::npos);
+            // A whole-scheme comparison, not find().  "imaps" does not contain
+            // "simap", so the substring test said an imaps:// URL was not
+            // secure -- and the caller then opened a plain socketstream to
+            // port 143 and sent LOGIN with the password on it.  The standard
+            // scheme downgraded silently to no encryption at all.
+            const std::string scheme = util::lower(m_url.get_protocol());
+
+            for(const std::string& s : SSL_PROTOCOLS) {
+                if(scheme == s) return true;
+            }
+
+            return false;
         }
 
         Email Imap4::get(sys::socketstream& sock, 

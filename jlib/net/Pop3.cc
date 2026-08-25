@@ -35,20 +35,33 @@ const std::string OK = "+OK";
 namespace jlib {
     namespace net {
         
+        bool Pop3::is_secure(const jlib::util::URL& url) {
+            // A whole-scheme comparison, not find().  "pop3s" contains "pop"
+            // and does not contain "spop", so the old test read the standard
+            // scheme as *plain* POP3: it chose port 110, opened a plain
+            // socketstream, and sent the password over it.  Silently, and for
+            // the one spelling anybody outside this library would use.
+            //
+            // Both spellings are here: "pop3s" is what IANA registered,
+            // "spop" is the older convention this library was written with.
+            const std::string scheme = jlib::util::lower(url.get_protocol());
+
+            return scheme == "pop3s" || scheme == "spop" || scheme == "spop3";
+        }
+
         Pop3::Pop3(jlib::util::URL url, bool remove) 
             : m_remove(remove)
         {
             m_url = url;
+
+            const std::string scheme = jlib::util::lower(m_url.get_protocol());
+
+            if(!is_secure(m_url) && scheme != "pop3" && scheme != "pop") {
+                throw exception("bad protocol in jlib::net::Pop3::Pop3(), m_url = "+m_url());
+            }
+
             if(m_url.get_port() == "") {
-                if(jlib::util::lower(m_url.get_protocol()).find("spop") != std::string::npos) {
-                    m_url.set_port(jlib::util::string_value(SPORT));
-                }
-                else if(jlib::util::lower(m_url.get_protocol()).find("pop") != std::string::npos) {
-                    m_url.set_port(jlib::util::string_value(PORT));
-                }
-                else {
-                    throw exception("bad protocol in jlib::net::Pop3::Pop3(), m_url = "+m_url());
-                }
+                m_url.set_port(jlib::util::string_value(is_secure(m_url) ? SPORT : PORT));
             }
         }
         
@@ -105,14 +118,15 @@ namespace jlib {
         
         jlib::sys::socketstream* Pop3::connect() {
             jlib::sys::socketstream* sock;
-            if(jlib::util::lower(m_url.get_protocol()).find("spop") != std::string::npos) {
+            // The constructor already refused a scheme that is neither, so
+            // there is no third case to fall through to -- and the one that
+            // used to be here tested find("pop"), which is how "pop3s" ended
+            // up on a plain socket.
+            if(is_secure(m_url)) {
                 sock = new jlib::sys::sslstream(m_url.get_host(), m_url.get_port_val());
             }
-            else if(jlib::util::lower(m_url.get_protocol()).find("pop") != std::string::npos) {
-                sock = new jlib::sys::socketstream(m_url.get_host(), m_url.get_port_val());
-            }
             else {
-                throw exception("bad protocol in jlib::net::Pop3::connect(), m_url = "+m_url());
+                sock = new jlib::sys::socketstream(m_url.get_host(), m_url.get_port_val());
             }
 
 

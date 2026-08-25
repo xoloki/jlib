@@ -17,10 +17,10 @@ Each subdirectory of `jlib/` is one automake-built libtool library named
 
 | Dir | Library | What it is |
 | --- | --- | --- |
-| `jlib/sys` | `libjsys` | The foundation. iostream-based wrappers over OS facilities: `socketstream`, `sslstream`/`tlsstream`, `proxystream`, `sslproxystream`, `serialstream`, `pstream` (subprocess), `tfstream` (temp file). Plus `Servent`/`ASServent` (threaded worker + command queue), `sync<T>` (mutex-wrapped value, C++11), `ringbuffer<T>` (lock-free, one producer and one consumer, written for the audio callback), `pipe`, `Directory`, `joystick`, `Object` (a polymorphic base), `signal<R(Args...)>`. |
-| `jlib/util` | `libjutil` | String/format grab bag: `util.hh` (tokenize, trim, chop, base64/qp/URI codecs, byte `get`/`set`), `Regex` (POSIX `regex.h`), `Date` (RFC-822 etc.), `Headers` (MIME header folding), `MimeType`, `URL`, `Timer`, a hand-rolled XML tokenizer/parser/DOM (`xml.hh`, `xmlparser.hh`, `xmltokenizer.hh`), and `json.hh` (a C++ facade over json-c). |
+| `jlib/sys` | `libjsys` | The foundation. iostream-based wrappers over OS facilities: `socketstream`, `sslstream`/`tlsstream`, `proxystream`, `sslproxystream`, `serialstream`, `pstream` (subprocess), `tfstream` (temp file). `run(argv, out, err)` executes a program with no shell involved — reach for it rather than `shell()`, which hands its argument to `/bin/sh`. Plus `Servent`/`ASServent` (threaded worker + command queue), `sync<T>` (mutex-wrapped value, C++11), `ringbuffer<T>` (lock-free, one producer and one consumer, written for the audio callback), `pipe`, `Directory`, `joystick`, `Object` (a polymorphic base), `signal<R(Args...)>`. |
+| `jlib/util` | `libjutil` | Two halves. The **parsing** half is the 2026 work: `abnf.hh` is a parser-combinator core with an RFC 5234 text front end on top (`compile()` reads an RFC's grammar as it stands), and the grammars themselves are pasted into headers — `rfc5322.hh` (3.2 lexical tokens, 3.3 date-time), `rfc2045.hh`, `rfc2047.hh`, `rfc3986.hh` — with `content_type`, `encoded_word`, `URL`, `Date` and `xml` reading them. The **grab bag** is the rest: `util.hh` (tokenize, trim, chop, base64/qp/URI codecs, byte `get`/`set`), `Regex` (POSIX `regex.h`, one live caller left), `Headers` (MIME header folding), `MimeType`, `Timer`, `json.hh` (a facade over json-c). |
 | `jlib/crypt` | `libjcrypt` | `crypt.hh` wraps GPGME (OpenPGP encrypt/sign/verify). The `curve`/`schnorr`/`groth` trio is the recent work: ristretto255 `Scalar`/`Point`/`Commitment` over libsodium, Schnorr proofs (single, double, `GeneralProof<N>`), and Groth binary/zero-argument proofs. Built only when libsodium *with* ristretto headers is present. |
-| `jlib/net` | `libjnet` | Email client stack: `Email` (MIME parsing), `MailBox`/`MBox`/`Imap4Box`, `Pop3`, `Imap4`, `MailFolder`, plus `AS*` async variants layered on `sys::ASServent`. `net.cc` has the address-extraction logic the `net_extract_address_*` tests cover. |
+| `jlib/net` | `libjnet` | Email client stack: `Email` (MIME), `MailBox`/`MBox`/`Imap4Box`, `Pop3`, `Imap4`, `MailFolder`, plus `AS*` async variants layered on `sys::ASServent`. The protocol grammars live here — `rfc5322.hh` (addresses, appended to util's lexical block) read by `address.{hh,cc}`, and `rfc3501.hh` (IMAP responses) read by `imap_response.{hh,cc}`. `imap::read()` follows literals, which is why a response is not a line; `imap::quote()` writes command arguments. |
 | `jlib/media` | `libjmedia` | Audio via PortAudio, driven from its **callback**: `write()` fills a `sys::ringbuffer` and the device's callback drains it, so nothing in the path sleeps or polls. `AudioSink` is the device interface and `PortAudioSink` the implementation; `Player` (a `Servent`) runs a feeder thread so transport commands never wait on the device. Plus `AudioFile`/`WavFile`, `PlayList`, and streambuf-based `datastream`/`wavstream`/`notestream`/`audiofilestream`. `Type.hh` is a template-specialization table over PCM sample formats. `Dsp` is the retired OSS backend, kept but not built. |
 | `jlib/math` | `libjmath` | Header-only despite being a `lib_LTLIBRARIES` (its `_SOURCES` are all `.hh`). `matrix`, `vertex`, `tensor`, `buffer`, `polynomial` (templated on a Power type so it can hold curve `Scalar`s), and `Plot<T>` — the abstract plotting base, with `projection_mode` for perspective, orthographic or mixed. `object<T>` holds index-based topology — vertices, edges, and 2-faces built lazily — with `cuboid`, `pyramoid`, `spheroid`, `staroid` and `torus` (a flat k-torus in n dimensions; equal radii and k=2 is the Clifford torus). |
 | `jlib/x` | `libjx` | Raw Xlib: `Display`, `Window`, and an X11 `Plot`. |
@@ -120,28 +120,42 @@ The media tests are silent unless passed `--play` or `--play-all`.
 
 Between 2020 and 2021 the active work was `crypt` (curve/schnorr/groth) and the
 `math::polynomial` support behind it. In 2026 the library was ported to build on
-macOS and modern Linux, in a seven-phase plan that is now **complete**: autotools
-modernized to C++20, libsigc++ and glibmm replaced with `std::`, OSS replaced
-with PortAudio, GLUT replaced with GLFW, 4-D objects rendered as solid 3-D
-geometry, and an API pass over copies, moves and exception specifications.
+macOS and modern Linux — autotools to C++20, libsigc++ and glibmm replaced with
+`std::`, OSS replaced with PortAudio, GLUT with GLFW, 4-D objects rendered as
+solid 3-D geometry — and then rewritten to parse by the RFCs rather than by
+`find()` and `substr()`.
 
 The headline goal since 1999 — rendering 4D+ objects as solid 3-D geometry — is
 done. `jhardhyper` draws translucent depth-sorted faces with per-frame normals,
 for hypercubes and for the flat torus, and under stereographic projection shows
 the Hopf foliation as nested tori.
 
-Both `TODO.md` items are done — libsigc++ is gone, and `sys/sslstream.hh` now
-uses the system trust store and verifies the hostname with `SSL_set1_host`.
+**The parsing arc is done too, and it is what most of the library now rests
+on.** An ABNF parser was built (`util::abnf`), an RFC's grammar can be pasted
+into a header and read as it stands, and everything that used to guess now does
+not: addresses (RFC 5322), MIME headers (2045/2047/2231), URLs (3986), dates
+(5322 §3.3), IMAP responses (3501), and XML. The XML parser was replaced
+clean-room along the way, which removed the last copyright the author did not
+hold and **let the whole library relicense from GPL v2+ to Apache 2.0**.
+
+`tests/net_imap_live_test` starts a real Dovecot with a generated certificate
+and drives `Imap4` against it, in plaintext and over TLS. It is the only test
+that talks to a server rather than a `std::istringstream`, and the only way to
+exercise an IMAP literal, because only a server decides when to send one.
 
 Remaining work is tracked in GitHub issues; the phase labels are historical now.
-What is left is a normal backlog rather than porting: one network bug (#11,
-SIGPIPE terminates the process on a dropped connection), the graphics chain that
-would let one `HyperPlot` serve both apps (#20 → #24 → #28), tessellation and
-face enumeration for the remaining shapes (#31, #35), and some efficiency and
-API tidying (#47, #53).
+What is left is the graphics chain that would let one `HyperPlot` serve both
+apps (#20 → #24 → #28), tessellation and face enumeration for the remaining
+shapes (#31, #35), two `math` bugs (#53, and #76 — `vertex` and `matrix` share
+storage when copied but deep-copy when assigned, which is why `jhypermusic`
+reported exactly zero Doppler for months), and some efficiency and API tidying
+(#47, #69).
 
-Two habits from this work worth keeping. **Measure before diagnosing** — several
-"obvious" causes here were wrong, and the counter-example was usually a ten-line
-program under a counting `operator new` or a sanitizer. And **say what a test
-does not establish**: `sys_ringbuffer_test` passes, and neither it nor TSan
-verifies the memory ordering it depends on, which is written down in both.
+Three habits from this work worth keeping. **Measure before diagnosing** —
+several "obvious" causes here were wrong, and the counter-example was usually a
+ten-line program under a counting `operator new` or a sanitizer. **Say what a
+test does not establish**: `sys_ringbuffer_test` passes, and neither it nor TSan
+verifies the memory ordering it depends on, which is written down in both. And
+**mark every departure from a published grammar at the point of use** — the
+`rfc*.hh` headers say `; jlib:` on each one and why, because the whole value of
+pasting the RFC is that a reader can check it against the document.

@@ -54,6 +54,15 @@ namespace jlib {
             Pop3(jlib::util::URL url, bool remove=true);
 
             /**
+             * Does this URL's scheme mean TLS?
+             *
+             * "pop3s" and "spop", compared whole.  It used to be
+             * find("spop") != npos, and "pop3s" does not contain "spop" -- so
+             * the standard scheme chose port 110 and a plain socket.
+             */
+            static bool is_secure(const jlib::util::URL& url);
+
+            /**
              * Retrieve all email
              */
             std::list<std::string> retrieve();
