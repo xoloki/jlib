@@ -23,6 +23,7 @@
 
 #include <sys/stat.h>
 
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <cctype>
@@ -290,55 +291,101 @@ namespace jlib {
         void store(std::ostream& os, std::map<std::string,std::string>& m);
 
         /**
-         * namespace base64 contains functions that encode and decode base64 encryption
+         * base64, RFC 4648 section 4 as MIME uses it.
+         *
+         * ## Decoding is lenient, and says when it had to be
+         *
+         * RFC 2045 6.8 requires that characters outside the alphabet be
+         * ignored in base64-encoded data -- that rule is what makes the line
+         * breaks in a MIME body work, so it is not optional.  But "ignored"
+         * covers both a CRLF, which is expected, and a byte of corruption,
+         * which is not, so the two-argument form says which happened:
+         *
+         *     bool clean;
+         *     std::string data = base64::decode(part, clean);
+         *     if(!clean) { ... }   // something was skipped, or the tail was
+         *                          // short, or there was data after the "="
+         *
+         * A final group of one symbol carries six bits, which is not a byte.
+         * It is dropped and clean goes false, rather than being rounded up
+         * into a byte that the sender never wrote.
          */
         namespace base64 {
-            
-            /**
-             * Decode the std::string into a blob.
-             *
-             * @param s std::string to parse data from
-             * @return decoded data
-             */
+
+            /** Decoded bytes.  See the note above on what is skipped. */
             std::string decode(const std::string& s);
-            
+
+            /** As decode(s), and clears clean if anything was not as declared. */
+            std::string decode(const std::string& s, bool& clean);
+
             /**
-             * Encode the blob into a string.
+             * Encoded, on one line.
              *
-             * @param s std::string to parse data from
-             * @return encoded data
+             * No line breaks: an SMTP AUTH token and an RFC 2047 encoded word
+             * both go through here and neither may contain whitespace.  Ask
+             * for wrapping where a MIME body wants it.
              */
             std::string encode(const std::string& s);
 
+            /** Encoded, broken with CRLF every wrap columns.  0 means never. */
+            std::string encode(const std::string& s, std::size_t wrap);
+
         }
-        
+
+        /**
+         * Quoted-printable, RFC 2045 section 6.7.
+         *
+         * Not RFC 2047's "Q" encoding, which is a different rule set on the
+         * same idea and belongs with Headers.
+         */
         namespace qp {
-            
+
             /**
-             * Decode the std::string into a blob.
+             * Decoded bytes.
              *
-             * @param s std::string to parse data from
-             * @return decoded data
+             * An "=" that does not begin a valid escape is passed through as
+             * written and clears clean.  It used to be run through strtol,
+             * which stops at the first character it cannot read and returns
+             * zero, so "=ZZ" became a NUL byte in the middle of the message.
              */
             std::string decode(const std::string& s);
-            
-            /**
-             * Encode the blob into a string.
-             *
-             * @param s std::string to parse data from
-             * @return encoded data
-             */
+            std::string decode(const std::string& s, bool& clean);
+
+            /** Encoded, with soft line breaks at 76 columns. */
             std::string encode(const std::string& s);
 
         }
 
-
+        /**
+         * Percent-encoding, RFC 3986 sections 2.1 and 2.3.
+         */
         namespace uri {
+
+            /**
+             * Everything outside unreserved -- ALPHA DIGIT "-" "." "_" "~" --
+             * is escaped.
+             *
+             * This used to name eleven characters to escape and leave the
+             * rest, so a space, a quote and every byte over 0x7F went into a
+             * URI untouched.
+             */
             std::string encode(const std::string& s);
+
+            /**
+             * Decoded bytes.
+             *
+             * A "%" that does not begin a valid escape is passed through and
+             * clears clean.  The old version restarted its search from the
+             * front of the string after every replacement, so a "%" that came
+             * out of one escape was decoded again -- "%2525" came back as a
+             * NUL rather than as "%25".
+             */
             std::string decode(const std::string& s);
+            std::string decode(const std::string& s, bool& clean);
+
         }
-       
-        
+
+
         namespace xml {
             std::string encode(const std::string& s);
             std::string decode(const std::string& s);
