@@ -47,11 +47,8 @@ TESTS = \
 	math_test \
 	math_object_test \
 	tensor_test \
- \
-	net_extract_address_simple_test \
-	net_extract_address_mangled_test \
-	net_extract_address_noat_test \
-	net_extract_address_test \
+\
+	net_address_test \
 	net_email_test \
 	net_email_received_test \
 	net_email_multipart_test \
@@ -120,14 +117,9 @@ media_playlist_test_LDADD     = $(JMEDIA_LA) $(JUTIL_LA) $(JSYS_LA)
 media_live_test_SOURCES       = media_live_test.cc
 media_live_test_LDADD         = $(JMEDIA_LA) $(JUTIL_LA) $(JSYS_LA)
 
-net_extract_address_test_SOURCES        = net_extract_address_test.cc
-net_extract_address_test_LDADD          = $(JNET_LA)
-net_extract_address_simple_test_SOURCES = net_extract_address_simple_test.cc
-net_extract_address_simple_test_LDADD   = $(JNET_LA)
-net_extract_address_mangled_test_SOURCES = net_extract_address_mangled_test.cc
-net_extract_address_mangled_test_LDADD   = $(JNET_LA)
-net_extract_address_noat_test_SOURCES = net_extract_address_noat_test.cc
-net_extract_address_noat_test_LDADD   = $(JNET_LA)
+net_address_test_SOURCES        = net_address_test.cc
+net_address_test_LDADD          = $(JNET_LA) $(JUTIL_LA)
+
 net_email_test_SOURCES          = net_email_test.cc
 net_email_test_LDADD            = $(JNET_LA)
 net_email_received_test_SOURCES = net_email_received_test.cc

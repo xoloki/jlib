@@ -1024,12 +1024,16 @@ std::string error::report() const
     return o.str();
 }
 
+void error::raise() const { throw *this; }
+
 budget_exceeded::budget_exceeded(const std::string& msg, std::string input,
                                  std::size_t offset)
     : error("jlib::util::abnf::budget_exceeded: " + msg, std::move(input),
             offset, {}, {})
 {
 }
+
+void budget_exceeded::raise() const { throw *this; }
 
 // -------------------------------------------------------------------- match
 
@@ -1269,6 +1273,41 @@ std::ostream& operator<<(std::ostream& os, const rule& r)
     return os << r.to_abnf();
 }
 
+/**
+ * The first line of report(), for what().
+ *
+ * Built here rather than left to report() because an error that escapes -- to
+ * a terminate handler, or to a caller that wraps it in one of its own -- is
+ * seen through what() and nothing else, and "jlib::util::abnf::error" on its
+ * own says only which library was unhappy.
+ */
+static std::string summarise(std::string_view in, std::size_t offset,
+                             const std::vector<std::string>& expected)
+{
+    std::ostringstream o;
+
+    o << "jlib::util::abnf::error";
+
+    if(!expected.empty()) {
+        o << ": expected ";
+
+        for(std::size_t i = 0; i < expected.size(); i++) {
+            if(i) o << (i + 1 == expected.size() ? " or " : ", ");
+            o << expected[i];
+        }
+    }
+
+    std::size_t line = 1, start = 0;
+
+    for(std::size_t i = 0; i < offset && i < in.size(); i++) {
+        if(in[i] == '\n') { line++; start = i + 1; }
+    }
+
+    o << " at line " << line << ", column " << (offset - start + 1);
+
+    return o.str();
+}
+
 parse_result rule::try_parse(std::string_view in) const
 {
     return try_parse(in, options());
@@ -1304,8 +1343,8 @@ parse_result rule::try_parse(std::string_view in, const options& o) const
 
     if(!ok) {
         out.m_why = std::make_shared<error>(
-            "jlib::util::abnf::error", std::string(in), ctx.furthest,
-            ctx.expected, ctx.furthest_stack);
+            summarise(in, ctx.furthest, ctx.expected), std::string(in),
+            ctx.furthest, ctx.expected, ctx.furthest_stack);
 
         return out;
     }
@@ -1329,7 +1368,7 @@ match rule::parse(std::string_view in, const options& o) const
 {
     parse_result r = try_parse(in, o);
 
-    if(!r) throw r.why();
+    if(!r) r.why().raise();
 
     return r.root();
 }
@@ -2255,10 +2294,15 @@ grammar compile(std::string_view text, const compile_options& o)
         const std::string name = rl.child("defined-name").str();
         const std::string op = rl.child("op").str();
 
+        // as(name, ...) rather than the bare body: a rule name is the only
+        // name a grammar written in text has, so it has to be the capture
+        // name too, or a compiled grammar can answer "does this parse" and
+        // nothing else.  Costs nothing under capture_policy::listed, which is
+        // what a grammar this size wants anyway.
         rule body = build_alternation(rl.child("alternation"), g, o);
 
-        if(op == "=/") g.define_alternative(name, body);
-        else           g.define(name, body);
+        if(op == "=/") g.define_alternative(name, as(name, body));
+        else           g.define(name, as(name, body));
 
         // Recorded rather than derived: once a prose-val has been lowered to a
         // rule there is nothing left in the tree that says it was one.

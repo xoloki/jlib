@@ -468,6 +468,22 @@ static void the_depth_guard_fires_instead_of_the_stack() {
            std::string(r.why().what()).find("recursion") != std::string::npos,
            std::string(r.why().what()).substr(0, 70));
     }
+
+    // parse() has to throw the type it actually has.  try_parse holds the
+    // failure by reference to error, so "throw why()" sliced a
+    // budget_exceeded down to an error and a caller catching the derived type
+    // never saw one -- which made "I gave up on this" indistinguishable from
+    // "this does not match", the difference being whose fault it is.
+    {
+        bool sliced = false, kept = false;
+
+        try { p.parse(nest(2000)); }
+        catch(budget_exceeded&) { kept = true; }
+        catch(error&)           { sliced = true; }
+
+        ok("and parse() throws it as a budget_exceeded, not as an error",
+           kept && !sliced);
+    }
 }
 
 static void a_grammar_serializes_to_abnf() {

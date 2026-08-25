@@ -74,40 +74,28 @@ namespace jlib {
         void parse_end(std::istream& is, std::vector<std::string> ends, std::string& raw);
 
         /**
-         * Are the two email addresses the same, regardless of style, caps, etc?
+         * Are these two the same person?
          *
-         * @param p_addr1 first address
-         * @param p_addr1 second address
-         * @return true if same addr, ow false
+         * Both sides are parsed and compared without regard to case.  Anything
+         * that cannot be read is not the same as anything -- see the note in
+         * net.cc for what that used to answer instead.
          */
         bool same_address(const std::string& p_addr1, const std::string& p_addr2);
-            
+
         /**
-         * Extract the actual email address from the given string
-         * 
-         * @param p_addr passed email address
-         * @return extracted email addr
-         * @throw email_exception if we can't parse a valid address from the string
+         * The address out of "Joe Yandle <joe@x.com> (at home)".
+         *
+         * mailbox::parse(s, lenient()).addr().str(), and kept because that is
+         * a mouthful for the commonest thing a caller wants.  Throws
+         * address::exception on anything it cannot read; it does not return
+         * an empty string.
+         *
+         * extract_addresses() and split_addresses() are gone.  jlib::net's
+         * mailbox::parse_list does both, and does them against the RFC's
+         * grammar: addr().str() for the values, source() for the text each one
+         * was written as.  See jlib/net/address.hh.
          */
         std::string extract_address(const std::string& p_addr);
-
-        /**
-         * Extract the actual email addresses from a comma delimited string
-         * 
-         * @param s string of passed email address
-         * @return list of extracted email addrs
-         * @throw email_exception if we can't parse a valid address from the string
-         */
-        std::list<std::string> extract_addresses(const std::string& s);
-
-        /**
-         * Split the full addresses from a comma delimited string
-         * 
-         * @param s string of passed email address
-         * @return list of split email addrs
-         * @throw email_exception if we can't parse a valid address from the string
-         */
-        std::list<std::string> split_addresses(const std::string& s);
 
         /**
          * recurse through email, building text for mime and placing it
