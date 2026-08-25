@@ -22,6 +22,8 @@
 
 #include <jlib/util/util.hh>
 #include <jlib/util/Headers.hh>
+#include <jlib/util/content_type.hh>
+#include <jlib/util/encoded_word.hh>
 
 #include <utility>
 
@@ -235,14 +237,26 @@ namespace jlib {
             m_length = current_length;
 
             if(find("content-type") != end()) {
-                std::string cs = "charset=";
-                std::string ctype = get("content-type");
-                std::vector<std::string> ctypev = tokenize(ctype, ";");
-                for(std::vector<std::string>::iterator x = ctypev.begin(); x != ctypev.end(); x++) {
-                    if(x->find(cs) != std::string::npos) {
-                        m_charset = trim(x->substr(x->find(cs)+cs.length()));
-                        break;
-                    }
+                // The fourth hand-rolled copy of MIME parameter parsing in the
+                // tree, and it had every bug the other three had: tokenize on
+                // ";" splits inside a quoted value, so boundary="a;b" was cut
+                // in half; find("charset=") anywhere rather than a whole-name
+                // comparison, so a boundary containing those letters won; and
+                // the value kept its quotes, so m_charset came back as
+                // "utf-8" with the quotation marks still on it and never
+                // matched a charset name anywhere else.
+                //
+                // content_type is in util now precisely so this could go --
+                // it used to be in jlib/net, which util cannot depend on.
+                try {
+                    m_charset = content_type::parse(get("content-type")).get("charset");
+                }
+                catch(content_type::exception&) {
+                    // A Content-Type that will not parse has no charset in it
+                    // to find.  RFC 2045 5.2 says to treat an unreadable one
+                    // as text/plain, which carries us-ascii by default, and
+                    // "" is what this reported for that case before.
+                    m_charset.clear();
                 }
             }
 
@@ -347,100 +361,28 @@ namespace jlib {
          * By value deliberately: val is the working buffer, decoded in place
          * and returned.
          */
-        std::string Headers::decode(std::string val, std::string& charset) {
-            //static jlib::util::Regex reg("(.*)=\\?(.+)\\?([QqBb])\\?(.+)\\?=(.*)");
-            static const std::string BEGIN = "=?", END = "?=";
-            if(getenv("JLIB_UTIL_HEADERS_DEBUG")) {
-                std::cerr <<"enter jlib::util::Headers::decode()"<<std::endl;
-            }
-            //jlib::util::Regex::Match m;
-            if(getenv("JLIB_UTIL_HEADERS_DEBUG")) {
-                std::cerr <<"\tparsing for RFC1522 header"<<std::endl;
-            }
-            
-            std::string::size_type i,j=0,k,m,n, z;
-            std::string enc, dec;
+        std::string Headers::decode(const std::string& val, std::string& charset) {
+            // This used to be forty lines of find() and substr(), with the two
+            // bug classes this repository has spent the year on.
+            //
+            // "m = val.find(\"?\", z)" was never checked against npos, so a
+            // value with an unbalanced "=?" in it read val[1] and took the
+            // whole rest of the string as the charset.  And after
+            // "val.replace(i, k + 2 - i, dec)" it resumed from k -- an index
+            // into the string as it had been *before* the replacement, which
+            // is shorter now -- so a header with two encoded words could lose
+            // the second.  The same shape as the util::recode loop.
+            std::vector<std::string> charsets;
+            const std::string out = rfc2047::decode(val, charsets);
 
-            while( (i=val.find(BEGIN,j)) != val.npos ) {
-            //while( (m=reg(val)) ) {
-                if(getenv("JLIB_UTIL_HEADERS_DEBUG")) {
-                    std::cerr <<"\tfound BEGIN"<<std::endl;
-                }
+            charset = charsets.empty() ? std::string() : charsets.front();
 
-                z = i+BEGIN.length();
-
-                if( (k=val.find(END,z)) != val.npos ) {
-                    if(getenv("JLIB_UTIL_HEADERS_DEBUG")) {
-                        std::cerr <<"\tfound END"<<std::endl;
-                        std::cerr <<"\t" << val.substr(z, k-z) <<std::endl;
-                    }
-                    m = val.find("?", z);
-                    if(val[m+2] == '?') {
-                        charset = val.substr(z, m-z);
-                        if(getenv("JLIB_UTIL_HEADERS_DEBUG")) {
-                            std::cerr <<"\tfound charset: "<< charset << std::endl;
-                        }
-                        enc = val.substr(m+3, k-m-3);
-                        dec = enc;
-
-                        if(std::toupper(val[m+1]) == 'B') {
-                            dec = base64::decode(enc);
-                        }
-                        else if(std::toupper(val[m+1]) == 'Q') {
-                            dec = qp::decode(enc);
-                        }
-                        
-                        if(getenv("JLIB_UTIL_HEADERS_DEBUG")) {
-                            std::cerr <<"\tdecoded "<<enc << " into " << dec << std::endl;
-                        }
-                        val.replace(i, k+END.length()-i, dec);
-                    }
-                }
-                
-                j = k;
-            }
-
-            
-
-            if(getenv("JLIB_UTIL_HEADERS_DEBUG")) {
-                std::cerr <<"leave jlib::util::Headers::decode()"<<std::endl;
-            }
-            return val;
+            return out;
         }
 
         std::string Headers::encode(const std::string& val, const std::string& charset) {
-            bool high = false;
-            std::string::size_type i = 0, p, x;
-            std::string ret;
-
-            while((p = find_high(val, i)) != std::string::npos) {
-                ret += val.substr(i, (p-i));
-                x = val.find(" ", p);
-                if(x != std::string::npos) {
-                    ret += ("=?" + charset + "?B?" + base64::encode(val.substr(p, (x-p))) + "?=");
-                } else {
-                    ret += ("=?" + charset + "?B?" + base64::encode(val.substr(p)) + "?=");
-                }
-
-                i = x;
-            }
-
-            if(i != std::string::npos)
-                ret += val.substr(i);
-
-            return ret;
+            return rfc2047::encode(val, charset);
         }
-
-        std::string::size_type Headers::find_high(const std::string& val, std::string::size_type p) {
-            for(; p < val.length(); p++) {
-                if(static_cast<u_char>(val[p]) > 127) {
-                    return p;
-                }
-            }
-            
-            return std::string::npos;
-        }
-
 
         u_int Headers::get_length() const {
             return m_length;

@@ -21,6 +21,8 @@
 #ifndef JLIB_NET_RFC5322_HH
 #define JLIB_NET_RFC5322_HH
 
+#include <jlib/util/rfc5322.hh>
+
 namespace jlib {
 namespace net {
 
@@ -31,7 +33,8 @@ namespace net {
  * RFC's own text rather than a transcription into find() and substr(), so what
  * jlib accepts can be checked against the document by reading it.
  *
- * Five pieces.  LEXICAL is section 3.2's tokens, which RFC 2045 borrows too;
+ * Four pieces, appended to jlib::util::rfc5322::LEXICAL -- section 3.2's
+ * tokens, which live in util because RFC 2045 and RFC 2047 borrow them too.
  * CORE is the rest of what every policy shares; STRICT and OBSOLETE are two
  * spellings of the six productions the RFC gives an obsolete form to, and
  * exactly one of them is appended; LENIENT is a further "=/" extension for
@@ -81,49 +84,6 @@ namespace net {
  */
 namespace rfc5322 {
 
-/**
- * Section 3.2's lexical tokens, which are not only an address's.
- *
- * Separate from CORE because RFC 2045 5.1 builds Content-Type out of these
- * same pieces -- "comments are allowed in accordance with RFC 822" -- and a
- * grammar for a media type should not have to drag addr-spec in behind it to
- * get a quoted-string.  See jlib/net/rfc2045.hh, which appends to this.
- */
-inline const char* const LEXICAL = R"ABNF(
-; 3.2.1 quoted characters
-quoted-pair     =  "\" (VCHAR / WSP)
-
-; 3.2.2 folding white space and comments
-FWS             =  [*WSP CRLF] 1*WSP
-ctext           =  %d33-39 / %d42-91 / %d93-126
-ccontent        =  ctext / quoted-pair / comment
-comment         =  "(" *([FWS] ccontent) [FWS] ")"
-CFWS            =  (1*([FWS] comment) [FWS]) / FWS
-
-; 3.2.3 atom
-atext           =  ALPHA / DIGIT / "!" / "#" / "$" / "%" / "&" / "'" /
-                   "*" / "+" / "-" / "/" / "=" / "?" / "^" / "_" / "`" /
-                   "{" / "|" / "}" / "~"
-atom            =  [CFWS] atom-text [CFWS]
-atom-text       =  1*atext                    ; jlib: names the value inside
-                                              ; the CFWS, which the span
-                                              ; otherwise includes
-dot-atom        =  [CFWS] dot-atom-text [CFWS]
-dot-atom-text   =  atom-text *("." atom-text) ; jlib: 1*atext respelled, so one
-                                              ; extractor serves both policies
-
-; 3.2.4 quoted strings
-qtext           =  %d33 / %d35-91 / %d93-126
-qcontent        =  qtext / quoted-pair
-quoted-string   =  [CFWS] DQUOTE qs-body DQUOTE [CFWS]
-qs-body         =  *([FWS] qcontent) [FWS]    ; jlib: names what is between the
-                                              ; quotes, which 3.2.4 says is the
-                                              ; whole of the value -- so the
-                                              ; trailing FWS is inside it, or a
-                                              ; parameter written as "a long "
-                                              ; loses its last space
-
-)ABNF";
 
 /**
  * Everything the address policies share: 3.2.5, 3.4.1's addr-spec, and the 3.4

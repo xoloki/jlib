@@ -18,8 +18,8 @@
  *
  */
 
-#ifndef JLIB_NET_CONTENT_TYPE_HH
-#define JLIB_NET_CONTENT_TYPE_HH
+#ifndef JLIB_UTIL_CONTENT_TYPE_HH
+#define JLIB_UTIL_CONTENT_TYPE_HH
 
 #include <cstddef>
 #include <stdexcept>
@@ -28,12 +28,12 @@
 #include <vector>
 
 namespace jlib {
-namespace net {
+namespace util {
 
 /**
  * A Content-Type or Content-Disposition, parsed against MIME's grammar.
  *
- * The grammar is RFC 2045 5.1 and RFC 2231, in jlib/net/rfc2045.hh, read by
+ * The grammar is RFC 2045 5.1 and RFC 2231, in jlib/util/rfc2045.hh, read by
  * jlib::util::abnf::compile().  Nothing here scans by hand.
  *
  *     content_type c = content_type::parse(email.find("CONTENT-TYPE"));
@@ -189,4 +189,4 @@ std::vector<std::string> split_multipart(std::string_view body,
 }
 }
 
-#endif // JLIB_NET_CONTENT_TYPE_HH
+#endif // JLIB_UTIL_CONTENT_TYPE_HH
