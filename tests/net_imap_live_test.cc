@@ -28,7 +28,7 @@
 // Exit 77 (SKIP) when there is no dovecot to start, which is every machine
 // that is not the build container.
 
-#include "certificate.hh"
+#include "mailserver.hh"
 
 #include <jlib/net/Imap4.hh>
 #include <jlib/net/imap_response.hh>
@@ -39,14 +39,12 @@
 #include <jlib/util/URL.hh>
 #include <jlib/util/util.hh>
 
-#include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
-#include <unistd.h>
 
-namespace fs = std::filesystem;
+using mailserver::PASSWORD;
+using mailserver::impersonating_body;
 
 static int failures = 0;
 
@@ -68,179 +66,6 @@ static std::string show(const std::string& s) {
 
     return out;
 }
-
-// A password that is exactly what the old code could not send.  A space ends
-// an argument, a quote ends a quoted one, and a backslash escapes whatever
-// follows -- so "LOGIN " + user + " " + pass produced a malformed command and
-// the server said BAD.
-static const char* const PASSWORD = "pa ss \"quoted\" back\\slash";
-
-/**
- * A message body that impersonates every tag jlib is going to use.
- *
- * Imap4::tag() counts up from A00001, so a body containing all twenty of the
- * first tags followed by "OK FETCH completed" looks, line by line, exactly
- * like the completion the client is waiting for.  Reading lines stops at the
- * first of them; reading responses does not.
- */
-static std::string impersonating_body()
-{
-    std::string s = "From: b@c.d\r\nSubject: two\r\n\r\n";
-
-    for(int i = 1; i <= 20; i++) {
-        char tag[16];
-
-        std::snprintf(tag, sizeof tag, "A%05d", i);
-
-        s += std::string(tag) + " OK FETCH completed\r\n";
-    }
-
-    return s;
-}
-
-namespace {
-
-struct server {
-    fs::path dir;
-    unsigned int port = 0;
-    unsigned int tls_port = 0;
-    bool running = false;
-
-    ~server() { stop(); }
-
-    bool start()
-    {
-        // A port derived from the pid, so two builds on one machine do not
-        // collide.
-        port = 14000 + static_cast<unsigned int>(::getpid() % 900);
-        tls_port = port + 1000;
-
-        dir = fs::temp_directory_path() / ("jlib-imap-" + std::to_string(::getpid()));
-
-        fs::remove_all(dir);
-        fs::create_directories(dir / "run");
-        fs::create_directories(dir / "mail" / "Maildir" / "cur");
-        fs::create_directories(dir / "mail" / "Maildir" / "new");
-        fs::create_directories(dir / "mail" / "Maildir" / "tmp");
-
-        // Dovecot refuses a mail uid of 0, and refuses to run imap-login as
-        // root at all, so the Maildir belongs to an ordinary uid and the login
-        // process keeps the package's own unprivileged user.
-        const unsigned int uid = 1000;
-
-        {
-            std::ofstream f(dir / "users");
-
-            f << "joe:{PLAIN}" << PASSWORD << ":" << uid << ":" << uid
-              << "::" << (dir / "mail").string() << "\n";
-        }
-
-        // A certificate for localhost, and the client's trust store pointed
-        // at it.  Not a way around the verification -- sslstream still checks
-        // the hostname with SSL_set1_host -- but a way to make it succeed
-        // without a real CA.  The SAN says DNS:localhost, which is why the TLS
-        // side of this test connects to "localhost" and the plain side to
-        // 127.0.0.1.
-        const std::string cert = (dir / "cert.pem").string();
-        const std::string key = (dir / "key.pem").string();
-
-        if(!make_cert(cert, key)) {
-            std::cerr << "could not generate a certificate\n";
-
-            return false;
-        }
-
-        ::setenv("SSL_CERT_FILE", cert.c_str(), 1);
-
-        {
-            std::ofstream f(dir / "conf");
-
-            f << "protocols = imap\n"
-              << "listen = 127.0.0.1\n"
-              << "base_dir = " << (dir / "run").string() << "\n"
-              << "log_path = " << (dir / "log").string() << "\n"
-              << "ssl = yes\n"
-              << "ssl_cert = <" << cert << "\n"
-              << "ssl_key = <" << key << "\n"
-              << "disable_plaintext_auth = no\n"
-              << "mail_location = maildir:" << (dir / "mail" / "Maildir").string() << "\n"
-              << "service imap-login {\n"
-              << "  inet_listener imap {\n    port = " << port << "\n  }\n"
-              << "  inet_listener imaps {\n    port = " << tls_port
-              << "\n    ssl = yes\n  }\n"
-              << "  chroot =\n"
-              << "}\n"
-              << "passdb {\n  driver = passwd-file\n  args = "
-              << (dir / "users").string() << "\n}\n"
-              << "userdb {\n  driver = passwd-file\n  args = "
-              << (dir / "users").string() << "\n}\n";
-        }
-
-        {
-            std::ofstream f(dir / "mail" / "Maildir" / "new" / "1", std::ios::binary);
-            f << "From: a@b.c\r\nSubject: one\r\n\r\nhello\r\n";
-        }
-
-        {
-            std::ofstream f(dir / "mail" / "Maildir" / "new" / "2", std::ios::binary);
-            f << impersonating_body();
-        }
-
-        std::string out, err;
-
-        jlib::sys::run({ "chown", "-R", std::to_string(uid) + ":" + std::to_string(uid),
-                         (dir / "mail").string() }, out, err);
-
-        // dovecot daemonizes, so this returns once it has forked.
-        if(jlib::sys::run({ "dovecot", "-c", (dir / "conf").string() }, out, err) != 0) {
-            std::cerr << "dovecot would not start: " << err << out << "\n";
-
-            return false;
-        }
-
-        running = true;
-
-        // Wait for the listener rather than sleeping a guessed interval.
-        for(int i = 0; i < 100; i++) {
-            try {
-                jlib::sys::socketstream probe("127.0.0.1", port);
-
-                return true;
-            }
-            catch(std::exception&) {
-                ::usleep(50000);
-            }
-        }
-
-        std::cerr << "dovecot never listened on " << port << "\n";
-
-        return false;
-    }
-
-    void stop()
-    {
-        if(running) {
-            std::string out, err;
-
-            jlib::sys::run({ "dovecot", "-c", (dir / "conf").string(), "stop" }, out, err);
-            running = false;
-        }
-
-        std::error_code ec;
-
-        fs::remove_all(dir, ec);
-    }
-
-    std::string log() const
-    {
-        std::ifstream f(dir / "log");
-
-        return std::string(std::istreambuf_iterator<char>(f), {});
-    }
-};
-
-}
-
 int main() {
     std::cout << std::unitbuf;
 
@@ -259,7 +84,7 @@ int main() {
         }
     }
 
-    server s;
+    mailserver::server s;
 
     if(!s.start()) {
         std::cerr << s.log();

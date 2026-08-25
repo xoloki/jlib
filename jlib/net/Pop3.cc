@@ -26,6 +26,7 @@
 
 #include <jlib/util/util.hh>
 
+#include <cctype>
 #include <memory>
 
 const int PORT = 110;
@@ -66,14 +67,46 @@ namespace jlib {
         }
         
         
+        unsigned int Pop3::count(jlib::sys::socketstream& sock) {
+            // RFC 1939 5: "+OK nn mm" -- the number of messages and the size
+            // of the maildrop.  Read as a number rather than as tokenize()[1],
+            // so that a server answering "+OK" with nothing after it is an
+            // error here rather than an out-of-range index somewhere later.
+            const std::string stat = handshake(sock, "STAT", OK);
+            std::string::size_type i = stat.find_first_of("0123456789");
+
+            if(i == stat.npos) {
+                throw exception("no message count in the STAT reply: " + stat);
+            }
+
+            unsigned int n = 0;
+
+            for(; i < stat.size() && std::isdigit(static_cast<unsigned char>(stat[i])); i++) {
+                n = n * 10 + static_cast<unsigned int>(stat[i] - '0');
+            }
+
+            return n;
+        }
+
         std::list<std::string> Pop3::retrieve() {
-            std::list<std::string> buf;
+            // This connected, disconnected and returned an empty list: the
+            // loop was commented out, so the only public way to get mail out
+            // of a POP3 account has never got any.  It reported success while
+            // doing it, which is why nobody noticed.
+            std::list<std::string> ret;
             std::unique_ptr<jlib::sys::socketstream> sock(connect());
 
-            //std::string buf = retrieve(sock,which);
+            const unsigned int n = count(*sock);
+
+            for(unsigned int i = 1; i <= n; i++) {
+                ret.push_back(retrieve(*sock, i));
+
+                if(m_remove) remove(*sock, i);
+            }
 
             disconnect(*sock);
-            return buf;
+
+            return ret;
         }
 
         std::string Pop3::read_body(std::istream& is) {

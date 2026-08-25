@@ -65,6 +65,13 @@ namespace jlib {
             /**
              * Retrieve all email
              */
+            /**
+             * Every message in the maildrop, as raw text.
+             *
+             * Deletes each one after reading it unless the constructor was
+             * told otherwise -- which is what POP3 is for, and what the
+             * `remove` flag has always claimed to control.
+             */
             std::list<std::string> retrieve();
 
             /**
@@ -84,6 +91,9 @@ namespace jlib {
             static std::string read_body(std::istream& is);
 
         protected:
+            /** How many messages the maildrop holds.  RFC 1939 5, STAT. */
+            unsigned int count(jlib::sys::socketstream& sock);
+
             std::string retrieve(jlib::sys::socketstream& sock, unsigned int which);
             
             void remove(jlib::sys::socketstream& sock,unsigned int which);
