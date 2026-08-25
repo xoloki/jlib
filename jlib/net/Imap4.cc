@@ -396,16 +396,19 @@ namespace jlib {
 
             command(sock, "STARTTLS");
 
-            sys::tlsstream* tls = dynamic_cast<sys::tlsstream*>(&sock);
-
-            if(tls == 0) {
-                throw exception("STARTTLS on a stream that cannot be upgraded");
-            }
-
             // The handshake, with the same verification an imaps:// connection
             // gets: SSL_VERIFY_PEER, the default trust store, and
-            // SSL_set1_host on the name that was connected to.
-            tls->start();
+            // SSL_set1_host on the *server's* name -- which through a proxy is
+            // not the name the socket was opened to.
+            if(sys::tlsstream* tls = dynamic_cast<sys::tlsstream*>(&sock)) {
+                tls->start();
+            }
+            else if(sys::tlsproxystream* p = dynamic_cast<sys::tlsproxystream*>(&sock)) {
+                p->start();
+            }
+            else {
+                throw exception("STARTTLS on a stream that cannot be upgraded");
+            }
 
             // 6.2.1: "The client MUST discard the cached CAPABILITY
             // information and re-issue the command."  Everything read before
@@ -456,13 +459,17 @@ namespace jlib {
                         // connects without handshaking, and start() does the
                         // handshake in place once the upgrade is negotiated.
                         // The same primitive smtp::send_tls has used all
-                        // along.  No proxy variant, because there is no
+                        // along.
+                        //
+                        // The proxy variant exists now that both sit on one
+                        // buffer; it used to throw here for want of a
                         // tlsproxystream.
                         if(m_url["proxy"] != "") {
-                            throw exception("STARTTLS through a proxy is not implemented");
+                            sock = new sys::tlsproxystream(m_host, m_port,
+                                                           phost, pport, true);
+                        } else {
+                            sock = new sys::tlsstream(m_host, m_port, true);
                         }
-
-                        sock = new sys::tlsstream(m_host, m_port, true);
                     }
                     else {
                         if(m_url["proxy"] != "") {

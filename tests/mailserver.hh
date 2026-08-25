@@ -97,7 +97,9 @@ struct server {
     unsigned int tls_port = 0;
     unsigned int pop_port = 0;
     unsigned int pop_tls_port = 0;
+    unsigned int proxy_port = 0;
     bool running = false;
+    bool proxied = false;
 
     ~server() { stop(); }
 
@@ -109,6 +111,7 @@ struct server {
         tls_port = port + 1000;
         pop_port = port + 2000;
         pop_tls_port = port + 3000;
+        proxy_port = port + 4000;
 
         dir = fs::temp_directory_path() / ("jlib-imap-" + std::to_string(::getpid()));
 
@@ -219,8 +222,81 @@ struct server {
         return false;
     }
 
+    /**
+     * An HTTP CONNECT proxy in front of the four mail ports.
+     *
+     * Separate from start() because only the proxy test wants it, and
+     * tinyproxy is one more thing that has to be installed.  Returns false if
+     * there is none, which is a SKIP rather than a failure.
+     */
+    bool start_proxy()
+    {
+        std::string out, err;
+
+        try {
+            if(jlib::sys::run({ "tinyproxy", "-v" }, out, err) != 0) return false;
+        }
+        catch(std::exception&) {
+            return false;
+        }
+
+        {
+            std::ofstream f(dir / "proxy");
+
+            f << "Port " << proxy_port << "\n"
+              << "Listen 127.0.0.1\n"
+              << "Timeout 60\n"
+              << "LogFile \"" << (dir / "proxy.log").string() << "\"\n"
+              << "LogLevel Info\n"
+              << "MaxClients 20\n"
+              << "Allow 127.0.0.1\n";
+
+            // Only the mail ports, so that asking for anything else is a
+            // refusal the client has to notice.
+            for(unsigned int p : { port, tls_port, pop_port, pop_tls_port }) {
+                f << "ConnectPort " << p << "\n";
+            }
+        }
+
+        if(jlib::sys::run({ "tinyproxy", "-c", (dir / "proxy").string() },
+                          out, err) != 0) {
+            std::cerr << "tinyproxy would not start: " << err << out << "\n";
+
+            return false;
+        }
+
+        proxied = true;
+
+        for(int i = 0; i < 100; i++) {
+            try {
+                jlib::sys::socketstream probe("127.0.0.1", proxy_port);
+
+                return true;
+            }
+            catch(std::exception&) {
+                ::usleep(50000);
+            }
+        }
+
+        return false;
+    }
+
     void stop()
     {
+        if(proxied) {
+            // tinyproxy has no stop subcommand; it wrote its pid nowhere we
+            // asked for, so this is the blunt instrument.
+            std::string out, err;
+
+            try {
+                jlib::sys::run({ "pkill", "-f", (dir / "proxy").string() }, out, err);
+            }
+            catch(std::exception&) {
+            }
+
+            proxied = false;
+        }
+
         if(running) {
             std::string out, err;
 

@@ -38,8 +38,15 @@
 #include <cstdio>
 #include <string>
 
-/** A self-signed certificate for localhost, written to cert_path and key_path. */
-inline bool make_cert(const std::string& cert_path, const std::string& key_path) {
+/**
+ * A self-signed certificate, written to cert_path and key_path.
+ *
+ * @param cn   the common name
+ * @param san  the subject alternative names, in X509V3_EXT_conf_nid syntax
+ */
+inline bool make_cert(const std::string& cert_path, const std::string& key_path,
+                      const std::string& cn = "localhost",
+                      const std::string& san = "DNS:localhost") {
     EVP_PKEY* key = EVP_RSA_gen(2048);
     if(key == 0) return false;
 
@@ -53,7 +60,7 @@ inline bool make_cert(const std::string& cert_path, const std::string& key_path)
 
     X509_NAME* name = X509_get_subject_name(x);
     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-                               reinterpret_cast<const unsigned char*>("localhost"),
+                               reinterpret_cast<const unsigned char*>(cn.c_str()),
                                -1, -1, 0);
     X509_set_issuer_name(x, name);
 
@@ -63,9 +70,14 @@ inline bool make_cert(const std::string& cert_path, const std::string& key_path)
     X509V3_set_ctx_nodb(&ctx);
     X509V3_set_ctx(&ctx, x, x, 0, 0, 0);
 
-    X509_EXTENSION* san = X509V3_EXT_conf_nid(0, &ctx, NID_subject_alt_name,
-                                              "DNS:localhost,IP:127.0.0.1");
-    if(san) { X509_add_ext(x, san, -1); X509_EXTENSION_free(san); }
+    // DNS:localhost and nothing else, deliberately.  A test that wants to
+    // show hostname verification working needs a name the certificate does
+    // *not* cover, and 127.0.0.1 is the one every caller here already has --
+    // an IP SAN would make it match, because OpenSSL checks iPAddress entries
+    // when the name it is given is an address literal.
+    X509_EXTENSION* ext = X509V3_EXT_conf_nid(0, &ctx, NID_subject_alt_name,
+                                              san.c_str());
+    if(ext) { X509_add_ext(x, ext, -1); X509_EXTENSION_free(ext); }
 
     if(!X509_sign(x, key, EVP_sha256())) { X509_free(x); EVP_PKEY_free(key); return false; }
 

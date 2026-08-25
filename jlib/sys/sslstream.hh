@@ -32,8 +32,23 @@
 namespace jlib {
     namespace sys {
 
-        template< typename charT, typename traitT = std::char_traits<charT> >
-        class basic_sslbuf : public basic_socketbuf<charT,traitT> {
+        /**
+         * TLS over any already-connected socket buffer.
+         *
+         * Base is the buffer that gets the connection open: basic_socketbuf
+         * for a direct connection, basic_proxybuf for one through an HTTP
+         * CONNECT proxy.  Everything from the handshake up is the same either
+         * way, and used to be written twice -- once here and once in
+         * sslproxystream.hh, where the copy had no certificate verification at
+         * all.  An imaps:// URL with a proxy was encrypted and unauthenticated.
+         *
+         * The host to verify against is passed in rather than taken from the
+         * base, because for a proxy connection the base's m_host is the
+         * *proxy's* name.  The certificate has to belong to the server that
+         * was asked for.
+         */
+        template< typename Base, typename charT, typename traitT = std::char_traits<charT> >
+        class basic_tlsbuf : public Base {
         public:
             typedef charT 					            char_type;
             typedef traitT 					            traits_type;
@@ -43,31 +58,38 @@ namespace jlib {
             
             static const unsigned int BUF_SIZE = 1024;
 
-            basic_sslbuf(const std::string& host, unsigned int port, const SSL_METHOD* method, bool delay = false)
-                : basic_socketbuf<charT,traitT>(host,port),
+            /**
+             * @param verify_host the name the certificate must be good for
+             * @param delay       connect without handshaking; see start()
+             * @param args        whatever Base's constructor takes
+             */
+            template<typename... Args>
+            basic_tlsbuf(const std::string& verify_host, bool delay, Args&&... args)
+                : Base(std::forward<Args>(args)...),
                   m_ctx(0),
                   m_ssl(0),
-                  m_method(method),
+                  m_verify_host(verify_host),
                   m_delay(delay)
             {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
-                    std::cerr << "basic_sslbuf::basic_sslbuf(" << host << ", " << port << ", SSL_METHOD, " << std::boolalpha << delay << ")"<<std::endl;
+                    std::cerr << "basic_tlsbuf::basic_tlsbuf(" << verify_host << ", "
+                              << std::boolalpha << delay << ")"<<std::endl;
                 if(!m_delay)
                     open_ssl();
             }
 
-            virtual ~basic_sslbuf() {
+            virtual ~basic_tlsbuf() {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
-                    std::cerr << "basic_sslbuf::~basic_sslbuf()"<<std::endl;
+                    std::cerr << "basic_tlsbuf::~basic_tlsbuf()"<<std::endl;
                 close();
             }
 
             virtual int_type underflow() {
                 if(m_delay)
-                    return basic_socketbuf<charT,traitT>::underflow();
+                    return Base::underflow();
 
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
-                    std::cerr << "basic_sslbuf::underflow()"<<std::endl;
+                    std::cerr << "basic_tlsbuf::underflow()"<<std::endl;
 
                 this->m_eintr = false;
                 int count = SSL_read(m_ssl, this->eback(), BUF_SIZE);
@@ -99,10 +121,10 @@ namespace jlib {
                 sigpipe_guard guard;
 
                 if(m_delay)
-                    return basic_socketbuf<charT,traitT>::sync();
+                    return Base::sync();
 
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
-                    std::cerr << "basic_sslbuf::sync()"<<std::endl;
+                    std::cerr << "basic_tlsbuf::sync()"<<std::endl;
 
                 int sofar = 0;
                 int total = this->pptr() - this->pbase();
@@ -133,7 +155,7 @@ namespace jlib {
 
             virtual void close() {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
-                    std::cerr << "basic_sslbuf::close()"<<std::endl;
+                    std::cerr << "basic_tlsbuf::close()"<<std::endl;
                 if(m_ssl != 0) {
                     SSL_shutdown(m_ssl);
                     SSL_free(m_ssl);
@@ -141,7 +163,7 @@ namespace jlib {
                     m_ssl = 0;
                     m_ctx = 0;
                 }
-                basic_socketbuf<charT,traitT>::close();
+                Base::close();
             }
 
             void start() {
@@ -197,21 +219,25 @@ namespace jlib {
 
             void throw_if(const std::string& ctx, int err) {
                 if(err <= 0) 
-                    throw typename basic_socketbuf<charT, traitT>::exception(this->print(ctx, err));
+                    throw typename Base::exception(this->print(ctx, err));
             }
 
             void open_ssl() {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
-                    std::cerr << "basic_sslbuf::open_ssl()"<<std::endl;
+                    std::cerr << "basic_tlsbuf::open_ssl()"<<std::endl;
 
                 // OpenSSL 1.1 initializes itself on first use: SSL_library_init
                 // and SSL_load_error_strings became no-ops there and are gone
                 // in 3.0, along with the hand-rolled once-guard they needed.
 
-                m_ctx = SSL_CTX_new(m_method);
+                // TLS_client_method, always.  It was a constructor parameter,
+                // and TLS_client_method was the only thing any caller ever
+                // passed -- the older spellings it existed to allow are
+                // SSLv2 and SSLv3, both removed from OpenSSL.
+                m_ctx = SSL_CTX_new(TLS_client_method());
                 if(m_ctx == 0) {
                     std::cerr <<"exception in jlib::sys::sslstream::open_ssl()"<<std::endl;
-                    throw typename basic_socketbuf<charT, traitT>::exception("error calling SSL_CTX_new()");
+                    throw typename Base::exception("error calling SSL_CTX_new()");
                 }
 
                 // SSL_OP_NO_SSLv2 has been a no-op since 1.1 and SSLv3 is long
@@ -227,13 +253,13 @@ namespace jlib {
                 // NB: not print() here -- that reports via SSL_get_error(m_ssl),
                 // and m_ssl does not exist until SSL_new below.
                 if(!SSL_CTX_set_default_verify_paths(m_ctx)) {
-                    throw typename basic_socketbuf<charT, traitT>::exception("error calling SSL_CTX_set_default_verify_paths()");
+                    throw typename Base::exception("error calling SSL_CTX_set_default_verify_paths()");
                 }
 
                 m_ssl = SSL_new(m_ctx);
                 if(m_ssl == 0) {
                     std::cerr <<"exception in jlib::sys::sslstream::open_ssl()"<<std::endl;
-                    throw typename basic_socketbuf<charT, traitT>::exception("error calling SSL_new()");
+                    throw typename Base::exception("error calling SSL_new()");
                 }
 
                 // Check that the certificate actually belongs to the host we
@@ -241,12 +267,15 @@ namespace jlib {
                 // valid certificate from any server the trust store covers,
                 // which is the hole TODO.md meant by "verify certs".  Sending
                 // SNI as well, so name-based virtual hosts serve the right one.
-                if(!this->m_host.empty()) {
+                // m_verify_host, not this->m_host: through a proxy the base
+                // is connected to the proxy, and the certificate has to belong
+                // to the server that was asked for.
+                if(!m_verify_host.empty()) {
                     SSL_set_hostflags(m_ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-                    if(!SSL_set1_host(m_ssl, this->m_host.c_str())) {
-                        throw typename basic_socketbuf<charT, traitT>::exception(this->print("SSL_set1_host", 0));
+                    if(!SSL_set1_host(m_ssl, m_verify_host.c_str())) {
+                        throw typename Base::exception(this->print("SSL_set1_host", 0));
                     }
-                    SSL_set_tlsext_host_name(m_ssl, this->m_host.c_str());
+                    SSL_set_tlsext_host_name(m_ssl, m_verify_host.c_str());
                 }
 
                 throw_if("SSL_set_fd", SSL_set_fd(m_ssl, this->m_sock));
@@ -255,31 +284,27 @@ namespace jlib {
             
             SSL_CTX* m_ctx;
             SSL* m_ssl;
-            const SSL_METHOD* m_method;
+            std::string m_verify_host;
             bool m_delay;
         };
+
+        /** TLS straight over a socket. */
+        template<typename charT, typename traitT = std::char_traits<charT> >
+        using basic_sslbuf = basic_tlsbuf<basic_socketbuf<charT,traitT>, charT, traitT>;
         
-        template<typename charT, typename traitT=std::char_traits<charT> >
-        class basic_sslstream : public basic_socketstream<charT,traitT> {
-        public:
-            basic_sslstream() 
-                : basic_socketstream<charT,traitT>()
-            {}
-
-            basic_sslstream(const std::string& host, unsigned int port) 
-                : basic_socketstream<charT,traitT>()
-            {
-                this->m_buf=new basic_sslbuf<charT,traitT>(host, port, TLS_client_method());
-                this->init(this->m_buf);
-            }
-            
-            void open(const std::string& host, unsigned int port) {
-                this->m_buf=new basic_sslbuf<charT,traitT>(host, port, TLS_client_method());
-                this->init(this->m_buf);
-            }
-
-        };
-
+        /**
+         * A TLS connection, optionally upgraded in place.
+         *
+         * delay = false handshakes immediately, which is what imaps:// and
+         * pop3s:// want.  delay = true connects in the clear and waits for
+         * start(), which is what STARTTLS and STLS want.
+         *
+         * basic_sslstream was a separate class that did the first of those and
+         * nothing else.  It is an alias now: "ssl" never meant the SSL
+         * protocol here -- both classes have always used TLS_client_method --
+         * it meant "handshake at once", and one flag says that more clearly
+         * than two class names did.
+         */
         template<typename charT, typename traitT=std::char_traits<charT> >
         class basic_tlsstream : public basic_socketstream<charT,traitT> {
         public:
@@ -292,24 +317,29 @@ namespace jlib {
             {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
                     std::cerr << "basic_tlsstream::basic_tlsstream(" << host << ", " << port << ", " << std::boolalpha << delay << ")"<<std::endl;
-                this->m_buf=new basic_sslbuf<charT,traitT>(host,port, TLS_client_method(), delay);
+                this->m_buf = new basic_sslbuf<charT,traitT>(host, delay, host, port);
                 this->init(this->m_buf);
             }
             
             void open(const std::string& host, unsigned int port, bool delay = false) {
-                this->m_buf=new basic_sslbuf<charT,traitT>(host,port, TLS_client_method(), delay);
+                this->m_buf = new basic_sslbuf<charT,traitT>(host, delay, host, port);
                 this->init(this->m_buf);
             }
 
+            /** Handshake now, on a stream opened with delay = true. */
             void start() {
                 dynamic_cast< basic_sslbuf<charT,traitT>* >(this->m_buf)->start();
             }
 
         };
 
-     
-        typedef basic_sslstream< char, std::char_traits<char> > sslstream;
+        template<typename charT, typename traitT = std::char_traits<charT> >
+        using basic_sslstream = basic_tlsstream<charT,traitT>;
+
         typedef basic_tlsstream< char, std::char_traits<char> > tlsstream;
+
+        /** The older name for a tlsstream that handshakes at once. */
+        typedef tlsstream sslstream;
        
     }
 }

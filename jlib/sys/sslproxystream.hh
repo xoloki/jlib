@@ -1,6 +1,6 @@
-/* -*- mode: C++ c-basic-offset: 4  -*-
+/* -*- mode: C++ c-basic-offset: 4 -*-
  *
- * Copyright (c) 2000 Joey Yandle <xoloki@gmail.com>
+ * Copyright (c) 2002 Joey Yandle <xoloki@gmail.com>
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,185 +15,84 @@
  * limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
- *
  */
 
 #ifndef JLIB_SYS_SSLPROXYSTREAM_HH
 #define JLIB_SYS_SSLPROXYSTREAM_HH
 
 #include <jlib/sys/proxystream.hh>
-
-#include <openssl/ssl.h>
-
-#include <sstream>
+#include <jlib/sys/sslstream.hh>
 
 namespace jlib {
-    namespace sys {
+namespace sys {
 
-        template< typename charT, typename traitT = std::char_traits<charT> >
-        class basic_sslproxybuf : public basic_proxybuf<charT,traitT> {
-        public:
-            typedef charT 					            char_type;
-            typedef traitT 					            traits_type;
-            typedef typename traits_type::int_type 		int_type;
-            typedef typename traits_type::pos_type 		pos_type;
-            typedef typename traits_type::off_type 		off_type;
-            
-            static const unsigned int BUF_SIZE = 1024;
+/**
+ * TLS to a server reached through an HTTP CONNECT proxy.
+ *
+ * All of this used to be written out again here -- its own SSL_CTX, its own
+ * SSL_new, its own SSL_connect, its own underflow and sync -- and the copy had
+ * no certificate verification of any kind: no SSL_CTX_set_verify, no trust
+ * store, no SSL_set1_host.  So an imaps:// URL with a proxy on it produced a
+ * connection that was encrypted and unauthenticated, which any certificate at
+ * all would satisfy.  It looked secure, which is the worst way for it to be
+ * wrong.
+ *
+ * It is basic_tlsbuf over basic_proxybuf now, so there is one handshake in the
+ * library and the proxy path gets exactly what the direct path gets.  The name
+ * to verify against is the *server's*, not the proxy's -- see the note in
+ * sslstream.hh.
+ */
+template<typename charT, typename traitT = std::char_traits<charT> >
+using basic_sslproxybuf = basic_tlsbuf<basic_proxybuf<charT,traitT>, charT, traitT>;
 
-            basic_sslproxybuf(const std::string& host, unsigned int port, 
-                              const std::string& phost, u_int pport)
-                : basic_proxybuf<charT,traitT>(host,port,phost,pport)
-            {
-                open_ssl();
-            }
+template<typename charT, typename traitT=std::char_traits<charT> >
+class basic_tlsproxystream : public basic_proxystream<charT,traitT> {
+public:
+    basic_tlsproxystream()
+        : basic_proxystream<charT,traitT>()
+    {}
 
-            virtual ~basic_sslproxybuf() {
-                if(getenv("JLIB_SYS_SOCKET_DEBUG"))
-                    std::cerr << "basic_sslbuf::~basic_sslproxybuf()"<<std::endl;
-                close();
-            }
-
-            virtual int_type underflow() {
-                if(getenv("JLIB_SYS_SOCKET_DEBUG"))
-                    std::cerr << "basic_sslproxybuf::underflow()"<<std::endl;
-
-                this->m_eintr = false;
-                int count = SSL_read(m_ssl, this->eback(), BUF_SIZE);
-                
-                if(count < 0) {
-                    //throw exception("error reading");
-                    //this->setstate(std::ios_base::badbit);
-                    if(errno == EINTR) {
-                        this->m_eintr = true;
-                    }
-                    std::cerr <<"exception in jlib::sys::sslproxystream::underflow()"<<std::endl;
-                    return traits_type::eof();
-                }                
-                else if(count == 0) {
-                    return traits_type::eof();
-                }
-                else {
-                    char_type* end = this->eback()+count;
-                    this->setg(this->eback(), this->eback(), end);
-                    
-                    return traits_type::to_int_type(*this->gptr());
-                }
-            }
-
-            virtual int_type sync() {
-                if(getenv("JLIB_SYS_SOCKET_DEBUG"))
-                    std::cerr << "basic_sslproxybuf::sync()"<<std::endl;
-                int sofar = 0;
-                int total = this->pptr() - this->pbase();
-                int diff;
-                int count;
-                char_type* current = this->pbase();
-                
-                while( (diff=(total-sofar)) > 0 ) {
-                    this->m_eintr = false;
-                    count = SSL_write(m_ssl, current, diff);
-
-                    if(count == -1) {
-                        if(getenv("JLIB_SYS_SOCKET_DEBUG"))
-                            std::cerr <<"exception in jlib::sys::sslproxystream::sync()"<<std::endl;
-                        if(errno == EINTR) {
-                            this->m_eintr = true;
-                        }
-                        return traits_type::eof();
-                    }
-                    sofar += count;
-                    current += count;
-                }
-                
-                this->setp(this->pbase(), this->pbase()+BUF_SIZE);
-                return 0;                
-            }
-
-            virtual void close() {
-                if(getenv("JLIB_SYS_SOCKET_DEBUG"))
-                    std::cerr << "basic_sslproxybuf::close()"<<std::endl;
-                if(m_ssl != 0) {
-                    SSL_shutdown(m_ssl);
-                    SSL_free(m_ssl);
-                    m_ssl = 0;
-                }
-                basic_proxybuf<charT,traitT>::close();
-            }
-
-        protected:
-            void open_ssl() {
-                // OpenSSL 1.1 initializes itself on first use: SSL_library_init
-                // and SSL_load_error_strings became no-ops there and are gone in
-                // 3.0.  A function-local static is initialized exactly once and
-                // thread-safely as of C++11, which retires both of the
-                // hand-rolled mutexes this used to need.  SSLv23_client_method
-                // is the deprecated spelling of TLS_client_method.
-                static SSL_CTX* s_ctx = SSL_CTX_new(TLS_client_method());
-
-                int err;
-
-                if(s_ctx == 0) {
-                    std::cerr <<"exception in jlib::sys::sslproxystream::open_ssl()"<<std::endl;
-                    throw typename basic_socketbuf<charT, traitT>::exception("error calling SSL_CTX_new()");
-                }
-                
-                m_ssl = SSL_new(s_ctx);
-                if(m_ssl == 0) {
-                    std::cerr <<"exception in jlib::sys::sslproxystream::open_ssl()"<<std::endl;
-                    throw typename basic_socketbuf<charT, traitT>::exception("error calling SSL_new()");
-                }
-                
-                err = SSL_set_fd(m_ssl,this->m_sock);
-                if(err <= 0) {
-                    std::ostringstream o;
-                    std::cerr <<"exception in jlib::sys::sslproxystream::open_ssl()"<<std::endl;
-                    o << "error in SSL_set_fd("<<m_ssl<<","<<this->m_sock<<")";
-                    throw typename basic_socketbuf<charT, traitT>::exception(o.str());
-                }
-                
-                err = SSL_connect(m_ssl);
-                
-                if(err <= 0) {
-                    std::ostringstream o;
-                    std::cerr <<"exception in jlib::sys::sslproxystream::open_ssl()"<<std::endl;
-                    o << "error in SSL_connect("<<m_ssl<<")";
-                    throw typename basic_socketbuf<charT, traitT>::exception(o.str());
-                }
-            }
-
-            
-            SSL* m_ssl;
-        };
-        
-        template<typename charT, typename traitT=std::char_traits<charT> >
-        class basic_sslproxystream : public basic_proxystream<charT,traitT> {
-        public:
-            basic_sslproxystream()
-                : basic_proxystream<charT,traitT>()
-            {}
-
-            basic_sslproxystream(const std::string& host, unsigned int port,
-                                 const std::string& phost, u_int pport) 
-                : basic_proxystream<charT,traitT>()
-            {
-                this->m_buf=new basic_sslproxybuf<charT,traitT>(host,port,phost,pport);
-                this->init(this->m_buf);
-            }
-            
-            void open(const std::string& host, unsigned int port,
-                      const std::string& phost, u_int pport) 
-            {
-                this->m_buf=new basic_sslproxybuf<charT,traitT>(host,port,phost,pport);
-                this->init(this->m_buf);
-            }
-
-        };
-    
-        typedef basic_sslproxystream< char, std::char_traits<char> > sslproxystream;
-        
+    /**
+     * @param host   the server to reach
+     * @param port   its port
+     * @param phost  the proxy
+     * @param pport  the proxy's port
+     * @param delay  connect without handshaking; see start()
+     */
+    basic_tlsproxystream(const std::string& host, unsigned int port,
+                         const std::string& phost, u_int pport,
+                         bool delay = false)
+        : basic_proxystream<charT,traitT>()
+    {
+        this->m_buf = new basic_sslproxybuf<charT,traitT>(host, delay,
+                                                          host, port, phost, pport);
+        this->init(this->m_buf);
     }
-}
 
+    void open(const std::string& host, unsigned int port,
+              const std::string& phost, u_int pport, bool delay = false)
+    {
+        this->m_buf = new basic_sslproxybuf<charT,traitT>(host, delay,
+                                                          host, port, phost, pport);
+        this->init(this->m_buf);
+    }
+
+    /** Handshake now, on a stream opened with delay = true. */
+    void start() {
+        dynamic_cast< basic_sslproxybuf<charT,traitT>* >(this->m_buf)->start();
+    }
+
+};
+
+template<typename charT, typename traitT = std::char_traits<charT> >
+using basic_sslproxystream = basic_tlsproxystream<charT,traitT>;
+
+typedef basic_tlsproxystream< char, std::char_traits<char> > tlsproxystream;
+
+/** The older name for a tlsproxystream that handshakes at once. */
+typedef tlsproxystream sslproxystream;
+
+}
+}
 
 #endif // JLIB_SYS_SSLPROXYSTREAM_HH

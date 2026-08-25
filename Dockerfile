@@ -15,7 +15,9 @@
 #
 # dovecot is here for tests/net_{imap,pop3}_live_test, which start a real
 # server on high ports with a seeded Maildir and drive jlib::net::Imap4 and
-# jlib::net::Pop3 against it.  It is the only way to exercise the literal handling end to end:
+# jlib::net::Pop3 against it.  tinyproxy is for the same reason one layer out:
+# jlib can reach a server through an HTTP CONNECT proxy, and until there was a
+# proxy to test against, that path had never run.  It is the only way to exercise the literal handling end to end:
 # a std::istringstream can be made to produce any response, but only a server
 # decides when to send a literal.
 
@@ -47,6 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         freeglut3-dev \
         dovecot-imapd \
         dovecot-pop3d \
+        tinyproxy \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/jlib
