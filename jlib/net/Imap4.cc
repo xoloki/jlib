@@ -48,87 +48,51 @@ namespace jlib {
 
         ListItem::ListItem() {}
         ListItem::ListItem(const std::string& line) {
-            // These were unsigned int, which truncates npos to 0xFFFFFFFF: a
-            // reply with no "(" left i as that, i+1 wrapped to 0, and the
-            // find(")") that followed searched from the start of the line.
-            // line.substr(j+1) then threw, or returned a slice of something
-            // unrelated.  This is the same bug class already fixed and
-            // regression-tested in net::extract_address.
-            std::string::size_type i, j;
+            // Eighty lines of find() and tokenize() used to live here, with a
+            // comment saying that reading LIST properly needed the grammar
+            // rather than more guards.  This is that grammar.
+            //
+            // What it got wrong, when it got anything wrong, was quiet: a
+            // mailbox name in a literal was invisible because the response
+            // never arrived whole; a name containing a quote, a space or a
+            // parenthesis was cut in the wrong place; and a truncated reply
+            // produced a nameless item the caller then skipped.
+            imap::response r;
 
-            i = line.find("(");
-            j = (i == line.npos) ? line.npos : line.find(")", i+1);
+            try {
+                // The reader hands back the response without its CRLF, and
+                // the grammar wants it.
+                r = imap::response::parse(line + "\r\n");
+            }
+            catch(imap::error& e) {
+                if(getenv("JLIB_NET_IMAP4_DEBUG")) {
+                    std::cout << "not a LIST response: " << e.what() << std::endl;
+                }
 
-            if(i == line.npos || j == line.npos) {
                 return;
             }
 
-            std::string ending = line.substr(j+1);
-            std::vector<std::string> etokens = util::tokenize(ending," ",false);
+            if(r.name() != "LIST" && r.name() != "LSUB") return;
 
-            // A truncated reply used to index etokens[0] and etokens[1] with
-            // no size check.  Leaving the item as it is means the caller sees
-            // a nameless non-folder and skips it, which is the same outcome as
-            // a mailbox it cannot select -- rather than a crash from the
-            // network.  Reading LIST properly needs the grammar, not more
-            // guards; that is a later branch.
-            if(etokens.empty() || etokens[0].empty()) {
-                return;
-            }
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) {
-                std::cout << "ending = '"<<ending<<"'"<<std::endl;
-                for(unsigned int i=0;i<etokens.size();i++) {
-                    std::cout << "etokens["<<i<<"] = "<<etokens[i]<<std::endl;
-                }
-            }
-            // 
-            if(etokens[0][0] == '"') {
-                m_delim = util::slice(ending,"\"", "\"");
-                std::string b = ending.substr(ending.find(m_delim)+m_delim.length()+2);
-                etokens = util::tokenize(b," ",false);
-                
-                if(etokens[0][0] == '"') {
-                    m_name = util::slice(b,"\"", "\"");
-                }
-                else {
-                    m_name = etokens[0];
-                }
-            }
-            else {
-                m_delim = etokens[0];
-                if(etokens.size() < 2 || etokens[1].empty()) {
-                    return;
-                }
-                if(etokens[1][0] == '"') {
-                    std::string b = ending;
-                    b = b.substr(b.find(m_delim)+m_delim.length()+1);
-                    m_name = util::slice(b,"\"", "\"");
-                }
-                else {
-                    m_name = etokens[1];
-                }
-            }
+            m_name = r.mailbox();
+            m_delim = r.delimiter();
+            m_attr = r.flags();
 
-            m_attr = util::tokenize(line.substr(i+1,j-i-1));
             m_is_folder = true;
             m_is_parent = true;
-            for(unsigned int i=0;i<m_attr.size();i++) {
-                std::string attr = util::upper(m_attr[i]);
-                if(attr.find("NOSELECT") != std::string::npos) {
-                    m_is_folder = false;
-                }
-                else if(attr.find("NOINFERIORS") != std::string::npos) {
-                    m_is_parent = false;
-                }
+
+            for(const std::string& a : m_attr) {
+                const std::string flag = util::upper(a);
+
+                if(flag == "\\NOSELECT")         m_is_folder = false;
+                else if(flag == "\\NOINFERIORS") m_is_parent = false;
             }
+
             if(getenv("JLIB_NET_IMAP4_DEBUG")) {
                 std::cout << "m_name = <"<<m_name<<">: m_delim = <"<<m_delim<<">: m_attr = ";
-                for(unsigned int i=0;i<m_attr.size();i++)
-                    std::cout << "<"<<m_attr[i]<<">";
+                for(const std::string& a : m_attr) std::cout << "<"<<a<<">";
                 std::cout << "is_folder(): " << is_folder() << "; "
                           << "is_parent(): " << is_parent() << std::endl;
-                    
-                std::cout << std::endl;
             }
         }
         
@@ -188,149 +152,140 @@ namespace jlib {
                          int which, 
                          bool only_headers)
         {
-            Email ret;
-            std::set<Email:: flag_type> flags;
-            std::vector<std::string>::iterator i;
-            std::string buf;
-            std::vector<std::string> info;
-            std::vector<std::string> flagv;
-            std::string s = util::string_value(which+1);
-            std::string flagbuf;
-            int size = 0, header_size = 0;
+            // A hundred and forty lines used to live here.  They tokenized the
+            // response on whitespace, looked for "(FLAGS" and then for
+            // "RFC822.SIZE" -- and, failing that, for "(RFC822.SIZE", because
+            // whether the parenthesis was attached depended on where the
+            // attribute happened to fall.  A FETCH response is not a
+            // whitespace-separated list of tokens, and every one of those
+            // guesses was a way of pretending it is.
+            const std::string s = util::string_value(which + 1);
+            const std::string what = only_headers ? "RFC822.HEADER" : "RFC822";
 
             tag(1);
 
-            std::string req = 
-                tag() + " FETCH " + s + ":" + s + " (FLAGS RFC822.SIZE " + 
-                (only_headers ? "RFC822.HEADER" : "RFC822") + ")";
-            
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) 
-                std::cout << req << std::endl;
+            const std::string req = tag() + " FETCH " + s + ":" + s
+                                  + " (FLAGS RFC822.SIZE " + what + ")";
+
+            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << req << std::endl;
 
             sock << req << ENDL << std::flush;
-            sys::getline(sock, buf);
 
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) 
-                std::cout << buf << std::endl;
+            Email ret;
+            std::set<Email::flag_type> flags;
+            std::vector<std::string> flagv;
+            bool got = false;
 
-            if(buf.find(tag()+" NO") == 0) {
-                throw exception(buf.substr(tag().length()+1));
-            }
-            
-            info = util::tokenize(buf);
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) 
-                std::cout << "Response parsed into " << info.size() << " tokens" << std::endl;
+            for(;;) {
+                const std::string raw = imap::read(sock);
 
-            i = find(info.begin(),info.end(), "(FLAGS");
-            if(i != info.end()) {
-                for(i++; (i != info.end() && *i != "RFC822.SIZE"); i++) {
-                    std::string flag = *i;
-                    
-                    if(getenv("JLIB_NET_IMAP4_DEBUG")) 
-                        std::cout << "Found flag: " << flag << std::endl;
-                    
-                    std::string::size_type x; 
-                    while((x=flag.find("(")) != std::string::npos) {
-                        flag.erase(x,x+1);
+                if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << raw;
+
+                const imap::response r = imap::response::parse(raw);
+
+                if(r.type() == imap::response::kind::tagged) {
+                    if(!r.ok()) throw exception(r.text());
+
+                    break;
+                }
+
+                if(r.name() != "FETCH") continue;
+
+                const std::map<std::string,std::string>& att = r.attributes();
+                std::map<std::string,std::string>::const_iterator a;
+
+                if((a = att.find("RFC822.SIZE")) != att.end()) {
+                    ret.set_data_size(util::int_value(a->second));
+                }
+
+                if((a = att.find(what)) != att.end()) {
+                    got = true;
+
+                    // Email::create throws on a message it cannot make sense
+                    // of, and a mailbox with one bad message in it should
+                    // still open.
+                    try {
+                        ret.create(a->second);
                     }
-                    while((x=flag.find(")")) != std::string::npos) {
-                        flag.erase(x,x+1);
+                    catch(std::exception& e) {
+                        if(getenv("JLIB_NET_IMAP4_DEBUG")) {
+                            std::cout << "could not read message " << s << ": "
+                                      << e.what() << std::endl;
+                        }
                     }
-                    
-                    flagv.push_back(flag);
                 }
+
+                flagv = r.flags();
             }
 
-            i = find(info.begin(),info.end(), "RFC822.SIZE");
-            if(i == info.end()) {
-                if(getenv("JLIB_NET_IMAP4_DEBUG")) 
-                    std::cout << "Didn't find token RFC822.SIZE, look for (RFC822.SIZE" << std::endl;
-
-                i = find(info.begin(),info.end(), "(RFC822.SIZE");
+            if(!got) {
+                throw exception("no " + what + " in the response to " + req);
             }
 
-            if(i != info.end() && (++i) != info.end()) {
-                if(getenv("JLIB_NET_IMAP4_DEBUG")) 
-                    std::cout << "Found RFC822.SIZE:" << *i << std::endl;
-
-                size = util::int_value(*i);
-            } else {
-                if(getenv("JLIB_NET_IMAP4_DEBUG")) 
-                    std::cout << "Didn't find tokens RFC822.SIZE or (RFC822.SIZE" << std::endl;
+            for(const std::string& f : flagv) {
+                if(f == "\\Seen")          flags.insert(Email::seen_flag);
+                else if(f == "\\Answered") flags.insert(Email::answered_flag);
+                else if(f == "\\Deleted")  flags.insert(Email::deleted_flag);
             }
 
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) 
-                std::cout << "Parse header size from token" << info.back() << std::endl;
-
-            std::size_t literal = 0;
-
-            if(!imap::literal_size(buf, literal)) {
-                throw exception("expected a literal at the end of: " + buf);
-            }
-
-            header_size = static_cast<long>(literal);
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) 
-                std::cout << "Header size:" << header_size << std::endl;
-            
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "reading " << header_size << "bytes..." << std::flush;
-            sys::getstring(sock, buf, header_size);
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "done" << std::endl;
-
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) {
-                std::cout << buf << std::endl;
-            }
-            
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "creating email from buffer with size " << size << std::endl;
-            try { 
-                ret.create(buf); 
-            } 
-            catch(std::exception& e) {
-                if(getenv("JLIB_NET_IMAP4_DEBUG")) 
-                    std::cout << "caught exception while creating email: " << e.what() << std::endl;
-            }
-            catch(...) {
-                if(getenv("JLIB_NET_IMAP4_DEBUG")) 
-                    std::cout << "caught exception while creating email " << size << std::endl;
-            }
-            ret.set_data_size(size);
-
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) {
-                std::cout << "iterating over flagv: size " << flagv.size() << std::endl;
-            }
-
-            for(i = flagv.begin(); i != flagv.end(); i++) {
-                if(getenv("JLIB_NET_IMAP4_DEBUG")) {
-                    std::cout << "checking flag " << *i << std::endl;
-                }
-                
-                if(*i == "\\Seen") {
-                    flags.insert(flags.begin(), Email::seen_flag);
-                }
-                else if(*i == "\\Answered") {
-                    flags.insert(flags.begin(), Email::answered_flag);
-                }
-                else if(*i == "\\Deleted") {
-                    flags.insert(flags.begin(), Email::deleted_flag);
-                }
-            }
-
-            if(!only_headers) {
-                flags.insert(flags.begin(), Email::seen_flag);
-            }
+            // Fetching the body marks it read, whatever the server said.
+            if(!only_headers) flags.insert(Email::seen_flag);
 
             ret.set_flags(flags);
 
-            while(!util::begins(buf, tag())) {
-                sys::getline(sock, buf);
-                if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << buf << std::endl;
-            }
-            
-            if(buf.find(tag()+" NO") == 0 || buf.find(tag()+" BAD") == 0) {
-                throw exception(buf.substr(tag().length()+1));
+            return ret;
+        }
+
+        std::string Imap4::fetch_attribute(sys::socketstream& sock,
+                                           unsigned int which,
+                                           const std::string& items,
+                                           const std::string& want,
+                                           unsigned int& size)
+        {
+            const std::string s = util::string_value(which + 1);
+            const std::string req = tag(1) + " FETCH " + s + ":" + s
+                                  + " (" + items + ")";
+
+            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << req << std::endl;
+
+            sock << req << ENDL << std::flush;
+
+            std::string ret;
+            bool got = false;
+
+            size = 0;
+
+            for(;;) {
+                const std::string raw = imap::read(sock);
+
+                if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << raw;
+
+                const imap::response r = imap::response::parse(raw);
+
+                if(r.type() == imap::response::kind::tagged) {
+                    if(!r.ok()) throw exception(r.text());
+
+                    break;
+                }
+
+                if(r.name() != "FETCH") continue;
+
+                const std::map<std::string,std::string>& att = r.attributes();
+                std::map<std::string,std::string>::const_iterator a;
+
+                if((a = att.find("RFC822.SIZE")) != att.end()) {
+                    size = util::int_value(a->second);
+                }
+
+                if((a = att.find(want)) != att.end()) {
+                    ret = a->second;
+                    got = true;
+                }
             }
 
-            return ret;            
-            
+            if(!got) throw exception("no " + want + " in the response to " + req);
+
+            return ret;
         }
 
         std::string Imap4::retrieve_headers(unsigned int which, 
@@ -354,53 +309,8 @@ namespace jlib {
                                        unsigned int which, 
                                        const std::string& mailbox,
                                        unsigned int& size) {
-
-            std::string buf;
-            //std::vector<std::string> info;
-            std::string s = util::valueOf(which+1);
-            //info = handshake(sock"FETCH "+s+":"+s+" (FLAGS RFC822)");
-            tag(1);
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << std::string(tag()+" FETCH "+s+":"+s+" (FLAGS RFC822.HEADER)") << std::endl;
-            sock << std::string(tag()+" FETCH "+s+":"+s+" (FLAGS RFC822.SIZE RFC822.HEADER)") << ENDL << std::flush;
-            sys::getline(sock, buf);
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << buf << std::endl;
-            if(buf.find(tag()+" NO") == 0) {
-                throw exception(buf.substr(tag().length()+1));
-            }
-            std::vector<std::string> bufvec = util::tokenize(buf);
-
-            std::vector<std::string>::iterator i = find(bufvec.begin(),bufvec.end(), "RFC822.SIZE");
-            if(i != bufvec.end() && (++i) != bufvec.end()) {
-                size = util::int_value(*i);
-            }
-            else {
-                size = 0;
-            }
-
-            std::size_t literal = 0;
-
-            if(!imap::literal_size(buf, literal)) {
-                throw exception("expected a literal at the end of: " + buf);
-            }
-
-            const long n = static_cast<long>(literal);
-            
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "DEBUG: reading " << n << " bytes from server...\n";            
-            std::string ret;
-            sys::getstring(sock, ret, n);
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << ret << std::endl;
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "DEBUG: finished reading\n";
-            
-            while(!util::begins(buf, tag())) {
-                sys::getline(sock, buf);
-                if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << buf << std::endl;
-            }
-            
-            if(buf.find(tag()+" NO") == 0 || buf.find(tag()+" BAD") == 0) {
-                throw exception(buf.substr(tag().length()+1));
-            }
-
-            return ret;            
+            return fetch_attribute(sock, which, "FLAGS RFC822.SIZE RFC822.HEADER",
+                                   "RFC822.HEADER", size);
         }
 
         std::string Imap4::retrieve(int which, const std::string& mailbox) {
@@ -420,43 +330,18 @@ namespace jlib {
 
         std::string Imap4::retrieve(sys::socketstream& sock, int which, const std::string& mailbox) 
         {
-            std::string buf;
-            //std::vector<std::string> info;
-            std::string s = util::valueOf(which+1);
-            //info = handshake(sock"FETCH "+s+":"+s+" (FLAGS RFC822)");
-            sock << std::string(tag(1)+" FETCH "+s+":"+s+" (FLAGS RFC822)") << ENDL << std::flush;
-            sys::getline(sock, buf);
-            if(buf.find(tag()+" NO") == 0) {
-                throw exception(buf.substr(tag().length()+1));
-            }
-            std::vector<std::string> bufvec = util::tokenize(buf);
-            std::size_t literal = 0;
+            unsigned int size = 0;
+            const std::string ret =
+                fetch_attribute(sock, static_cast<unsigned int>(which),
+                                "FLAGS RFC822", "RFC822", size);
 
-            if(!imap::literal_size(buf, literal)) {
-                throw exception("expected a literal at the end of: " + buf);
-            }
+            // Fetching the body marks it read; say so explicitly rather than
+            // relying on the server having done it.
+            const std::pair<unsigned int, unsigned int> p(which + 1, which + 1);
+            const std::vector<std::string> f { "\\Seen" };
 
-            const long n = static_cast<long>(literal);
-            
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "DEBUG: reading " << n << " bytes from server...\n";            
-            std::string ret;
-            sys::getstring(sock, ret, n);
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << ret << std::endl;
-            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "DEBUG: finished reading\n";
-            
-            while(!util::begins(buf, tag())) {
-                sys::getline(sock, buf);
-                if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << buf << std::endl;
-            }
-            
-            if(buf.find(tag()+" NO") == 0 || buf.find(tag()+" BAD") == 0) {
-                throw exception(buf.substr(tag().length()+1));
-            }
+            store(sock, p, "+FLAGS.SILENT", f);
 
-            std::pair<unsigned int, unsigned int> p(which+1,which+1);
-            std::vector<std::string> f; f.push_back("\\Seen");
-            store(sock,p,"+FLAGS.SILENT",f);
-            
             return ret;
         }
         
@@ -648,18 +533,31 @@ namespace jlib {
         }
 
         void Imap4::parse(std::vector<std::string> hand) {
-            for(unsigned int i=0;i<hand.size();i++) {
-                if(util::icontains(hand[i], "exists")) {
-                    std::vector<std::string> tok = util::tokenize(hand[i]);
-                    exists(util::int_value(tok[1]));
+            // icontains(line, "exists") matched any line with those letters
+            // anywhere in it, and then read tok[1] with no size check.  The
+            // UNSEEN branch read tok[2], which on
+            //
+            //     * OK [UNSEEN 1] First unseen.
+            //
+            // is the string "[UNSEEN" -- so int_value gave 0 and the unseen
+            // count has been zero for as long as there has been one.
+            for(const std::string& line : hand) {
+                imap::response r;
+
+                try {
+                    r = imap::response::parse(line + "\r\n");
                 }
-                else if(util::icontains(hand[i], "recent")) {
-                    std::vector<std::string> tok = util::tokenize(hand[i]);
-                    recent(util::int_value(tok[1]));
+                catch(imap::error&) {
+                    continue;
                 }
-                else if(util::icontains(hand[i], "unseen")) {
-                    std::vector<std::string> tok = util::tokenize(hand[i]);
-                    unseen(util::int_value(tok[2]));
+
+                if(r.name() == "EXISTS")      exists(r.number());
+                else if(r.name() == "RECENT") recent(r.number());
+
+                // The unseen count is a response-text-code on an OK, not a
+                // data response: "* OK [UNSEEN 12] Message 12 is first unseen".
+                if(util::ibegins(r.code(), "UNSEEN ")) {
+                    unseen(util::int_value(r.code().substr(7)));
                 }
             }
         }
@@ -872,7 +770,90 @@ namespace jlib {
             handshake(sock,"EXPUNGE");
         }
 
-                std::vector<std::string> Imap4::fetch(sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, std::vector<std::string> n) {
+                std::vector<imap::response> Imap4::command(sys::socketstream& sock,
+                                                   const std::string& data)
+        {
+            const std::string com = tag(1) + " " + data;
+
+            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << com << std::endl;
+
+            sock << com << ENDL << std::flush;
+
+            std::vector<imap::response> ret;
+
+            for(;;) {
+                const std::string raw = imap::read(sock);
+
+                if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << raw;
+
+                const imap::response r = imap::response::parse(raw);
+
+                if(r.type() == imap::response::kind::tagged) {
+                    if(!r.ok()) throw exception(r.text());
+
+                    return ret;
+                }
+
+                if(r.type() == imap::response::kind::untagged) ret.push_back(r);
+            }
+        }
+
+        std::vector<unsigned long> Imap4::search(sys::socketstream& sock,
+                                                 const std::string& criteria,
+                                                 const std::string& charset)
+        {
+            std::string cmd = "SEARCH ";
+
+            if(!charset.empty()) cmd += "CHARSET " + imap::quote(charset) + " ";
+
+            std::vector<unsigned long> ret;
+
+            // 6.4.4: the answer comes back as untagged SEARCH responses, and
+            // a server is allowed to split them across more than one.
+            for(const imap::response& r : command(sock, cmd + criteria)) {
+                if(r.name() != "SEARCH") continue;
+
+                ret.insert(ret.end(), r.numbers().begin(), r.numbers().end());
+            }
+
+            return ret;
+        }
+
+        std::vector<imap::response> Imap4::uid(sys::socketstream& sock,
+                                               const std::string& command_name,
+                                               const std::string& args)
+        {
+            return command(sock, "UID " + command_name + " " + args);
+        }
+
+        std::string Imap4::fetch_partial(sys::socketstream& sock,
+                                         unsigned int which,
+                                         const std::string& section,
+                                         std::size_t origin,
+                                         std::size_t length)
+        {
+            std::ostringstream cmd;
+            const std::string s = util::string_value(which + 1);
+
+            cmd << "FETCH " << s << ":" << s << " (BODY.PEEK[" << section << "]<"
+                << origin << "." << length << ">)";
+
+            for(const imap::response& r : command(sock, cmd.str())) {
+                if(r.name() != "FETCH") continue;
+
+                // The response echoes the section and the *origin* but not the
+                // length -- "BODY[]<0>" for a request of "<0.1024>" -- so the
+                // key is not the string that was sent, and it comes back as
+                // BODY rather than BODY.PEEK.
+                for(const auto& a : r.attributes()) {
+                    if(util::ibegins(a.first, "BODY[")) return a.second;
+                }
+            }
+
+            throw exception("no BODY in the response to " + cmd.str());
+        }
+
+        std::vector<std::string> Imap4::fetch(sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, std::vector<std::string> n) {
             std::ostringstream cmd;
             cmd << "FETCH "<<set.first<<":"<<set.second<<" (";
             for(unsigned int i=0;i<n.size();i++) {
