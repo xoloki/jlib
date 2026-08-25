@@ -1,0 +1,413 @@
+/* -*- mode: C++ c-basic-offset: 4 -*-
+ *
+ * Copyright (c) 2026 Joey Yandle <xoloki@gmail.com>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// jlib::net::Imap4 against a real IMAP server.
+//
+// Everything else in the suite feeds a std::istringstream, which can be made
+// to produce any response at all -- but only a server decides *when* to send
+// a literal, and the literal is what the line-based reader could not do.  So
+// this one starts a Dovecot on a high port with a Maildir it seeds, and talks
+// to it.
+//
+// Exit 77 (SKIP) when there is no dovecot to start, which is every machine
+// that is not the build container.
+
+#include <jlib/net/Imap4.hh>
+#include <jlib/net/imap_response.hh>
+
+#include <jlib/sys/socketstream.hh>
+#include <jlib/sys/sys.hh>
+
+#include <jlib/util/URL.hh>
+#include <jlib/util/util.hh>
+
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <unistd.h>
+
+namespace fs = std::filesystem;
+
+static int failures = 0;
+
+static void ok(const std::string& what, bool good, const std::string& detail = "") {
+    if(!good) ++failures;
+    std::cout << (good ? "  ok   " : "  FAIL ") << what;
+    if(!detail.empty()) std::cout << ": " << detail;
+    std::cout << "\n";
+}
+
+static std::string show(const std::string& s) {
+    std::string out;
+
+    for(char c : s) {
+        if(c == '\r')      out += "\\r";
+        else if(c == '\n') out += "\\n";
+        else               out += c;
+    }
+
+    return out;
+}
+
+// A password that is exactly what the old code could not send.  A space ends
+// an argument, a quote ends a quoted one, and a backslash escapes whatever
+// follows -- so "LOGIN " + user + " " + pass produced a malformed command and
+// the server said BAD.
+static const char* const PASSWORD = "pa ss \"quoted\" back\\slash";
+
+/**
+ * A message body that impersonates every tag jlib is going to use.
+ *
+ * Imap4::tag() counts up from A00001, so a body containing all twenty of the
+ * first tags followed by "OK FETCH completed" looks, line by line, exactly
+ * like the completion the client is waiting for.  Reading lines stops at the
+ * first of them; reading responses does not.
+ */
+static std::string impersonating_body()
+{
+    std::string s = "From: b@c.d\r\nSubject: two\r\n\r\n";
+
+    for(int i = 1; i <= 20; i++) {
+        char tag[16];
+
+        std::snprintf(tag, sizeof tag, "A%05d", i);
+
+        s += std::string(tag) + " OK FETCH completed\r\n";
+    }
+
+    return s;
+}
+
+namespace {
+
+struct server {
+    fs::path dir;
+    unsigned int port = 0;
+    bool running = false;
+
+    ~server() { stop(); }
+
+    bool start()
+    {
+        // A port derived from the pid, so two builds on one machine do not
+        // collide.
+        port = 14000 + static_cast<unsigned int>(::getpid() % 900);
+
+        dir = fs::temp_directory_path() / ("jlib-imap-" + std::to_string(::getpid()));
+
+        fs::remove_all(dir);
+        fs::create_directories(dir / "run");
+        fs::create_directories(dir / "mail" / "Maildir" / "cur");
+        fs::create_directories(dir / "mail" / "Maildir" / "new");
+        fs::create_directories(dir / "mail" / "Maildir" / "tmp");
+
+        // Dovecot refuses a mail uid of 0, and refuses to run imap-login as
+        // root at all, so the Maildir belongs to an ordinary uid and the login
+        // process keeps the package's own unprivileged user.
+        const unsigned int uid = 1000;
+
+        {
+            std::ofstream f(dir / "users");
+
+            f << "joe:{PLAIN}" << PASSWORD << ":" << uid << ":" << uid
+              << "::" << (dir / "mail").string() << "\n";
+        }
+
+        {
+            std::ofstream f(dir / "conf");
+
+            f << "protocols = imap\n"
+              << "listen = 127.0.0.1\n"
+              << "base_dir = " << (dir / "run").string() << "\n"
+              << "log_path = " << (dir / "log").string() << "\n"
+              << "ssl = no\n"
+              << "disable_plaintext_auth = no\n"
+              << "mail_location = maildir:" << (dir / "mail" / "Maildir").string() << "\n"
+              << "service imap-login {\n"
+              << "  inet_listener imap {\n    port = " << port << "\n  }\n"
+              << "  chroot =\n"
+              << "}\n"
+              << "passdb {\n  driver = passwd-file\n  args = "
+              << (dir / "users").string() << "\n}\n"
+              << "userdb {\n  driver = passwd-file\n  args = "
+              << (dir / "users").string() << "\n}\n";
+        }
+
+        {
+            std::ofstream f(dir / "mail" / "Maildir" / "new" / "1", std::ios::binary);
+            f << "From: a@b.c\r\nSubject: one\r\n\r\nhello\r\n";
+        }
+
+        {
+            std::ofstream f(dir / "mail" / "Maildir" / "new" / "2", std::ios::binary);
+            f << impersonating_body();
+        }
+
+        std::string out, err;
+
+        jlib::sys::run({ "chown", "-R", std::to_string(uid) + ":" + std::to_string(uid),
+                         (dir / "mail").string() }, out, err);
+
+        // dovecot daemonizes, so this returns once it has forked.
+        if(jlib::sys::run({ "dovecot", "-c", (dir / "conf").string() }, out, err) != 0) {
+            std::cerr << "dovecot would not start: " << err << out << "\n";
+
+            return false;
+        }
+
+        running = true;
+
+        // Wait for the listener rather than sleeping a guessed interval.
+        for(int i = 0; i < 100; i++) {
+            try {
+                jlib::sys::socketstream probe("127.0.0.1", port);
+
+                return true;
+            }
+            catch(std::exception&) {
+                ::usleep(50000);
+            }
+        }
+
+        std::cerr << "dovecot never listened on " << port << "\n";
+
+        return false;
+    }
+
+    void stop()
+    {
+        if(running) {
+            std::string out, err;
+
+            jlib::sys::run({ "dovecot", "-c", (dir / "conf").string(), "stop" }, out, err);
+            running = false;
+        }
+
+        std::error_code ec;
+
+        fs::remove_all(dir, ec);
+    }
+
+    std::string log() const
+    {
+        std::ifstream f(dir / "log");
+
+        return std::string(std::istreambuf_iterator<char>(f), {});
+    }
+};
+
+}
+
+int main() {
+    std::cout << std::unitbuf;
+
+    {
+        std::string out, err;
+
+        try {
+            if(jlib::sys::run({ "dovecot", "--version" }, out, err) != 0) {
+                std::cerr << "dovecot does not run here; skipping\n";
+                return 77;
+            }
+        }
+        catch(std::exception& e) {
+            std::cerr << "no dovecot: " << e.what() << "; skipping\n";
+            return 77;
+        }
+    }
+
+    server s;
+
+    if(!s.start()) {
+        std::cerr << s.log();
+        std::cerr << "could not start a server; skipping\n";
+
+        return 77;
+    }
+
+    std::cout << "dovecot on 127.0.0.1:" << s.port << "\n";
+
+    jlib::util::URL url("imap://joe@127.0.0.1:" + std::to_string(s.port) + "/INBOX");
+
+    url.set_pass(PASSWORD);
+
+    jlib::net::Imap4 imap(url);
+
+    try {
+        std::unique_ptr<jlib::sys::socketstream> sock(imap.connect());
+
+        ok("the greeting reads", true);
+
+        // The whole of (b): every command used to build its arguments by
+        // concatenation, so this password produced "LOGIN joe pa ss "quoted"
+        // back\slash" and the server answered BAD.
+        imap.login(*sock, "", "");
+
+        ok("LOGIN with a space, a quote and a backslash in the password", true);
+
+        std::vector<jlib::net::ListItem> ls = imap.list(*sock, "", "*");
+
+        bool inbox = false;
+
+        for(jlib::net::ListItem& i : ls) {
+            if(jlib::util::upper(i.get_name()) == "INBOX") inbox = true;
+        }
+
+        ok("LIST finds INBOX", inbox, std::to_string(ls.size()) + " mailboxes");
+
+        // A mailbox whose name needs quoting, which is the same fix seen from
+        // the other end.
+        imap.create(*sock, "My Mail");
+        imap.subscribe(*sock, "My Mail");
+
+        bool spaced = false;
+
+        for(jlib::net::ListItem& i : imap.list(*sock, "", "*")) {
+            if(i.get_name().find("My Mail") != std::string::npos) spaced = true;
+        }
+
+        ok("a mailbox with a space in its name can be created and listed", spaced);
+
+        // LSUB sent LIST, so it answered with every mailbox rather than the
+        // subscribed ones.  INBOX is not subscribed here and "My Mail" is.
+        std::vector<jlib::net::ListItem> subs = imap.lsub(*sock, "", "*");
+
+        bool only_subscribed = !subs.empty();
+
+        for(jlib::net::ListItem& i : subs) {
+            if(jlib::util::upper(i.get_name()) == "INBOX") only_subscribed = false;
+        }
+
+        ok("LSUB answers with the subscribed mailboxes, not all of them",
+           only_subscribed, std::to_string(subs.size()) + " subscribed");
+
+        imap.select(*sock, "INBOX");
+
+        ok("SELECT", true);
+
+        // The reason this test exists.  One of these two messages is a body
+        // that says "A00001 OK FETCH completed" and nineteen variations, which
+        // is what the client is waiting for -- and it has to come back whole.
+        std::string one, two;
+
+        for(int i = 0; i < 2; i++) {
+            const std::string raw = imap.get(*sock, i, false).raw();
+
+            if(raw.find("Subject: one") != std::string::npos)      one = raw;
+            else if(raw.find("Subject: two") != std::string::npos) two = raw;
+        }
+
+        ok("a plain message comes back", one == "From: a@b.c\r\nSubject: one\r\n\r\nhello\r\n",
+           show(one));
+
+        ok("and one whose body impersonates every tag jlib uses",
+           two == impersonating_body(),
+           two == impersonating_body()
+               ? std::string()
+               : "got " + std::to_string(two.size()) + " of "
+                 + std::to_string(impersonating_body().size()) + " octets");
+
+        imap.logout(*sock);
+
+        ok("LOGOUT", true);
+
+        // The control.  Everything above says the new reader works; this says
+        // the old one would not have, against this same server, rather than
+        // asking anyone to take it on trust.
+        //
+        // A second connection, driven by hand, reading *lines* until one
+        // begins with the tag -- which is exactly what Imap4::handshake did.
+        {
+            jlib::sys::socketstream raw("127.0.0.1", s.port);
+
+            std::string line;
+
+            jlib::sys::getline(raw, line);                       // greeting
+
+            raw << "B1 LOGIN joe " << jlib::net::imap::quote(PASSWORD)
+                << "\r\n" << std::flush;
+
+            while(line.rfind("B1 ", 0) != 0) jlib::sys::getline(raw, line);
+
+            raw << "B2 SELECT INBOX\r\n" << std::flush;
+
+            while(line.rfind("B2 ", 0) != 0) jlib::sys::getline(raw, line);
+
+            // Ask for the message whose body impersonates the tag, using that
+            // very tag.
+            raw << "A00001 FETCH 2 (RFC822)\r\n" << std::flush;
+
+            std::string collected;
+            int lines = 0;
+
+            while(lines++ < 200) {
+                jlib::sys::getline(raw, line);
+                collected += line + "\r\n";
+
+                if(line.rfind("A00001 ", 0) == 0) break;
+            }
+
+            ok("reading lines stops inside the message, as it always did",
+               collected.find("A00020 OK FETCH completed") == std::string::npos,
+               "stopped after " + std::to_string(lines) + " lines");
+
+            // And the same fetch, read as responses, does not.
+            jlib::sys::socketstream good("127.0.0.1", s.port);
+
+            jlib::net::imap::read(good);
+
+            good << "C1 LOGIN joe " << jlib::net::imap::quote(PASSWORD)
+                 << "\r\n" << std::flush;
+
+            while(jlib::net::imap::read(good).rfind("C1 ", 0) != 0) ;
+
+            good << "C2 SELECT INBOX\r\n" << std::flush;
+
+            while(jlib::net::imap::read(good).rfind("C2 ", 0) != 0) ;
+
+            good << "A00001 FETCH 2 (RFC822)\r\n" << std::flush;
+
+            const std::string whole = jlib::net::imap::read(good);
+
+            ok("reading responses does not",
+               whole.find("A00020 OK FETCH completed") != std::string::npos);
+        }
+    }
+    catch(std::exception& e) {
+        ok("the session ran without throwing", false, e.what());
+        std::cerr << s.log();
+    }
+
+    // What a green run does NOT establish.
+    //
+    // Not interoperability.  One server, one version, one configuration, with
+    // TLS off and plaintext authentication on -- which is exactly what no real
+    // account allows.  What it establishes is that jlib's reader survives a
+    // response a real server chose to send as a literal.
+    //
+    // Not the commands #85 is about.  SEARCH, UID and a ranged FETCH are still
+    // unimplemented; this exercises what was already there.
+    //
+    // Not TLS.  imaps:// goes through sys::sslstream, which no test here
+    // reaches -- setting up a certificate Dovecot and OpenSSL both accept is a
+    // branch of its own.
+    return failures ? 1 : 0;
+}

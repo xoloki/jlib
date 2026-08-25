@@ -12,6 +12,12 @@
 # virtualization layer, which makes C++ compilation dramatically slower.
 # Dependencies are installed in their own layer so edits to the source do not
 # re-run apt.
+#
+# dovecot-imapd is here for tests/net_imap_live_test, which starts a real IMAP
+# server on a high port with a seeded Maildir and drives jlib::net::Imap4
+# against it.  It is the only way to exercise the literal handling end to end:
+# a std::istringstream can be made to produce any response, but only a server
+# decides when to send a literal.
 
 FROM ubuntu:24.04
 
@@ -39,6 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl-dev \
         libglu1-mesa-dev \
         freeglut3-dev \
+        dovecot-imapd \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/jlib

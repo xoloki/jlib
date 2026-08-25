@@ -54,6 +54,8 @@ TESTS = \
 	net_email_multipart_test \
 	net_mbox_crlf_test \
 	net_protocol_test \
+	net_imap_test \
+	net_imap_live_test \
 	net_mime_test \
 	net_same_address_test \
  \
@@ -133,6 +135,12 @@ net_email_received_test_SOURCES = net_email_received_test.cc
 net_email_received_test_LDADD   = $(JNET_LA)
 net_mime_test_SOURCES           = net_mime_test.cc
 net_mime_test_LDADD             = $(JNET_LA) $(JUTIL_LA)
+
+net_imap_live_test_SOURCES      = net_imap_live_test.cc
+net_imap_live_test_LDADD        = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA)
+
+net_imap_test_SOURCES           = net_imap_test.cc
+net_imap_test_LDADD             = $(JNET_LA) $(JUTIL_LA)
 
 net_protocol_test_SOURCES       = net_protocol_test.cc
 net_protocol_test_LDADD         = $(JNET_LA) $(JUTIL_LA)

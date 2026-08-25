@@ -21,7 +21,7 @@
 #include <jlib/net/net.hh>
 #include <jlib/net/Imap4.hh>
 
-#include <jlib/util/abnf.hh>
+#include <jlib/net/imap_response.hh>
 
 #include <jlib/sys/sys.hh>
 #include <jlib/sys/sslstream.hh>
@@ -146,70 +146,6 @@ namespace jlib {
 
 
 
-        namespace {
-
-            /**
-             * RFC 3501's literal introducer, and RFC 7888's.
-             *
-             * Two productions, so this is a small thing to reach for a grammar
-             * over -- but it is the RFC's own two productions, which is the
-             * point: what is accepted here can be checked by reading 4.3
-             * rather than by reading this.  Built once, on first use, for the
-             * reason in crypt/curve.hh:42.
-             */
-            const util::abnf::grammar& imap_literal() {
-                static util::abnf::grammar g = [] {
-                    util::abnf::grammar g = util::abnf::compile(
-                        "literal-introducer = \"{\" number [\"+\"] \"}\"\r\n"
-                        "number             = 1*DIGIT\r\n");
-                    g.check();
-
-                    return g;
-                }();
-
-                return g;
-            }
-
-        }
-
-        bool Imap4::literal_size(const std::string& line, std::size_t& n) {
-            // The introducer is the last thing on the line, so this is where
-            // it has to start if it is anywhere.
-            const std::string::size_type b = line.rfind('{');
-
-            if(b == line.npos) return false;
-
-            util::abnf::options o;
-            o.captures = util::abnf::options::capture_policy::listed;
-            o.capture_only = { "number" };
-
-            const util::abnf::parse_result r =
-                imap_literal().at("literal-introducer").try_parse(line.substr(b), o);
-
-            // A whole-input match, so "{12} more words" is not a literal and
-            // neither is "{}", "{-1}" or "{12x}".
-            if(!r) return false;
-
-            const std::string digits = r.root()["number"].str();
-
-            // A count from the network decides how many octets to read, so it
-            // is refused rather than clamped when it is absurd.  Two gigabytes
-            // is past anything a mail server will send in one literal and is
-            // also where the long this used to be held in would have gone
-            // negative.
-            try {
-                const unsigned long long v = std::stoull(digits);
-
-                if(v > 0x7FFFFFFFull) return false;
-
-                n = static_cast<std::size_t>(v);
-            }
-            catch(std::exception&) {
-                return false;
-            }
-
-            return true;
-        }
 
         Imap4::Imap4(util::URL url) 
             : m_url(url)
@@ -328,7 +264,7 @@ namespace jlib {
 
             std::size_t literal = 0;
 
-            if(!literal_size(buf, literal)) {
+            if(!imap::literal_size(buf, literal)) {
                 throw exception("expected a literal at the end of: " + buf);
             }
 
@@ -443,7 +379,7 @@ namespace jlib {
 
             std::size_t literal = 0;
 
-            if(!literal_size(buf, literal)) {
+            if(!imap::literal_size(buf, literal)) {
                 throw exception("expected a literal at the end of: " + buf);
             }
 
@@ -496,7 +432,7 @@ namespace jlib {
             std::vector<std::string> bufvec = util::tokenize(buf);
             std::size_t literal = 0;
 
-            if(!literal_size(buf, literal)) {
+            if(!imap::literal_size(buf, literal)) {
                 throw exception("expected a literal at the end of: " + buf);
             }
 
@@ -654,10 +590,25 @@ namespace jlib {
             }
             sock << com << ENDL << std::flush;
 
-            std::string end = (idle ? "+" : tag());
+            const std::string end = (idle ? "+" : tag());
 
+            // One *response* at a time, not one line.  RFC 3501 4.3 lets a
+            // response carry a literal -- "{32}" CRLF and then that many
+            // octets of message content -- and those octets may contain a line
+            // that looks exactly like the tagged completion this loop is
+            // waiting for.  Reading lines therefore stopped in the middle of a
+            // message, and every command after it read the rest of that
+            // message as its own response.
             while(!util::begins(buf, end)) {
-                sys::getline(sock, buf);
+                buf = imap::read(sock);
+
+                // The trailing CRLF comes off, as sys::getline used to take
+                // it, so that what a caller sees is unchanged for every
+                // response that has no literal in it.
+                while(!buf.empty() && (buf.back() == '\n' || buf.back() == '\r')) {
+                    buf.pop_back();
+                }
+
                 if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << buf << std::endl;
                 ret.push_back(buf);
             }
@@ -672,7 +623,12 @@ namespace jlib {
                 sock << "DONE" << ENDL << std::flush;
 
                 while(!util::begins(buf, tag())) {
-                    sys::getline(sock, buf);
+                    buf = imap::read(sock);
+
+                    while(!buf.empty() && (buf.back() == '\n' || buf.back() == '\r')) {
+                        buf.pop_back();
+                    }
+
                     if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << buf << std::endl;
                     ret.push_back(buf);
                 }
@@ -790,59 +746,70 @@ namespace jlib {
         }
         void Imap4::login(sys::socketstream& sock, const std::string& user, const std::string& pass) {
             if(user!="" && pass != "") {
-                handshake(sock,"LOGIN "+user+" "+pass);
+                handshake(sock, "LOGIN " + imap::quote(user) + " " + imap::quote(pass));
             }
             else {
-                handshake(sock,"LOGIN "+m_user+" "+m_pass);            
+                handshake(sock, "LOGIN " + imap::quote(m_user) + " " + imap::quote(m_pass));
             }
             m_state = Authenticated;
         }
 
         std::vector<std::string> Imap4::select(sys::socketstream& sock, const std::string& path) {
-            std::vector<std::string> config = handshake(sock,"SELECT \""+path+"\"");
+            std::vector<std::string> config = handshake(sock, "SELECT " + imap::quote(path));
             parse(config);
             m_state = Selected;
             return config;
         }
         
         std::vector<std::string> Imap4::examine(sys::socketstream& sock, const std::string& path) {
-            std::vector<std::string> ret = handshake(sock,"EXAMINE \""+path+"\"");
+            std::vector<std::string> ret = handshake(sock, "EXAMINE " + imap::quote(path));
             parse(ret);
             m_state = Selected;
             return ret;
         }
 
         void Imap4::create(sys::socketstream& sock, const std::string& path) {
-            handshake(sock,"CREATE \""+path+"\"");
+            handshake(sock, "CREATE " + imap::quote(path));
         }
         void Imap4::remove(sys::socketstream& sock, const std::string& path) {
-            handshake(sock,"DELETE \""+path+"\"");
+            handshake(sock, "DELETE " + imap::quote(path));
         }
         void Imap4::rename(sys::socketstream& sock, const std::string& old_name, const std::string& new_name) {
-            handshake(sock,"RENAME \""+old_name+"\" \""+new_name+"\"");
+            handshake(sock, "RENAME " + imap::quote(old_name) + " " + imap::quote(new_name));
         }
         void Imap4::subscribe(sys::socketstream& sock, const std::string& path) {
-            handshake(sock,"SUBSCRIBE \""+path+"\"");
+            handshake(sock, "SUBSCRIBE " + imap::quote(path));
         }
         void Imap4::unsubscribe(sys::socketstream& sock, const std::string& path) {
-            handshake(sock,"UNSUBSCRIBE \""+path+"\"");
+            handshake(sock, "UNSUBSCRIBE " + imap::quote(path));
         }
 
         std::vector<ListItem> Imap4::list(sys::socketstream& sock, const std::string& ref, const std::string& path) {
             std::vector<ListItem> ret;
-            std::vector<std::string> ls = handshake(sock,"LIST \""+ref+"\" \""+path+"\"");
-            for(unsigned int i=0;i<ls.size()-1;i++) {
+            std::vector<std::string> ls = handshake(sock, "LIST " + imap::quote(ref) + " " + imap::quote(path));
+
+            // i + 1 < size(), not i < size() - 1: the last response is the
+            // tagged completion and is not a list item, and on an empty vector
+            // size() - 1 is SIZE_MAX.
+            for(std::size_t i = 0; i + 1 < ls.size(); i++) {
                 ret.push_back(ListItem(ls[i]));
             }
+
             return ret;
         }
 
         std::vector<ListItem> Imap4::lsub(sys::socketstream& sock, const std::string& ref, const std::string& path) {
             std::vector<ListItem> ret;
-            std::vector<std::string> ls = handshake(sock,"LIST \""+ref+"\" \""+path+"\"");
-            for(unsigned int i=0;i<ls.size()-1;i++) {
+
+            // LSUB, not LIST.  This sent LIST, so asking for the subscribed
+            // mailboxes returned all of them -- which is not a parse error, or
+            // any kind of error, just the wrong answer.
+            std::vector<std::string> ls = handshake(sock, "LSUB " + imap::quote(ref) + " " + imap::quote(path));
+
+            for(std::size_t i = 0; i + 1 < ls.size(); i++) {
                 ret.push_back(ListItem(ls[i]));
             }
+
             return ret;
         }
 
@@ -854,9 +821,11 @@ namespace jlib {
                 (path == "INBOX" ? path : (m_url.get_path_no_slash() + path));
             tag(1);
             if(getenv("JLIB_NET_IMAP4_DEBUG")) {
-                std::cout << tag() << " APPEND \""<<path<<"\" ("<<flag<<") {"<<data.length()<<"}"<<std::endl;
+                std::cout << tag() << " APPEND " << imap::quote(path)
+                          << " (" << flag << ") {" << data.length() << "}" << std::endl;
             }
-            sock << tag() << " APPEND \""<<path<<"\" ("<<flag<<") {"<<data.length()<<"}"<<ENDL << std::flush;
+            sock << tag() << " APPEND " << imap::quote(path)
+                 << " (" << flag << ") {" << data.length() << "}" << ENDL << std::flush;
             sys::getline(sock,buf);
             if(getenv("JLIB_NET_IMAP4_DEBUG")) {
                 std::cout <<buf<<std::endl;
@@ -935,7 +904,7 @@ namespace jlib {
         void Imap4::copy(sys::socketstream& sock, std::pair<unsigned int,unsigned int> set, const std::string& box) {
             std::string path = (box == "INBOX" ? box : (m_url.get_path_no_slash() + box));
             std::ostringstream cmd;
-            cmd << "COPY " << set.first << ":" << set.second << " \"" << path << "\"";
+            cmd << "COPY " << set.first << ":" << set.second << " " << imap::quote(path);
             std::vector<std::string> ret = handshake(sock,cmd.str());
         }
         
