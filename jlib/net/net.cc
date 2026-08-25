@@ -231,14 +231,20 @@ namespace jlib {
                     //cout << "data = "<< email.data() << endl;
                 }
                 else if(util::icontains(encoding, "quoted-printable")) {
-                    //cout << "QP encoding"<<endl;
-                    data += email.data();
-                    //cout << "data = "<< email.data() << endl;
+                    // This used to append the body unencoded while the header
+                    // said quoted-printable, so a message with a high byte in
+                    // it was declared to be one thing and sent as another.
+                    // qp::encode was an empty stub at the time, which is why.
+                    data += util::qp::encode(email.data());
                 }
                 else if(util::icontains(encoding, "base64")) {
-                    //cout << "base64 encoding"<<endl;
-                    data += util::base64::encode(email.data());
-                    //cout << "data = "<< email.data() << endl;
+                    // RFC 2045 6.8: base64 in a MIME body is broken into
+                    // lines of at most 76 characters.  base64::encode no
+                    // longer wraps by default, because the other two callers
+                    // -- an SMTP AUTH token and an RFC 2047 encoded word --
+                    // are both broken by a line break in the middle.  This one
+                    // wants it, so it asks.
+                    data += util::base64::encode(email.data(), 76);
                 }
                 else {
                     throw exception("error in net::build_mime(): unknown content-transfer-encoding '"+encoding+"'");

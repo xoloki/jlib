@@ -368,208 +368,351 @@ namespace jlib {
             return ( upper(s) == upper(t) );
         }        
 
+        // ------------------------------------------------------------ base64
+
         namespace base64 {
-            
-            static char decode_table[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 62, 0, 0, 0, 63, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 0, 0, 0, 0, 0, 0, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51  };
-            
-            int decode(const char* in, char* out) {
-                if(in[2] == '=') {
-                    out[0] = ((decode_table[in[0]] << 2 ) | (0x03)) & ((0xfc) | (decode_table[in[1]] >> 4));
-                    return 1;
-                }
-                else if(in[3] == '=') {
-                    out[0] = ((decode_table[in[0]] << 2 ) | (0x03)) & ((0xfc) | (decode_table[in[1]] >> 4));
-                    out[1] = ((decode_table[in[1]] << 4 ) | (0x0f)) & ((0xf0) | (decode_table[in[2]] >> 2));
-                    return 2;
-                }
-                else {
-                    out[0] = ((decode_table[in[0]] << 2 ) | (0x03)) & ((0xfc) | (decode_table[in[1]] >> 4));
-                    out[1] = ((decode_table[in[1]] << 4 ) | (0x0f)) & ((0xf0) | (decode_table[in[2]] >> 2));
-                    out[2] = ((decode_table[in[2]] << 6 ) | (0x3f)) & ((0xc0) | (decode_table[in[3]] >> 0));
-                    return 3;
-                }
-            }
-            
 
-            std::string decode(const std::string& s) {
-                char* out = new char[s.length()];
-                const char* in = s.data();
-                
-                int j=0;
-                for(unsigned int i=0; i<s.length(); i+=4) {
-                    while(i<s.length() && s[i] < 0x20) {
-                        i++;
+            static const char* const ALPHABET =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+            /**
+             * 256 entries, indexed through unsigned char.
+             *
+             * The old table had 123 and was indexed with a plain char, so
+             * every byte over 0x7F was a negative index and "{|}~" ran off
+             * the end.  Both are out-of-bounds reads on input that arrives
+             * from the network -- ASan caught the second one on
+             * decode("~~~~").
+             */
+            static const signed char* table()
+            {
+                static signed char t[256];
+                static const bool built = [] {
+                    for(int i = 0; i < 256; i++) t[i] = -1;
+                    for(int i = 0; i < 64; i++) {
+                        t[static_cast<unsigned char>(ALPHABET[i])] =
+                            static_cast<signed char>(i);
                     }
-                    if(i<s.length()) {
-                        j += decode(in+i, out+j);
+
+                    return true;
+                }();
+
+                (void)built;
+
+                return t;
+            }
+
+            std::string decode(const std::string& s, bool& clean)
+            {
+                std::string out;
+
+                out.reserve(s.size() / 4 * 3);
+                clean = true;
+
+                // Three decoded bytes per four symbols, accumulated six bits
+                // at a time.  The old version stepped four bytes at a time and
+                // read in[2] and in[3] unconditionally, so a final group of
+                // one to three symbols -- which is what a truncated message
+                // or a stripped line break leaves -- read past the end of the
+                // string and appended whatever was there.
+                unsigned int bits = 0;
+                int have = 0;
+                bool padded = false;
+
+                for(unsigned char c : s) {
+                    if(c == '=') { padded = true; continue; }
+
+                    const signed char v = table()[c];
+
+                    if(v < 0) {
+                        // RFC 2045 6.8: characters outside the alphabet are
+                        // ignored in base64-encoded data.  That rule is what
+                        // makes the line breaks in a MIME body work, so it is
+                        // not optional -- but anything other than whitespace
+                        // being skipped means the input was not what it said.
+                        if(c != '\r' && c != '\n' && c != ' ' && c != '\t') {
+                            clean = false;
+                        }
+
+                        continue;
+                    }
+
+                    // Padding means the data ended.  Whatever follows it is
+                    // not part of this value, and decoding it anyway is how
+                    // "Zg==Zg==" produced a byte that neither half encodes.
+                    if(padded) { clean = false; break; }
+
+                    bits = (bits << 6) | static_cast<unsigned int>(v);
+                    have += 6;
+
+                    if(have >= 8) {
+                        have -= 8;
+                        out += static_cast<char>((bits >> have) & 0xFF);
                     }
                 }
 
-                std::string ret(out,j);
-                delete [] out;
-                return ret;
-            }
-          
+                // Six leftover bits cannot be a byte.  They are dropped rather
+                // than rounded up into one: inventing a byte is how the old
+                // version turned "aGk" into "hi" plus a stray character.
+                if(have >= 6) clean = false;
 
-            static unsigned char encode_table[] = { 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '/' };
+                return out;
+            }
 
-            int encode(const char* in, char* out, int sz) {
-                if(sz < 1) {
-                    return 0;
-                }
-                else if(sz == 1) {
-                    out[0] = encode_table[(in[0] >> 2) & (0x3f)];
-                    out[1] = encode_table[(((in[0] << 4) & (0x3f)) | 0x0f) & ((0xf0))];
-                    return 2;
-                }
-                else if(sz == 2) {
-                    out[0] = encode_table[(in[0] >> 2) & (0x3f)];
-                    out[1] = encode_table[(((in[0] << 4) & (0x3f)) | 0x0f) & ((0xf0) | (in[1] >> 4))];
-                    out[2] = encode_table[(((in[1] << 2) & (0x3f)) | 0x03) & ((0xfc))];
-                    return 3;
-                }
-                else if(sz == 3) {
-                    out[0] = encode_table[(in[0] >> 2) & (0x3f)];
-                    out[1] = encode_table[(((in[0] << 4) & (0x3f)) | 0x0f) & ((0xf0) | (in[1] >> 4))];
-                    out[2] = encode_table[(((in[1] << 2) & (0x3f)) | 0x03) & ((0xfc) | (in[2] >> 6))];
-                    out[3] = encode_table[(in[2]) & (0x3f)];
-                    return 4;
-                }
-                else {
-                    return 0;
-                }
+            std::string decode(const std::string& s)
+            {
+                bool clean;
+
+                return decode(s, clean);
             }
-            
-            std::string encode(const std::string& s) {
-                char* outbuf = new char[2*s.length()];
-                int sz = 0;
-                u_int j = 0;
-                const char* inbuf = s.data();
-                
-                bool first = true;
-                
-                while(j < s.length()) {
-                    u_int num = 3;
-                    if((s.length() - j) < num) {
-                        num = s.length() - j;
+
+            std::string encode(const std::string& s, std::size_t wrap)
+            {
+                std::string out;
+
+                out.reserve((s.size() + 2) / 3 * 4 + (wrap ? s.size() / wrap : 0));
+
+                std::size_t column = 0;
+
+                for(std::size_t i = 0; i < s.size(); i += 3) {
+                    const std::size_t n = std::min<std::size_t>(3, s.size() - i);
+
+                    unsigned int bits = 0;
+
+                    for(std::size_t k = 0; k < 3; k++) {
+                        bits = (bits << 8) |
+                               (k < n ? static_cast<unsigned char>(s[i + k]) : 0);
                     }
-                    sz += encode(inbuf+j, outbuf+sz, num);
-                    j += 3;
-                    if( (first && (sz % 64) == 0) || (!first && ((sz+1) % 65) == 0) ) {
-                        outbuf[sz++] = '\n';
+
+                    char quad[4];
+
+                    for(int k = 0; k < 4; k++) {
+                        quad[k] = ALPHABET[(bits >> (18 - 6 * k)) & 0x3F];
                     }
-                    if(sz >= 64) {
-                        first = false;
+
+                    // One padding character per byte the last group was short.
+                    for(std::size_t k = n + 1; k < 4; k++) quad[k] = '=';
+
+                    if(wrap && column + 4 > wrap) {
+                        out += "\r\n";
+                        column = 0;
                     }
+
+                    out.append(quad, 4);
+                    column += 4;
                 }
-                int numeq = 0;
-                switch(s.length() % 3) {
-                case 1:
-                    numeq = 2;
-                    break;
-                case 2:
-                    numeq = 1;
-                    break;
-                default:
-                    break;
-                    
-                }
-                for(int i = 0; i<numeq; i++) {
-                    outbuf[sz++] = '=';
-                }
-            
-                //outbuf[sz] = 0;
-                std::string ret(outbuf,sz);
-                delete [] outbuf;
-                return ret;                
+
+                return out;
             }
-            
+
+            std::string encode(const std::string& s)
+            {
+                // No wrapping by default, which is a change.  The old version
+                // put a newline in after every 64 characters, unconditionally
+                // -- including in the middle of an SMTP AUTH token, which
+                // breaks the command, and in the middle of an RFC 2047
+                // encoded word, which may not contain whitespace at all.  The
+                // callers that want a wrapped MIME body ask for one.
+                return encode(s, 0);
+            }
+
         }
-        
+
+        // -------------------------------------------------- quoted-printable
+
         namespace qp {
-            
-            std::string decode(const std::string& s) {
-                std::string ret;
-                
-                int i=0;
-                int j=i;
-                
-                while((unsigned int)i<s.length() && (j=s.find("=", i)) != -1) {
-                    ret += s.substr(i,j-i);
-                    if(s[j+1] == '\n') {
-                        i = j+2;
+
+            static int hex(unsigned char c)
+            {
+                if(c >= '0' && c <= '9') return c - '0';
+                if(c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if(c >= 'A' && c <= 'F') return c - 'A' + 10;
+
+                return -1;
+            }
+
+            std::string decode(const std::string& s, bool& clean)
+            {
+                std::string out;
+
+                out.reserve(s.size());
+                clean = true;
+
+                for(std::string::size_type i = 0; i < s.size(); i++) {
+                    if(s[i] != '=') { out += s[i]; continue; }
+
+                    // A soft line break, RFC 2045 6.7 rule 5.
+                    if(i + 2 < s.size() && s[i + 1] == '\r' && s[i + 2] == '\n') {
+                        i += 2;
+                        continue;
                     }
-                    else if(s[j+1] == '\r' && s[j+2] == '\n') {
-                        i = j+3;
+
+                    if(i + 1 < s.size() && s[i + 1] == '\n') {
+                        i += 1;
+                        continue;
+                    }
+
+                    const int hi = i + 1 < s.size() ? hex(s[i + 1]) : -1;
+                    const int lo = i + 2 < s.size() ? hex(s[i + 2]) : -1;
+
+                    // An escape that is not one.  Passed through as written
+                    // rather than decoded: strtol used to accept "=ZZ", stop
+                    // at the first character it could not read, and return
+                    // zero, so a stray equals sign became a NUL byte in the
+                    // middle of the message.
+                    if(hi < 0 || lo < 0) {
+                        clean = false;
+                        out += s[i];
+                        continue;
+                    }
+
+                    out += static_cast<char>(hi * 16 + lo);
+                    i += 2;
+                }
+
+                return out;
+            }
+
+            std::string decode(const std::string& s)
+            {
+                bool clean;
+
+                return decode(s, clean);
+            }
+
+            std::string encode(const std::string& s)
+            {
+                // RFC 2045 6.7, the body form.  This was an empty function
+                // returning the empty string, with a TODO where the body
+                // should be.
+                //
+                // Not RFC 2047's "Q" encoding, which is a different rule set
+                // on the same idea -- it writes a space as "_" and must escape
+                // anything a header field may not contain.  That belongs with
+                // Headers::encode.
+                static const char* const HEX = "0123456789ABCDEF";
+
+                std::string out;
+                std::size_t column = 0;
+
+                for(std::string::size_type i = 0; i < s.size(); i++) {
+                    const unsigned char c = static_cast<unsigned char>(s[i]);
+
+                    if(c == '\n') {
+                        out += '\n';
+                        column = 0;
+                        continue;
+                    }
+
+                    // Rule 3: whitespace may stand for itself, but not at the
+                    // end of a line, where transport would strip it.
+                    const bool trailing = (c == ' ' || c == '\t') &&
+                        (i + 1 == s.size() || s[i + 1] == '\n' || s[i + 1] == '\r');
+
+                    const bool literal = c >= 33 && c <= 126 && c != '=';
+                    const std::size_t width = (literal || (!trailing &&
+                                              (c == ' ' || c == '\t'))) ? 1 : 3;
+
+                    // Rule 5: at most 76 characters, and the "=" of a soft
+                    // break needs a column of its own.
+                    if(column + width > 75) {
+                        out += "=\r\n";
+                        column = 0;
+                    }
+
+                    if(width == 1) {
+                        out += static_cast<char>(c);
+                    }
+                    else if(c == '\r') {
+                        // A bare CR, since CRLF was handled above.
+                        out += "=0D";
                     }
                     else {
-                        std::string ch = s.substr(j+1,2);
-                        char val = std::strtol(ch.c_str(), NULL, 16);
-                        ret.append(1,val);
-                        i = j+3;
+                        out += '=';
+                        out += HEX[c >> 4];
+                        out += HEX[c & 0x0F];
                     }
-                }
-                ret += s.substr(i);
-                return ret;
-            }
 
-            std::string encode(const std::string& s) {
-                std::string ret;
-                
-                //TODO: write qp::encode()
-                
-                return ret;
+                    column += width;
+                }
+
+                return out;
             }
 
         }
 
+        // --------------------------------------------------------------- uri
 
         namespace uri {
 
-            const std::string reserved = ";/?:@&=+$,%";
-
-	    std::string hex_value(unsigned char c, bool upper) {
-		const unsigned int size=16;
-		char buffer[size];
-
-		snprintf(buffer, size-1, "%02x", c);
-
-		std::string ret(buffer);
-
-		if(upper) {
-		    for (unsigned int i = 0; i < ret.size(); i++) {
-			ret[i] = toupper(ret[i]);
-		    }
-		    return ret;
-		}
-		else {
-		    return ret;
-		}
-
-	    }
-
-
-            std::string encode(const std::string& s) {
-                std::string::size_type i, j=0;
-                std::string ret = s;
-                while( (i=ret.find_first_of(reserved,j)) != std::string::npos ) {
-                    std::string tmp = "%" + hex_value(ret[i], false);
-                    ret.replace(i,1,tmp);
-                    j = i+tmp.length();
-                }
-                return ret;
+            /**
+             * RFC 3986 2.3.  Everything else is escaped.
+             *
+             * The old list went the other way round -- it named eleven
+             * characters to escape and left the rest alone -- so a space, a
+             * quote and every byte over 0x7F went into a URI untouched.
+             */
+            static bool unreserved(unsigned char c)
+            {
+                return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                       (c >= '0' && c <= '9') ||
+                       c == '-' || c == '.' || c == '_' || c == '~';
             }
 
-            std::string decode(const std::string& s) {
-                std::string ret = s;
-                std::string::size_type i;
-                while( (i=ret.find("%")) != ret.npos ) {
-                    std::string hex = ret.substr(i+1,2);
-                    char c = strtol(hex.c_str(), NULL, 16);
-                    ret.replace(i,3,1,c);
+            std::string encode(const std::string& s)
+            {
+                static const char* const HEX = "0123456789ABCDEF";
+
+                std::string out;
+
+                out.reserve(s.size());
+
+                for(unsigned char c : s) {
+                    if(unreserved(c)) {
+                        out += static_cast<char>(c);
+                    }
+                    else {
+                        // 2.1: uppercase hex digits are the canonical form.
+                        out += '%';
+                        out += HEX[c >> 4];
+                        out += HEX[c & 0x0F];
+                    }
                 }
 
-                return ret;
+                return out;
+            }
+
+            std::string decode(const std::string& s, bool& clean)
+            {
+                std::string out;
+
+                out.reserve(s.size());
+                clean = true;
+
+                for(std::string::size_type i = 0; i < s.size(); i++) {
+                    if(s[i] != '%') { out += s[i]; continue; }
+
+                    const int hi = i + 1 < s.size() ? qp::hex(s[i + 1]) : -1;
+                    const int lo = i + 2 < s.size() ? qp::hex(s[i + 2]) : -1;
+
+                    if(hi < 0 || lo < 0) {
+                        clean = false;
+                        out += s[i];
+                        continue;
+                    }
+
+                    out += static_cast<char>(hi * 16 + lo);
+                    i += 2;
+                }
+
+                return out;
+            }
+
+            std::string decode(const std::string& s)
+            {
+                bool clean;
+
+                return decode(s, clean);
             }
 
         }
