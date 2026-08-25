@@ -105,6 +105,38 @@ namespace jlib {
 #endif
         };
 
+        /**
+         * How long a connect() may take before it is given up on, in seconds.
+         *
+         * Until this existed every socket in the library connected with no
+         * timeout at all, so a host that accepted the SYN and then said nothing
+         * -- a firewall configured to drop rather than reject is the ordinary
+         * way to get one -- hung the caller until the kernel's own retry limit
+         * ran out, which is minutes.  A mail client freezing on startup with no
+         * output is exactly that.
+         *
+         * Zero means wait forever, which is the old behaviour.
+         */
+        void set_default_connect_timeout(double seconds);
+        double get_default_connect_timeout();
+
+        /**
+         * How long a read or write on a connected socket may block, in seconds.
+         *
+         * Zero -- the default, and deliberately so -- means forever.  A read
+         * timeout cannot be turned on library-wide without breaking the callers
+         * that are *supposed* to sit on a quiet socket: Imap4::idle() waits on
+         * an IMAP IDLE for as long as the server keeps it open, which is up to
+         * 29 minutes by RFC 2177, and there is no value here that is both long
+         * enough for that and short enough to be useful anywhere else.
+         *
+         * So it is off by default and the caller that knows its own protocol
+         * turns it on, either here or per-socket with
+         * basic_socketbuf::set_timeout().  The HTTP client does.
+         */
+        void set_default_io_timeout(double seconds);
+        double get_default_io_timeout();
+
         void getline(std::istream& is, std::string& s);
 
         /**

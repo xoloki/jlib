@@ -24,6 +24,7 @@
 #include <cerrno>
 #include <jlib/sys/tfstream.hh>
 
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -66,6 +67,32 @@ namespace jlib {
                 return i == g_registry.end() ? nullptr : &i->second;
             }
 
+        }
+
+        namespace {
+
+            // Not a mutex-guarded pair: these are set once at startup if they
+            // are set at all, and an atomic read on every connect is cheaper
+            // than a lock.
+            std::atomic<double> g_connect_timeout{30.0};
+            std::atomic<double> g_io_timeout{0.0};
+
+        }
+
+        void set_default_connect_timeout(double seconds) {
+            g_connect_timeout.store(seconds < 0 ? 0 : seconds);
+        }
+
+        double get_default_connect_timeout() {
+            return g_connect_timeout.load();
+        }
+
+        void set_default_io_timeout(double seconds) {
+            g_io_timeout.store(seconds < 0 ? 0 : seconds);
+        }
+
+        double get_default_io_timeout() {
+            return g_io_timeout.load();
         }
 
         void nosigpipe(int fd) {
