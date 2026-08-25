@@ -1,9 +1,10 @@
 # jlib
 
 A personal C++ utility library by Joey Yandle, begun ~1999-2000 and worked on
-sporadically ever since (CVS → SourceForge → git import in 2011). GPL v2+.
-Version 1.2.0; installs headers under `$(includedir)/jlib-1.2/jlib/<module>` and
-ships a `jlib-1.2.pc` pkg-config file.
+sporadically ever since (CVS → SourceForge → git import in 2011). Apache-2.0
+since 2026, GPL v2+ before that. Version 1.2.0; installs headers under
+`$(includedir)/jlib-1.2/jlib/<module>` and ships a `jlib-1.2.pc` pkg-config
+file.
 
 The name of the game is "STL-compatible C++ utility classes": most of the library
 either models an STL container/iterator concept or plugs into `std::streambuf` /
@@ -89,7 +90,8 @@ The media tests are silent unless passed `--play` or `--play-all`.
 
 - Headers are `.hh`, sources `.cc`. Include guard `JLIB_<DIR>_<FILE>_HH`.
 - Every file opens with the emacs modeline `/* -*- mode: C++ c-basic-offset: 4 -*-`
-  and the GPL v2+ boilerplate. Keep both when adding files.
+  and the Apache-2.0 boilerplate, ending in an `SPDX-License-Identifier:`
+  line. Keep both when adding files.
 - Includes of jlib headers are always absolute: `#include <jlib/util/util.hh>`
   (built with `-I$(top_srcdir)`).
 - Each class nests its own `class exception : public std::exception` holding a
