@@ -163,7 +163,37 @@ namespace jlib {
             virtual void set(struct tm* t);
             
             virtual std::string get(const std::string& fmt="%a, %d %b %Y %H:%M:%S %z") const;
+
+            /**
+             * Read a date.
+             *
+             * The default format "%O" means an RFC 5322 date-time -- the thing
+             * in a Date: header -- read against section 3.3's grammar, in
+             * jlib/util/rfc5322.hh.  Section 4.3's obsolete forms are accepted,
+             * because a Date: header is written by whoever sent the message
+             * and refusing one means refusing to sort a mailbox.
+             *
+             * Any other format string is a strftime-style one and is read by
+             * build_date() as before.
+             *
+             * Throws Date::exception on a date it cannot read.  It used to
+             * guess: is_timezone() returned true for every input, so the two
+             * "couldn't parse" throws below it were unreachable and any
+             * garbage became a format string that strptime then half-applied.
+             */
             virtual void set(const std::string& s, const std::string& fmt="%O");
+
+            /** Would it parse as an RFC 5322 date-time? */
+            static bool valid(const std::string& s);
+
+            /**
+             * An RFC 5322 date-time as seconds since the epoch.
+             *
+             * The zone in the header is applied, so this is an absolute
+             * instant and does not depend on where the machine reading it is.
+             * Throws Date::exception.
+             */
+            static time_t parse_rfc5322(const std::string& s);
             
             /**
              * return the current date as a time_t
@@ -201,47 +231,15 @@ namespace jlib {
              */
             void build_date(std::istream& is, const std::string& fmt);
             
-            /**
-             * automagically parse the date string, building a best
-             * guess as to the format
-             *
-             */
-            void auto_parse(std::istream& is);
-            
+
             /**
              * reinitialize m_time by calling mktime() and localtime(), 
              * successively
              */
             void reinit();
             
-            /**
-             * get rid of punctuation 
-             *
-             */
-            std::string sanitize(const std::string& s) const;
-            
-            /**
-             * is the entire std::string alpha
-             *
-             */
-            bool is_alpha(const std::string& s) const;
-            
-            /**
-             * is the entire std::string digit
-             *
-             */
-            bool is_digit(const std::string& s) const;
-            
-            bool is_time(const std::string& s) const;
-            bool is_timezone(const std::string& s) const;
-            bool is_date(const std::string& s) const;
-            
-            /**
-             * return the format std::string for the passed date
-             *
-             */
-            std::string which_date(const std::string& s) const;
-            
+
+
             /**
              * convert the std::string to first letter uppercase, ow lower
              *

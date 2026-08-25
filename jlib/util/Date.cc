@@ -19,6 +19,10 @@
  */
 
 #include <jlib/util/Date.hh>
+#include <jlib/util/rfc5322.hh>
+
+#include <jlib/util/abnf.hh>
+#include <jlib/util/util.hh>
 
 #include <sstream>
 #include <iostream>
@@ -310,9 +314,19 @@ namespace jlib {
             std::string sfmt;
             sfmt.append(fmt[i],1);
             switch(fmt[i]) {
-            case 'O':
-                auto_parse(is);
+            case 'O': {
+                // "%O" is an RFC 5322 date-time, and set() intercepts it
+                // before build_date is ever called with one.  Reaching here
+                // means the directive is embedded in a longer format string,
+                // which it cannot be: a date-time is the whole of the value.
+                std::string rest;
+
+                std::getline(is, rest);
+
+                set(rest, "%O");
+
                 return;
+            }
             case 'H':
             case 'k':
                 is >> ibuf;
@@ -419,119 +433,164 @@ namespace jlib {
             
         }
         
-        void Date::auto_parse(std::istream& is) {
-            std::vector<std::string> elems;
-            std::string buf, s;
-            std::string fmt;
-            while(!is.eof()) {
-                is >> buf;
-                elems.push_back(buf);
-            }
-            for(std::vector<std::string>::size_type i=0;i<elems.size();i++) {
-                //std::cout << "i = "<<i<<", elems[i] = "<<elems[i]<<std::endl;
-                elems[i] = sanitize(elems[i]);
-                if(is_alpha(elems[i])) {
-                    elems[i] = first_upper(elems[i]);
-                    try {
-                        find_month(elems[i], SHORT);
-                        fmt += "%b ";
-                    }
-                    catch(exception& e) {
-                        try {
-                            find_month(elems[i], LONG);
-                            fmt += "%B ";
-                        }
-                        catch(exception& e) {
-                            try {
-                                find_weekday(elems[i], SHORT);
-                                fmt += "%a ";
-                            }
-                            catch(exception& e) {
-                                try {
-                                    find_weekday(elems[i], LONG);
-                                    fmt += "%A ";
-                                }
-                                catch(exception& e) {
-                                    if(is_timezone(elems[i])) {
-                                        fmt += "%Z ";
-                                    }
-                                    else {
-                                        throw exception("couldn't parse "+elems[i]+" into a valid date field");
-                                    }
-                                }
-                            }
-                            
-                        }
-                    }
-                }
-                else if(is_digit(elems[i])) {
-                    if(elems[i].length() == 4) {
-                        fmt += "%Y ";
-                    }
-                    else if(elems[i].length() == 2 || elems[i].length() == 1) {
-                        int k;
-                        std::istringstream isk(elems[i]);
-                        isk >> k;
-                        if(k > 31 || k == 0) {
-                            fmt += "%y ";
-                        }
-                        else {
-                            fmt += "%d ";
-                        }
-                    }
-                }
-                else {
-                    if(is_time(elems[i])) {
-                        //std::cout << elems[i] << " is_time"<<std::endl;
-                        //std::cout << "i = "<<i<<std::endl;
-                        if((i+1 < elems.size()) && (elems[i+1] == "AM" || elems[i+1] == "PM")) {
-                            //std::cout << "elems[i+1] = " << elems[i+1] <<std::endl;
-                            //std::cout << elems[i] << " is 12"<<std::endl;
-                            fmt += "%r ";
-                            i++;
-                        }
-                        else {
-                            //std::cout << elems[i] << " is 24"<<std::endl;
-                            fmt += "%T ";
-                        }
-                        //std::cout << "i = "<<i<<std::endl;
-                    }
-                    else if(is_timezone(elems[i])) {
-                        fmt += "%Z ";
-                    }
-                    else{
-                        throw exception("couldn't parse "+elems[i]+" into a valid date field");
-                    }
-                }
-                
-            }
-            
-            while(fmt[fmt.length()-1] == ' ')
-                fmt.erase(fmt.length()-1);
-            
-            /* 
-             * now that we have the format std::string built, rebuild our std::istream
-             * and call build_date normally
-             */
-            
-            for(std::vector<std::string>::size_type i=0;i<elems.size();i++)
-                s += (elems[i]+" ");
-            while(s[s.length()-1] == ' ')
-                s.erase(s.length()-1);
-            
-            std::istringstream is2(s);
-            //std::cout << "s = "<<s<<"; fmt = "<<fmt<<std::endl;
-            build_date(is2,fmt);
-        }
-        
         std::string Date::get(const std::string& fmt) const {
             return build_date(fmt);
         }
         
+        namespace {
+
+            /** Built on first use, for the reason at crypt/curve.hh:42. */
+            const abnf::grammar& dates() {
+                static abnf::grammar g = [] {
+                    abnf::grammar g = abnf::compile(std::string(rfc5322::LEXICAL) +
+                                                    rfc5322::DATE_TIME);
+                    g.check();
+
+                    return g;
+                }();
+
+                return g;
+            }
+
+            abnf::options parse_options() {
+                abnf::options o;
+
+                o.captures = abnf::options::capture_policy::listed;
+                o.capture_only = { "day-digits", "month", "year-digits",
+                                   "hour-digits", "minute-digits",
+                                   "second-digits",
+                                   "zone-sign", "zone-offset", "obs-zone" };
+
+                return o;
+            }
+
+            int month_of(std::string_view name) {
+                static const char* const MONTHS[] = {
+                    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+                };
+
+                for(int i = 0; i < 12; i++) {
+                    if(name == MONTHS[i]) return i;
+                }
+
+                return 0;
+            }
+
+            /**
+             * RFC 5322 4.3, the zones that are names.
+             *
+             * The single military letters are deliberately absent: 4.3 says
+             * they "were defined incorrectly" in RFC 822 and that a parser
+             * SHOULD treat them as -0000, which is what falling through to
+             * zero does.  Reading "A" as +0100 would be following the older
+             * document's mistake.
+             */
+            int offset_of(const std::string& name) {
+                static const std::map<std::string, int> ZONES = {
+                    { "UTC",   0 }, { "UT",    0 }, { "GMT",   0 },
+                    { "EST", -300 }, { "EDT", -240 },
+                    { "CST", -360 }, { "CDT", -300 },
+                    { "MST", -420 }, { "MDT", -360 },
+                    { "PST", -480 }, { "PDT", -420 },
+                };
+
+                const std::map<std::string, int>::const_iterator i =
+                    ZONES.find(upper(name));
+
+                return i == ZONES.end() ? 0 : i->second;
+            }
+
+            /**
+             * Days from 1970-01-01 to a civil date, Howard Hinnant's algorithm.
+             *
+             * Rather than timegm(), which is not in any C or C++ standard, or
+             * mktime(), which would apply the local zone to a time that
+             * already carries its own.
+             */
+            long long days_from_civil(long long y, unsigned m, unsigned d) {
+                y -= m <= 2;
+
+                const long long era = (y >= 0 ? y : y - 399) / 400;
+                const unsigned yoe = static_cast<unsigned>(y - era * 400);
+                const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+                const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+
+                return era * 146097 + static_cast<long long>(doe) - 719468;
+            }
+
+        }
+
+        time_t Date::parse_rfc5322(const std::string& s) {
+            abnf::match m;
+
+            try {
+                m = dates().at("date-time").parse(trim(s), parse_options());
+            }
+            catch(abnf::budget_exceeded& e) {
+                throw exception(std::string("jlib::util::Date: gave up reading \"")
+                                + s + "\": " + e.what());
+            }
+            catch(abnf::error& e) {
+                throw exception("jlib::util::Date: \"" + s + "\" is not an RFC 5322 "
+                                "date-time, at column " + std::to_string(e.column()));
+            }
+
+            const int day = int_value(m["day-digits"].str());
+            const int mon = month_of(m["month"].text());
+
+            int year = int_value(m["year-digits"].str());
+            const std::size_t digits = m["year-digits"].str().size();
+
+            // RFC 5322 4.3: a two-digit year 00-49 is 20xx and 50-99 is 19xx;
+            // three digits are the year minus 1900.  This is the rule the
+            // obsolete syntax needs and the old code had no notion of -- it
+            // decided between %y and %Y by whether the token was four
+            // characters long and left the rest to strptime.
+            if(digits == 2)      year += (year < 50 ? 2000 : 1900);
+            else if(digits == 3) year += 1900;
+
+            const int hour = int_value(m["hour-digits"].str());
+            const int min = int_value(m["minute-digits"].str());
+            const int sec = m["second-digits"] ? int_value(m["second-digits"].str()) : 0;
+
+            int offset = 0;
+
+            if(m["zone-offset"]) {
+                const std::string o = m["zone-offset"].str();
+
+                offset = int_value(o.substr(0, 2)) * 60 + int_value(o.substr(2, 2));
+
+                if(m["zone-sign"].text() == "-") offset = -offset;
+            }
+            else if(m["obs-zone"]) {
+                offset = offset_of(m["obs-zone"].str());
+            }
+
+            const long long days = days_from_civil(year, static_cast<unsigned>(mon + 1),
+                                                   static_cast<unsigned>(day));
+
+            return static_cast<time_t>(days * 86400 + hour * 3600 + min * 60 + sec
+                                       - offset * 60);
+        }
+
+        bool Date::valid(const std::string& s) {
+            abnf::options o;
+
+            o.captures = abnf::options::capture_policy::none;
+
+            return static_cast<bool>(dates().at("date-time").try_parse(trim(s), o));
+        }
+
         void Date::set(const std::string& s, const std::string& fmt) {
-            //std::cout << "setting "<<s<<" to format "<<fmt<<std::endl;
             std::memset(&m_time, 0, sizeof(struct tm));
             m_current_tz = "";
+
+            if(fmt == "%O") {
+                set(parse_rfc5322(s));
+                return;
+            }
+
             std::istringstream is(s);
             build_date(is,fmt);
             reinit();
@@ -553,31 +612,8 @@ namespace jlib {
             }
         }
         
-        std::string Date::sanitize(const std::string& s) const {
-            std::string ret = s;
-            std::string bad = "();,\"\'[]";
-            std::string::size_type i;
-            while((i=ret.find_first_of(bad)) != s.npos) {
-                ret.erase(i,1);
-            }
-            return ret;
-        }
         
-        bool Date::is_alpha(const std::string& s) const {
-            for(std::string::size_type i=0; i<s.length(); i++) {
-                if(!isalpha(s[i]))
-                    return false;
-            }
-            return true;
-        }
         
-        bool Date::is_digit(const std::string& s) const {
-            for(std::string::size_type i=0; i<s.length(); i++) {
-                if(!isdigit(s[i]))
-                    return false;
-            }
-            return true;
-        }
         
         std::string Date::first_upper(const std::string& s) const {
             std::string ret = s;
@@ -590,47 +626,10 @@ namespace jlib {
             return ret;
         }
         
-        bool Date::is_time(const std::string& s) const {
-            return (
-                    s.length() == 8 &&
-                    isdigit(s[0]) &&
-                    isdigit(s[1]) &&
-                    s[2] == ':' &&
-                    isdigit(s[3]) &&
-                    isdigit(s[4]) &&
-                    s[5] == ':' &&
-                    isdigit(s[6]) &&
-                    isdigit(s[7])
-                    );
-        }
-        
-        bool Date::is_timezone(const std::string& s) const {
-            /*
-              bool nzone = ( (s.length() == 5) && (s[0] == '-' || s[0] == '+') && (is_digit(s.substr(1,4))) );
-              
-              bool szone = (
-              s.length() == 3 || 
-              s.length() == 5 || 
-              (s == "/etc/localtime") 
-              );
-              
-              std::string::size_type i = s.find("/");
-              bool lszone = (i != s.npos && is_alpha(s.substr(0,i)) && is_alpha(s.substr(i+1)));
-              return (nzone || szone || lszone);
-            */
-            // i used to actually give a damn about this field, for now
-            // i'm just going to call anything I don't recognize a timezone
-            return true;
-        }
         
         
-        bool Date::is_date(const std::string& s) const {
-            return true;
-        }
         
-        std::string Date::which_date(const std::string& s) const {
-            return s;
-        }
+        
         
         void Date::debug_print() const {
             std::cout << "m_time.tm_sec = " << m_time.tm_sec << std::endl;

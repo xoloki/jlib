@@ -63,6 +63,7 @@ TESTS = \
 	util_test \
 	util_codec_test \
 	util_url_test \
+	util_date_test \
 	util_rfc2047_test \
 	util_headers_test \
 	util_headers_manual_test \
@@ -155,6 +156,9 @@ util_test_SOURCES = util_test.cc
 util_test_LDADD   = $(JUTIL_LA)
 util_rfc2047_test_SOURCES       = util_rfc2047_test.cc
 util_rfc2047_test_LDADD         = $(JUTIL_LA)
+
+util_date_test_SOURCES          = util_date_test.cc
+util_date_test_LDADD            = $(JUTIL_LA)
 
 util_url_test_SOURCES           = util_url_test.cc
 util_url_test_LDADD             = $(JUTIL_LA)

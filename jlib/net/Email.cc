@@ -186,10 +186,18 @@ namespace jlib {
             std::string s2 = j2[j2.m_sort];
             
             if(j1.m_sort == "DATE" && j2.m_sort == "DATE") {
-                jlib::util::Date d1; d1.set(s1);
-                jlib::util::Date d2; d2.set(s2);
-                //cout << d1.time() << " -- " << d2.time() << endl;
-                return d1.time() < d2.time();
+                // A message with no Date header, or one nothing can read, is
+                // as old as possible and sorts first.  Not an exception:
+                // Date::set throws now where it used to guess, and a
+                // comparator that throws part way through std::sort leaves the
+                // range in an unspecified state -- which is a worse answer
+                // than putting one message in the wrong place.
+                const auto when = [](const std::string& s) -> time_t {
+                    try { return jlib::util::Date::parse_rfc5322(s); }
+                    catch(jlib::util::Date::exception&) { return 0; }
+                };
+
+                return when(s1) < when(s2);
             }
             else if(j1.m_sort == "SIZE" && j2.m_sort == "SIZE") {
                 return (j1.get_data_size() < j2.get_data_size());
