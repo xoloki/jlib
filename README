@@ -37,8 +37,15 @@ For a list of options,
 
 LICENSE
 -------
-This library is distributed under the GPL.  See the file COPYING
-for details.
+Apache License, Version 2.0.  See the file LICENSE for the full text,
+and NOTICE for the attribution notice it requires.
+
+jlib was distributed under the GNU General Public License, version 2 or
+later, from 1999 until 2026.  Everything up to and including the commit
+that added this paragraph remains available under those terms; the
+relicense applies from that point forward.  It became possible only when
+the last file jlib did not hold the copyright to -- a third-party XML
+parser -- was replaced.
 
 
 CONTACT
