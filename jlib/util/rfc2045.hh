@@ -18,22 +18,22 @@
  *
  */
 
-#ifndef JLIB_NET_RFC2045_HH
-#define JLIB_NET_RFC2045_HH
+#ifndef JLIB_UTIL_RFC2045_HH
+#define JLIB_UTIL_RFC2045_HH
 
 namespace jlib {
-namespace net {
+namespace util {
 
 /**
  * MIME's Content-Type and Content-Disposition, as ABNF.
  *
- * Appended to jlib::net::rfc5322::LEXICAL, because RFC 2045 5.1 is explicit
+ * Appended to jlib::util::rfc5322::LEXICAL, because RFC 2045 5.1 is explicit
  * that it is not defining its own lexical layer: "comments are allowed in
  * accordance with RFC 822", and quoted-string is that document's.  So the
  * quoted-string a boundary parameter is written in is literally the same
  * production as the one a display name is written in, and it is written once.
  *
- * See jlib/net/content_type.hh for what reads it.
+ * See jlib/util/content_type.hh for what reads it.
  *
  * ## Where this departs from the published text
  *
@@ -117,4 +117,4 @@ tchar           =  %x21 / %x23-27 / %x2A-2B / %x2D-2E / %x30-39 /
 }
 }
 
-#endif // JLIB_NET_RFC2045_HH
+#endif // JLIB_UTIL_RFC2045_HH

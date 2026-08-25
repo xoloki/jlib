@@ -115,9 +115,18 @@ namespace jlib {
 
             void clear(const std::string& key);
 
-            static std::string decode(std::string val, std::string& charset);
+            /**
+             * RFC 2047, as jlib::util::rfc2047 does it.
+             *
+             * Kept as the spelling a header caller reaches for; both are one
+             * line over jlib/util/encoded_word.hh now.  charset gets the first
+             * one seen, which is all a single out-parameter can say -- a
+             * header mixing two charsets decodes to a string that no one name
+             * describes, and rfc2047::decode's other form hands back all of
+             * them.
+             */
+            static std::string decode(const std::string& val, std::string& charset);
             static std::string encode(const std::string& val, const std::string& charset);
-            static std::string::size_type find_high(const std::string& val, std::string::size_type p);
 
             /**
              * this is from the 'content-type' header

@@ -61,6 +61,7 @@ TESTS = \
  \
 	util_test \
 	util_codec_test \
+	util_rfc2047_test \
 	util_headers_test \
 	util_headers_manual_test \
 	util_headers_fold_test \
@@ -147,6 +148,9 @@ sys_sync_test_LDADD   = $(JSYS_LA)
 
 util_test_SOURCES = util_test.cc
 util_test_LDADD   = $(JUTIL_LA)
+util_rfc2047_test_SOURCES       = util_rfc2047_test.cc
+util_rfc2047_test_LDADD         = $(JUTIL_LA)
+
 util_codec_test_SOURCES         = util_codec_test.cc
 util_codec_test_LDADD           = $(JUTIL_LA)
 

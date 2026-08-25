@@ -18,9 +18,9 @@
  *
  */
 
-#include <jlib/net/content_type.hh>
-#include <jlib/net/rfc2045.hh>
-#include <jlib/net/rfc5322.hh>
+#include <jlib/util/content_type.hh>
+#include <jlib/util/rfc2045.hh>
+#include <jlib/util/rfc5322.hh>
 
 #include <jlib/util/abnf.hh>
 
@@ -29,13 +29,13 @@
 #include <set>
 
 namespace jlib {
-namespace net {
+namespace util {
 
 namespace {
 
-using util::abnf::grammar;
-using util::abnf::match;
-using util::abnf::options;
+using abnf::grammar;
+using abnf::match;
+using abnf::options;
 
 /**
  * The grammar, built on first use.
@@ -46,7 +46,7 @@ using util::abnf::options;
 const grammar& mime()
 {
     static grammar g = [] {
-        grammar g = util::abnf::compile(std::string(rfc5322::LEXICAL) +
+        grammar g = abnf::compile(std::string(rfc5322::LEXICAL) +
                                         rfc2045::CONTENT);
         g.check();
 
@@ -266,7 +266,7 @@ struct mime_reader {
 
 content_type::exception::exception(const std::string& msg, std::string text,
                                    std::size_t offset)
-    : std::runtime_error("jlib::net::content_type::exception: " + msg),
+    : std::runtime_error("jlib::util::content_type::exception: " + msg),
       m_text(std::move(text)),
       m_offset(offset)
 {
@@ -281,11 +281,11 @@ match run(const std::string& rule, std::string_view s)
     try {
         return mime().at(rule).parse(s, parse_options());
     }
-    catch(util::abnf::budget_exceeded& e) {
+    catch(abnf::budget_exceeded& e) {
         throw content_type::exception(std::string("gave up reading a header: ")
                                       + e.what(), std::string(s), e.offset());
     }
-    catch(util::abnf::error& e) {
+    catch(abnf::error& e) {
         // The expected set for this grammar is every tchar, which tells a
         // caller nothing.  Where it stopped does.
         throw content_type::exception("not a MIME header at column "

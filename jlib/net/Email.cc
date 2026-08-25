@@ -19,7 +19,7 @@
  */
 
 #include <jlib/net/net.hh>
-#include <jlib/net/content_type.hh>
+#include <jlib/util/content_type.hh>
 
 #include <jlib/sys/sys.hh>
 
@@ -113,12 +113,12 @@ namespace jlib {
             // icontains(type, "multipart") used to be the test, so a
             // Content-Type of text/plain; name="multipart.txt" was a multipart
             // message.  is() compares the type, not the header.
-            net::content_type ctype;
+            util::content_type ctype;
 
             try {
-                ctype = net::content_type::parse(type);
+                ctype = util::content_type::parse(type);
             }
-            catch(net::content_type::exception& e) {
+            catch(util::content_type::exception& e) {
                 // An unreadable Content-Type is text/plain, which is what
                 // RFC 2045 5.2 says to do with one that is missing, and is
                 // what the sanitizing above already assumes.
@@ -142,7 +142,7 @@ namespace jlib {
                 // The split is RFC 2046 5.1.1 now, rather than parse_divide on
                 // "--" + bound.  It is the leading CRLF belonging to the
                 // delimiter that this gets right and the old loop did not.
-                for(std::string& part : net::split_multipart(m_raw.substr(header_end),
+                for(std::string& part : util::split_multipart(m_raw.substr(header_end),
                                                              bound)) {
                     m_attach.push_back(Email(std::move(part)));
                 }
@@ -359,13 +359,13 @@ namespace jlib {
             const std::string::size_type slash = type.find('/');
 
             try {
-                const net::content_type c = net::content_type::parse(find("CONTENT-TYPE"));
+                const util::content_type c = util::content_type::parse(find("CONTENT-TYPE"));
 
                 if(slash == type.npos) return c.is(type);
 
                 return c.is(type.substr(0, slash), type.substr(slash + 1));
             }
-            catch(net::content_type::exception&) {
+            catch(util::content_type::exception&) {
                 return false;
             }
         }
@@ -408,9 +408,9 @@ namespace jlib {
             // -- which is how any name with a non-ASCII character in it
             // arrives -- it did not know about at all.
             try {
-                return net::content_type::parse(find("CONTENT-TYPE")).get("name");
+                return util::content_type::parse(find("CONTENT-TYPE")).get("name");
             }
-            catch(net::content_type::exception&) {
+            catch(util::content_type::exception&) {
                 return std::string();
             }
         }
@@ -421,12 +421,12 @@ namespace jlib {
             // RFC 2045 after it.
             try {
                 const std::string name =
-                    net::content_type::parse_disposition(find("CONTENT-DISPOSITION"))
+                    util::content_type::parse_disposition(find("CONTENT-DISPOSITION"))
                         .get("filename");
 
                 if(!name.empty()) return name;
             }
-            catch(net::content_type::exception&) {
+            catch(util::content_type::exception&) {
             }
 
             // Falling back to Content-Type's "name" is new.  Every mail client

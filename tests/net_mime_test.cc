@@ -25,8 +25,8 @@
 // parse error a caller can see -- the message simply does not come apart into
 // its pieces, and an attachment goes missing.
 
-#include <jlib/net/content_type.hh>
-#include <jlib/net/rfc2045.hh>
+#include <jlib/util/content_type.hh>
+#include <jlib/util/rfc2045.hh>
 #include <jlib/net/rfc5322.hh>
 #include <jlib/net/Email.hh>
 
@@ -35,8 +35,8 @@
 #include <iostream>
 #include <string>
 
-using jlib::net::content_type;
-using jlib::net::split_multipart;
+using jlib::util::content_type;
+using jlib::util::split_multipart;
 
 static int failures = 0;
 
@@ -418,8 +418,8 @@ static void the_grammar_itself() {
     std::string why;
 
     try {
-        grammar g = compile(std::string(jlib::net::rfc5322::LEXICAL) +
-                            jlib::net::rfc2045::CONTENT);
+        grammar g = compile(std::string(jlib::util::rfc5322::LEXICAL) +
+                            jlib::util::rfc2045::CONTENT);
         g.check();
         built = true;
     }
