@@ -415,10 +415,6 @@ namespace jlib {
         }
 
 
-        bool Email::is_valid(char c) {
-            return (isalnum(c) || c == '.' || c == '-' || c == '_' || c == '=');
-        }
-        
         bool Email::is_loaded() const {
             return m_is_loaded;
         }

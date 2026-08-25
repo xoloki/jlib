@@ -19,6 +19,7 @@
  */
 
 #include <jlib/net/net.hh>
+#include <jlib/net/address.hh>
 
 #include <jlib/sys/sys.hh>
 #include <jlib/sys/tfstream.hh>
@@ -287,126 +288,45 @@ namespace jlib {
         }
 
         bool same_address(const std::string& p_addr1, const std::string& p_addr2) {
-            const std::string addr1 = extract_address(p_addr1);
-            const std::string addr2 = extract_address(p_addr2);
-
             // An address that could not be read is not the same as anything,
             // and that includes another address that could not be read.
             //
-            // This used to uppercase both results and compare them.
-            // extract_address returns "" for anything with no @ in it, so both
-            // sides came back empty and equal: same_address("Joe Yandle",
+            // This used to extract both sides, uppercase them, and compare.
+            // extract_address returned "" for anything with no @ in it, so
+            // both sides came back empty and equal: same_address("Joe Yandle",
             // "Bob Smith") was true, and so was same_address("", "garbage").
             // A function whose whole job is "is this the same person" answered
             // yes for two different people whenever it failed to read either
-            // one of them, silently, which in a mail client is a misfiled
-            // message or a reply to the wrong recipient.
-            if(addr1.empty() || addr2.empty()) {
+            // of them, silently, which in a mail client is a misfiled message
+            // or a reply sent to the wrong recipient.
+            try {
+                const std::string a = mailbox::parse(p_addr1, lenient()).addr().str();
+                const std::string b = mailbox::parse(p_addr2, lenient()).addr().str();
+
+                // Case folding across the whole address, local part included.
+                // RFC 5321 2.4 reserves the local part's case for the
+                // receiving host, but that binds relays; jlib is a user agent,
+                // every major provider folds, and a client that thought
+                // Joe@x.com and joe@x.com were two people would be wrong about
+                // every one of them.
+                return util::iequals(a, b);
+            }
+            catch(address::exception&) {
                 return false;
             }
-
-            // Case folding is left as it was for now -- see the note on
-            // RFC 5321 2.4 in net.hh.  The catch(exception&) that used to wrap
-            // this is gone with it: extract_address does not throw.
-            return util::iequals(addr1, addr2);
         }
-        
+
         std::string extract_address(const std::string& p_addr) {
-            // p was a u_int, which truncates npos to 0xFFFFFFFF, so the
-            // "no @ present" guard below never fired: the function fell into
-            // the else branch, where p+1 wrapped to 0, and returned a chunk of
-            // the input instead of an empty string.
-            std::string::size_type p = p_addr.find("@");
-            int m=0,n=-1;
-
-            if(p == p_addr.npos) {
-                return std::string();
-            }
-            else {
-                for(int i=static_cast<int>(p)+1;i<(int)p_addr.length();i++) {
-                    if(!Email::is_valid(p_addr[i])) {
-                        n = i;
-                        break;
-                    }
-                }
-                for(int i=static_cast<int>(p)-1;i>=0;i--) {
-                    if(!Email::is_valid(p_addr[i])) {
-                        m = i+1;
-                        break;
-                    }
-                }
-                
-                return p_addr.substr(m,(n-m));
-            }
+            // The convenient spelling of
+            // mailbox::parse(s, lenient()).addr().str(), which is what most
+            // callers want and all this ever tried to be.
+            //
+            // It throws now.  Returning "" to mean "I could not read that" is
+            // what let same_address decide two strangers were the same person,
+            // and a silent empty string in a To: header is a message that goes
+            // nowhere with no indication of why.
+            return mailbox::parse(p_addr, lenient()).addr().str();
         }
-
-        std::list<std::string> extract_addresses(const std::string& s) {
-            std::list<std::string> tokens = util::tokenize_list(s, ",");
-            std::list<std::string> ret;
-
-            for(std::list<std::string>::iterator i = tokens.begin(); i != tokens.end(); i++) {
-                std::string ex = extract_address(*i);
-                if(ex != "") {
-                    ret.push_back(ex);
-                }
-            }
-            
-            return ret;
-        }
-
-        std::list<std::string> split_addresses(const std::string& s) {
-            std::list<std::string> ret;
-            std::string token;
-            u_int x = 0, y;
-            bool p = false, q = false;
-            std::stack<std::string> nest;
-            for(u_int i = 0; i < s.length(); i++) {
-                char c = s[i];
-
-                // if we're in an nested parse, look for the end
-                if(nest.size()) {
-                    if(nest.top() == "\"" && c == '"') {
-                        nest.pop();
-                        continue;
-                    }
-                    if(nest.top() == "(" && c == ')') {
-                        nest.pop();
-                        continue;
-                    }
-                }
-                if(c == '(') {
-                    nest.push("(");
-                    continue;
-                }
-                if(c == '"') {
-                    nest.push("\"");
-                    continue;
-                }
-
-                if(nest.size() == 0) {
-                    if(c == ',') {
-                        if(i > x) {
-                            std::string t = util::trim(s.substr(x, i-x));
-                            if(t != "" && t.find("@") != std::string::npos) {
-                                ret.push_back(t);
-                            }
-                        }
-                        x = i+1;
-                        continue;
-                    }
-                }
-            }
-
-            if(x < (s.length()-1)) {
-                std::string t = util::trim(s.substr(x));
-                if(t != "" && t.find("@") != std::string::npos) {
-                    ret.push_back(t);
-                }
-            }
-
-            return ret;
-        }
-
 
         void build_mime(std::string& data, net::Email& email, bool is_recurse) {
             //cout << "build_mime()"<<endl;
@@ -798,16 +718,19 @@ namespace jlib {
         namespace smtp {
 
             std::vector<std::string> parse(const std::string& field) {
+                // RFC 5322's address-list, rather than the excise-then-split
+                // this used to be.  That version cut everything between the
+                // first quote and the last, so two quoted display names in one
+                // header took the text between them with them, and it split on
+                // every comma including the ones inside a display name -- so
+                // "Yandle, Joseph" <joey@x.com> became two recipients, one of
+                // them undeliverable.
                 std::vector<std::string> ret;
-                std::string tmp = field;
-                tmp = util::excise(tmp, "\"", "\"");
-                tmp = util::excise(tmp, "(", ")");
-                
-                ret = util::tokenize(tmp, ",");
-                for(std::vector<std::string>::iterator i = ret.begin(); i != ret.end(); i++) {
-                    *i = extract_address(*i);
+
+                for(const mailbox& m : mailbox::parse_list(field, lenient())) {
+                    ret.push_back(m.addr().str());
                 }
-                
+
                 return ret;
             }
 

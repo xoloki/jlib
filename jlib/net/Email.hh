@@ -222,8 +222,6 @@ namespace jlib {
 
             void parse_received();
 
-            static bool is_valid(char c);
-
             bool is_loaded() const;
             void set_loaded(bool b);
 

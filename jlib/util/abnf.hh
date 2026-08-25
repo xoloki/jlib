@@ -132,6 +132,17 @@ public:
     /** Several lines, with a caret under the offending column. */
     std::string report() const;
 
+    /**
+     * Throw this, keeping the type it actually is.
+     *
+     * try_parse() holds the failure by reference to the base, so a plain
+     * "throw why()" slices a budget_exceeded down to an error and a caller
+     * catching the derived type never sees it.  That is not a nicety: giving
+     * up on a hostile input and disagreeing with a well-formed one are
+     * different answers, and only one of them is the sender's fault.
+     */
+    [[noreturn]] virtual void raise() const;
+
 protected:
     std::string m_input;
     std::size_t m_offset;
@@ -165,6 +176,8 @@ class budget_exceeded : public error {
 public:
     budget_exceeded(const std::string& msg, std::string input,
                     std::size_t offset);
+
+    [[noreturn]] void raise() const override;
 };
 
 // ------------------------------------------------------------------- options
