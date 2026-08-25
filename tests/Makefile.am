@@ -58,6 +58,7 @@ TESTS = \
 	net_same_address_test \
  \
 	sys_sync_test \
+	sys_run_test \
  \
 	util_test \
 	util_codec_test \
@@ -142,6 +143,9 @@ net_same_address_test_LDADD     = $(JNET_LA)
 
 net_email_multipart_test_SOURCES = net_email_multipart_test.cc
 net_email_multipart_test_LDADD   = $(JNET_LA)
+
+sys_run_test_SOURCES            = sys_run_test.cc
+sys_run_test_LDADD              = $(JSYS_LA) $(JUTIL_LA)
 
 sys_sync_test_SOURCES = sys_sync_test.cc
 sys_sync_test_LDADD   = $(JSYS_LA)

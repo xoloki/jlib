@@ -26,6 +26,7 @@
 #include <string>
 
 #include <functional>
+#include <vector>
 
 #include <signal.h>
 #include <sys/socket.h>
@@ -141,9 +142,34 @@ namespace jlib {
         bool locked(const std::string& s);
 
         /**
+         * Run a program.  No shell is involved.
+         *
+         * argv[0] is the program, looked up on PATH, and the rest are its
+         * arguments exactly as written -- a space, a quote, a semicolon or a
+         * backtick in one of them is a character in an argument and nothing
+         * else.  Its standard output and standard error come back in out and
+         * err, and the return value is the exit status.
+         *
+         *     sys::run({ "file", "--mime-type", "-b", path }, out, err);
+         *
+         * This is what to reach for.  shell() below builds a command line and
+         * hands it to /bin/sh, so every caller of it that interpolates a
+         * string it did not choose is an injection: jlib had five, and two of
+         * them were "rm" and "mv" on a folder name that came from a mail
+         * server.
+         *
+         * Throws sys::exception if the program could not be started.  A
+         * program that ran and failed is not an exception -- that is what the
+         * status is for.
+         */
+        int run(const std::vector<std::string>& argv, std::string& out, std::string& err);
+
+        /**
          * run the std::string as a shell command, and throw an exception
          * if the command fails
-         * 
+         *
+         * The string is parsed by /bin/sh, so anything interpolated into it
+         * is code.  Use run() unless a shell is what is actually wanted.
          */
         void shell(const std::string& cmd);
 

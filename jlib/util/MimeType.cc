@@ -23,6 +23,7 @@
 
 #include <jlib/util/util.hh>
 #include <jlib/util/MimeType.hh>
+#include <jlib/util/content_type.hh>
 
 //#include <gnome-1.0/gnome.h>
 
@@ -30,80 +31,55 @@ namespace jlib {
     namespace util {
         
         
-        std::string MimeType::get_type_from_file(const std::string& path) {
-            //return gnome_mime_type_of_file(path.c_str());
-            std::string out, err;
-            sys::shell("file "+path, out, err);
+        namespace {
 
-            return parse_file_output(out);
+            /**
+             * file(1), asked for the answer rather than for a sentence.
+             *
+             * --mime-type -b prints "image/jpeg" and nothing else, so there is
+             * no output to parse.  What was here instead ran icontains() over
+             * file's English prose looking for the words "image" and "JPEG" --
+             * and over the *whole* of its output, which begins with the
+             * filename, so a file called JPEG-notes.txt was an image/jpeg.
+             * The variable that was supposed to cut the name off was computed
+             * and never read.
+             */
+            std::string sniff(const std::string& path) {
+                std::string out, err;
+
+                // sys::run, not sys::shell: the path is a filename, and
+                // "file "+path handed it to /bin/sh.  A file named
+                // "x; rm -rf ~" ran as a command.
+                if(sys::run({ "file", "--mime-type", "-b", path }, out, err) != 0) {
+                    return "application/octet-stream";
+                }
+
+                const std::string type = util::trim(out);
+
+                // A type is "type/subtype" and nothing else.  file prints
+                // "cannot open ..." on stdout for a file it cannot read, and
+                // that is not a media type.
+                if(!content_type::valid(type)) {
+                    return "application/octet-stream";
+                }
+
+                return type;
+            }
+
+        }
+
+        std::string MimeType::get_type_from_file(const std::string& path) {
+            return sniff(path);
         }
 
         std::string MimeType::get_type_from_data(const std::string& data) {
-            std::string ret;
-            std::string out, err;
             jlib::sys::tfstream in;
+
             in << data;
             in.close();
 
-            sys::shell("file "+in.get_path(), out, err);
-            return parse_file_output(out);
+            return sniff(in.get_path());
         }
 
-        std::string MimeType::parse_file_output(const std::string& data) {
-            // On a local: this overwrote its own parameter.
-            const std::string body = (data.find(":") != std::string::npos)
-                ? data.substr(data.find(":"))
-                : data;
-            std::string ret;
-
-            if(icontains(data, "image")) {
-                ret = "image/";
-                if(icontains(data, "JPEG")) {
-                    ret += "jpeg";
-                }
-                else if(icontains(data, "GIF")) {
-                    ret += "gif";
-                }
-                else if(icontains(data, "PNG")) {
-                    ret += "png";
-                }
-                else 
-                    ret = "application/octet-stream";
-            }
-            else if(icontains(data, "audio")) {
-                ret = "audio/";
-                if(icontains(data, "wav")) {
-                    ret += "x-wav";
-                }
-                else
-                    ret = "application/octet-stream";
-            }
-            
-
-            else if(icontains(data, "document")) {
-                if(icontains(data, "postscript"))
-                    ret = "application/postscript";
-                else if(icontains(data, "pdf"))
-                    ret = "application/x-pdf";
-                else
-                    ret = "application/octet-stream";
-            }
-
-            else if(icontains(data, "text")) {
-                ret += "text/";
-                if(icontains(data, "HTML")) {
-                    ret += "html";
-                }
-                else {
-                    ret += "plain";
-                }
-            }
-            else {
-                ret = "application/octet-stream";
-            }
-            
-            return ret;
-        }
-        
     }
 }

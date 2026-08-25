@@ -40,6 +40,8 @@ int main(int argc, char** argv) {
 	    player = ::getenv("JM3U_PLAYER");
 	}
 
+	std::string out, err;
+
 	for(int i = 1; i < argc; i++) {
 	    std::string path = argv[i];
 	    std::ifstream ifs(path.c_str());
@@ -49,11 +51,9 @@ int main(int argc, char** argv) {
 		if(ifs) {
 		    mp3 = util::trim(mp3);
 		    std::cout << "Playing " << mp3 << std::endl;
-		    std::stringstream ss;
-		    ss << player << " \"" << mp3 << "\"";
-		    std::string cmd = ss.str();
-		    std::cout << cmd << std::endl;
-		    sys::shell(cmd);
+		    // Was a command line with the path in quotes, which a
+		    // filename containing a quote, a backtick or a $ escapes.
+		    sys::run({player, mp3}, out, err);
 		}
 	    }
 	}
