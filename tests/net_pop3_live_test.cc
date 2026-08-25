@@ -174,6 +174,52 @@ int main() {
         }
     }
 
+    // STLS, RFC 2595 4.  The ordinary port, in the clear, upgraded in place.
+    std::cout << "\nSTLS:\n";
+
+    {
+        jlib::util::URL up = account("pop3", s.pop_port);
+
+        up.set_qs("tls=starttls");
+        up.set_pass(PASSWORD);
+
+        ok("?tls=starttls asks for it", jlib::net::Pop3::use_starttls(up));
+        ok("and it is not the same as a secure scheme",
+           !jlib::net::Pop3::is_secure(up));
+
+        try {
+            jlib::net::Pop3 pop(up, false);
+
+            const std::list<std::string> mail = pop.retrieve();
+
+            ok("the maildrop comes back over the upgraded connection",
+               mail.size() == 2, std::to_string(mail.size()) + " messages");
+
+            ok("and the dot-stuffed message is still whole",
+               mail.size() == 2 && mail.back() == impersonating_body());
+        }
+        catch(std::exception& e) {
+            ok("STLS works", false, e.what());
+            std::cerr << s.log();
+        }
+    }
+
+    {
+        // Asked for where it is not offered: the pop3s port is already TLS and
+        // does not advertise STLS.  That has to fail rather than continue.
+        jlib::util::URL nope = account("pop3", s.pop_tls_port);
+
+        nope.set_qs("tls=starttls");
+        nope.set_pass(PASSWORD);
+
+        bool threw = false;
+
+        try { jlib::net::Pop3(nope, false).retrieve(); }
+        catch(std::exception&) { threw = true; }
+
+        ok("asking for STLS where it is not offered fails", threw);
+    }
+
     // The control, as on the IMAP side: read the same message the way the old
     // code did -- to the octet count in the +OK -- and show it lands in the
     // wrong place.

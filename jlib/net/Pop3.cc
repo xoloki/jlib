@@ -27,6 +27,7 @@
 #include <jlib/util/util.hh>
 
 #include <cctype>
+#include <sstream>
 #include <memory>
 
 const int PORT = 110;
@@ -50,6 +51,10 @@ namespace jlib {
             return scheme == "pop3s" || scheme == "spop" || scheme == "spop3";
         }
 
+        bool Pop3::use_starttls(const jlib::util::URL& url) {
+            return jlib::util::lower(url["tls"]) == "starttls";
+        }
+
         Pop3::Pop3(jlib::util::URL url, bool remove) 
             : m_remove(remove)
         {
@@ -67,6 +72,65 @@ namespace jlib {
         }
         
         
+        std::list<std::string> Pop3::capa(jlib::sys::socketstream& sock) {
+            std::list<std::string> ret;
+
+            try {
+                handshake(sock, "CAPA", OK);
+            }
+            catch(exception&) {
+                // RFC 2449 postdates RFC 1939 and a server need not implement
+                // it.  An empty list rather than an error -- the caller
+                // decides what not knowing means.
+                return ret;
+            }
+
+            // A multi-line response, terminated by "." on a line of its own,
+            // exactly as a message body is.
+            std::istringstream body(read_body(sock));
+            std::string line;
+
+            while(std::getline(body, line)) {
+                if(!line.empty() && line.back() == '\r') line.pop_back();
+                if(!line.empty()) ret.push_back(line);
+            }
+
+            return ret;
+        }
+
+        void Pop3::upgrade(jlib::sys::socketstream& sock) {
+            // RFC 2595 4.
+            bool offered = false;
+
+            for(const std::string& c : capa(sock)) {
+                if(jlib::util::upper(c) == "STLS") offered = true;
+            }
+
+            if(!offered) {
+                throw exception("the server does not offer STLS, and "
+                                "?tls=starttls asked for it");
+            }
+
+            handshake(sock, "STLS", OK);
+
+            jlib::sys::tlsstream* tls = dynamic_cast<jlib::sys::tlsstream*>(&sock);
+
+            if(tls == 0) {
+                throw exception("STLS on a stream that cannot be upgraded");
+            }
+
+            // The same verification an implicit-TLS connection gets:
+            // SSL_VERIFY_PEER, the default trust store, and SSL_set1_host on
+            // the name that was connected to.
+            tls->start();
+
+            // 2595 4: the client must discard what CAPA said before the
+            // handshake.  Everything read then was unauthenticated, so a man
+            // in the middle could have taken STLS out of that list, or put an
+            // authentication mechanism into it.
+            capa(sock);
+        }
+
         unsigned int Pop3::count(jlib::sys::socketstream& sock) {
             // RFC 1939 5: "+OK nn mm" -- the number of messages and the size
             // of the maildrop.  Read as a number rather than as tokenize()[1],
@@ -158,6 +222,13 @@ namespace jlib {
             if(is_secure(m_url)) {
                 sock = new jlib::sys::sslstream(m_url.get_host(), m_url.get_port_val());
             }
+            else if(use_starttls(m_url)) {
+                // A tlsstream with delay set connects without handshaking;
+                // start() does the handshake in place once STLS has been
+                // negotiated.  The primitive smtp::send_tls has used all along.
+                sock = new jlib::sys::tlsstream(m_url.get_host(),
+                                                m_url.get_port_val(), true);
+            }
             else {
                 sock = new jlib::sys::socketstream(m_url.get_host(), m_url.get_port_val());
             }
@@ -168,6 +239,10 @@ namespace jlib {
             if(!jlib::util::begins(buf, OK)) {
                 throw exception(buf);
             }
+            if(use_starttls(m_url)) {
+                upgrade(*sock);
+            }
+
             handshake(*sock,"USER "+m_url.get_user(), OK);
             handshake(*sock,"PASS "+m_url.get_pass(), OK);
 

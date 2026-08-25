@@ -358,6 +358,72 @@ int main() {
         }
     }
 
+    // STARTTLS, RFC 2595 3: the ordinary port, in the clear, upgraded in
+    // place.  The same tlsstream primitive smtp::send_tls has used all along.
+    std::cout << "\nSTARTTLS:\n";
+
+    {
+        jlib::util::URL up("imap://joe@localhost:" + std::to_string(s.port)
+                           + "/INBOX?tls=starttls");
+
+        up.set_pass(PASSWORD);
+
+        jlib::net::Imap4 imap(up);
+
+        ok("?tls=starttls asks for it", imap.use_starttls());
+        ok("and it is not the same as a secure scheme", !imap.is_secure());
+
+        try {
+            std::unique_ptr<jlib::sys::socketstream> sock(imap.connect());
+
+            // RFC 3501 6.2.1 requires the capability list be taken again after
+            // the handshake, and a server must not still be offering STARTTLS
+            // once it has been negotiated.
+            ok("STARTTLS is gone from the list afterwards",
+               !imap.has_capability("STARTTLS"));
+            ok("and the list is not empty, so it was really re-issued",
+               !imap.capabilities().empty(),
+               std::to_string(imap.capabilities().size()) + " capabilities");
+
+            imap.login(*sock, "", "");
+            imap.select(*sock, "INBOX");
+
+            const std::string raw = imap.get(*sock, 1, false).raw();
+
+            ok("the session works over the upgraded connection",
+               raw == impersonating_body(),
+               raw == impersonating_body() ? std::string()
+                                           : std::to_string(raw.size()) + " octets");
+
+            imap.logout(*sock);
+        }
+        catch(std::exception& e) {
+            ok("STARTTLS works", false, e.what());
+            std::cerr << s.log();
+        }
+    }
+
+    // Asked for and not offered is an error.  Carrying on in the clear is the
+    // bug the top of this branch exists to fix, wearing a different hat -- so
+    // the imaps port, which does not offer STARTTLS because it is already TLS,
+    // has to be refused rather than used.
+    {
+        jlib::util::URL nope("imap://joe@localhost:" + std::to_string(s.tls_port)
+                             + "/INBOX?tls=starttls");
+
+        nope.set_pass(PASSWORD);
+
+        bool threw = false;
+
+        try {
+            jlib::net::Imap4 imap(nope);
+            std::unique_ptr<jlib::sys::socketstream> sock(imap.connect());
+        }
+        catch(std::exception&) { threw = true; }
+
+        ok("asking for STARTTLS where it is not offered fails", threw);
+    }
+
     // The port it picks when it is not told one.
     ok("imaps:// with no port is still secure",
        jlib::net::Imap4(jlib::util::URL("imaps://joe@localhost/INBOX")).is_secure());
