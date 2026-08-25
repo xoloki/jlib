@@ -19,6 +19,7 @@
  */
 
 #include <jlib/net/net.hh>
+#include <jlib/net/content_type.hh>
 
 #include <jlib/sys/sys.hh>
 
@@ -109,88 +110,49 @@ namespace jlib {
                 std::cerr <<"jlib::net::Email::create(): Content-Type: "
                           << type << std::endl;
             }
-            if(jlib::util::icontains(type, "multipart")) {
-                std::vector<std::string> v = jlib::util::tokenize(type,";");
-                std::string bound;
-                std::vector<std::string>::iterator i = v.begin();
-                while(bound == "" && i != v.end()) {
-                    if(jlib::util::icontains(*i,"boundary")) {
-                        bound = *i;
-                    }
-                    i++;
-                }
-                bound = bound.substr(bound.find("=")+1);
-                bound = jlib::util::slice(bound, "\"", "\"");
-                //cout << "boundary='"<<bound<<"'"<<endl;
-                std::vector<long> attach_divide;
-                std::istringstream ihead(m_raw);
-                ihead.seekg(header_end);
-                parse_divide(ihead, attach_divide, "--"+bound);
-                for(unsigned int i=0;i<attach_divide.size();i++) {
-                    std::istringstream istr(m_raw);
-                    //cout << "seekg()'ing "<<attach_divide[i]<<endl;
-                    istr.seekg(attach_divide[i]);
-                    std::string buf;
-                    while(buf.find(bound) == buf.npos) {
-                        //cout << "istr.tellg() = " << istr.tellg() << endl;
-                        //cout << "istr.eof() = " << istr.eof() << endl;
-                        jlib::sys::getline(istr, buf);
-                        //cout << "read line: '"<<buf<<"'"<<endl;
-                    }
-                    if(buf.find("--"+bound+"-") != buf.npos) {
-                        // final boundary, ignore everything after this
-                        //cout << "final boundary, ignore everything after this"<<endl;
-                        i = attach_divide.size();
-                    }
-                    else {
-                        // intermediate boundary, go for it
-                        //cout << "intermediate boundary, go for it"<<endl;
+            // icontains(type, "multipart") used to be the test, so a
+            // Content-Type of text/plain; name="multipart.txt" was a multipart
+            // message.  is() compares the type, not the header.
+            net::content_type ctype;
 
-                        // tellg() returns a streampos, which this narrowed to
-                        // 32 bits -- wrong for any message past 4GB, and it
-                        // also swallows the -1 tellg() returns on a failed
-                        // stream, turning it into a huge offset that substr
-                        // then throws on.
-                        const std::istream::pos_type where = istr.tellg();
-
-                        if(where == std::istream::pos_type(-1)) {
-                            break;
-                        }
-
-                        const std::string::size_type pos =
-                            static_cast<std::string::size_type>(where);
-                        // last case, have to get jiggy
-                        if(i+1 == attach_divide.size()) {
-                            buf = m_raw.substr(pos);
-                        }
-                        else {
-                            buf = m_raw.substr(pos, attach_divide[i+1]-pos);
-                        }
-
-                        if(buf[buf.length()-1] == '\n') {
-                            buf = buf.substr(0,buf.length()-1);
-                            if(buf[buf.length()-1] == '\r') {
-                                buf = buf.substr(0,buf.length()-1);
-                            }
-                        }
-
-                        //std::istringstream icreate(buf);
-                        m_attach.push_back(Email(buf));
-                    }
+            try {
+                ctype = net::content_type::parse(type);
+            }
+            catch(net::content_type::exception& e) {
+                // An unreadable Content-Type is text/plain, which is what
+                // RFC 2045 5.2 says to do with one that is missing, and is
+                // what the sanitizing above already assumes.
+                if(getenv("JLIB_NET_EMAIL_DEBUG")) {
+                    std::cerr << "jlib::net::Email::create(): " << e.what()
+                              << std::endl;
                 }
             }
-            else if(jlib::util::icontains(type, "message")) {
-                std::string buf;
-                if(jlib::util::icontains(type, "message/digest")) {
-                    
+
+            const std::string bound = ctype.get("boundary");
+
+            if(ctype.is("multipart") && !bound.empty()) {
+                // The boundary used to be found by splitting the header on
+                // ";" -- which splits inside a quoted value, so boundary="a;b"
+                // came out as boundary="a -- and then asking util::slice for
+                // what lay between the quotes, which returns its whole input
+                // when there are none.  Neither failure was visible: the
+                // message simply did not split into its parts, so an
+                // attachment went missing or the body was shown as one.
+                //
+                // The split is RFC 2046 5.1.1 now, rather than parse_divide on
+                // "--" + bound.  It is the leading CRLF belonging to the
+                // delimiter that this gets right and the old loop did not.
+                for(std::string& part : net::split_multipart(m_raw.substr(header_end),
+                                                             bound)) {
+                    m_attach.push_back(Email(std::move(part)));
                 }
-                else if(jlib::util::icontains(type, "message/rfc822")) {
-                    buf = m_raw.substr(header_end);
-                    m_attach.push_back(Email(buf));
-                }
-                else {
-                    
-                }
+            }
+            else if(ctype.is("message", "rfc822")) {
+                // The two empty branches that used to sit beside this one
+                // tested for "message" and then for "message/digest", which is
+                // not a media type -- the digest is multipart/digest, and it
+                // is handled by the multipart branch above.
+                m_attach.push_back(Email(m_raw.substr(header_end)));
             }
             else {
                 std::string encoding = jlib::util::upper(find("CONTENT-TRANSFER-ENCODING"));
@@ -389,8 +351,23 @@ namespace jlib {
         }
 
         bool Email::is(const std::string& type) const {
-            std::string ctype = jlib::util::lower(find("CONTENT-TYPE"));
-            return (ctype.find(type) != std::string::npos);
+            // A whole-component comparison.  This used to be find() != npos
+            // over the entire lowercased header, so is("text") was true for
+            // application/x-latext, and true for any multipart whose boundary
+            // happened to contain the letters "text" -- which is to say, true
+            // for a message whose boundary the sender chose.
+            const std::string::size_type slash = type.find('/');
+
+            try {
+                const net::content_type c = net::content_type::parse(find("CONTENT-TYPE"));
+
+                if(slash == type.npos) return c.is(type);
+
+                return c.is(type.substr(0, slash), type.substr(slash + 1));
+            }
+            catch(net::content_type::exception&) {
+                return false;
+            }
         }
 
         void Email::parse_received() {
@@ -424,33 +401,39 @@ namespace jlib {
         }
 
         std::string Email::get_name() const {
-            std::vector<std::string> ctype = util::tokenize(find("content-type"), ";");
-            std::string name;
-
-            for(std::vector<std::string>::iterator i = ctype.begin(); i != ctype.end(); i++) {
-                std::string buf = util::trim(*i);
-                if(buf.find("name=") == 0) {
-                    name = buf.substr(buf.find("=")+1);
-                    return util::slice(name, "\"", "\"");
-                }
+            // The old version matched a piece that *began* with "name=", so a
+            // parameter written with a space before it was invisible, and it
+            // read the value with util::slice, which hands back its whole
+            // input when the quotes are not there.  RFC 2231's filename*= form
+            // -- which is how any name with a non-ASCII character in it
+            // arrives -- it did not know about at all.
+            try {
+                return net::content_type::parse(find("CONTENT-TYPE")).get("name");
             }
-
-            return "";
+            catch(net::content_type::exception&) {
+                return std::string();
+            }
         }
 
         std::string Email::get_filename() const {
-            std::vector<std::string> ctype = util::tokenize(find("content-disposition"), ";");
-            std::string name;
+            // Content-Disposition, RFC 2183, and the same grammar -- the
+            // disposition type is a token with the parameter syntax of
+            // RFC 2045 after it.
+            try {
+                const std::string name =
+                    net::content_type::parse_disposition(find("CONTENT-DISPOSITION"))
+                        .get("filename");
 
-            for(std::vector<std::string>::iterator i = ctype.begin(); i != ctype.end(); i++) {
-                std::string buf = util::trim(*i);
-                if(buf.find("filename=") == 0) {
-                    name = buf.substr(buf.find("=")+1);
-                    return util::slice(name, "\"", "\"");
-                }
+                if(!name.empty()) return name;
+            }
+            catch(net::content_type::exception&) {
             }
 
-            return "";
+            // Falling back to Content-Type's "name" is new.  Every mail client
+            // does it, because plenty of senders put the attachment's name
+            // there and nowhere else, and an attachment that displays with no
+            // name is the whole of what this function is for.
+            return get_name();
         }
 
         void Email::set_indx(int indx) {

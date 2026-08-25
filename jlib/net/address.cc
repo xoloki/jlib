@@ -37,7 +37,9 @@ using util::abnf::options;
 
 grammar build(bool obsolete, bool lenient)
 {
-    std::string text = rfc5322::CORE;
+    std::string text = rfc5322::LEXICAL;
+
+    text += rfc5322::CORE;
 
     text += obsolete ? rfc5322::OBSOLETE : rfc5322::STRICT;
     if(lenient) text += rfc5322::LENIENT;
