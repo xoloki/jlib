@@ -855,13 +855,17 @@ namespace jlib {
         namespace html {
             std::string render(const std::string& s) {
                 sys::tfstream buf;
-                std::string cmd,out,err;
+                std::string out, err;
 
                 buf << s;
                 buf.close();
-                cmd = "lynx -dump -force_html "+buf.get_path();
-                sys::shell(cmd,out,err);
-                    
+
+                // The path is jlib's own temporary name, so this was not
+                // exploitable -- but it was the same shape as the four that
+                // were, and there is no reason for a shell to be here.
+                sys::run({ "lynx", "-dump", "-force_html", buf.get_path() },
+                         out, err);
+
                 return out;
             }
         }

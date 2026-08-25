@@ -47,27 +47,21 @@ namespace jlib {
             };
 
             /**
-             * Get the Mime-Type from the given filename
+             * The media type of the file at path.
              *
-             * @param path path to file
+             * Asks file(1) with --mime-type, which prints the answer rather
+             * than a sentence about it, so nothing has to be parsed out.
+             * "application/octet-stream" when file cannot say -- an
+             * unidentifiable attachment should still be sendable.
              *
-             * @return std::string description of data's MIME type
+             * The path is passed as an argument and never through a shell.
+             * It used to be interpolated into "file "+path and handed to
+             * /bin/sh, so a file named "x; rm -rf ~" ran as a command.
              */
             static std::string get_type_from_file(const std::string& path);
 
-            /**
-             * Get the Mime-Type from the given filename
-             *
-             * @param path path to file
-             *
-             * @return std::string description of data's MIME type
-             */
+            /** The media type of a blob, via a temporary file. */
             static std::string get_type_from_data(const std::string& data);
-          
-            /**
-             * parse the text output of the UNIX file command into a mime-type
-             */
-            static std::string parse_file_output(const std::string& data);
         };
         
     }

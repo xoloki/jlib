@@ -31,6 +31,13 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <fstream>
+#include <vector>
+
 
 const int SZ = 1024;
 
@@ -249,6 +256,80 @@ namespace jlib {
                 return false;
             }
             return true;
+        }
+
+        int run(const std::vector<std::string>& argv, std::string& out, std::string& err) {
+            if(argv.empty()) {
+                throw sys_exception("jlib::sys::run() with no program to run");
+            }
+
+            // Output goes to temp files rather than pipes, which is what
+            // shell() does and avoids the deadlock a pair of pipes needs a
+            // poll loop to escape: a child that fills the stderr pipe while
+            // the parent is still reading stdout blocks forever.
+            tfstream outf, errf;
+            const std::string outp = outf.get_path(), errp = errf.get_path();
+
+            outf.close();
+            errf.close();
+
+            std::vector<char*> args;
+
+            for(const std::string& a : argv) {
+                args.push_back(const_cast<char*>(a.c_str()));
+            }
+
+            args.push_back(nullptr);
+
+            const pid_t pid = fork();
+
+            if(pid < 0) {
+                throw sys_exception("fork() in jlib::sys::run(): " +
+                                    std::string(std::strerror(errno)));
+            }
+
+            if(pid == 0) {
+                // The child.  Nothing here may throw or allocate in a way that
+                // matters -- between fork and exec, only async-signal-safe
+                // calls are defined in a process that might have threads.
+                const int o = ::open(outp.c_str(), O_WRONLY | O_TRUNC);
+                const int e = ::open(errp.c_str(), O_WRONLY | O_TRUNC);
+
+                if(o >= 0) { ::dup2(o, STDOUT_FILENO); ::close(o); }
+                if(e >= 0) { ::dup2(e, STDERR_FILENO); ::close(e); }
+
+                ::execvp(args[0], args.data());
+
+                // Only reached if exec failed.  _exit, not exit: the child
+                // shares the parent's stdio buffers and must not flush them.
+                ::_exit(127);
+            }
+
+            int status = 0;
+
+            while(::waitpid(pid, &status, 0) < 0) {
+                if(errno != EINTR) {
+                    throw sys_exception("waitpid() in jlib::sys::run(): " +
+                                        std::string(std::strerror(errno)));
+                }
+            }
+
+            std::ifstream ofs(outp.c_str()), efs(errp.c_str());
+
+            getstring(ofs, out);
+            getstring(efs, err);
+
+            if(WIFSIGNALED(status)) {
+                return 128 + WTERMSIG(status);
+            }
+
+            const int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+
+            if(code == 127 && out.empty() && err.empty()) {
+                throw sys_exception("could not run \"" + argv[0] + "\"");
+            }
+
+            return code;
         }
 
         void shell(const std::string& cmd) {

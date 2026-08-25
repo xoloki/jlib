@@ -25,6 +25,8 @@
 #include <jlib/net/MFolder.hh>
 #include <jlib/net/MBox.hh>
 
+#include <filesystem>
+
 #include <jlib/sys/sys.hh>
 #include <jlib/sys/Directory.hh>
 
@@ -149,15 +151,34 @@ namespace jlib {
         }
 
         void MBoxBuf::delete_folder(std::list<std::string> path) {
-            if(!is_inbox(path)) {
-                jlib::sys::shell("rm "+m_maildir+MailNode::pathstr(path));
+            if(is_inbox(path)) return;
+
+            // This was sys::shell("rm "+m_maildir+pathstr(path)).  The folder
+            // name comes from the filesystem or, for an IMAP account being
+            // mirrored, from the server -- so it was a command line built out
+            // of a string jlib did not choose, handed to /bin/sh, running rm.
+            // A folder named "x; rm -rf $HOME" did that.  A folder named
+            // "My Mail" merely failed, because rm saw two arguments.
+            std::error_code ec;
+
+            std::filesystem::remove_all(m_maildir + MailNode::pathstr(path), ec);
+
+            if(ec) {
+                throw exception("could not delete folder: " + ec.message());
             }
         }
 
         void MBoxBuf::rename_folder(std::list<std::string> path, std::list<std::string> npath) {
-            if(!is_inbox(path)) {
-                jlib::sys::shell("mv "+m_maildir+MailNode::pathstr(path)+" "+
-                                 m_maildir+MailNode::pathstr(npath));
+            if(is_inbox(path)) return;
+
+            // Was sys::shell("mv "+...+" "+...), with the same hazard twice.
+            std::error_code ec;
+
+            std::filesystem::rename(m_maildir + MailNode::pathstr(path),
+                                    m_maildir + MailNode::pathstr(npath), ec);
+
+            if(ec) {
+                throw exception("could not rename folder: " + ec.message());
             }
         }
 
