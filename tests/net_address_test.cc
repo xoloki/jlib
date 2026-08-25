@@ -287,7 +287,8 @@ static void extending_the_grammar() {
     // RFC 6532 is written as one incremental alternative, and so is this.
     using namespace jlib::util::abnf;
 
-    grammar g = compile(std::string(jlib::net::rfc5322::CORE) +
+    grammar g = compile(std::string(jlib::net::rfc5322::LEXICAL) +
+                        jlib::net::rfc5322::CORE +
                         jlib::net::rfc5322::OBSOLETE + R"ABNF(
 atext           =/ UTF8-non-ascii
 UTF8-non-ascii  =  UTF8-2 / UTF8-3 / UTF8-4
@@ -360,7 +361,8 @@ static void the_grammar_itself() {
         std::string why;
 
         try {
-            grammar g = compile(std::string(jlib::net::rfc5322::CORE) + d);
+            grammar g = compile(std::string(jlib::net::rfc5322::LEXICAL) +
+                                jlib::net::rfc5322::CORE + d);
             g.check();
             built = true;
         }

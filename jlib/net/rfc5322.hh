@@ -31,10 +31,11 @@ namespace net {
  * RFC's own text rather than a transcription into find() and substr(), so what
  * jlib accepts can be checked against the document by reading it.
  *
- * Four pieces.  CORE is what every policy shares; STRICT and OBSOLETE are two
+ * Five pieces.  LEXICAL is section 3.2's tokens, which RFC 2045 borrows too;
+ * CORE is the rest of what every policy shares; STRICT and OBSOLETE are two
  * spellings of the six productions the RFC gives an obsolete form to, and
- * exactly one of them is appended to CORE; LENIENT is a further "=/" extension
- * for text that is not RFC 5322 at all.  See jlib/net/address.hh.
+ * exactly one of them is appended; LENIENT is a further "=/" extension for
+ * text that is not RFC 5322 at all.  See jlib/net/address.hh.
  *
  * ## Where this departs from the published text, and why
  *
@@ -81,10 +82,14 @@ namespace net {
 namespace rfc5322 {
 
 /**
- * Everything the policies share: 3.2 lexical tokens, 3.4.1 addr-spec, and the
- * 3.4 shapes whose obsolete form is elsewhere.
+ * Section 3.2's lexical tokens, which are not only an address's.
+ *
+ * Separate from CORE because RFC 2045 5.1 builds Content-Type out of these
+ * same pieces -- "comments are allowed in accordance with RFC 822" -- and a
+ * grammar for a media type should not have to drag addr-spec in behind it to
+ * get a quoted-string.  See jlib/net/rfc2045.hh, which appends to this.
  */
-inline const char* const CORE = R"ABNF(
+inline const char* const LEXICAL = R"ABNF(
 ; 3.2.1 quoted characters
 quoted-pair     =  "\" (VCHAR / WSP)
 
@@ -110,10 +115,21 @@ dot-atom-text   =  atom-text *("." atom-text) ; jlib: 1*atext respelled, so one
 ; 3.2.4 quoted strings
 qtext           =  %d33 / %d35-91 / %d93-126
 qcontent        =  qtext / quoted-pair
-quoted-string   =  [CFWS] DQUOTE qs-body [FWS] DQUOTE [CFWS]
-qs-body         =  *([FWS] qcontent)          ; jlib: names what is between the
-                                              ; quotes
+quoted-string   =  [CFWS] DQUOTE qs-body DQUOTE [CFWS]
+qs-body         =  *([FWS] qcontent) [FWS]    ; jlib: names what is between the
+                                              ; quotes, which 3.2.4 says is the
+                                              ; whole of the value -- so the
+                                              ; trailing FWS is inside it, or a
+                                              ; parameter written as "a long "
+                                              ; loses its last space
 
+)ABNF";
+
+/**
+ * Everything the address policies share: 3.2.5, 3.4.1's addr-spec, and the 3.4
+ * shapes whose obsolete form is elsewhere.  Appended to LEXICAL.
+ */
+inline const char* const CORE = R"ABNF(
 ; 3.2.5 miscellaneous tokens
 word            =  atom / quoted-string
 
