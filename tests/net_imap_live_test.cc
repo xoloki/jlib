@@ -303,6 +303,15 @@ int main() {
 
         ok("SELECT", true);
 
+        // parse() read the SELECT responses with icontains() and an index into
+        // a tokenized line.  The UNSEEN branch took tok[2], which on
+        // "* OK [UNSEEN 1] First unseen." is the string "[UNSEEN" -- so the
+        // count was zero for as long as there was one.
+        ok("EXISTS comes back", imap.exists() == 2,
+           std::to_string(imap.exists()));
+        ok("and UNSEEN is not zero", imap.unseen() == 1,
+           std::to_string(imap.unseen()));
+
         // The reason this test exists.  One of these two messages is a body
         // that says "A00001 OK FETCH completed" and nineteen variations, which
         // is what the client is waiting for -- and it has to come back whole.
@@ -324,6 +333,69 @@ int main() {
                ? std::string()
                : "got " + std::to_string(two.size()) + " of "
                  + std::to_string(impersonating_body().size()) + " octets");
+
+        // SEARCH, which was a bare tag and no command.
+        const std::vector<unsigned long> all = imap.search(*sock, "ALL");
+
+        ok("SEARCH ALL finds both messages",
+           all.size() == 2 && all[0] == 1 && all[1] == 2,
+           std::to_string(all.size()) + " found");
+
+        const std::vector<unsigned long> subject =
+            imap.search(*sock, "HEADER SUBJECT \"two\"");
+
+        ok("and a header search finds the one",
+           subject.size() == 1 && subject[0] == 2,
+           std::to_string(subject.size()) + " found");
+
+        ok("a search that matches nothing returns nothing",
+           imap.search(*sock, "HEADER SUBJECT \"nothing here\"").empty());
+
+        // UID, which was also a bare tag.  A sequence number shifts under an
+        // EXPUNGE from another client; a UID does not, which is why gtkmail
+        // needs this one.
+        const std::vector<jlib::net::imap::response> uids =
+            imap.uid(*sock, "SEARCH", "ALL");
+
+        unsigned long first_uid = 0;
+
+        for(const jlib::net::imap::response& r : uids) {
+            if(r.name() == "SEARCH" && !r.numbers().empty()) first_uid = r.numbers()[0];
+        }
+
+        ok("UID SEARCH answers with unique ids", first_uid != 0,
+           std::to_string(first_uid));
+
+        const std::vector<jlib::net::imap::response> byuid =
+            imap.uid(*sock, "FETCH", std::to_string(first_uid) + " (RFC822.SIZE)");
+
+        bool sized = false;
+
+        for(const jlib::net::imap::response& r : byuid) {
+            if(r.name() == "FETCH" && r.attributes().count("RFC822.SIZE")) sized = true;
+        }
+
+        ok("and UID FETCH takes one", sized);
+
+        // A byte range.  PARTIAL was withdrawn in RFC 3501 in favour of this,
+        // which is why the method that used to be called partial() is gone.
+        // Eleven octets, which is "From: a@b.c" -- twelve would take the CR
+        // as well, which is what the first draft of this line asked for and
+        // then did not expect.
+        const std::string head = imap.fetch_partial(*sock, 0, "", 0, 11);
+
+        ok("a partial fetch returns only what was asked for",
+           head == "From: a@b.c", "|" + show(head) + "|");
+
+        const std::string middle = imap.fetch_partial(*sock, 0, "", 6, 5);
+
+        ok("from the offset given", middle == "a@b.c", "|" + show(middle) + "|");
+
+        // A server may return fewer octets than asked for; it may not return
+        // more.
+        ok("and no more than the message holds",
+           imap.fetch_partial(*sock, 0, "", 0, 100000).size() == 36,
+           std::to_string(imap.fetch_partial(*sock, 0, "", 0, 100000).size()));
 
         imap.logout(*sock);
 

@@ -25,6 +25,7 @@
 
 #include <jlib/util/URL.hh>
 #include <jlib/net/Email.hh>
+#include <jlib/net/imap_response.hh>
 
 #include <cstddef>
 #include <vector>
@@ -421,6 +422,83 @@ namespace jlib {
              */
             std::string retrieve_headers(unsigned int which, const std::string& mailbox,unsigned int& size);
             std::string retrieve_headers(jlib::sys::socketstream& sock, unsigned int which, const std::string& mailbox,unsigned int& size);
+
+            /**
+             * Send a command and return the untagged responses it produced.
+             *
+             * What handshake() would be if it had existed after the grammar:
+             * whole responses, parsed, with the tagged completion checked and
+             * dropped.  Throws Imap4::exception on NO or BAD.
+             */
+            std::vector<imap::response> command(jlib::sys::socketstream& sock,
+                                                const std::string& data);
+
+            /**
+             * SEARCH, RFC 3501 6.4.4.  The message numbers that matched.
+             *
+             * criteria is the search key -- "UNSEEN", "FROM joe", "SINCE
+             * 1-Jan-2026" -- and charset names the encoding its strings are
+             * in, if they are not ASCII.
+             *
+             * This used to send a bare tag with no command at all and return
+             * whatever the server said about that, which is BAD.
+             */
+            std::vector<unsigned long> search(jlib::sys::socketstream& sock,
+                                              const std::string& criteria,
+                                              const std::string& charset = "");
+
+            /**
+             * UID, RFC 3501 6.4.8: the same commands keyed by unique id.
+             *
+             *     uid(sock, "SEARCH", "UNSEEN")
+             *     uid(sock, "FETCH", "4827313 (RFC822.SIZE)")
+             *
+             * The one gtkmail most needs: a sequence number shifts under an
+             * EXPUNGE from another client, so any state a client keeps across
+             * a connection has to be keyed by UID.
+             *
+             * Also a stub before this: a bare tag and no command.
+             */
+            std::vector<imap::response> uid(jlib::sys::socketstream& sock,
+                                            const std::string& command,
+                                            const std::string& args);
+
+            /**
+             * A byte range of one part, RFC 3501 6.4.5.
+             *
+             * The replacement for PARTIAL, which was withdrawn in RFC 3501 in
+             * favour of a FETCH with an origin and a length -- so the method
+             * that used to be called partial() is gone and this is not it.
+             *
+             *     fetch_partial(sock, 0, "", 0, 1024)      the first KB
+             *     fetch_partial(sock, 0, "HEADER", 0, 512)
+             *
+             * A server may return fewer octets than were asked for; it may
+             * not return more.
+             */
+            std::string fetch_partial(jlib::sys::socketstream& sock,
+                                      unsigned int which,
+                                      const std::string& section,
+                                      std::size_t origin,
+                                      std::size_t length);
+
+            /**
+             * FETCH one message and return one of its attributes.
+             *
+             * items is what to ask for -- "FLAGS RFC822.SIZE RFC822.HEADER" --
+             * and want is which of them to return.  RFC822.SIZE, if it was
+             * asked for and the server sent it, goes into size.
+             *
+             * Reads whole responses, so an attribute that arrives as a literal
+             * arrives whole; retrieve() and retrieve_headers() each used to
+             * take the response apart with util::tokenize and a linear search
+             * for the attribute name.
+             */
+            std::string fetch_attribute(jlib::sys::socketstream& sock,
+                                        unsigned int which,
+                                        const std::string& items,
+                                        const std::string& want,
+                                        unsigned int& size);
             
             /**
              * Remove this email from it's server
