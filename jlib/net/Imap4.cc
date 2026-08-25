@@ -21,7 +21,7 @@
 #include <jlib/net/net.hh>
 #include <jlib/net/Imap4.hh>
 
-#include <jlib/util/abnf.hh>
+#include <jlib/net/imap_response.hh>
 
 #include <jlib/sys/sys.hh>
 #include <jlib/sys/sslstream.hh>
@@ -146,70 +146,6 @@ namespace jlib {
 
 
 
-        namespace {
-
-            /**
-             * RFC 3501's literal introducer, and RFC 7888's.
-             *
-             * Two productions, so this is a small thing to reach for a grammar
-             * over -- but it is the RFC's own two productions, which is the
-             * point: what is accepted here can be checked by reading 4.3
-             * rather than by reading this.  Built once, on first use, for the
-             * reason in crypt/curve.hh:42.
-             */
-            const util::abnf::grammar& imap_literal() {
-                static util::abnf::grammar g = [] {
-                    util::abnf::grammar g = util::abnf::compile(
-                        "literal-introducer = \"{\" number [\"+\"] \"}\"\r\n"
-                        "number             = 1*DIGIT\r\n");
-                    g.check();
-
-                    return g;
-                }();
-
-                return g;
-            }
-
-        }
-
-        bool Imap4::literal_size(const std::string& line, std::size_t& n) {
-            // The introducer is the last thing on the line, so this is where
-            // it has to start if it is anywhere.
-            const std::string::size_type b = line.rfind('{');
-
-            if(b == line.npos) return false;
-
-            util::abnf::options o;
-            o.captures = util::abnf::options::capture_policy::listed;
-            o.capture_only = { "number" };
-
-            const util::abnf::parse_result r =
-                imap_literal().at("literal-introducer").try_parse(line.substr(b), o);
-
-            // A whole-input match, so "{12} more words" is not a literal and
-            // neither is "{}", "{-1}" or "{12x}".
-            if(!r) return false;
-
-            const std::string digits = r.root()["number"].str();
-
-            // A count from the network decides how many octets to read, so it
-            // is refused rather than clamped when it is absurd.  Two gigabytes
-            // is past anything a mail server will send in one literal and is
-            // also where the long this used to be held in would have gone
-            // negative.
-            try {
-                const unsigned long long v = std::stoull(digits);
-
-                if(v > 0x7FFFFFFFull) return false;
-
-                n = static_cast<std::size_t>(v);
-            }
-            catch(std::exception&) {
-                return false;
-            }
-
-            return true;
-        }
 
         Imap4::Imap4(util::URL url) 
             : m_url(url)
@@ -328,7 +264,7 @@ namespace jlib {
 
             std::size_t literal = 0;
 
-            if(!literal_size(buf, literal)) {
+            if(!imap::literal_size(buf, literal)) {
                 throw exception("expected a literal at the end of: " + buf);
             }
 
@@ -443,7 +379,7 @@ namespace jlib {
 
             std::size_t literal = 0;
 
-            if(!literal_size(buf, literal)) {
+            if(!imap::literal_size(buf, literal)) {
                 throw exception("expected a literal at the end of: " + buf);
             }
 
@@ -496,7 +432,7 @@ namespace jlib {
             std::vector<std::string> bufvec = util::tokenize(buf);
             std::size_t literal = 0;
 
-            if(!literal_size(buf, literal)) {
+            if(!imap::literal_size(buf, literal)) {
                 throw exception("expected a literal at the end of: " + buf);
             }
 
@@ -654,10 +590,25 @@ namespace jlib {
             }
             sock << com << ENDL << std::flush;
 
-            std::string end = (idle ? "+" : tag());
+            const std::string end = (idle ? "+" : tag());
 
+            // One *response* at a time, not one line.  RFC 3501 4.3 lets a
+            // response carry a literal -- "{32}" CRLF and then that many
+            // octets of message content -- and those octets may contain a line
+            // that looks exactly like the tagged completion this loop is
+            // waiting for.  Reading lines therefore stopped in the middle of a
+            // message, and every command after it read the rest of that
+            // message as its own response.
             while(!util::begins(buf, end)) {
-                sys::getline(sock, buf);
+                buf = imap::read(sock);
+
+                // The trailing CRLF comes off, as sys::getline used to take
+                // it, so that what a caller sees is unchanged for every
+                // response that has no literal in it.
+                while(!buf.empty() && (buf.back() == '\n' || buf.back() == '\r')) {
+                    buf.pop_back();
+                }
+
                 if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << buf << std::endl;
                 ret.push_back(buf);
             }
@@ -672,7 +623,12 @@ namespace jlib {
                 sock << "DONE" << ENDL << std::flush;
 
                 while(!util::begins(buf, tag())) {
-                    sys::getline(sock, buf);
+                    buf = imap::read(sock);
+
+                    while(!buf.empty() && (buf.back() == '\n' || buf.back() == '\r')) {
+                        buf.pop_back();
+                    }
+
                     if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << buf << std::endl;
                     ret.push_back(buf);
                 }

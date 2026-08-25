@@ -28,7 +28,7 @@
 
 #include <jlib/net/net.hh>
 #include <jlib/net/Pop3.hh>
-#include <jlib/net/Imap4.hh>
+#include <jlib/net/imap_response.hh>
 
 #include <iostream>
 #include <sstream>
@@ -37,7 +37,7 @@
 using jlib::net::dot_stuff;
 using jlib::net::dot_unstuff;
 using jlib::net::Pop3;
-using jlib::net::Imap4;
+namespace imap = jlib::net::imap;
 
 static int failures = 0;
 
@@ -211,7 +211,7 @@ static void imap_literals() {
 
     for(const auto& c : cases) {
         std::size_t n = 12345;
-        const bool got = Imap4::literal_size(c.line, n);
+        const bool got = imap::literal_size(c.line, n);
 
         ok(std::string("\"") + c.line + "\"",
            got == c.found && (!c.found || n == c.n),

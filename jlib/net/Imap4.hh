@@ -348,27 +348,6 @@ namespace jlib {
 
             
             /**
-             * The octet count of the literal a response line ends with.
-             *
-             * RFC 3501 4.3: a literal is "{" number "}" CRLF followed by that
-             * many octets, and RFC 7888 adds the non-synchronising "{n+}".
-             * The count is the only way to know where the literal ends, so
-             * getting it wrong desynchronises the connection for good.
-             *
-             * Returns false when the line does not end in a literal, which is
-             * the case the old code got wrong: it took the last token of the
-             * line and asked util::slice for what was between "{" and "}",
-             * and slice returns its whole input when the delimiters are not
-             * there.  int_value of that is 0, so a response with no literal --
-             * an error, a NIL, a server that answered something else -- read
-             * zero octets and then consumed the message body as though it were
-             * protocol.
-             *
-             * Static and public because it is worth testing without a server.
-             */
-            static bool literal_size(const std::string& line, std::size_t& n);
-
-            /**
              * The FETCH command retrieves data associated with a message in the
              * mailbox.  The data items to be fetched may be either a single atom
              * or a parenthesized list.  The currently defined data items that
