@@ -24,7 +24,10 @@ namespace jlib {
 namespace util {
 
 /**
- * RFC 5322 section 3.2, the lexical tokens the mail RFCs share.
+ * The parts of RFC 5322 that are not about addresses.
+ *
+ * Section 3.2's lexical tokens, which the mail RFCs share, and section 3.3's
+ * date-time, which is read by jlib::util::Date.
  *
  * Here rather than in jlib/net because three grammars need them and only one
  * of the three is about addresses.  RFC 2045 5.1 says its Content-Type
@@ -79,6 +82,75 @@ qs-body         =  *([FWS] qcontent) [FWS]    ; jlib: names what is between the
                                               ; parameter written as "a long "
                                               ; loses its last space
 
+)ABNF";
+
+/**
+ * Section 3.3, the Date: header.  Appended to LEXICAL.
+ *
+ * Section 4.3's obsolete forms are all here and all *first*, because every one
+ * of them subsumes the modern form it sits beside -- obs-day is
+ * "[CFWS] 1*2DIGIT [CFWS]" where day requires a trailing FWS, obs-year takes
+ * two digits where year takes four -- so under ordered choice the modern form
+ * would match a prefix, commit, and strand the rest.  The same reordering, for
+ * the same reason, as jlib/net/rfc5322.hh's OBSOLETE block.
+ *
+ * There is no policy switch here.  A Date: header is not something a client
+ * gets to be strict about: it is written by whatever sent the message, it is
+ * frequently obsolete syntax, and refusing to read one means refusing to sort
+ * a mailbox.
+ */
+inline const char* const DATE_TIME = R"ABNF(
+; 3.3
+date-time       =  [ day-of-week "," ] date time [CFWS]
+
+day-of-week     =  obs-day-of-week / ([FWS] day-name)
+day-name        =  "Mon" / "Tue" / "Wed" / "Thu" / "Fri" / "Sat" / "Sun"
+
+date            =  day month year
+day             =  obs-day / ([FWS] day-digits FWS)
+month           =  "Jan" / "Feb" / "Mar" / "Apr" / "May" / "Jun" /
+                   "Jul" / "Aug" / "Sep" / "Oct" / "Nov" / "Dec"
+year            =  obs-year / (FWS year-digits FWS)
+
+time            =  time-of-day zone
+time-of-day     =  hour ":" minute [ ":" second ]
+hour            =  obs-hour / hour-digits
+minute          =  obs-minute / minute-digits
+second          =  obs-second / second-digits
+
+; jlib: names for the digits, which the RFC writes inline.  The obsolete
+; forms wrap each field in [CFWS], so the span of "day" can be " 1 (the 2nd) "
+; -- and a comment is allowed to contain digits.  Scraping them out of the
+; span would read that comment as part of the date.
+day-digits      =  1*2DIGIT
+year-digits     =  2*DIGIT
+hour-digits     =  2DIGIT
+minute-digits   =  2DIGIT
+second-digits   =  2DIGIT
+
+; jlib: [CFWS] before the numeric form, which the RFC writes as FWS.  A
+; Date: header that folds before its zone, or carries a comment there, is
+; common and means what it says.
+zone            =  ([CFWS] zone-sign zone-offset) / ([CFWS] obs-zone)
+zone-sign       =  "+" / "-"
+zone-offset     =  4DIGIT
+
+; 4.3
+obs-day-of-week =  [CFWS] day-name [CFWS]
+obs-day         =  [CFWS] day-digits [CFWS]
+obs-year        =  [CFWS] year-digits [CFWS]
+obs-hour        =  [CFWS] hour-digits [CFWS]
+obs-minute      =  [CFWS] minute-digits [CFWS]
+obs-second      =  [CFWS] second-digits [CFWS]
+
+; jlib: "UTC" added, and first, because it is not RFC 5322 and it is
+; everywhere -- without it "UT" matches and strands the "C".  The single
+; letters come last for the same reason: "G" would take the first character
+; of "GMT".
+obs-zone        =  "UTC" / "UT" / "GMT" /
+                   "EST" / "EDT" / "CST" / "CDT" /
+                   "MST" / "MDT" / "PST" / "PDT" /
+                   %d65-73 / %d75-90 / %d97-105 / %d107-122
 )ABNF";
 
 }
