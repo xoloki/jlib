@@ -69,7 +69,35 @@ namespace jlib {
              * doing a copy; measured, moving a 2M Email copied 4M.
              */
 
+            /**
+             * Read a URI, against RFC 3986's own grammar.
+             *
+             * Throws URL::exception, with a column, on anything that is not
+             * one.  A scheme is required: "example.com/x" is a relative
+             * reference and jlib has no base to resolve it against.
+             *
+             * The scheme and the host are lowercased, which RFC 3986 6.2.2.1
+             * says is the canonical form and which every caller here was
+             * doing for itself.  The userinfo is percent-decoded, so
+             * "joe%40example.com" comes back as "joe@example.com"; the path
+             * and the query are not, because "%2F" in a path is a character
+             * and "/" is a separator and decoding loses the difference.
+             */
             void parse(const std::string& url);
+
+            /** Would it parse?  The way to ask without catching. */
+            static bool valid(const std::string& url);
+
+            /**
+             * Split a query string into its pairs, percent-decoding both
+             * sides.
+             *
+             * "+" is not a space here.  That convention belongs to HTML's
+             * application/x-www-form-urlencoded, not to RFC 3986, where "+"
+             * is a sub-delim that stands for itself -- and a URL class that
+             * silently turned it into a space would corrupt every base64
+             * value anyone put in a query.
+             */
             static std::map<std::string,std::string> parse_qs(const std::string& qs);
             static std::string parse_qs(std::map<std::string,std::string> qs);
 
@@ -82,6 +110,9 @@ namespace jlib {
             std::string get_path_no_slash() const;
 
             std::string get_delim() const;
+
+            /** The "#fragment", without its "#", or "" when there was none. */
+            std::string get_fragment() const;
 
             std::string get_qs() const;
             std::map<std::string,std::string> get_qs_hash() const;
@@ -100,6 +131,7 @@ namespace jlib {
             void set_port(const std::string& port);
             void set_path(const std::string& path);
             void set_delim(const std::string& delim);
+            void set_fragment(const std::string& fragment);
             void set_qs(const std::string& qs);
             void set_qs(std::map<std::string,std::string> qs);
            
@@ -125,6 +157,28 @@ namespace jlib {
             std::string m_port;
             std::string m_path;
             std::string m_qs;
+            std::string m_fragment;
+
+            /**
+             * Whether the URI had an authority -- a "//" after the scheme.
+             *
+             * Not the same as having a host: "mbox:///home/joe/Mail" has an
+             * authority and it is empty, while "mailto:joe@example.com" has
+             * none at all, and coagulate() has to put back what was there.
+             * True by default so that a URL built through a constructor,
+             * which takes a host, still writes one.
+             */
+            bool m_authority = true;
+
+            /**
+             * Whether the host was written as "[...]".
+             *
+             * Kept so that get_host() can hand back the bare address -- which
+             * is what getaddrinfo wants -- and coagulate() can put the
+             * brackets back.
+             */
+            bool m_host_literal = false;
+
             std::string m_delim;
             std::map<std::string,std::string> m_qs_hash;
         };
