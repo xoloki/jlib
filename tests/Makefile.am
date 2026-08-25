@@ -56,6 +56,7 @@ TESTS = \
 	net_protocol_test \
 	net_imap_test \
 	net_imap_live_test \
+	sys_proxy_live_test \
 	net_pop3_live_test \
 	net_mime_test \
 	net_same_address_test \
@@ -139,6 +140,9 @@ net_mime_test_LDADD             = $(JNET_LA) $(JUTIL_LA)
 
 net_pop3_live_test_SOURCES      = net_pop3_live_test.cc
 net_pop3_live_test_LDADD        = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
+
+sys_proxy_live_test_SOURCES     = sys_proxy_live_test.cc
+sys_proxy_live_test_LDADD       = $(JSYS_LA) $(JUTIL_LA) $(OPENSSL_LIBS)
 
 net_imap_live_test_SOURCES      = net_imap_live_test.cc
 net_imap_live_test_LDADD        = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)

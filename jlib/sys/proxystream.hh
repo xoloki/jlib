@@ -59,71 +59,76 @@ public:
     
 protected:
     void open_proxy() {
-        std::string buf;
         std::ostringstream os, con;
-        int c;
-        int n;
+
         os << m_proxy_host << ":" << m_proxy_port;
         con << "CONNECT " << os.str() << " HTTP/1.1\r\n"
-            << "Connection: persist\r\n\r\n";
-        
-        std::string connect(con.str());
-        
+            << "Host: " << os.str() << "\r\n"
+            << "\r\n";
+
+        const std::string connect(con.str());
+
         if(getenv("JLIB_SYS_PROXY_DEBUG"))
-            std::cerr << connect <<std::flush;
-        
+            std::cerr << connect << std::flush;
+
         this->sputn(connect.data(), connect.length());
-        sync();
-        
-        //c = sgetc();
-        c = this->sbumpc();
-        if(c == '\n') n++;
-        for(n = 0; (n < 2 && c != -1); ) {
-            if(getenv("JLIB_SYS_PROXY_DEBUG")) {
-                if(c == '\r') {
-                    std::cerr << "\\r" << std::flush;
-                } else if(c == '\n') {
-                    std::cerr << "\\n\n" << std::flush;
-                } else {
-                    std::cerr << (char)c << std::flush;
-                }
+
+        // this->sync(), not sync().
+        //
+        // basic_socketbuf is a dependent base, so unqualified lookup does not
+        // find its members -- and there is a ::sync() in <unistd.h>, which
+        // takes no arguments, returns void, and flushes the machine's
+        // filesystem buffers.  So this compiled, called that, and never sent
+        // the request.  The proxy support has never worked; the line above it
+        // gets this->sputn right, so someone knew and missed one.
+        this->sync();
+
+        // The whole of the response head, to the blank line.  What was here
+        // read until it had seen two '\n' characters and then threw the result
+        // away -- so a proxy that sends any headers of its own (most do:
+        // Proxy-agent, Connection) left the rest of them in the stream to be
+        // read as protocol data, and a proxy that refused the tunnel was
+        // indistinguishable from one that granted it.
+        std::string head;
+
+        while(head.find("\r\n\r\n") == std::string::npos &&
+              head.find("\n\n") == std::string::npos) {
+            const int c = this->sbumpc();
+
+            if(c == traits_type::eof()) {
+                throw typename basic_socketbuf<charT,traitT>::exception(
+                    "the proxy closed the connection before answering CONNECT: "
+                    "read \"" + head + "\"");
             }
-            buf.append(1, (char)c);
-            //c = sgetc();
-            c = this->sbumpc();
-            if(c == '\n') n++;
-        }
-        if(getenv("JLIB_SYS_PROXY_DEBUG") && c != -1) {
-            buf.append(1, (char)c);
-            std::cerr << "\\n" << std::endl;
-        }
-                
-        if(getenv("JLIB_SYS_PROXY_DEBUG")) {
-            if(c != -1) {
-                /*
-                  while((c=snextc()) != -1) {
-                  if(c == '\r') {
-                  std::cerr << "\\r" << std::flush;
-                  } else if(c == '\n') {
-                  std::cerr << "\\n\n" << std::flush;
-                  } else {
-                  std::cerr << (char)c << std::flush;
-                  }
-                  }
-                */
-            } else {
-                std::cerr << "reached EOF after reading '" << buf << "'" << std::endl;
+
+            head.append(1, static_cast<char>(c));
+
+            if(head.size() > 8192) {
+                throw typename basic_socketbuf<charT,traitT>::exception(
+                    "the proxy's answer to CONNECT has no end to its headers");
             }
         }
 
-        //n = sgetn(buffer, 4096);
+        if(getenv("JLIB_SYS_PROXY_DEBUG"))
+            std::cerr << head << std::flush;
 
-        //if(getenv("JLIB_SYS_PROXY_DEBUG"))
-        //std::cerr << buf <<std::endl;
-                
+        // RFC 9110 9.3.6: any 2xx means the tunnel is up, and anything else
+        // means it is not.  "HTTP/1.1 200 Connection established".
+        const std::string::size_type sp = head.find(' ');
+
+        if(sp == std::string::npos || head.compare(0, 5, "HTTP/") != 0) {
+            throw typename basic_socketbuf<charT,traitT>::exception(
+                "the proxy did not answer CONNECT with a status line: " + head);
+        }
+
+        if(head[sp + 1] != '2') {
+            const std::string::size_type nl = head.find_first_of("\r\n");
+
+            throw typename basic_socketbuf<charT,traitT>::exception(
+                "the proxy refused CONNECT: " + head.substr(0, nl));
+        }
     }
 
-            
     std::string m_proxy_host;
     uint m_proxy_port;
 };
