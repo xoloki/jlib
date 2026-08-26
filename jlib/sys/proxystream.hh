@@ -22,10 +22,12 @@
 #define JLIB_SYS_PROXYSTREAM_HH
 
 #include <jlib/sys/socketstream.hh>
+#include <jlib/util/http.hh>
 #include <jlib/util/util.hh>
 
 #include <openssl/ssl.h>
 
+#include <istream>
 #include <sstream>
 
 namespace jlib {
@@ -83,49 +85,49 @@ protected:
         // gets this->sputn right, so someone knew and missed one.
         this->sync();
 
-        // The whole of the response head, to the blank line.  What was here
-        // read until it had seen two '\n' characters and then threw the result
-        // away -- so a proxy that sends any headers of its own (most do:
-        // Proxy-agent, Connection) left the rest of them in the stream to be
-        // read as protocol data, and a proxy that refused the tunnel was
-        // indistinguishable from one that granted it.
-        std::string head;
+        // The whole of the response head, to the blank line, read and parsed
+        // by util::http.
+        //
+        // This used to be twenty lines here: read until two '\n' have gone by,
+        // then find(' ') and look at the character after it.  Two things were
+        // wrong with the version before *that* -- it threw the head away, so a
+        // proxy sending headers of its own (most do: Proxy-agent, Connection)
+        // left the rest of them in the stream to be read as protocol data, and
+        // a refused tunnel was indistinguishable from a granted one.  Both were
+        // fixed here, and then the same reader had to be written again for the
+        // HTTP client, which is one too many.
+        //
+        // An istream over this streambuf, because read_head() takes a stream
+        // and this *is* the stream -- nothing is copied, and there is no second
+        // buffer to get out of step with the first.
+        std::istream is(this);
 
-        while(head.find("\r\n\r\n") == std::string::npos &&
-              head.find("\n\n") == std::string::npos) {
-            const int c = this->sbumpc();
+        util::http::Response answer;
 
-            if(c == traits_type::eof()) {
-                throw typename basic_socketbuf<charT,traitT>::exception(
-                    "the proxy closed the connection before answering CONNECT: "
-                    "read \"" + head + "\"");
-            }
-
-            head.append(1, static_cast<char>(c));
-
-            if(head.size() > 8192) {
-                throw typename basic_socketbuf<charT,traitT>::exception(
-                    "the proxy's answer to CONNECT has no end to its headers");
-            }
+        try {
+            // A 2xx answer to CONNECT has no body whatever its fields say
+            // (9110 9.3.6): what follows the blank line is the tunnel.  Saying
+            // so here means a Content-Length the proxy had no business sending
+            // cannot make anything try to read one.
+            answer = util::http::parse_head(util::http::read_head(is), true);
+        }
+        catch(util::http::error& e) {
+            throw typename basic_socketbuf<charT,traitT>::exception(
+                std::string("the proxy's answer to CONNECT: ") + e.what());
         }
 
         if(getenv("JLIB_SYS_PROXY_DEBUG"))
-            std::cerr << head << std::flush;
+            std::cerr << answer.status() << " " << answer.reason() << std::endl;
 
         // RFC 9110 9.3.6: any 2xx means the tunnel is up, and anything else
         // means it is not.  "HTTP/1.1 200 Connection established".
-        const std::string::size_type sp = head.find(' ');
+        if(!answer.ok()) {
+            std::ostringstream why;
 
-        if(sp == std::string::npos || head.compare(0, 5, "HTTP/") != 0) {
-            throw typename basic_socketbuf<charT,traitT>::exception(
-                "the proxy did not answer CONNECT with a status line: " + head);
-        }
+            why << "the proxy refused CONNECT: " << answer.status()
+                << " " << answer.reason();
 
-        if(head[sp + 1] != '2') {
-            const std::string::size_type nl = head.find_first_of("\r\n");
-
-            throw typename basic_socketbuf<charT,traitT>::exception(
-                "the proxy refused CONNECT: " + head.substr(0, nl));
+            throw typename basic_socketbuf<charT,traitT>::exception(why.str());
         }
     }
 

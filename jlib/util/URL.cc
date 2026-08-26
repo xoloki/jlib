@@ -84,6 +84,14 @@ namespace jlib {
         }
         
         void URL::parse(const std::string& url) {
+            parse(url, "URI");
+        }
+
+        void URL::parse_reference(const std::string& url) {
+            parse(url, "URI-reference");
+        }
+
+        void URL::parse(const std::string& url, const char* start) {
             if(std::getenv("JLIB_UTIL_URL_DEBUG"))
                 std::cerr << "jlib::util::URL::parse(\""<<url<<"\")"<<std::endl;
 
@@ -96,7 +104,14 @@ namespace jlib {
             abnf::match m;
 
             try {
-                m = uri_grammar().at("URI").parse(text, parse_options());
+                // "URI" or "URI-reference" -- see parse_reference().  The
+                // latter is URI / relative-ref, so an absolute URL takes the
+                // same branch either way and everything below is unchanged.
+                //
+                // relative-ref could not be asked for at all until this
+                // branch: the first version of rfc3986.hh pasted only the
+                // rules URL::parse needed, and that was not one of them.
+                m = uri_grammar().at(start).parse(text, parse_options());
             }
             catch(abnf::budget_exceeded& e) {
                 throw exception(std::string("gave up reading a URL: ") + e.what());
@@ -110,7 +125,9 @@ namespace jlib {
             // RFC 3986 6.2.2.1: the scheme and the host are case insensitive,
             // and lower case is the canonical form.  Every caller in jlib was
             // doing this for itself, with util::lower, at every comparison.
-            m_protocol = lower(m["scheme"].str());
+            // A relative reference has no scheme, and get_protocol() being
+            // empty is how a caller tells the two apart.
+            m_protocol = m["scheme"] ? lower(m["scheme"].str()) : std::string();
 
             m_authority = static_cast<bool>(m["authority"]);
 
@@ -140,7 +157,11 @@ namespace jlib {
 
             m_host_literal = static_cast<bool>(m["IP-literal"]);
 
-            if(m_host_literal) {
+            if(!host) {
+                m_host.clear();
+                m_host_literal = false;
+            }
+            else if(m_host_literal) {
                 // Without the brackets: they delimit the literal, they are not
                 // part of the address, and getaddrinfo does not want them.
                 const std::string text = host.str();
@@ -157,7 +178,8 @@ namespace jlib {
             // took, and exactly one of the three can be present.
             m_path.clear();
 
-            for(const char* n : { "path-abempty", "path-absolute", "path-rootless" }) {
+            for(const char* n : { "path-abempty", "path-absolute", "path-rootless",
+                                  "path-noscheme" }) {
                 if(const abnf::match p = m[n]) {
                     m_path = p.str();
                     break;
@@ -172,6 +194,17 @@ namespace jlib {
         bool URL::valid(const std::string& url) {
             try {
                 URL u(url);
+                return true;
+            }
+            catch(exception&) {
+                return false;
+            }
+        }
+
+        bool URL::valid_reference(const std::string& url) {
+            try {
+                URL u;
+                u.parse_reference(url);
                 return true;
             }
             catch(exception&) {
