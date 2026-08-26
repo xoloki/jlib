@@ -24,6 +24,7 @@
 #include <string>
 #include <iostream>
 #include <map>
+#include <list>
 #include <vector>
 #include <exception>
 
@@ -159,6 +160,20 @@ namespace jlib {
             void send_tls(const std::string& mail, const std::string& rcpt, const std::string& data, const std::string& host,unsigned int port);
             void send_tls_auth(const std::string& mail, const std::string& rcpt, const std::string& data, const std::string& host,unsigned int port, const std::string& user, const std::string& pass);
             void send_ssl_auth(const std::string& mail, const std::string& rcpt, const std::string& data, const std::string& host,unsigned int port, const std::string& user, const std::string& pass);
+
+            /**
+             * Whether an EHLO reply offers a SASL mechanism.
+             *
+             * @param lines the reply, each line with its "250-" already off,
+             *              as eshake() returns it
+             * @param want  the mechanism, compared case-insensitively and whole
+             *
+             * Exposed because the scan it replaced was wrong in two ways that
+             * only a test can pin down -- it gave up at the first AUTH line,
+             * and it matched substrings -- and neither is reachable from
+             * outside without an SMTP server to answer.
+             */
+            bool has_auth_mechanism(const std::list<std::string>& lines, const std::string& want);
         }
 
         namespace http {

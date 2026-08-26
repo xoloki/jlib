@@ -424,6 +424,84 @@ int main() {
         ok("asking for STARTTLS where it is not offered fails", threw);
     }
 
+    // AUTHENTICATE against a server that decides for itself what it will
+    // accept.  net_imap_sasl_test drives the same code against a scripted
+    // server, which proves the framing; this proves the message.
+    {
+        jlib::util::URL u("imap://joe@127.0.0.1:" + std::to_string(s.port) + "/INBOX");
+
+        u.set_pass(PASSWORD);
+
+        jlib::net::Imap4 imap(u);
+
+        try {
+            std::unique_ptr<jlib::sys::socketstream> sock(imap.connect());
+
+            imap.capability(*sock);
+
+            ok("dovecot offers AUTH=PLAIN", imap.has_capability("AUTH=PLAIN"));
+
+            // The same password as the LOGIN section: a space, a quote and a
+            // backslash.  None of the three means anything inside a SASL
+            // message -- the fields are counted, not delimited -- which is
+            // half the reason to prefer this over LOGIN.
+            imap.authenticate_plain(*sock);
+
+            ok("AUTHENTICATE PLAIN succeeds against a real server",
+               imap.state() == jlib::net::Imap4::Authenticated);
+
+            imap.select(*sock, "INBOX");
+
+            ok("and the session works afterwards", imap.exists() == 2,
+               std::to_string(imap.exists()));
+
+            imap.logout(*sock);
+        }
+        catch(std::exception& e) {
+            ok("AUTHENTICATE PLAIN succeeds against a real server", false, e.what());
+            std::cerr << s.log();
+        }
+    }
+
+    // A mechanism the server has never heard of.  Dovecot answers a tagged NO
+    // without ever sending a continuation, which is the one path the scripted
+    // server cannot claim to have got right by construction.
+    {
+        jlib::util::URL u("imap://joe@127.0.0.1:" + std::to_string(s.port) + "/INBOX");
+
+        u.set_pass(PASSWORD);
+
+        jlib::net::Imap4 imap(u);
+
+        try {
+            std::unique_ptr<jlib::sys::socketstream> sock(imap.connect());
+
+            bool threw = false;
+
+            try {
+                imap.authenticate(*sock, "NOSUCHMECHANISM",
+                                  [](const std::string&) { return std::string(); });
+            }
+            catch(std::exception&) { threw = true; }
+
+            ok("an unknown mechanism is refused", threw);
+
+            // And the connection survives it, which is the assertion that
+            // matters: a client that guesses at mechanisms has to be able to
+            // fall back to the next one on the same socket.
+            imap.authenticate_plain(*sock);
+
+            ok("and the next mechanism works on the same connection",
+               imap.state() == jlib::net::Imap4::Authenticated);
+
+            imap.logout(*sock);
+        }
+        catch(std::exception& e) {
+            ok("and the next mechanism works on the same connection", false, e.what());
+            std::cerr << s.log();
+        }
+    }
+
     // The port it picks when it is not told one.
     ok("imaps:// with no port is still secure",
        jlib::net::Imap4(jlib::util::URL("imaps://joe@localhost/INBOX")).is_secure());
@@ -441,8 +519,9 @@ int main() {
     // Not the commands #85 is about.  SEARCH, UID and a ranged FETCH are still
     // unimplemented; this exercises what was already there.
     //
-    // Not TLS.  imaps:// goes through sys::sslstream, which no test here
-    // reaches -- setting up a certificate Dovecot and OpenSSL both accept is a
-    // branch of its own.
+    // Not the mechanisms that matter for a real account.  AUTH=PLAIN is what
+    // dovecot offers out of the box; XOAUTH2 is what Gmail and Outlook.com
+    // require, and nothing here has ever spoken to either.  The exchange is
+    // the same shape and the credential is not.
     return failures ? 1 : 0;
 }

@@ -569,13 +569,25 @@ namespace jlib {
             bool idle = (data == "IDLE");
 
             if(getenv("JLIB_NET_IMAP4_DEBUG")) {
-                if(util::upper(data.substr(0,5)).find("LOGIN") == 0) {
+                // Two commands carry a credential in an argument, and the
+                // masking here knew about one of them.  AUTHENTICATE's
+                // argument is a base64 SASL message: under PLAIN that is the
+                // password and under XOAUTH2 it is a bearer token, either of
+                // which printed in full to stdout is worse than the password
+                // this was written to hide.  Both are cut to their first
+                // argument -- the username, or the mechanism name.
+                const std::string verb = util::upper(util::tokenize(data).empty()
+                                                     ? std::string()
+                                                     : util::tokenize(data)[0]);
+
+                if(verb == "LOGIN" || verb == "AUTHENTICATE") {
                     std::vector<std::string> tok = util::tokenize(data);
+
                     if(tok.size() >= 2) {
                         std::cout << tag()<<" "<<tok[0] << " " << tok[1] << " ********"<<std::endl;
                     }
                     else {
-                        std::cout << tag() << "LOGIN **** ********"<<std::endl;
+                        std::cout << tag() << " " << verb << " **** ********"<<std::endl;
                     }
                 }
                 else {
@@ -742,8 +754,152 @@ namespace jlib {
             handshake(sock,"LOGOUT");
             m_state = UnConnected;
         }
-        void Imap4::authenticate(sys::socketstream& sock, const std::string& name) {
-            handshake(sock,"AUTHENTICATE "+name);
+        void Imap4::authenticate(sys::socketstream& sock, const std::string& name,
+                                 const sasl_responder& respond)
+        {
+            // Not through handshake() or command(): both loop until a tagged
+            // response and neither can answer a "+", which is the whole of
+            // this exchange.
+            const std::string com = tag(1) + " AUTHENTICATE " + name;
+
+            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << com << std::endl;
+
+            sock << com << ENDL << std::flush;
+
+            // A server that keeps issuing challenges and a responder that
+            // keeps answering the same thing would spin here forever.  No
+            // mechanism jlib speaks needs more than two rounds; the cap is
+            // loose enough not to matter and finite, which is the point.
+            const int MAX_ROUNDS = 8;
+            int rounds = 0;
+
+            std::vector<std::string> capabilities;
+
+            for(;;) {
+                const std::string raw = imap::read(sock);
+
+                if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << raw;
+
+                imap::response r;
+
+                try {
+                    r = imap::response::parse(raw);
+                }
+                catch(imap::error& e) {
+                    // Unparseable mid-exchange: the connection is no longer at
+                    // a known boundary, so cancelling would only add to the
+                    // confusion.  Say so and let the caller drop it.
+                    throw exception(std::string("AUTHENTICATE: ") + e.what());
+                }
+
+                if(r.type() == imap::response::kind::continuation) {
+                    std::string answer;
+
+                    if(++rounds > MAX_ROUNDS) {
+                        cancel_authenticate(sock);
+
+                        throw exception("AUTHENTICATE " + name + ": the server is still "
+                                        "challenging after " + util::valueOf(MAX_ROUNDS) +
+                                        " rounds");
+                    }
+
+                    try {
+                        // 6.2.2: the challenge is base64.  Decoded here so a
+                        // responder sees the mechanism's own bytes -- the JSON
+                        // error blob XOAUTH2 sends on failure, for one --
+                        // rather than having to know the encoding.
+                        answer = respond(util::base64::decode(r.text()));
+                    }
+                    catch(...) {
+                        // The responder gave up.  Cancelling is not politeness:
+                        // without it the server is still waiting for a line,
+                        // and the next command sent on this socket is read as
+                        // the answer to this challenge.
+                        cancel_authenticate(sock);
+                        throw;
+                    }
+
+                    sock << util::base64::encode(answer) << ENDL << std::flush;
+
+                    if(getenv("JLIB_NET_IMAP4_DEBUG"))
+                        std::cout << "<" << answer.length() << " octets of "
+                                  << name << " response elided>" << std::endl;
+
+                    continue;
+                }
+
+                if(r.type() == imap::response::kind::untagged) {
+                    if(r.name() == "CAPABILITY") capabilities = r.capabilities();
+
+                    continue;
+                }
+
+                if(!r.ok()) throw exception(r.text());
+
+                // 6.2.2: the capability list changes on authentication, and a
+                // client that goes on using the one it took before is reading
+                // stale advertising -- LOGINDISABLED and the AUTH= mechanisms
+                // are exactly what drops off it.  A server may hand the new
+                // one back in the tagged OK's response code, or as an untagged
+                // response during the exchange; failing both, the cache is
+                // cleared rather than kept, and capability() will fetch it.
+                if(util::ibegins(r.code(), "CAPABILITY ")) {
+                    m_capabilities = util::tokenize(r.code().substr(11));
+                }
+                else {
+                    m_capabilities = capabilities;
+                }
+
+                m_state = Authenticated;
+
+                return;
+            }
+        }
+
+        void Imap4::cancel_authenticate(sys::socketstream& sock) {
+            if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "*" << std::endl;
+
+            sock << "*" << ENDL << std::flush;
+
+            // Read to the tagged completion -- which is a BAD, since the
+            // exchange was cancelled -- so the connection is left at a
+            // response boundary and stays usable.  Anything thrown in here is
+            // swallowed: this runs while another exception is on its way out,
+            // and that one is the interesting one.
+            try {
+                for(;;) {
+                    const imap::response r = imap::response::parse(imap::read(sock));
+
+                    if(r.type() == imap::response::kind::tagged) return;
+
+                    // A second continuation after a cancel would mean the
+                    // server did not take it; there is nothing further to try.
+                    if(r.type() == imap::response::kind::continuation) return;
+                }
+            }
+            catch(...) {
+            }
+        }
+
+        void Imap4::authenticate_plain(sys::socketstream& sock,
+                                       const std::string& user,
+                                       const std::string& pass)
+        {
+            const std::string u = user.empty() && pass.empty() ? m_user : user;
+            const std::string p = user.empty() && pass.empty() ? m_pass : pass;
+
+            // RFC 4616 2: the three fields are separated by NUL, so a NUL in
+            // any of them makes the message mean something else.  The RFC
+            // forbids it outright; refusing beats sending a credential that
+            // has been silently cut in half.
+            if(u.find('\0') != std::string::npos || p.find('\0') != std::string::npos) {
+                throw exception("AUTHENTICATE PLAIN: a NUL in the username or "
+                                "password would change where the fields end");
+            }
+
+            authenticate(sock, "PLAIN", [&u, &p](const std::string&) {
+                return std::string(1, '\0') + u + std::string(1, '\0') + p;
+            });
         }
         void Imap4::login(sys::socketstream& sock, const std::string& user, const std::string& pass) {
             // RFC 3501 6.2.3: a server advertising LOGINDISABLED will refuse
