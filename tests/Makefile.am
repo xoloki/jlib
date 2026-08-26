@@ -76,6 +76,7 @@ TESTS = \
 	util_headers_fold_test \
 	util_headers_angie_test \
 	util_xml_test \
+	util_json_test \
 	util_abnf_test \
 	util_abnf_compile_test \
  \
@@ -175,6 +176,9 @@ sys_sync_test_LDADD   = $(JSYS_LA)
 
 sys_socket_test_SOURCES = sys_socket_test.cc
 sys_socket_test_LDADD   = $(JSYS_LA)
+
+util_json_test_SOURCES = util_json_test.cc
+util_json_test_LDADD   = $(JUTIL_LA) $(JSYS_LA) $(JSONC_LIBS)
 
 util_test_SOURCES = util_test.cc
 util_test_LDADD   = $(JUTIL_LA)
