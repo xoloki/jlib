@@ -31,6 +31,7 @@
 #include <jlib/net/imap_response.hh>
 
 #include <iostream>
+#include <list>
 #include <sstream>
 #include <string>
 
@@ -59,6 +60,42 @@ static std::string show(const std::string& s) {
     }
 
     return out;
+}
+
+static void smtp_auth_mechanisms() {
+    std::cout << "\nwhich SASL mechanisms an EHLO reply offers:\n";
+
+    using jlib::net::smtp::has_auth_mechanism;
+
+    // The shape that was rejected outright.  RFC 4954 4 does not say the
+    // mechanisms come on one line, and a server is free to spread them; the
+    // scan here stopped at the first AUTH line and threw if PLAIN was not on
+    // that one, so this server -- which does offer PLAIN -- could not be
+    // authenticated to at all.
+    const std::list<std::string> split = { "PIPELINING", "AUTH GSSAPI",
+                                           "AUTH PLAIN LOGIN", "STARTTLS" };
+
+    ok("a mechanism on the second of two AUTH lines is found",
+       has_auth_mechanism(split, "PLAIN"));
+    ok("and one on the first still is", has_auth_mechanism(split, "GSSAPI"));
+    ok("one that is not there is not found", has_auth_mechanism(split, "CRAM-MD5") == false);
+
+    // The other half: find() matched anywhere in the line, so a mechanism
+    // whose name merely contains PLAIN counted as PLAIN.  Comparing whole
+    // tokens is the fix, and this is the case that tells the two apart.
+    ok("a longer name that contains the wanted one does not count",
+       has_auth_mechanism({ "AUTH XPLAINTEXT NTLM" }, "PLAIN") == false);
+
+    ok("the comparison ignores case",
+       has_auth_mechanism({ "auth plain" }, "PLAIN"));
+
+    // Not in the RFC; emitted for years by servers humouring a broken client
+    // of the day, and still emitted by some.  Reading it costs nothing.
+    ok("the old AUTH=PLAIN spelling is read too",
+       has_auth_mechanism({ "AUTH=PLAIN" }, "PLAIN"));
+
+    ok("a reply with no AUTH at all offers nothing",
+       has_auth_mechanism({ "PIPELINING", "STARTTLS" }, "PLAIN") == false);
 }
 
 static void smtp_transparency() {
@@ -222,6 +259,7 @@ static void imap_literals() {
 int main() {
     std::cout << std::unitbuf;
 
+    smtp_auth_mechanisms();
     smtp_transparency();
     pop3_framing();
     imap_literals();

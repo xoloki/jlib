@@ -28,6 +28,7 @@
 #include <jlib/net/imap_response.hh>
 
 #include <cstddef>
+#include <functional>
 #include <vector>
 #include <mutex>
 #include <map>
@@ -131,6 +132,15 @@ namespace jlib {
             bool has_capability(const std::string& name) const;
 
             /**
+             * Which of RFC 3501 3's four states the connection is in.
+             *
+             * There was no way to ask before -- m_state was written by half
+             * the commands here and read by nobody, which is how
+             * authenticate() came to not set it without anything noticing.
+             */
+            State state() const { return m_state; }
+
+            /**
              * Negotiate STARTTLS on an already-connected plaintext stream.
              *
              * Called by connect() when ?tls=starttls was asked for.  Throws if
@@ -183,13 +193,75 @@ namespace jlib {
 
 
             // 6.2.    Client Commands - Non-Authenticated State
+
+            /**
+             * What answers a SASL challenge.
+             *
+             * Called once per "+" continuation with the server's challenge
+             * already base64-decoded, and returns the client's answer in the
+             * clear -- the driver encodes it.  Returning "" sends an empty
+             * line, which is what a mechanism's final round wants.
+             *
+             * Throwing cancels the exchange: the driver sends the "*" of RFC
+             * 3501 6.2.2, waits for the tagged completion so the connection is
+             * left at a response boundary, and then rethrows.  That is the
+             * point of doing it this way -- a responder that cannot produce an
+             * answer must not just stop talking, because a half-finished
+             * AUTHENTICATE leaves the server waiting for a line and every
+             * later command reads someone else's response.
+             */
+            typedef std::function<std::string(const std::string& challenge)> sasl_responder;
+
             /**
              * The AUTHENTICATE command indicates an authentication mechanism,
              * such as described in [IMAP-AUTH], to the server.
              *
-             * @param name authentication mechanism name
-             */ 
-            void authenticate(jlib::sys::socketstream& sock, const std::string& name);
+             * RFC 3501 6.2.2's exchange, driven to completion: the command
+             * goes out, each "+" continuation is handed to respond(), and the
+             * tagged completion ends it.  A NO or BAD throws, as everywhere
+             * else here.
+             *
+             * What was here before sent the command through handshake(),
+             * which loops until it sees a tagged response -- and a
+             * continuation is not one, so it blocked forever on the first "+"
+             * the server sent.  It never set m_state either.  Nothing called
+             * it, which is the only reason that was not noticed.
+             *
+             * command() cannot be used for this: it treats a continuation as
+             * neither tagged nor untagged and reads straight past it, which
+             * is the same hang one layer down.
+             *
+             * @param name    authentication mechanism name
+             * @param respond what answers each challenge
+             */
+            void authenticate(jlib::sys::socketstream& sock, const std::string& name,
+                              const sasl_responder& respond);
+
+            /**
+             * AUTHENTICATE PLAIN, per RFC 4616.
+             *
+             * The message is authzid NUL authcid NUL password with an empty
+             * authzid.  Worth having over LOGIN even with the same credentials
+             * on the wire: it is the mechanism a server advertises as
+             * AUTH=PLAIN, some servers set LOGINDISABLED and offer only this,
+             * and it is the same driver XOAUTH2 will use.
+             *
+             * Empty arguments take the URL's user and password, as login()
+             * does.
+             */
+            void authenticate_plain(jlib::sys::socketstream& sock,
+                                    const std::string& user = "",
+                                    const std::string& pass = "");
+
+            /**
+             * Cancel an AUTHENTICATE in progress and leave the socket usable.
+             *
+             * RFC 3501 6.2.2's "*", followed by a read to the tagged
+             * completion.  Public because a caller driving authenticate() with
+             * its own responder may want it, but the driver calls it for you
+             * whenever the responder throws.
+             */
+            void cancel_authenticate(jlib::sys::socketstream& sock);
 
             /**
              * The LOGIN command identifies the user to the server and carries

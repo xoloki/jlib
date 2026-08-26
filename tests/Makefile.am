@@ -55,6 +55,7 @@ TESTS = \
 	net_mbox_crlf_test \
 	net_protocol_test \
 	net_imap_test \
+	net_imap_sasl_test \
 	net_imap_live_test \
 	sys_proxy_live_test \
 	net_pop3_live_test \
@@ -150,6 +151,9 @@ net_imap_live_test_LDADD        = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LI
 
 net_imap_test_SOURCES           = net_imap_test.cc
 net_imap_test_LDADD             = $(JNET_LA) $(JUTIL_LA)
+
+net_imap_sasl_test_SOURCES      = net_imap_sasl_test.cc
+net_imap_sasl_test_LDADD        = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
 net_protocol_test_SOURCES       = net_protocol_test.cc
 net_protocol_test_LDADD         = $(JNET_LA) $(JUTIL_LA)

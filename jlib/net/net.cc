@@ -672,6 +672,51 @@ namespace jlib {
                 return ret;
             }
 
+            /**
+             * Whether an EHLO reply advertises a SASL mechanism.
+             *
+             * RFC 4954 4: the keyword is AUTH and the mechanisms follow it,
+             * space-separated -- and a server may list them over more than one
+             * line, which is where this went wrong.  What was here walked the
+             * reply, stopped at the *first* line beginning "AUTH", and threw
+             * unless that one line mentioned PLAIN.  So a server answering
+             *
+             *     250-AUTH GSSAPI
+             *     250-AUTH PLAIN LOGIN
+             *
+             * was rejected outright for not supporting an authentication
+             * mechanism it was in the middle of offering.
+             *
+             * It also matched with find(), so "AUTH XPLAINTEXT" counted as
+             * PLAIN.  The comparison is whole tokens now.
+             *
+             * The "AUTH=PLAIN" spelling is here too: it is not in the RFC, it
+             * is what a generation of servers emitted alongside the real line
+             * for a broken client of the day, and refusing to read it costs
+             * nothing.
+             */
+            bool has_auth_mechanism(const std::list<std::string>& lines, const std::string& want) {
+                const std::string upper_want = util::upper(want);
+
+                for(const std::string& line : lines) {
+                    std::vector<std::string> tok = util::tokenize(line);
+
+                    if(tok.empty()) continue;
+
+                    const std::string verb = util::upper(tok[0]);
+
+                    if(verb != "AUTH" && verb.compare(0, 5, "AUTH=") != 0) continue;
+
+                    if(verb.length() > 5 && verb.substr(5) == upper_want) return true;
+
+                    for(std::size_t i = 1; i < tok.size(); i++) {
+                        if(util::upper(tok[i]) == upper_want) return true;
+                    }
+                }
+
+                return false;
+            }
+
             void send_tls(const std::string& mail, const std::string& rcpt, const std::string& data, const std::string& host, unsigned int port) {
                 sys::tlsstream stream(host, port, true);
                 std::list<std::string> r;
@@ -700,20 +745,8 @@ namespace jlib {
                 stream.start();
 
                 r = eshake(stream, "EHLO localhost", "250");
-                bool plain = false;
-                for(std::list<std::string>::iterator i = r.begin(); i != r.end(); i++) {
-                    if(i->find("AUTH") == 0) {
-                        if(i->find("PLAIN") != std::string::npos) {
-                            plain = true;
-                            break;
-                        } else {
-                            throw exception("AUTH option does not include plain: " + (*i));
-                        }
-                    }
-                }
-
-                if(!plain)
-                    throw exception("No AUTH option");
+                if(!has_auth_mechanism(r, "PLAIN"))
+                    throw exception("the server does not offer AUTH PLAIN");
                 
                 std::string token = util::base64::encode(std::string(1, '\0') + user + std::string(1, '\0') + pass);
                 handshake(stream, "AUTH PLAIN " + token, "235");
@@ -726,20 +759,8 @@ namespace jlib {
                 std::list<std::string> r;
 
                 r = eshake(stream, "EHLO localhost", "250");
-                bool plain = false;
-                for(std::list<std::string>::iterator i = r.begin(); i != r.end(); i++) {
-                    if(i->find("AUTH") == 0) {
-                        if(i->find("PLAIN") != std::string::npos) {
-                            plain = true;
-                            break;
-                        } else {
-                            throw exception("AUTH option does not include plain: " + (*i));
-                        }
-                    }
-                }
-
-                if(!plain)
-                    throw exception("No AUTH option");
+                if(!has_auth_mechanism(r, "PLAIN"))
+                    throw exception("the server does not offer AUTH PLAIN");
                 
                 std::string token = util::base64::encode(std::string(1, '\0') + user + std::string(1, '\0') + pass);
                 handshake(stream, "AUTH PLAIN " + token, "235");
