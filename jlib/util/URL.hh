@@ -85,8 +85,34 @@ namespace jlib {
              */
             void parse(const std::string& url);
 
-            /** Would it parse?  The way to ask without catching. */
+            /**
+             * Parse an RFC 3986 4.1 URI-reference: a URI, or a relative one.
+             *
+             * Separate from parse() on purpose, rather than parse() being
+             * widened.  A mail URL with a typo in it -- "imap:/host", say --
+             * is a perfectly good relative reference, so a parse() that
+             * accepted one would stop throwing on it and start returning
+             * something with no scheme and no host, which Imap4 would then try
+             * to connect to.  Refusing at the point of parse is worth keeping.
+             *
+             * What wants this is HTTP: RFC 9110 makes Location a
+             * URI-reference, and a 302 pointing at "/signin" is the ordinary
+             * case rather than the exotic one.
+             *
+             * Nothing here resolves a reference against a base.  RFC 3986 5.3
+             * is an algorithm of its own and no caller has needed it yet;
+             * relative() is how to find out that you have one.
+             */
+            void parse_reference(const std::string& url);
+
+            /** Would it parse as a URI?  The way to ask without catching. */
             static bool valid(const std::string& url);
+
+            /** Would it parse as a URI-reference? */
+            static bool valid_reference(const std::string& url);
+
+            /** No scheme: this came from parse_reference() and is relative. */
+            bool relative() const { return m_protocol.empty(); }
 
             /**
              * Split a query string into its pairs, percent-decoding both
@@ -181,6 +207,10 @@ namespace jlib {
 
             std::string m_delim;
             std::map<std::string,std::string> m_qs_hash;
+
+        protected:
+            void parse(const std::string& url, const char* start);
+
         };
         
     }

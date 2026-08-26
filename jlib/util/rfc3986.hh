@@ -81,6 +81,14 @@ namespace util {
  * **A rule per path shape is what hier-part already had.**  No change; noted
  * because a reader will look for one name and find four.
  *
+ * ## What was missing, and is here now
+ *
+ * URI-reference, absolute-URI, relative-ref, relative-part, path-noscheme and
+ * segment-nz-nc are all in Appendix A and none of them had been pasted -- the
+ * first draft of this header took only what URL::parse needed, which is why
+ * URL::parse refused a relative reference: there was no rule for one.  RFC
+ * 9110 imports four of the six by name, which is what turned the omission up.
+ *
  * ## What the grammar does not decide
  *
  * Not whether the URI means anything.  "imap://-b.example/" parses and no
@@ -103,6 +111,17 @@ URI             =  scheme ":" hier-part [ "?" query ] [ "#" fragment ]
 hier-part       =  ( "//" authority path-abempty )
                 /  path-absolute
                 /  path-rootless
+                /  path-empty
+
+URI-reference   =  URI / relative-ref
+
+absolute-URI    =  scheme ":" hier-part [ "?" query ]
+
+relative-ref    =  relative-part [ "?" query ] [ "#" fragment ]
+
+relative-part   =  ( "//" authority path-abempty )
+                /  path-absolute
+                /  path-noscheme
                 /  path-empty
 
 scheme          =  ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
@@ -146,12 +165,14 @@ reg-name        =  *( unreserved / pct-encoded / sub-delims )
 
 path-abempty    =  *( "/" segment )
 path-absolute   =  "/" [ segment-nz *( "/" segment ) ]
+path-noscheme   =  segment-nz-nc *( "/" segment )
 path-rootless   =  segment-nz *( "/" segment )
 path-empty      =  ""                   ; jlib: the RFC writes 0<pchar>, which
                                         ; is its notation for "nothing"
 
 segment         =  *pchar
 segment-nz      =  1*pchar
+segment-nz-nc   =  1*( unreserved / pct-encoded / sub-delims / "@" )
 pchar           =  unreserved / pct-encoded / sub-delims / ":" / "@"
 
 query           =  *( pchar / "/" / "?" )
