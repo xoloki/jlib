@@ -333,6 +333,41 @@ namespace jlib {
         }
 
         /**
+         * base64url, RFC 4648 section 5, without padding.
+         *
+         * The same six-bit alphabet with "-" and "_" in place of "+" and "/",
+         * so that a value can go in a URL or a filename without being
+         * percent-encoded first.
+         *
+         * **Separate from base64 rather than a flag on it, and the padding is
+         * the reason.**  RFC 7636 4.2 requires the PKCE code challenge to be
+         * base64url with the "=" stripped, and OAuth2 tokens are compared as
+         * whole strings by the server that issued them -- so a challenge with
+         * padding on the end simply does not match, and the error a provider
+         * returns for it says nothing about padding.  Meanwhile the XOAUTH2
+         * blob two files away is standard base64 *with* padding.  Two
+         * encodings that differ in three characters, used within a few lines
+         * of each other, is exactly the sort of thing a bool argument gets
+         * wrong silently.
+         *
+         * decode() accepts padding if it finds any, because other people's
+         * encoders emit it and refusing would be pedantry; encode() never
+         * writes it.
+         */
+        namespace base64url {
+
+            /** Encoded, no padding, no line breaks. */
+            std::string encode(const std::string& s);
+
+            /** Decoded.  Padding is tolerated on input and is not required. */
+            std::string decode(const std::string& s);
+
+            /** As decode(s), and clears clean if anything was not as declared. */
+            std::string decode(const std::string& s, bool& clean);
+
+        }
+
+        /**
          * Quoted-printable, RFC 2045 section 6.7.
          *
          * Not RFC 2047's "Q" encoding, which is a different rule set on the

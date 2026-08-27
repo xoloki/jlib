@@ -17,10 +17,10 @@ Each subdirectory of `jlib/` is one automake-built libtool library named
 
 | Dir | Library | What it is |
 | --- | --- | --- |
-| `jlib/sys` | `libjsys` | The foundation. iostream-based wrappers over OS facilities: `socketstream`, `sslstream`/`tlsstream`, `proxystream`, `sslproxystream`, `serialstream`, `pstream` (subprocess), `tfstream` (temp file). `run(argv, out, err)` executes a program with no shell involved — reach for it rather than `shell()`, which hands its argument to `/bin/sh`. Plus `Servent`/`ASServent` (threaded worker + command queue), `sync<T>` (mutex-wrapped value, C++11), `ringbuffer<T>` (lock-free, one producer and one consumer, written for the audio callback), `pipe`, `Directory`, `joystick`, `Object` (a polymorphic base), `signal<R(Args...)>`. |
-| `jlib/util` | `libjutil` | Two halves. The **parsing** half is the 2026 work: `abnf.hh` is a parser-combinator core with an RFC 5234 text front end on top (`compile()` reads an RFC's grammar as it stands), and the grammars themselves are pasted into headers — `rfc5322.hh` (3.2 lexical tokens, 3.3 date-time), `rfc2045.hh`, `rfc2047.hh`, `rfc3986.hh` — with `content_type`, `encoded_word`, `URL`, `Date` and `xml` reading them. The **grab bag** is the rest: `util.hh` (tokenize, trim, chop, base64/qp/URI codecs, byte `get`/`set`), `Regex` (POSIX `regex.h`, one live caller left), `Headers` (MIME header folding), `MimeType`, `Timer`, `json.hh` (a facade over json-c). |
+| `jlib/sys` | `libjsys` | The foundation. iostream-based wrappers over OS facilities: `socketstream`, `sslstream`/`tlsstream`, `proxystream`, `sslproxystream`, `serialstream`, `pstream` (subprocess), `tfstream` (temp file), and `listener` — bind/listen/accept, the accepting end jlib did without for twenty-six years. Sockets resolve with `getaddrinfo` (so IPv6 works and two threads no longer share `gethostbyname`'s static buffer), take a connect deadline, and can bound a read; `basic_socketbuf` adopts an accepted descriptor with the `sys::adopt` tag. `run(argv, out, err)` executes a program with no shell involved — reach for it rather than `shell()`, which hands its argument to `/bin/sh`. Plus `Servent`/`ASServent` (threaded worker + command queue), `sync<T>` (mutex-wrapped value, C++11), `ringbuffer<T>` (lock-free, one producer and one consumer, written for the audio callback), `pipe`, `Directory`, `joystick`, `Object` (a polymorphic base), `signal<R(Args...)>`. |
+| `jlib/util` | `libjutil` | Two halves. The **parsing** half is the 2026 work: `abnf.hh` is a parser-combinator core with an RFC 5234 text front end on top (`compile()` reads an RFC's grammar as it stands), and the grammars themselves are pasted into headers — `rfc5322.hh` (3.2 lexical tokens, 3.3 date-time), `rfc2045.hh`, `rfc2047.hh`, `rfc3986.hh`, and `rfc9110.hh`/`rfc9112.hh` (HTTP, pasted whole) — with `content_type`, `encoded_word`, `URL`, `Date`, `xml` and `http` reading them. `http.hh` is the HTTP *message* layer — a status line, a field section, and how the body after them is framed — and it lives here rather than in `net` because `sys/proxystream.hh` reads the answer to CONNECT with it and `sys` may not include `net`. The **grab bag** is the rest: `util.hh` (tokenize, trim, chop, base64/qp/URI codecs, byte `get`/`set`), `Regex` (POSIX `regex.h`, one live caller left), `Headers` (MIME header folding), `MimeType`, `Timer`, `json.hh` (a facade over json-c). |
 | `jlib/crypt` | `libjcrypt` | `crypt.hh` wraps GPGME (OpenPGP encrypt/sign/verify). The `curve`/`schnorr`/`groth` trio is the recent work: ristretto255 `Scalar`/`Point`/`Commitment` over libsodium, Schnorr proofs (single, double, `GeneralProof<N>`), and Groth binary/zero-argument proofs. Built only when libsodium *with* ristretto headers is present. |
-| `jlib/net` | `libjnet` | Email client stack: `Email` (MIME), `MailBox`/`MBox`/`Imap4Box`, `Pop3`, `Imap4`, `MailFolder`, plus `AS*` async variants layered on `sys::ASServent`. The protocol grammars live here — `rfc5322.hh` (addresses, appended to util's lexical block) read by `address.{hh,cc}`, and `rfc3501.hh` (IMAP responses) read by `imap_response.{hh,cc}`. `imap::read()` follows literals, which is why a response is not a line; `imap::quote()` writes command arguments. |
+| `jlib/net` | `libjnet` | Email client stack: `Email` (MIME), `MailBox`/`MBox`/`Imap4Box`, `Pop3`, `Imap4`, `MailFolder`, plus `AS*` async variants layered on `sys::ASServent`. The protocol grammars live here — `rfc5322.hh` (addresses, appended to util's lexical block) read by `address.{hh,cc}`, and `rfc3501.hh` (IMAP responses) read by `imap_response.{hh,cc}`. `imap::read()` follows literals, which is why a response is not a line; `imap::quote()` writes command arguments. `http.{hh,cc}` is the client — deliberately narrow, and the header says so — and `oauth.{hh,cc}` is OAuth2: the refresh grant, the authorization-code grant with PKCE, a loopback `redirect_receiver`, and the XOAUTH2 message that carries a token to IMAP. |
 | `jlib/media` | `libjmedia` | Audio via PortAudio, driven from its **callback**: `write()` fills a `sys::ringbuffer` and the device's callback drains it, so nothing in the path sleeps or polls. `AudioSink` is the device interface and `PortAudioSink` the implementation; `Player` (a `Servent`) runs a feeder thread so transport commands never wait on the device. Plus `AudioFile`/`WavFile`, `PlayList`, and streambuf-based `datastream`/`wavstream`/`notestream`/`audiofilestream`. `Type.hh` is a template-specialization table over PCM sample formats. `Dsp` is the retired OSS backend, kept but not built. |
 | `jlib/math` | `libjmath` | Header-only despite being a `lib_LTLIBRARIES` (its `_SOURCES` are all `.hh`). `matrix`, `vertex`, `tensor`, `buffer`, `polynomial` (templated on a Power type so it can hold curve `Scalar`s), and `Plot<T>` — the abstract plotting base, with `projection_mode` for perspective, orthographic or mixed. `object<T>` holds index-based topology — vertices, edges, and 2-faces built lazily — with `cuboid`, `pyramoid`, `spheroid`, `staroid` and `torus` (a flat k-torus in n dimensions; equal radii and k=2 is the Clifford torus). |
 | `jlib/x` | `libjx` | Raw Xlib: `Display`, `Window`, and an X11 `Plot`. |
@@ -130,21 +130,45 @@ done. `jhardhyper` draws translucent depth-sorted faces with per-frame normals,
 for hypercubes and for the flat torus, and under stereographic projection shows
 the Hopf foliation as nested tori.
 
+**jlib speaks OAuth2, which is what it needed to reach a real mailbox.** Gmail
+has wanted it since 2022 and Outlook.com has required it for personal accounts
+since September 2024, so a client with only LOGIN and AUTH PLAIN could not
+connect to either. Closing that took an HTTP client (RFC 9110 and 9112 pasted
+whole, `check()`-clean), a `jlib::sys` that can accept a connection, a real
+`AUTHENTICATE` driver, and a `util::json` that survives a stranger's reply.
+`net_imap_live_test` runs the whole chain against a real Dovecot: jlib fetches a
+token over HTTP, presents it over IMAP with XOAUTH2, and Dovecot goes back over
+HTTP to check it — using an in-process server that is the token endpoint and the
+tokeninfo endpoint at once, because Google's has the same shape.
+
+What that cannot establish, and no test here can: **neither Google nor Microsoft
+will issue a client id without the user registering an application first.** The
+library can be complete and the feature still not work for a given user.
+
 **The parsing arc is done too, and it is what most of the library now rests
 on.** An ABNF parser was built (`util::abnf`), an RFC's grammar can be pasted
 into a header and read as it stands, and everything that used to guess now does
 not: addresses (RFC 5322), MIME headers (2045/2047/2231), URLs (3986), dates
-(5322 §3.3), IMAP responses (3501), and XML. The XML parser was replaced
+(5322 §3.3), IMAP responses (3501), HTTP messages (9110/9112), and XML. The XML parser was replaced
 clean-room along the way, which removed the last copyright the author did not
 hold and **let the whole library relicense from GPL v2+ to Apache 2.0**.
 
-`tests/net_imap_live_test` starts a real Dovecot with a generated certificate
-and drives `Imap4` against it, in plaintext and over TLS. It is the only test
-that talks to a server rather than a `std::istringstream`, and the only way to
-exercise an IMAP literal, because only a server decides when to send one.
+The `*_live_test` programs start a real server — Dovecot, tinyproxy, nginx — and
+drive jlib against it. They exist because a `std::istringstream` produces only
+the responses somebody thought of, and so does an in-process server you wrote
+yourself: an IMAP literal, a Date and an ETag in an order nobody chose, a
+proxy's 403, are all things only a server decides to send. The in-process
+servers (`tests/httpserver.hh`, and the scripted one in `net_imap_sasl_test`)
+are for the opposite case — a chunked body whose data looks like its own
+framing, a challenge that never ends — which no real server will produce on
+request. Both kinds are needed and neither substitutes for the other.
 
 Remaining work is tracked in GitHub issues; the phase labels are historical now.
-What is left is the graphics chain that would let one `HyperPlot` serve both
+The HTTP arc left three of its own: #112 (`jlib::sys` can be the client end of a
+TLS connection and not the server end, so two tests hand-roll `SSL_accept`),
+#104 (proxy authentication — and `rfc9110.hh` already records that
+`credentials`/`challenge` need reordering under ordered choice before it can
+work) and #105 (SOCKS5). Otherwise what is left is the graphics chain that would let one `HyperPlot` serve both
 apps (#20 → #24 → #28), tessellation and face enumeration for the remaining
 shapes (#31, #35), two `math` bugs (#53, and #76 — `vertex` and `matrix` share
 storage when copied but deep-copy when assigned, which is why `jhypermusic`

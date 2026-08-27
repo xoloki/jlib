@@ -19,14 +19,26 @@
 
 #include <jlib/net/oauth.hh>
 
+#include <jlib/sys/listener.hh>
+#include <jlib/sys/socketstream.hh>
+
 #include <jlib/util/URL.hh>
+#include <jlib/util/http.hh>
 #include <jlib/util/json.hh>
+#include <jlib/util/util.hh>
+
+#include <openssl/evp.h>
+#include <openssl/rand.h>
 
 #include <map>
+#include <memory>
+#include <sstream>
 
 namespace jlib {
 namespace net {
 namespace oauth {
+
+namespace abnf = util::abnf;
 
 namespace {
 
@@ -191,6 +203,306 @@ const std::string& session::access() {
     m_token = fresh;
 
     return m_token.access();
+}
+
+// ------------------------------------------------------------ PKCE and state
+
+std::string random_token(std::size_t bytes) {
+    std::string raw(bytes, '\0');
+
+    // RAND_bytes, not std::random_device or rand().  This is the value that
+    // makes a stolen authorization code useless, so a predictable one is the
+    // same as none -- and OpenSSL is already a hard dependency here, where
+    // libsodium is optional and gated.
+    if(RAND_bytes(reinterpret_cast<unsigned char*>(&raw[0]),
+                  static_cast<int>(bytes)) != 1) {
+        throw error("the system random number generator failed");
+    }
+
+    return util::base64url::encode(raw);
+}
+
+pkce::pkce(std::string verifier)
+    : m_verifier(std::move(verifier))
+{
+    // RFC 7636 4.1: 43 to 128 characters of unreserved.  Checked rather than
+    // assumed, because a caller supplying its own is the case where it can be
+    // wrong, and a provider's complaint about it says "invalid_request".
+    if(m_verifier.length() < 43 || m_verifier.length() > 128)
+        throw error("a PKCE verifier is 43 to 128 characters; this one is " +
+                    std::to_string(m_verifier.length()));
+
+    for(char c : m_verifier) {
+        const bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                (c >= '0' && c <= '9') ||
+                                c == '-' || c == '.' || c == '_' || c == '~';
+
+        if(!unreserved)
+            throw error("a PKCE verifier is unreserved characters only");
+    }
+
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int len = 0;
+
+    if(EVP_Digest(m_verifier.data(), m_verifier.length(), hash, &len,
+                  EVP_sha256(), 0) != 1) {
+        throw error("SHA-256 failed");
+    }
+
+    // RFC 7636 4.2: base64url of the hash of the *ASCII* verifier, unpadded.
+    // The padding matters -- a provider compares the whole string.
+    m_challenge = util::base64url::encode(
+        std::string(reinterpret_cast<const char*>(hash), len));
+}
+
+pkce pkce::generate() {
+    // 32 random octets is 43 base64url characters, which is the minimum length
+    // RFC 7636 4.1 allows and 256 bits of entropy.
+    return pkce(random_token(32));
+}
+
+// -------------------------------------------------------- redirect_receiver
+
+class redirect_receiver::impl {
+public:
+    explicit impl(unsigned short port)
+        : listener(port, "127.0.0.1", 1)
+    {}
+
+    sys::listener listener;
+};
+
+redirect_receiver::redirect_receiver(unsigned short port)
+    : m_impl(new impl(port))
+{}
+
+redirect_receiver::~redirect_receiver() = default;
+
+unsigned short redirect_receiver::port() const {
+    return m_impl->listener.port();
+}
+
+std::string redirect_receiver::redirect_uri() const {
+    // The address literal, not "localhost".  RFC 8252 7.3: "localhost" is
+    // whatever the resolver says it is, and the resolver is not always ours.
+    return "http://127.0.0.1:" + std::to_string(port()) + "/";
+}
+
+callback redirect_receiver::wait(const std::string& expect_state, double timeout) {
+    std::unique_ptr<sys::socketstream> browser;
+
+    try {
+        browser = m_impl->listener.accept_stream(timeout);
+    }
+    catch(std::exception& e) {
+        throw error(std::string("waiting for the browser: ") + e.what());
+    }
+
+    if(!browser)
+        throw error("no redirect arrived within " + std::to_string(timeout) +
+                    " seconds");
+
+    // Reading is bounded twice over: a deadline, and a cap on the request line.
+    // Whatever connected is not necessarily a browser.
+    browser->set_timeout(10);
+
+    std::string line;
+
+    std::getline(*browser, line);
+
+    while(!line.empty() && line.back() == '\r') line.pop_back();
+
+    if(line.length() > 8192) throw error("the redirect's request line is absurd");
+
+    // "GET /?code=...&state=... HTTP/1.1".  Read with the grammar rather than
+    // with find(): request-line is RFC 9112 3, and the pieces come out of the
+    // match instead of out of offsets counted by hand.
+    const abnf::parse_result p =
+        util::http::grammar().at("request-line").try_parse(line);
+
+    if(!p) throw error("what connected to the redirect port did not send a "
+                       "request line");
+
+    const abnf::match m = p.root();
+
+    if(m["method"].str() != "GET")
+        throw error("the redirect was not a GET");
+
+    // The target is origin-form: an absolute path and a query.  URL learned to
+    // parse a relative reference two branches ago, which is exactly this.
+    util::URL target;
+
+    try {
+        target.parse_reference(m["request-target"].str());
+    }
+    catch(std::exception&) {
+        throw error("the redirect's request target is not a URI reference");
+    }
+
+    callback back;
+
+    back.code = target["code"];
+    back.state = target["state"];
+    back.error = target["error"];
+    back.error_description = target["error_description"];
+
+    // The state first, and before anything else is believed.  RFC 6749 10.12:
+    // this is the client's only defence against someone else's authorization
+    // code being planted on it, and the check is worthless if it happens after
+    // the code has been used.
+    const bool state_ok = !expect_state.empty() && back.state == expect_state;
+
+    // One fixed page, whatever happened, because the person is looking at a
+    // browser and an empty response is indistinguishable from a crash.  It
+    // never contains the code: a URL bar is shoulder-surfable and a page is
+    // saveable.
+    const std::string body =
+        state_ok && back.ok()
+        ? "<html><body><h1>Signed in</h1><p>You can close this window and "
+          "return to the application.</p></body></html>"
+        : "<html><body><h1>Sign-in failed</h1><p>Return to the application; "
+          "it has the details.</p></body></html>";
+
+    std::ostringstream reply;
+
+    reply << "HTTP/1.1 200 OK\r\n"
+          << "Content-Type: text/html; charset=utf-8\r\n"
+          << "Content-Length: " << body.length() << "\r\n"
+          << "Connection: close\r\n"
+          << "\r\n"
+          << body;
+
+    *browser << reply.str() << std::flush;
+    browser->close();
+
+    if(!state_ok) {
+        throw error("the redirect's state does not match the one that was sent; "
+                    "refusing it");
+    }
+
+    if(!back.error.empty()) {
+        throw denied(back.error, back.error_description);
+    }
+
+    if(back.code.empty()) throw error("the redirect carried neither a code nor an error");
+
+    return back;
+}
+
+// ----------------------------------------------------- the code grant itself
+
+std::string authorize_url(const client& c,
+                          const std::string& redirect_uri,
+                          const std::string& state,
+                          const pkce& p)
+{
+    if(c.authorize_endpoint.empty()) throw error("no authorization endpoint");
+    if(c.id.empty()) throw error("no client id");
+    if(state.empty()) throw error("no state; see RFC 6749 10.12");
+
+    const util::URL endpoint(c.authorize_endpoint);
+
+    if(endpoint.get_protocol() != "https" && !c.allow_http) {
+        // Not because a secret goes out on it -- nothing here does -- but
+        // because whoever can rewrite this URL chooses where the user types
+        // their password.
+        throw error("refusing to send a user to a plaintext authorization "
+                    "endpoint: " + c.authorize_endpoint);
+    }
+
+    std::map<std::string, std::string> query;
+
+    query["response_type"] = "code";
+    query["client_id"] = c.id;
+    query["redirect_uri"] = redirect_uri;
+    query["state"] = state;
+    query["code_challenge"] = p.challenge();
+    query["code_challenge_method"] = pkce::method();
+
+    if(!c.scope.empty()) query["scope"] = c.scope;
+
+    // form_encode, which is the encoding a query string uses: space is "+".
+    // The separator is whatever the endpoint already has -- a provider is
+    // entitled to put its own parameters in the URL it publishes.
+    const std::string sep = endpoint.get_qs().empty() ? "?" : "&";
+
+    return c.authorize_endpoint + sep + http::form_encode(query);
+}
+
+token exchange(const client& c,
+               const std::string& code,
+               const pkce& p,
+               const std::string& redirect_uri,
+               const http::options& o)
+{
+    if(c.token_endpoint.empty()) throw error("no token endpoint");
+    if(code.empty()) throw error("no authorization code to exchange");
+
+    const util::URL endpoint(c.token_endpoint);
+
+    if(endpoint.get_protocol() != "https" && !c.allow_http) {
+        throw error("refusing to send a credential to a plaintext endpoint: " +
+                    c.token_endpoint);
+    }
+
+    std::map<std::string, std::string> form;
+
+    form["grant_type"] = "authorization_code";
+    form["code"] = code;
+    form["redirect_uri"] = redirect_uri;
+    form["code_verifier"] = p.verifier();
+
+    if(!c.id.empty()) form["client_id"] = c.id;
+    if(!c.secret.empty()) form["client_secret"] = c.secret;
+
+    http::fields send;
+
+    send.add("Accept", "application/json");
+
+    http::options opts = o;
+
+    opts.redirects = 0;
+
+    const http::Response r = http::post_form(endpoint, form, send, opts);
+
+    // An authorization code is single-use, so there is no refresh token to
+    // fall back on here: whatever the reply says about one is all there is.
+    try {
+        return parse_token_response(r.body(), std::string(), 0);
+    }
+    catch(denied&) {
+        throw;
+    }
+    catch(error&) {
+        if(!r.ok()) {
+            throw error("the token endpoint answered " +
+                        std::to_string(r.status()) + " " + r.reason() +
+                        " with nothing a program can act on");
+        }
+
+        throw;
+    }
+}
+
+token authorize(const client& c,
+                const std::function<void(const std::string&)>& open,
+                unsigned short port,
+                double timeout)
+{
+    if(!open) throw error("no way to open a browser was given");
+
+    // Bound before the URL is built, because the URL has to name the port.
+    redirect_receiver receiver(port);
+
+    const pkce p = pkce::generate();
+    const std::string state = random_token(32);
+    const std::string uri = receiver.redirect_uri();
+
+    open(authorize_url(c, uri, state, p));
+
+    const callback back = receiver.wait(state, timeout);
+
+    return exchange(c, back.code, p, uri);
 }
 
 std::string xoauth2(const std::string& user, const std::string& access_token) {
