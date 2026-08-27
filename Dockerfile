@@ -17,9 +17,16 @@
 # server on high ports with a seeded Maildir and drive jlib::net::Imap4 and
 # jlib::net::Pop3 against it.  tinyproxy is for the same reason one layer out:
 # jlib can reach a server through an HTTP CONNECT proxy, and until there was a
-# proxy to test against, that path had never run.  It is the only way to exercise the literal handling end to end:
-# a std::istringstream can be made to produce any response, but only a server
-# decides when to send a literal.
+# proxy to test against, that path had never run.  It is the only way to
+# exercise the literal handling end to end: a std::istringstream can be made to
+# produce any response, but only a server decides when to send a literal.
+#
+# nginx is here for tests/net_http_live_test, and for the same reason.  The
+# HTTP client is tested against a server written in the test as well, because
+# that is the only way to get a chunked body whose data looks like its own
+# framing -- but a server somebody else wrote sends a Date and a Server and an
+# ETag and a 404 body nobody here thought of, and those are what an in-process
+# server can never provide.
 
 FROM ubuntu:24.04
 
@@ -50,6 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         dovecot-imapd \
         dovecot-pop3d \
         tinyproxy \
+        nginx-light \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/jlib

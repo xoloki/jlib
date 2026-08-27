@@ -23,6 +23,7 @@
 
 #include <jlib/sys/sys.hh>
 #include <jlib/sys/sslstream.hh>
+#include <jlib/sys/sslproxystream.hh>
 
 #include <jlib/util/util.hh>
 
@@ -215,22 +216,56 @@ namespace jlib {
         
         jlib::sys::socketstream* Pop3::connect() {
             jlib::sys::socketstream* sock;
+
+            // The URL's ?proxy= parameter, which this read nowhere at all: it
+            // was accepted by the URL parser, stored, and silently ignored, so
+            // pop3s://host/?proxy=p:3128 connected direct.  A caller asking to
+            // go through a proxy may be doing so because it is the only route
+            // out; giving them a direct connection instead is the worst of the
+            // three things that could happen.  Imap4 had the three branches
+            // and this had none (#103).
+            std::string phost;
+            unsigned int pport = 0;
+
+            const bool proxied = proxy_of(m_url, phost, pport);
+
             // The constructor already refused a scheme that is neither, so
             // there is no third case to fall through to -- and the one that
             // used to be here tested find("pop"), which is how "pop3s" ended
             // up on a plain socket.
             if(is_secure(m_url)) {
-                sock = new jlib::sys::sslstream(m_url.get_host(), m_url.get_port_val());
+                if(proxied) {
+                    sock = new jlib::sys::tlsproxystream(m_url.get_host(),
+                                                         m_url.get_port_val(),
+                                                         phost, pport);
+                }
+                else {
+                    sock = new jlib::sys::sslstream(m_url.get_host(), m_url.get_port_val());
+                }
             }
             else if(use_starttls(m_url)) {
                 // A tlsstream with delay set connects without handshaking;
                 // start() does the handshake in place once STLS has been
                 // negotiated.  The primitive smtp::send_tls has used all along.
-                sock = new jlib::sys::tlsstream(m_url.get_host(),
-                                                m_url.get_port_val(), true);
+                if(proxied) {
+                    sock = new jlib::sys::tlsproxystream(m_url.get_host(),
+                                                         m_url.get_port_val(),
+                                                         phost, pport, true);
+                }
+                else {
+                    sock = new jlib::sys::tlsstream(m_url.get_host(),
+                                                    m_url.get_port_val(), true);
+                }
             }
             else {
-                sock = new jlib::sys::socketstream(m_url.get_host(), m_url.get_port_val());
+                if(proxied) {
+                    sock = new jlib::sys::proxystream(m_url.get_host(),
+                                                      m_url.get_port_val(),
+                                                      phost, pport);
+                }
+                else {
+                    sock = new jlib::sys::socketstream(m_url.get_host(), m_url.get_port_val());
+                }
             }
 
 

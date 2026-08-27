@@ -30,13 +30,20 @@
 
 #include "mailserver.hh"
 
+#include <jlib/net/Pop3.hh>
+
 #include <jlib/sys/proxystream.hh>
 #include <jlib/sys/sslproxystream.hh>
 #include <jlib/sys/sslstream.hh>
 #include <jlib/sys/sys.hh>
 
+#include <jlib/util/URL.hh>
+
 #include <functional>
 #include <iostream>
+#include <list>
+#include <memory>
+#include <sstream>
 #include <string>
 
 static int failures = 0;
@@ -179,6 +186,42 @@ int main() {
         if(!keep.empty()) ::setenv("SSL_CERT_FILE", keep.c_str(), 1);
     }
 
+    // POP3 through the proxy, which is #103: Pop3::connect had no proxy
+    // branch at all, so the URL's parameter was parsed, stored and ignored and
+    // a caller who asked for a proxy got a direct connection instead.  Silence
+    // is the worst of the three possible behaviours -- they may have asked
+    // because it is the only route out.
+    {
+        std::ostringstream u;
+
+        u << "pop3://joe@127.0.0.1:" << s.pop_port << "/?proxy=127.0.0.1:"
+          << s.proxy_port;
+
+        jlib::util::URL url(u.str());
+
+        url.set_pass(mailserver::PASSWORD);
+
+        try {
+            // retrieve() is the public way in: it connects, reads the whole
+            // maildrop and disconnects.  Captured once -- calling it again for
+            // the detail argument would fetch the mail twice, which is the
+            // shape that broke the IMAP tests when the second call could not
+            // be made on an exhausted stream.
+            //
+            // false, so the messages are left where they are for whichever
+            // test runs next.
+            jlib::net::Pop3 pop(url, false);
+
+            const std::list<std::string> mail = pop.retrieve();
+
+            ok("POP3 reaches the server through the proxy", mail.size() == 2,
+               std::to_string(mail.size()) + " messages");
+        }
+        catch(std::exception& e) {
+            ok("POP3 reaches the server through the proxy", false, e.what());
+        }
+    }
+
     // What a green run does NOT establish.
     //
     // Not proxy authentication.  jlib sends no Proxy-Authorization header and
@@ -187,10 +230,6 @@ int main() {
     // reports as an error rather than tunnelling into.
     //
     // Not SOCKS.  basic_proxybuf speaks HTTP CONNECT and only that.
-    //
-    // Not POP3 through a proxy.  Pop3::connect has no proxy branch at all --
-    // only Imap4 does -- so the URL's proxy parameter is silently ignored
-    // there.  That is a gap, not a fix: worth its own issue.
     //
     // Not interoperability.  One proxy, one version.  tinyproxy answers
     // "HTTP/1.0 200 Connection established" and sends one header; a proxy that
