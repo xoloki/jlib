@@ -28,6 +28,7 @@
 // net_http_live_test is the other half, against a real nginx, including
 // through a real proxy.
 
+#include "certificate.hh"
 #include "httpserver.hh"
 
 #include <jlib/net/http.hh>
@@ -35,6 +36,7 @@
 
 #include <jlib/util/URL.hh>
 
+#include <cstdio>
 #include <iostream>
 #include <map>
 #include <string>
@@ -455,6 +457,113 @@ static void a_credential_does_not_cross_an_origin() {
        !at_other.empty() && at_other[0].head.find("X-Harmless: kept") != std::string::npos);
 }
 
+static void over_tls() {
+    std::cout << "\nover TLS:\n";
+
+    // The one thing net_http_test could not do until the test server learned
+    // to speak TLS, and the gap that mattered most: every request this client
+    // exists to make is an https:// one, and none of them had ever been made.
+    //
+    // The verification is real.  A certificate for localhost is generated
+    // here, SSL_CERT_FILE points the client's trust store at it -- which
+    // basic_tlsbuf reaches through SSL_CTX_set_default_verify_paths -- and the
+    // handshake succeeds because the certificate is genuinely trusted for this
+    // run, not because anything was turned off.  The same arrangement
+    // mailserver.hh and sys_tls_sigpipe_test use.
+    const std::string cert = "http_test_cert.pem";
+    const std::string key = "http_test_key.pem";
+
+    if(!make_cert(cert, key)) {
+        std::cout << "  skip  could not generate a test certificate\n";
+
+        return;
+    }
+
+    const char* const had = std::getenv("SSL_CERT_FILE");
+    const std::string keep = had ? had : "";
+
+    ::setenv("SSL_CERT_FILE", cert.c_str(), 1);
+
+    try {
+        httpserver::server s([](const httpserver::request&) {
+            return httpserver::reply(200, "OK", "over TLS",
+                                     "Content-Type: text/plain\r\n");
+        }, cert, key);
+
+        const http::Response r = http::get(URL(s.url("/secure?a=1")));
+
+        ok("an https:// request completes", r.status() == 200 &&
+           r.body() == "over TLS", r.body());
+
+        const std::vector<httpserver::request> sent = s.requests();
+
+        ok("and it is a real request, not a tunnel",
+           !sent.empty() && has_line(sent[0].head, "GET /secure?a=1 HTTP/1.1"),
+           sent.empty() ? "" : sent[0].head.substr(0, sent[0].head.find("\r\n")));
+
+        // The Host field names the port when it is not the scheme's default,
+        // and 443 is the default for https -- so this is also the assertion
+        // that the client knows which default goes with which scheme.
+        ok("Host carries the name that was verified, and the port",
+           !sent.empty() &&
+           has_line(sent[0].head, "Host: localhost:" + std::to_string(s.port())));
+    }
+    catch(std::exception& e) {
+        ok("an https:// request completes", false, e.what());
+    }
+
+    // A name the certificate does not cover.  The client must refuse it: TLS
+    // that is encrypted and unauthenticated is the failure that looked fine
+    // for years in sslproxystream, and an OAuth2 token handed to whoever
+    // answered is the whole game.
+    try {
+        httpserver::server s([](const httpserver::request&) {
+            return httpserver::reply(200, "OK", "should not get here");
+        }, cert, key);
+
+        bool threw = false;
+
+        try {
+            // 127.0.0.1 rather than localhost: the certificate says
+            // DNS:localhost and nothing else.
+            http::get(URL("https://127.0.0.1:" + std::to_string(s.port()) + "/"));
+        }
+        catch(std::exception&) { threw = true; }
+
+        ok("a certificate that does not cover the name is refused", threw);
+        ok("and nothing was sent to it", s.requests().empty(),
+           std::to_string(s.requests().size()) + " request(s)");
+    }
+    catch(std::exception& e) {
+        ok("a certificate that does not cover the name is refused", false, e.what());
+    }
+
+    // And an untrusted one, which is the same question asked the other way.
+    ::unsetenv("SSL_CERT_FILE");
+
+    try {
+        httpserver::server s([](const httpserver::request&) {
+            return httpserver::reply(200, "OK", "should not get here");
+        }, cert, key);
+
+        bool threw = false;
+
+        try { http::get(URL(s.url("/"))); }
+        catch(std::exception&) { threw = true; }
+
+        ok("and so is one nothing trusts", threw);
+    }
+    catch(std::exception& e) {
+        ok("and so is one nothing trusts", false, e.what());
+    }
+
+    if(keep.empty()) ::unsetenv("SSL_CERT_FILE");
+    else             ::setenv("SSL_CERT_FILE", keep.c_str(), 1);
+
+    std::remove(cert.c_str());
+    std::remove(key.c_str());
+}
+
 static void the_proxy_parameter_is_read_one_way() {
     std::cout << "\nthe proxy parameter is read in one place:\n";
 
@@ -503,13 +612,19 @@ int main() {
     what_it_refuses_to_send();
     redirects_are_off_and_stay_off();
     a_credential_does_not_cross_an_origin();
+    over_tls();
     the_proxy_parameter_is_read_one_way();
 
     // What a green run does not establish.
     //
-    // Not TLS.  Every server here is plaintext on loopback; https:// goes
-    // through sys::tlsstream, which sys_tls_sigpipe_test and the mail live
-    // tests exercise, but no test in this file makes an HTTPS request.
+    // Not a real TLS peer.  The HTTPS section here handshakes against
+    // OpenSSL configured by this test, with a certificate this test generated,
+    // so it proves the client's transport selection and its verification and
+    // says nothing about what a public certificate authority chain, a session
+    // ticket, or a server picking TLS 1.3 would do.  net_http_live_test does
+    // the same against nginx, which is one more real peer and still not a
+    // survey; the first request to a real token endpoint will be the first one
+    // made to a stranger.
     //
     // Not a real server.  This one sends exactly what it was told to, which is
     // the point of it for the awkward cases and its whole limitation for the

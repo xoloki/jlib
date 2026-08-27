@@ -33,6 +33,8 @@
 // SKIP (77) where there is no nginx, which is every machine that is not the
 // build container.
 
+#include "certificate.hh"
+
 #include <jlib/net/http.hh>
 #include <jlib/net/net.hh>
 
@@ -66,8 +68,10 @@ static void ok(const std::string& what, bool good, const std::string& detail = "
 struct site {
     fs::path dir;
     unsigned int port = 0;
+    unsigned int tls_port = 0;
     unsigned int proxy_port = 0;
     bool running = false;
+    bool tls = false;
     bool proxied = false;
 
     ~site() { stop(); }
@@ -84,6 +88,7 @@ struct site {
 
         // Derived from the pid, so two builds on one machine do not collide.
         port = 16000 + static_cast<unsigned int>(::getpid() % 900);
+        tls_port = port + 2000;
         proxy_port = port + 1000;
 
         dir = fs::temp_directory_path() / ("jlib-http-" + std::to_string(::getpid()));
@@ -97,6 +102,18 @@ struct site {
             std::ofstream f(dir / "www" / "hello.txt");
             f << "hello from nginx\n";
         }
+
+        // A certificate for localhost, and the client's trust store pointed at
+        // it.  Not a way around verification -- jlib still checks the name
+        // with SSL_set1_host -- but a way to make it succeed without a real
+        // CA.  The SAN says DNS:localhost, which is why the TLS requests below
+        // go to "localhost" and the plaintext ones to 127.0.0.1.
+        const std::string cert = (dir / "cert.pem").string();
+        const std::string key = (dir / "key.pem").string();
+
+        tls = make_cert(cert, key);
+
+        if(tls) ::setenv("SSL_CERT_FILE", cert.c_str(), 1);
 
         {
             std::ofstream f(dir / "nginx.conf");
@@ -126,8 +143,19 @@ struct site {
               << "    location = /teapot {\n"
               << "      return 418 \"short and stout\";\n"
               << "    }\n"
-              << "  }\n"
-              << "}\n";
+              << "  }\n";
+
+            if(tls) {
+                f << "  server {\n"
+                  << "    listen 127.0.0.1:" << tls_port << " ssl;\n"
+                  << "    server_name localhost;\n"
+                  << "    ssl_certificate " << cert << ";\n"
+                  << "    ssl_certificate_key " << key << ";\n"
+                  << "    root " << (dir / "www").string() << ";\n"
+                  << "  }\n";
+            }
+
+            f << "}\n";
         }
 
         if(jlib::sys::run({ "nginx", "-c", (dir / "nginx.conf").string(),
@@ -229,6 +257,10 @@ struct site {
 
     std::string url(const std::string& path) const {
         return "http://127.0.0.1:" + std::to_string(port) + path;
+    }
+
+    std::string secure_url(const std::string& path) const {
+        return "https://localhost:" + std::to_string(tls_port) + path;
     }
 
     std::string through_proxy(const std::string& path) const {
@@ -338,6 +370,42 @@ int main() {
         ok("a POST with a form body reaches it", false, e.what());
     }
 
+    if(s.tls) {
+        std::cout << "\nover TLS, to a real server on " << s.tls_port << ":\n";
+
+        try {
+            const http::Response r = http::get(URL(s.secure_url("/hello.txt")));
+
+            ok("an https:// request to nginx", r.status() == 200 &&
+               r.body() == "hello from nginx\n", r.body());
+        }
+        catch(std::exception& e) {
+            ok("an https:// request to nginx", false, e.what());
+        }
+
+        try {
+            // The certificate says DNS:localhost and nothing else.  Encrypted
+            // and unauthenticated is the failure that looked fine for years in
+            // sslproxystream, and here the thing being handed over would be an
+            // OAuth2 token.
+            bool threw = false;
+
+            try {
+                http::get(URL("https://127.0.0.1:" + std::to_string(s.tls_port) +
+                              "/hello.txt"));
+            }
+            catch(std::exception&) { threw = true; }
+
+            ok("and a name the certificate does not cover is refused", threw);
+        }
+        catch(std::exception& e) {
+            ok("and a name the certificate does not cover is refused", false, e.what());
+        }
+    }
+    else {
+        std::cout << "\n  skip  no certificate; the TLS path is untested here\n";
+    }
+
     if(s.start_proxy()) {
         std::cout << "\nthrough a real proxy on " << s.proxy_port << ":\n";
 
@@ -379,9 +447,17 @@ int main() {
 
     // What a green run does not establish.
     //
-    // Not TLS.  nginx here is plaintext; https:// goes through sys::tlsstream,
-    // which the mail live tests exercise against dovecot, but no request in
-    // this file is an HTTPS one.
+    // Not TLS to a stranger.  The https:// requests above handshake against a
+    // certificate this test generated, with the trust store pointed at it, so
+    // they prove the client's transport selection and its hostname checking
+    // and say nothing about a public CA chain or a server that picks something
+    // unexpected.  The first request to a real token endpoint will be the
+    // first one made to a peer nobody here configured.
+    //
+    // Not TLS through the proxy.  The CONNECT path carries plaintext HTTP here
+    // and tlsproxystream is exercised by sys_proxy_live_test against dovecot,
+    // but no request in this file is both proxied and encrypted -- which is
+    // the combination a corporate network would actually present.
     //
     // Not interoperability.  One server, one version, one configuration.  What
     // it establishes is that the client's request line, its Host, and its

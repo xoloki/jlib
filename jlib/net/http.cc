@@ -147,6 +147,12 @@ namespace {
                                   ? (tls ? 443u : 80u)
                                   : url.get_port_val();
 
+        // The caller's fields are checked before anything is connected.  They
+        // cannot become a valid request however the socket goes, so opening
+        // one first only means a connection the server has to notice, time out
+        // and clean up on behalf of a request that was never going to be sent.
+        for(const fields::value_type& f : send) check_field(f.first, f.second);
+
         std::unique_ptr<sys::socketstream> sock = transport(url, port, tls, o);
 
         std::ostringstream head;
@@ -179,8 +185,6 @@ namespace {
         }
 
         for(const fields::value_type& f : send) {
-            check_field(f.first, f.second);
-
             head << f.first << ": " << f.second << "\r\n";
         }
 
