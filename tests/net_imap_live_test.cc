@@ -28,6 +28,7 @@
 // Exit 77 (SKIP) when there is no dovecot to start, which is every machine
 // that is not the build container.
 
+#include "httpserver.hh"
 #include "mailserver.hh"
 
 #include <jlib/net/Imap4.hh>
@@ -35,6 +36,8 @@
 
 #include <jlib/sys/socketstream.hh>
 #include <jlib/sys/sys.hh>
+
+#include <jlib/net/oauth.hh>
 
 #include <jlib/util/URL.hh>
 #include <jlib/util/util.hh>
@@ -85,6 +88,41 @@ int main() {
     }
 
     mailserver::server s;
+
+    // An HTTP server in this process, wearing two hats at once.  To jlib it is
+    // an OAuth2 token endpoint -- POST a refresh token, get an access token.
+    // To dovecot it is the tokeninfo endpoint its oauth2 passdb consults to
+    // find out whether that access token is any good and whose it is.
+    //
+    // Which is what makes an end-to-end XOAUTH2 test possible without Google
+    // or Microsoft.  Both of them are exactly this shape and neither can be
+    // reached from make check.
+    httpserver::server tokens([](const httpserver::request& r) {
+        if(r.head.find("POST /token") == 0) {
+            // A refresh token this test wrote, exchanged for an access token
+            // this test will recognise.
+            if(r.body.find("refresh_token=good-refresh") == std::string::npos)
+                return httpserver::reply(400, "Bad Request",
+                                         "{\"error\":\"invalid_grant\"}");
+
+            return httpserver::reply(200, "OK",
+                                     "{\"access_token\":\"live-access-token\","
+                                     "\"refresh_token\":\"rotated-refresh\","
+                                     "\"expires_in\":3600}",
+                                     "Content-Type: application/json\r\n");
+        }
+
+        // dovecot's half.  Any token but the good one is not joe's.
+        if(r.head.find("GET /tokeninfo?access_token=live-access-token ") == 0)
+            return httpserver::reply(200, "OK", "{\"email\":\"joe\"}",
+                                     "Content-Type: application/json\r\n");
+
+        return httpserver::reply(401, "Unauthorized",
+                                 "{\"error\":\"invalid_token\"}",
+                                 "Content-Type: application/json\r\n");
+    });
+
+    s.tokeninfo_port = tokens.port();
 
     if(!s.start()) {
         std::cerr << s.log();
@@ -502,6 +540,103 @@ int main() {
         }
     }
 
+    // OAuth2 end to end: jlib fetches an access token over HTTP, presents it
+    // to dovecot over IMAP, and dovecot goes back over HTTP to check it.  Four
+    // pieces of this branch's work in one line of a user's day.
+    {
+        jlib::net::oauth::client provider;
+
+        provider.token_endpoint = "http://127.0.0.1:" +
+                                  std::to_string(tokens.port()) + "/token";
+        provider.id = "jlib-live-test";
+
+        // Plaintext, which refresh() refuses by default and a real provider
+        // would never offer.  It is loopback to a server in this process.
+        provider.allow_http = true;
+
+        std::string persisted;
+
+        jlib::net::oauth::session account(provider, "good-refresh",
+                                          [&persisted](const jlib::net::oauth::token& t) {
+                                              persisted = t.refresh();
+                                          });
+
+        try {
+            const std::string access = account.access();
+
+            ok("an access token comes back from the token endpoint",
+               access == "live-access-token", access);
+
+            // Microsoft rotates on every refresh and kills the old one at the
+            // same moment, so a client that cannot store the new one is logged
+            // out after the first refresh.
+            ok("and the rotated refresh token was handed over to be stored",
+               persisted == "rotated-refresh", persisted);
+
+            jlib::util::URL u("imap://joe@127.0.0.1:" + std::to_string(s.port) +
+                              "/INBOX");
+
+            jlib::net::Imap4 imap(u);
+
+            std::unique_ptr<jlib::sys::socketstream> sock(imap.connect());
+
+            imap.capability(*sock);
+
+            ok("dovecot offers AUTH=XOAUTH2", imap.has_capability("AUTH=XOAUTH2"));
+
+            imap.authenticate_xoauth2(*sock, "joe", access);
+
+            ok("XOAUTH2 authenticates against a real server",
+               imap.state() == jlib::net::Imap4::Authenticated);
+
+            imap.select(*sock, "INBOX");
+
+            ok("and the mailbox is there afterwards", imap.exists() == 2,
+               std::to_string(imap.exists()));
+
+            imap.logout(*sock);
+        }
+        catch(std::exception& e) {
+            ok("XOAUTH2 authenticates against a real server", false, e.what());
+            std::cerr << s.log();
+        }
+    }
+
+    // A token the endpoint will not vouch for.  dovecot answers with a
+    // continuation carrying base64 JSON and withholds the tagged NO until the
+    // client replies -- which is the shape net_imap_sasl_test asserts against a
+    // scripted server, here confirmed against a real one.
+    {
+        jlib::util::URL u("imap://joe@127.0.0.1:" + std::to_string(s.port) + "/INBOX");
+
+        jlib::net::Imap4 imap(u);
+
+        try {
+            std::unique_ptr<jlib::sys::socketstream> sock(imap.connect());
+
+            bool threw = false;
+
+            try { imap.authenticate_xoauth2(*sock, "joe", "not-a-real-token"); }
+            catch(std::exception&) { threw = true; }
+
+            ok("a token the endpoint rejects is refused", threw);
+
+            // The assertion that matters: the exchange finished, so the socket
+            // is at a response boundary and can still be used.
+            imap.authenticate_plain(*sock, "joe", mailserver::PASSWORD);
+
+            ok("and the connection survives to try another mechanism",
+               imap.state() == jlib::net::Imap4::Authenticated);
+
+            imap.logout(*sock);
+        }
+        catch(std::exception& e) {
+            ok("and the connection survives to try another mechanism", false,
+               e.what());
+            std::cerr << s.log();
+        }
+    }
+
     // The port it picks when it is not told one.
     ok("imaps:// with no port is still secure",
        jlib::net::Imap4(jlib::util::URL("imaps://joe@localhost/INBOX")).is_secure());
@@ -519,9 +654,15 @@ int main() {
     // Not the commands #85 is about.  SEARCH, UID and a ranged FETCH are still
     // unimplemented; this exercises what was already there.
     //
-    // Not the mechanisms that matter for a real account.  AUTH=PLAIN is what
-    // dovecot offers out of the box; XOAUTH2 is what Gmail and Outlook.com
-    // require, and nothing here has ever spoken to either.  The exchange is
-    // the same shape and the credential is not.
+    // Not a real provider.  The XOAUTH2 section above is end to end -- jlib
+    // fetches a token over HTTP, dovecot validates it over HTTP, and the
+    // mechanism in the middle is the one Gmail and Outlook.com require -- but
+    // both endpoints are servers in this process, answering what this test told
+    // them to.  Neither Google nor Microsoft can be reached from make check:
+    // both need a registered application and a human at a browser.
+    //
+    // Nor TLS on the OAuth2 half.  The token endpoint here is plaintext
+    // loopback with allow_http set, which is exactly what oauth::refresh
+    // refuses by default.
     return failures ? 1 : 0;
 }

@@ -98,6 +98,22 @@ struct server {
     unsigned int pop_port = 0;
     unsigned int pop_tls_port = 0;
     unsigned int proxy_port = 0;
+
+    /**
+     * Where dovecot should go to find out whether an access token is good.
+     *
+     * Set this before start() and the server offers AUTH=XOAUTH2, validating
+     * every token by GETting <tokeninfo_port>/tokeninfo?access_token=<token>
+     * and reading an "email" out of the JSON that comes back.  That is
+     * dovecot's oauth2 passdb doing exactly what Google's and Microsoft's do
+     * -- which is what makes an end-to-end XOAUTH2 test possible without
+     * either of them.
+     *
+     * Zero leaves the configuration as it was, so net_pop3_live_test is
+     * unaffected.
+     */
+    unsigned int tokeninfo_port = 0;
+
     bool running = false;
     bool proxied = false;
 
@@ -178,6 +194,29 @@ struct server {
               << (dir / "users").string() << "\n}\n"
               << "userdb {\n  driver = passwd-file\n  args = "
               << (dir / "users").string() << "\n}\n";
+
+            // The oauth2 passdb, when a tokeninfo endpoint was named.  It goes
+            // after the passwd-file one and is restricted to the xoauth2
+            // mechanism, so PLAIN and LOGIN keep working exactly as they did.
+            if(tokeninfo_port != 0) {
+                f << "auth_mechanisms = plain xoauth2\n"
+                  << "passdb {\n"
+                  << "  driver = oauth2\n"
+                  << "  mechanisms = xoauth2\n"
+                  << "  args = " << (dir / "oauth2").string() << "\n"
+                  << "}\n";
+            }
+        }
+
+        if(tokeninfo_port != 0) {
+            std::ofstream f(dir / "oauth2");
+
+            // dovecot appends the token to this URL and expects JSON with the
+            // account's address in it.  Google's endpoint has the same shape,
+            // which is the point: the client cannot tell the difference.
+            f << "tokeninfo_url = http://127.0.0.1:" << tokeninfo_port
+              << "/tokeninfo?access_token=\n"
+              << "username_attribute = email\n";
         }
 
         {

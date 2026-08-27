@@ -254,6 +254,31 @@ namespace jlib {
                                     const std::string& pass = "");
 
             /**
+             * AUTHENTICATE XOAUTH2, which is how OAuth2 reaches IMAP.
+             *
+             * Google's and Microsoft's mechanism, not an RFC -- RFC 7628's
+             * OAUTHBEARER is the standardised one and neither provider
+             * requires it.  See net::oauth::xoauth2() for the message.
+             *
+             * Two rounds, and the second is the reason this is not three lines
+             * on top of authenticate().  A rejected token is not reported as a
+             * tagged NO: the server sends a *continuation* carrying a base64
+             * JSON error and will not send the NO until the client answers it
+             * with an empty line.  A driver that answers only the first
+             * challenge waits forever on a socket that looks alive.
+             *
+             * Refuses when the capability list has been fetched and does not
+             * offer AUTH=XOAUTH2.  An unfetched list is not an objection --
+             * capability() is the caller's to call.
+             *
+             * @param user   the account's address, which is part of the message
+             * @param access the access token, not the refresh token
+             */
+            void authenticate_xoauth2(jlib::sys::socketstream& sock,
+                                      const std::string& user,
+                                      const std::string& access);
+
+            /**
              * Cancel an AUTHENTICATE in progress and leave the socket usable.
              *
              * RFC 3501 6.2.2's "*", followed by a read to the tagged
