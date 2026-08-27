@@ -68,11 +68,16 @@ static void ok(const std::string& what, bool good, const std::string& detail = "
 static std::string show(const std::string& s) {
     std::string out;
 
-    for(char c : s) {
-        if(c == '\r')      out += "\\r";
-        else if(c == '\n') out += "\\n";
-        else if(c == '\0') out += "\\0";
-        else               out += c;
+    for(unsigned char c : s) {
+        if(c == '\r')       out += "\\r";
+        else if(c == '\n')  out += "\\n";
+        else if(c == '\0')  out += "\\0";
+        // The XOAUTH2 separator, which is the whole point of one assertion
+        // here: printed raw it is invisible, and an invisible octet is exactly
+        // how "\x01auth=" being 0x1A goes unnoticed.
+        else if(c == '\001') out += "^A";
+        else if(c < 0x20)    out += "\\" + std::to_string(static_cast<int>(c));
+        else                 out += static_cast<char>(c);
     }
 
     return out;
@@ -459,6 +464,144 @@ static void an_endless_challenge_is_not_endless() {
     ok("and cancels rather than falling silent", cancelled);
 }
 
+static void xoauth2_end_to_end() {
+    std::cout << "\nAUTHENTICATE XOAUTH2, both ways it can end:\n";
+
+    {
+        scripted_server server({ "* CAPABILITY IMAP4rev1 AUTH=XOAUTH2\r\n"
+                                 "A00001 OK capability completed\r\n",
+                                 "+ \r\n",
+                                 "A00002 OK [CAPABILITY IMAP4rev1] logged in\r\n" });
+
+        jlib::net::Imap4 imap(url_for(server.port()));
+
+        try {
+            std::unique_ptr<jlib::sys::socketstream> sock = connect_to(imap);
+
+            imap.capability(*sock);
+
+            imap.authenticate_xoauth2(*sock, "joe@example.com", "ya29.TOKEN");
+
+            ok("it completes", imap.state() == jlib::net::Imap4::Authenticated);
+
+            sock->close();
+        }
+        catch(std::exception& e) {
+            ok("it completes", false, e.what());
+        }
+
+        const std::vector<std::string>& sent = server.sent();
+
+        ok("the mechanism is named XOAUTH2",
+           sent.size() >= 2 && sent[1] == "A00002 AUTHENTICATE XOAUTH2",
+           sent.size() >= 2 ? show(sent[1]) : "");
+
+        if(sent.size() >= 3) {
+            const std::string message = util::base64::decode(sent[2]);
+
+            // What the two providers expect, byte for byte.  The separator is
+            // one octet: "\x01auth=" would have been 0x1A followed by "uth=",
+            // because a hexadecimal escape in C++ eats every hex digit after it.
+            ok("and the message is what Google and Microsoft expect",
+               message == std::string("user=joe@example.com\001auth=Bearer "
+                                      "ya29.TOKEN\001\001"),
+               show(message));
+        }
+        else {
+            ok("and the message is what Google and Microsoft expect", false,
+               "nothing was sent");
+        }
+    }
+
+    {
+        // How a bad token is actually reported, and the reason this mechanism
+        // needs two rounds.  Not a tagged NO: a *continuation* carrying base64
+        // JSON, with the NO withheld until the client answers it -- so a driver
+        // that answers only the first challenge waits forever on a socket that
+        // looks perfectly alive.
+        const std::string blob =
+            "{\"status\":\"401\",\"schemes\":\"Bearer\",\"scope\":\"https://mail.google.com/\"}";
+
+        scripted_server server({ "* CAPABILITY IMAP4rev1 AUTH=XOAUTH2\r\n"
+                                 "A00001 OK capability completed\r\n",
+                                 "+ \r\n",
+                                 "+ " + util::base64::encode(blob) + "\r\n",
+                                 "A00002 NO Invalid credentials (Failure)\r\n" });
+
+        jlib::net::Imap4 imap(url_for(server.port()));
+
+        try {
+            std::unique_ptr<jlib::sys::socketstream> sock = connect_to(imap);
+
+            imap.capability(*sock);
+
+            bool threw = false;
+
+            try {
+                imap.authenticate_xoauth2(*sock, "joe@example.com", "expired");
+            }
+            catch(std::exception&) { threw = true; }
+
+            ok("a rejected token throws rather than hanging", threw);
+            ok("and the client is not authenticated",
+               imap.state() != jlib::net::Imap4::Authenticated);
+
+            imap.noop(*sock);
+
+            ok("and the connection is still usable afterwards", true);
+
+            sock->close();
+        }
+        catch(std::exception& e) {
+            ok("and the connection is still usable afterwards", false, e.what());
+        }
+
+        const std::vector<std::string>& sent = server.sent();
+
+        // The empty line is what unblocks the tagged NO.  Without it the
+        // server never sends one and the client never returns.
+        ok("the error challenge is answered with an empty line",
+           sent.size() >= 4 && sent[3].empty(),
+           sent.size() >= 4 ? show(sent[3]) : "");
+
+        ok("and the next command went out under the next tag",
+           sent.size() >= 5 && sent[4] == "A00003 NOOP",
+           sent.size() >= 5 ? show(sent[4]) : "");
+    }
+
+    {
+        // A capability list that has been fetched and does not offer it is an
+        // objection; sending a bearer token to a server that will not take it
+        // is putting a credential on the wire for nothing.
+        scripted_server server({ "* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\n"
+                                 "A00001 OK capability completed\r\n" });
+
+        jlib::net::Imap4 imap(url_for(server.port()));
+
+        try {
+            std::unique_ptr<jlib::sys::socketstream> sock = connect_to(imap);
+
+            imap.capability(*sock);
+
+            bool threw = false;
+
+            try { imap.authenticate_xoauth2(*sock, "joe@example.com", "t"); }
+            catch(std::exception&) { threw = true; }
+
+            ok("a server that does not offer XOAUTH2 is not sent a token", threw);
+
+            sock->close();
+        }
+        catch(std::exception& e) {
+            ok("a server that does not offer XOAUTH2 is not sent a token", false,
+               e.what());
+        }
+
+        ok("and the token never reached the wire", server.sent().size() == 1,
+           std::to_string(server.sent().size()) + " line(s)");
+    }
+}
+
 static void a_nul_in_a_credential_is_refused() {
     std::cout << "\na NUL in a credential is refused before it is sent:\n";
 
@@ -501,6 +644,7 @@ int main() {
     a_responder_that_gives_up_cancels();
     a_second_challenge_is_answered();
     an_endless_challenge_is_not_endless();
+    xoauth2_end_to_end();
     a_nul_in_a_credential_is_refused();
 
     // What a green run does not establish: that a real server accepts what

@@ -20,6 +20,7 @@
 
 #include <jlib/net/net.hh>
 #include <jlib/net/Imap4.hh>
+#include <jlib/net/oauth.hh>
 
 #include <jlib/net/imap_response.hh>
 
@@ -853,6 +854,35 @@ namespace jlib {
 
                 return;
             }
+        }
+
+        void Imap4::authenticate_xoauth2(sys::socketstream& sock,
+                                         const std::string& user,
+                                         const std::string& access)
+        {
+            // A list that has been fetched and does not offer it is an
+            // objection; one that has never been fetched is not.  login()
+            // makes the same distinction the other way round, refusing only
+            // when LOGINDISABLED is positively present.
+            if(!m_capabilities.empty() && !has_capability("AUTH=XOAUTH2")) {
+                throw exception("the server does not offer AUTH=XOAUTH2");
+            }
+
+            if(access.empty()) throw exception("AUTHENTICATE XOAUTH2: no access token");
+
+            int round = 0;
+
+            authenticate(sock, "XOAUTH2",
+                         [&round, &user, &access](const std::string&) -> std::string {
+                             if(++round == 1) return oauth::xoauth2(user, access);
+
+                             // The second challenge is the failure report --
+                             // base64 JSON, "status" and "schemes" -- and the
+                             // server is waiting for an empty line before it
+                             // will send the tagged NO that says the same thing
+                             // in a form this code can throw.
+                             return std::string();
+                         });
         }
 
         void Imap4::cancel_authenticate(sys::socketstream& sock) {
