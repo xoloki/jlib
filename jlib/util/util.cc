@@ -518,6 +518,58 @@ namespace jlib {
 
         }
 
+        // --------------------------------------------------------- base64url
+
+        namespace base64url {
+
+            std::string encode(const std::string& s)
+            {
+                std::string out = base64::encode(s);
+
+                // The three characters that differ, and the padding.  RFC 4648
+                // 5 is the same alphabet with two substitutions; RFC 7636 4.2
+                // is what requires the "=" to come off.
+                for(char& c : out) {
+                    if(c == '+')      c = '-';
+                    else if(c == '/') c = '_';
+                }
+
+                while(!out.empty() && out.back() == '=') out.pop_back();
+
+                return out;
+            }
+
+            std::string decode(const std::string& s, bool& clean)
+            {
+                std::string in;
+
+                in.reserve(s.size() + 3);
+
+                for(char c : s) {
+                    if(c == '-')      in += '+';
+                    else if(c == '_') in += '/';
+                    else if(c == '=') continue;   // tolerated, not required
+                    else              in += c;
+                }
+
+                // base64::decode drops a final group of one symbol and clears
+                // clean, which is the right answer -- six bits is not a byte.
+                // Padding it back is only so the length is a multiple of four,
+                // which is what that decoder expects to see.
+                while(in.size() % 4) in += '=';
+
+                return base64::decode(in, clean);
+            }
+
+            std::string decode(const std::string& s)
+            {
+                bool clean = true;
+
+                return decode(s, clean);
+            }
+
+        }
+
         // -------------------------------------------------- quoted-printable
 
         namespace qp {

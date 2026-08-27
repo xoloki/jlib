@@ -22,8 +22,10 @@
 
 #include <jlib/net/http.hh>
 
+#include <cstddef>
 #include <ctime>
 #include <functional>
+#include <memory>
 #include <string>
 
 namespace jlib {
@@ -42,11 +44,14 @@ namespace net {
  * already hold into an access token, and XOAUTH2, which is how that access
  * token reaches an IMAP server.
  *
- * Not here: the authorization-code flow that *obtains* the first refresh token.
- * That needs a browser, a loopback listener and PKCE, and it is a branch of its
- * own.  Until then a refresh token has to come from somewhere else -- a
- * provider's playground, another client, a script -- and this reads mail with
- * it, which is the smallest useful thing.
+ * Here too, since the branch that added it: the authorization-code flow with
+ * PKCE, which obtains that first refresh token -- authorize_url(),
+ * redirect_receiver, exchange(), and authorize() tying the three together.
+ *
+ * A caveat that is not a bug and cannot be fixed here: neither Google nor
+ * Microsoft will issue a client id without the user registering an
+ * application with them first.  jlib can be complete and this can still not
+ * work for somebody who has not done that.
  *
  * Not here: the device-code flow, OAUTHBEARER (RFC 7628), token introspection,
  * or anything that stores a credential on disk.  Where the refresh token lives
@@ -112,6 +117,9 @@ private:
 struct client {
     /** The provider's token endpoint.  Must be https unless allow_http. */
     std::string token_endpoint;
+
+    /** Where a browser is sent to authorize.  Only the code grant needs it. */
+    std::string authorize_endpoint;
 
     std::string id;
 
@@ -252,6 +260,163 @@ private:
     store_fn m_store;
     token m_token;
 };
+
+/**
+ * PKCE, RFC 7636: a secret and the hash a request carries in its place.
+ *
+ * The authorization code comes back over a loopback HTTP redirect, which any
+ * other application on the machine can race for -- it is a plain TCP port on
+ * localhost.  PKCE is what makes stealing the code useless: the exchange that
+ * turns it into a token also demands the verifier, which never left this
+ * process.
+ *
+ * **S256 only.**  RFC 7636 4.2 also defines "plain", where the challenge *is*
+ * the verifier, and RFC 8252 8.1 says a native application must use S256.
+ * Offering plain would only be useful to a server that cannot do SHA-256, and
+ * a client that can be talked down to plain by a server's say-so has no
+ * protection at all.
+ */
+class pkce {
+public:
+    /** A fresh verifier from the system's CSPRNG. */
+    static pkce generate();
+
+    /** Build from a verifier you already have; validates its shape. */
+    explicit pkce(std::string verifier);
+
+    /** RFC 7636 4.1: 43-128 characters of unreserved.  Never sent anywhere but
+     *  the token request. */
+    const std::string& verifier() const { return m_verifier; }
+
+    /** base64url(SHA-256(verifier)), unpadded.  This is what goes in the URL. */
+    const std::string& challenge() const { return m_challenge; }
+
+    /** "S256". */
+    static const char* method() { return "S256"; }
+
+private:
+    std::string m_verifier;
+    std::string m_challenge;
+};
+
+/** Unguessable text from the system CSPRNG, base64url, for state and nonces. */
+std::string random_token(std::size_t bytes = 32);
+
+/**
+ * What came back to the redirect URI.
+ *
+ * Either a code or an error -- RFC 6749 4.1.2 and 4.1.2.1 -- and in both cases
+ * the state that was sent, which the caller must check.
+ */
+struct callback {
+    std::string code;
+    std::string state;
+    std::string error;
+    std::string error_description;
+
+    bool ok() const { return error.empty() && !code.empty(); }
+};
+
+/**
+ * Receive one OAuth2 redirect on loopback.
+ *
+ * Not a server, and the name is load-bearing.  It binds one loopback port,
+ * accepts one connection, reads one request line, writes one fixed page and
+ * stops.  Calling it a server is what turns eighty lines into eight hundred:
+ * there is no routing, no second request, no keep-alive, and no configuration.
+ *
+ * 127.0.0.1 explicitly, never INADDR_ANY -- what arrives here is an
+ * authorization code, and a receiver reachable from the network receives it
+ * from the network.  RFC 8252 7.3 also says to use the address literal rather
+ * than "localhost", because "localhost" is whatever the resolver says it is.
+ *
+ * Plaintext, which is correct: 8.3 says a loopback redirect does not need TLS,
+ * and a self-signed certificate would only teach the user to click through a
+ * browser warning.
+ */
+class redirect_receiver {
+public:
+    /** Bind a loopback port.  0 lets the kernel choose; see redirect_uri(). */
+    explicit redirect_receiver(unsigned short port = 0);
+
+    ~redirect_receiver();
+
+    redirect_receiver(const redirect_receiver&) = delete;
+    redirect_receiver& operator=(const redirect_receiver&) = delete;
+
+    unsigned short port() const;
+
+    /** "http://127.0.0.1:<port>/" -- register this with the provider. */
+    std::string redirect_uri() const;
+
+    /**
+     * Wait for the browser, and answer it.
+     *
+     * @param expect_state  the state that was sent.  A callback carrying
+     *                      anything else is refused without being parsed
+     *                      further: RFC 6749 10.12 makes this the client's
+     *                      only defence against having someone else's
+     *                      authorization code planted on it.
+     * @param timeout       seconds to wait.  The user may be typing a password
+     *                      or approving on a phone, so this is generous by
+     *                      default.
+     *
+     * @throw error on a timeout, a request that is not a GET of the redirect
+     *        URI, or a state mismatch.
+     *
+     * Never logs or prints the code.
+     */
+    callback wait(const std::string& expect_state, double timeout = 300);
+
+private:
+    class impl;
+    std::unique_ptr<impl> m_impl;
+};
+
+/**
+ * The URL to send a browser to.  RFC 6749 4.1.1, with RFC 7636 4.3's fields.
+ *
+ * @param redirect_uri  where the provider sends the browser back; must be the
+ *                      one registered with them, which for a native
+ *                      application is a loopback URI
+ */
+std::string authorize_url(const client& c,
+                          const std::string& redirect_uri,
+                          const std::string& state,
+                          const pkce& p);
+
+/**
+ * Turn an authorization code into tokens.  RFC 6749 4.1.3.
+ *
+ * The redirect URI goes with it and must be the same one: it is not where
+ * anything is sent, it is a value the provider compares.
+ *
+ * @throw denied when the endpoint refuses in the documented way
+ */
+token exchange(const client& c,
+               const std::string& code,
+               const pkce& p,
+               const std::string& redirect_uri,
+               const http::options& o = http::options());
+
+/**
+ * The whole flow: open a browser, wait, exchange.
+ *
+ * Blocking, on purpose.  The application runs it on a thread; sys::ASServent is
+ * the house pattern and ASMailBox and ASImapBox are the precedent.  It cannot
+ * be anything else without inventing an event loop jlib does not have.
+ *
+ * @param open  called with the authorization URL.  Opening a browser is the
+ *              application's business -- it may be a desktop, a terminal
+ *              printing the URL, or a test -- and jlib guessing at xdg-open
+ *              would be wrong more often than right.
+ *
+ * The refresh token is in the result, and storing it is the caller's job.
+ */
+token authorize(const client& c,
+                const std::function<void(const std::string& url)>& open,
+                unsigned short port = 0,
+                double timeout = 300);
 
 /**
  * The SASL XOAUTH2 message, before base64.

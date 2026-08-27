@@ -58,6 +58,7 @@ TESTS = \
 	net_imap_sasl_test \
 	net_http_test \
 	net_oauth_test \
+	net_oauth_authorize_test \
 	net_http_live_test \
 	net_imap_live_test \
 	sys_proxy_live_test \
@@ -159,6 +160,9 @@ net_imap_test_LDADD             = $(JNET_LA) $(JUTIL_LA)
 
 net_http_live_test_SOURCES      = net_http_live_test.cc
 net_http_live_test_LDADD        = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
+
+net_oauth_authorize_test_SOURCES = net_oauth_authorize_test.cc
+net_oauth_authorize_test_LDADD   = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
 net_oauth_test_SOURCES          = net_oauth_test.cc
 net_oauth_test_LDADD            = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
