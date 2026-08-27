@@ -3,7 +3,7 @@
 AM_CPPFLAGS = -I$(top_srcdir) \
 	$(GPGME_CFLAGS) $(GPGERROR_CFLAGS) $(SODIUM_CFLAGS) $(OPENSSL_CFLAGS) $(JSONC_CFLAGS) $(PORTAUDIO_CFLAGS)
 
-EXTRA_DIST = audio_test.hh certificate.hh mailserver.hh
+EXTRA_DIST = audio_test.hh certificate.hh mailserver.hh httpserver.hh
 
 JSYS_LA   = $(top_builddir)/jlib/sys/libjsys.la
 JUTIL_LA  = $(top_builddir)/jlib/util/libjutil.la
@@ -56,6 +56,8 @@ TESTS = \
 	net_protocol_test \
 	net_imap_test \
 	net_imap_sasl_test \
+	net_http_test \
+	net_http_live_test \
 	net_imap_live_test \
 	sys_proxy_live_test \
 	net_pop3_live_test \
@@ -146,13 +148,19 @@ net_pop3_live_test_SOURCES      = net_pop3_live_test.cc
 net_pop3_live_test_LDADD        = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
 sys_proxy_live_test_SOURCES     = sys_proxy_live_test.cc
-sys_proxy_live_test_LDADD       = $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
+sys_proxy_live_test_LDADD       = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
 net_imap_live_test_SOURCES      = net_imap_live_test.cc
 net_imap_live_test_LDADD        = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
 net_imap_test_SOURCES           = net_imap_test.cc
 net_imap_test_LDADD             = $(JNET_LA) $(JUTIL_LA)
+
+net_http_live_test_SOURCES      = net_http_live_test.cc
+net_http_live_test_LDADD        = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
+
+net_http_test_SOURCES           = net_http_test.cc
+net_http_test_LDADD             = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
 net_imap_sasl_test_SOURCES      = net_imap_sasl_test.cc
 net_imap_sasl_test_LDADD        = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)

@@ -821,56 +821,42 @@ namespace jlib {
         }
 
 
-        namespace http {
+        bool proxy_of(const util::URL& url, std::string& host, unsigned int& port) {
+            const std::string p = url["proxy"];
 
-            std::string get(util::URL url) {
-                std::string endl = "\r\n";
-                std::string dendl = endl+endl;
-                std::string buf;
-                std::string ret;
-                std::ostringstream o;
-                unsigned int port = 80;
+            if(p.empty()) return false;
 
-                if(url.get_protocol() != "http") {
-                    throw net::exception("error in net::http::get(): bad protocol: "+
-                                               url.get_protocol());
-                }
+            // Rightmost colon, not the first: an IPv6 literal proxy is written
+            // [::1]:3128 and tokenize on ":" would hand back "[" as the host.
+            const std::string::size_type colon = p.rfind(':');
 
-                if(url.get_port() != "") {
-                    port = url.get_port_val();
-                }
-
-                o << "GET "<<url.get_path()<<" HTTP/1.0"<<endl
-                  << "Host: "<<url.get_host()<<endl
-                  << endl;
-
-                sys::socketstream sock(url.get_host(), port);
-                sock << o.str() << std::flush;
-                
-                std::getline(sock,buf);
-
-                std::vector<std::string> response = util::tokenize(buf);
-                if(response.size() < 3) {
-                    throw net::exception("error in net::http::get(): bad response: "+
-                                               buf);
-                }
-                
-                if(response[1] != "200") {
-                    std::ostringstream err;
-                    err << "error in net::http::get(): error code "<<response[1]<<": ";
-                    for(unsigned int j=2;j<response.size();j++)
-                        err << response[j]<< " ";
-                        
-                    throw net::exception(err.str());
-                }
-
-                sys::getstring(sock,buf);
-                std::string::size_type p = buf.find(dendl);
-                ret = buf.substr(p+dendl.length());
-
-                return ret;
+            if(colon == std::string::npos || colon == 0 || colon + 1 == p.length()) {
+                throw exception("the proxy parameter \"" + p + "\" is not "
+                                "host:port");
             }
 
+            const std::string h = p.substr(0, colon);
+            const std::string s = p.substr(colon + 1);
+
+            for(char c : s) {
+                if(c < '0' || c > '9')
+                    throw exception("the proxy parameter \"" + p + "\" has a "
+                                    "port that is not a number");
+            }
+
+            const unsigned long n = std::stoul(s);
+
+            if(n == 0 || n > 65535)
+                throw exception("the proxy parameter \"" + p + "\" has a port "
+                                "outside 1-65535");
+
+            // The brackets delimit an IPv6 literal; they are not part of the
+            // address and getaddrinfo does not want them.
+            host = (h.length() > 2 && h.front() == '[' && h.back() == ']')
+                   ? h.substr(1, h.length() - 2) : h;
+            port = static_cast<unsigned int>(n);
+
+            return true;
         }
 
         namespace html {

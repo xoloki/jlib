@@ -152,6 +152,30 @@ namespace jlib {
             void append(const std::string& path, Email e);
         }
 
+        /**
+         * The host and port of a URL's "?proxy=" parameter.
+         *
+         * @return false when there is no proxy parameter, leaving host and
+         *         port untouched
+         * @throw exception when there is one and it cannot be read.  Silently
+         *        connecting direct is the one behaviour that must not happen:
+         *        a caller has asked to go through a proxy, possibly because it
+         *        is the only route out, and telling them nothing is worse than
+         *        failing.
+         *
+         * One function because there were nearly two.  Imap4::connect had
+         *
+         *     std::vector<std::string> pvec = util::tokenize(m_url["proxy"], ":");
+         *     phost = pvec[0];
+         *     pport = util::int_value(pvec[1]);
+         *
+         * which indexes pvec[1] with no size check, so "?proxy=host" with no
+         * port read off the end of the vector.  Pop3::connect did not read the
+         * parameter at all -- it was accepted by the URL parser, stored, and
+         * ignored, so pop3s://host/?proxy=p:3128 connected direct.
+         */
+        bool proxy_of(const jlib::util::URL& url, std::string& host, unsigned int& port);
+
         namespace smtp {
             void send(const std::string& mail, const std::string& rcpt, const std::string& data, const std::string& host, unsigned int port);
 
@@ -176,23 +200,11 @@ namespace jlib {
             bool has_auth_mechanism(const std::list<std::string>& lines, const std::string& want);
         }
 
-        namespace http {
-            // Request, Response and request() were declared here and defined
-            // nowhere -- no constructor, no get_text(), no request(), in any
-            // file in the tree.  Twenty-odd years of a header promising an HTTP
-            // client that did not exist; the only thing here that ever ran is
-            // get(), below.  They are gone rather than kept as a sketch,
-            // because the sketch had already started to constrain the real
-            // thing: Request held a util::Headers, which is an RFC 5322 header
-            // set that decodes encoded-words, and HTTP fields are not that.
-            //
-            // get() is HTTP/1.0, plaintext-only, and treats any status but 200
-            // as an error, so it cannot follow a redirect or read the body of a
-            // 400 -- which is precisely what an OAuth2 token endpoint answers
-            // with when it has something to tell you.  Nothing in the tree
-            // calls it.  It goes when there is something to replace it with.
-            std::string get(jlib::util::URL url);
-        }
+        // namespace http was here.  Request, Response and request() were
+        // declared and never defined, in any file in the tree; get() was
+        // HTTP/1.0, plaintext-only, and treated any status but 200 as an
+        // error, so it could neither follow a redirect nor read the body of a
+        // 400.  Nothing called it.  jlib/net/http.hh is what replaced it.
 
         namespace html {
             std::string render(const std::string& s);

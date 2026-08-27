@@ -433,19 +433,18 @@ namespace jlib {
             while(i<MAX_CONNECT_ATTEMPTS && sock == 0) {
                 try {
                     std::string phost;
-                    u_int pport;
+                    unsigned int pport = 0;
 
-                    if(m_url["proxy"] != "") {
-                        std::vector<std::string> pvec = 
-                            util::tokenize(m_url["proxy"], ":");
-                        phost = pvec[0];
-                        pport = util::int_value(pvec[1]);
-                        if(getenv("JLIB_NET_PROXY_DEBUG")) 
-                            std::cout << "proxy "<<phost<<" on port "<<pport<<std::endl;
-                    }
+                    // proxy_of(), not tokenize on ":".  What was here indexed
+                    // pvec[1] without checking size(), so "?proxy=host" with
+                    // no port read off the end of the vector.
+                    const bool proxied = proxy_of(m_url, phost, pport);
+
+                    if(proxied && getenv("JLIB_NET_PROXY_DEBUG"))
+                        std::cout << "proxy "<<phost<<" on port "<<pport<<std::endl;
 
                     if(is_secure()) {
-                        if(m_url["proxy"] != "") {
+                        if(proxied) {
                             sock = new sys::sslproxystream(m_host,
                                                                  m_port,
                                                                  phost, 
@@ -464,7 +463,7 @@ namespace jlib {
                         // The proxy variant exists now that both sit on one
                         // buffer; it used to throw here for want of a
                         // tlsproxystream.
-                        if(m_url["proxy"] != "") {
+                        if(proxied) {
                             sock = new sys::tlsproxystream(m_host, m_port,
                                                            phost, pport, true);
                         } else {
@@ -472,7 +471,7 @@ namespace jlib {
                         }
                     }
                     else {
-                        if(m_url["proxy"] != "") {
+                        if(proxied) {
                             sock = new sys::proxystream(m_host,
                                                               m_port,
                                                               phost, 
