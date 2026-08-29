@@ -23,6 +23,7 @@
 
 #include <thread>
 #include <mutex>
+#include <concepts>
 #include <condition_variable>
 #include <fstream>
 #include <exception>
@@ -30,6 +31,8 @@
 #include <queue>
 #include <atomic>
 #include <functional>
+#include <iostream>
+#include <vector>
 
 namespace jlib {
 namespace sys {
@@ -90,8 +93,15 @@ public:
     }
 
     void set(const_reference val) {
-        safe_set(m_val, val, m_lock);
-        notify_all();
+        // One critical section, covering the assignment *and* the notify.  See
+        // the note on notify() below: releasing first leaves a window in which
+        // a waiter can observe the new value, act on it, and destroy this
+        // object before the notify lands on it.
+        std::unique_lock<std::mutex> lock(m_lock);
+
+        m_val = val;
+
+        m_cond.notify_all();
     }
 
     reference ref() { return m_val; }
@@ -112,7 +122,70 @@ public:
     void wait(std::unique_lock<std::mutex>& lock, std::chrono::nanoseconds timeout) {
         m_cond.wait_for(lock, timeout);
     }
+
+    /**
+     * Wait until the predicate holds.
+     *
+     * The form to reach for, and the one this wrapper was missing.  A bare
+     * wait() has to be written inside a loop -- against a spurious wakeup, and
+     * against a notification that arrived before the wait began -- and a caller
+     * who forgets gets a hang that reproduces once a week.  This cannot be got
+     * wrong: the condition is stated once, positively, and re-checked under the
+     * lock every time.
+     *
+     * Its absence was load-bearing.  media::Player wanted a predicate wait and
+     * used a raw std::condition_variable with its own std::mutex to get one,
+     * rather than a sync<T> (Player.hh:144, Player.cc:270); sys::job_queue
+     * wrote the loop out by hand.
+     *
+     * ## Why the constraint
+     *
+     * Without `requires std::predicate`, this overload swallows the timed one
+     * above.  wait(lock, milliseconds(5)) needs a converting constructor to
+     * reach std::chrono::nanoseconds -- a user-defined conversion -- while this
+     * template matches milliseconds exactly, and an exact template match beats
+     * a converting non-template.  So the duration would bind here and fail to
+     * compile inside, trying to call a duration.  The constraint excludes
+     * anything that is not callable, which puts the timed overload back.
+     */
+    template<typename Predicate>
+        requires std::predicate<Predicate>
+    void wait(std::unique_lock<std::mutex>& lock, Predicate pred) {
+        m_cond.wait(lock, std::move(pred));
+    }
     
+    /**
+     * Wake one waiter, or all of them.
+     *
+     * ## Everything inside this class notifies with the lock held
+     *
+     * set() above does, and so does job_queue.  The reason is lifetime, not
+     * speed.  Notify after releasing the lock and there is a window in which a
+     * waiter can take the lock, see the condition it was waiting for, act on
+     * it, and destroy this object -- and then the notifier touches a dead
+     * condition variable.  It is the classic shape:
+     *
+     *     { lock; done = true; }
+     *     cv.notify_one();          // the waiter may already have deleted us
+     *
+     * Holding the lock across the notify makes that impossible, and a
+     * general-purpose primitive should be safe by construction rather than
+     * safe because its current callers happen to be arranged well.  Nothing in
+     * jlib can reach that window today; the point is that nothing using this
+     * later has to check.
+     *
+     * The cost is that a woken waiter may only get as far as blocking on the
+     * mutex the notifier still holds -- though an implementation is allowed to
+     * move it straight from this condition variable's queue onto the mutex's
+     * instead of scheduling it, so how much that costs is implementation
+     * dependent and nobody here has measured it.  For one waiter it is at most
+     * one thread either way.
+     *
+     * A caller that invokes this directly makes its own choice; jlib has one
+     * such place, media::Player, which notifies outside the lock and takes the
+     * lock and drops it first as a barrier -- aimed at a lost wakeup rather
+     * than at lifetime, and commented where it happens.
+     */
     void notify() {
         m_cond.notify_one();
     }
@@ -126,47 +199,228 @@ protected:
     mutable T m_val;
 };
 
-class queue {
+/**
+ * A pool of threads, and functors for them to run.
+ *
+ * Not a queue.  A queue that passes arbitrary objects between threads is
+ * sync<std::queue<T>>, which is right above this and which this is built out
+ * of -- so calling the wrapper "queue" as well named the wrong half of it.
+ * What it is is a *job* queue: post a functor, and some thread in the pool
+ * runs it.
+ *
+ * ## A pool of none runs inline
+ *
+ * pool_size 0 is not a degenerate case, it is a mode: post() runs the job on
+ * the calling thread, then and there.  Everything else behaves the same --
+ * post() still swallows what a job throws and hands it to on_error(), stop()
+ * and join() still work, a job posted after stop() is still dropped -- so a
+ * caller can be written once and made synchronous or concurrent by one number.
+ *
+ * That is what it is for.  A server that would otherwise carry two code paths,
+ * one calling the handler inline and one dispatching it, carries neither: it
+ * always posts, and the size decides.
+ *
+ * Two consequences worth knowing.  A job that posts to its own inline queue
+ * *recurses* rather than queueing, so a job that posts itself will not stop.
+ * And with no pool nothing is ever queued, so stop(true) has nothing to drain.
+ *
+ * There is no default size, deliberately.  It was hardware_concurrency(), which
+ * is permitted to return 0 -- which used to mean a queue that accepted jobs and
+ * ran none, and would now mean a silently synchronous one.  Neither is a thing
+ * to arrive at by not choosing; a caller deriving the size from
+ * hardware_concurrency() should decide for itself what 0 means.
+ *
+ * ## What it does not do
+ *
+ * No size(), no wait for idle, no priorities, no futures, no work stealing, no
+ * bound on how deep the queue may get.  It is twenty lines and its appeal is
+ * that it is twenty lines; anything that wants one of those can ask for it
+ * then.
+ */
+class job_queue {
 public:
-    queue(int pool_size = std::thread::hardware_concurrency()) {
+    /** What to do with an exception a job let escape.  See on_error(). */
+    typedef std::function<void(const std::exception&)> error_handler;
+
+    /**
+     * @param pool_size how many threads, or 0 to run each job on the thread
+     *                  that posts it.  No default: see the note above.
+     */
+    explicit job_queue(int pool_size) {
         m_exit = false;
-        
+        m_drain = true;
+
         for(int i = 0; i < pool_size; i++) {
             m_pool.push_back(std::thread([this](){ start(); }));
         }
     }
 
-    ~queue() {
-        m_exit = true;
-        m_queue.notify_all();
-
-        for(auto& thread : m_pool) {
-            thread.join();
-        }
+    ~job_queue() {
+        stop();
+        join();
     }
-    
+
+    job_queue(const job_queue&) = delete;
+    job_queue& operator=(const job_queue&) = delete;
+
+    /**
+     * Hand a job to the pool, or run it here if there is no pool.
+     *
+     * Ignored once the queue has been stopped, either way.  And either way it
+     * does not throw what the job threw: an exception has nowhere to go from a
+     * worker thread, so run() catches it and on_error() gets it, and a caller
+     * whose behaviour changed with the pool size would defeat the point of
+     * being able to set that size to zero.
+     */
     void post(std::function<void()> job) {
+        // Before the lock, deliberately: m_exit is atomic, so a stopped queue
+        // is not worth contending a mutex to be told about.  It is an
+        // optimisation and not a guarantee -- a stop() may land immediately
+        // after this reads -- and under drain semantics that window is
+        // harmless, because a job queued in it still runs.
+        if(m_exit) return;
+
+        // m_pool is written once, in the constructor, and never touched again,
+        // so reading it here needs no lock.
+        if(m_pool.empty()) {
+            run(job);
+
+            return;
+        }
+
+        // Push and signal in one critical section; see the note on
+        // sync<T>::notify.
         std::unique_lock<std::mutex> lock(m_queue);
-        m_queue().push(job);
+
+        m_queue().push(std::move(job));
         m_queue.notify();
     }
-    
-protected:
-    void start() {
-        while(!m_exit) {
+
+    /**
+     * What to do with an exception a job let escape.
+     *
+     * Runs on the worker's thread.  The default writes one line to std::cerr,
+     * built whole before it is written -- several workers reporting at once
+     * otherwise interleave in the middle of a message.
+     *
+     * There has to be one.  An exception escaping a thread function calls
+     * std::terminate, and it cannot be caught from outside: exceptions do not
+     * cross thread boundaries, so the catch has to be in the code that calls
+     * the job.  A pool that runs arbitrary functors will be handed one that
+     * throws eventually.
+     */
+    void on_error(error_handler h) {
+        std::unique_lock<std::mutex> lock(m_queue);
+
+        m_on_error = h;
+    }
+
+    /**
+     * Stop taking jobs and let the workers leave.
+     *
+     * @param drain run what is already queued first.  join() then means "every
+     *              job I posted has run", which is the useful guarantee -- and
+     *              the destructor calls this, so a queue going out of scope
+     *              does not silently discard work.  false leaves as soon as
+     *              the job in hand finishes.
+     *
+     * Idempotent, and safe from any thread including a job's own.  **Not a
+     * barrier**: jobs already running keep running, and join() is what waits
+     * for them.
+     *
+     * With drain set, a caller that goes on posting keeps the drain going.
+     * That is a caller's mistake and not something this defends against.
+     */
+    void stop(bool drain = true) {
+        {
+            // Both under the lock, so a worker that observes m_exit also
+            // observes the matching m_drain: they are read together in the
+            // predicate below, and two independent atomics give no such
+            // guarantee.  m_exit stays atomic all the same, because post()
+            // reads it without the lock.
             std::unique_lock<std::mutex> lock(m_queue);
-            if(!m_queue().empty()) {
-                m_queue().front()();
-                m_queue().pop();
-            } else {
-                m_queue.wait(lock);
-            }
+
+            m_drain = drain;
+            m_exit = true;
+
+            m_queue.notify_all();
         }
     }
-    
+
+    /** Wait for every worker to leave.  Idempotent. */
+    void join() {
+        for(auto& thread : m_pool) {
+            if(thread.joinable()) thread.join();
+        }
+    }
+
+protected:
+    void start() {
+        for(;;) {
+            std::function<void()> job;
+
+            {
+                std::unique_lock<std::mutex> lock(m_queue);
+
+                // Re-checked under the lock, every time, which is what the
+                // predicate form guarantees: a worker that tested m_exit
+                // outside the lock and then waited would miss a stop() that
+                // landed in between -- a notification that has been and gone --
+                // and join() would never return.
+                m_queue.wait(lock, [this] {
+                    return m_exit || !m_queue().empty();
+                });
+
+                if(m_queue().empty()) return;        // stopped, nothing left
+                if(m_exit && !m_drain) return;       // stopped, abandoning
+
+                // Moved out under the lock so it can be called without one,
+                // which is the whole point.  Running it in here -- which is
+                // what this did -- made a pool of threads that took turns at
+                // one mutex, so exactly one job ran at a time.
+                job = std::move(m_queue().front());
+                m_queue().pop();
+            }
+
+            run(job);
+        }
+    }
+
+    void run(const std::function<void()>& job) {
+        try {
+            job();
+        }
+        catch(std::exception& e) {
+            // The handler is read under the lock, and only here: no data race
+            // with on_error(), and no cost at all on the path where nothing
+            // throws.
+            error_handler h;
+
+            {
+                std::unique_lock<std::mutex> lock(m_queue);
+
+                h = m_on_error;
+            }
+
+            if(h) h(e);
+        }
+        catch(...) {
+            // Nothing to hand a handler that takes a std::exception&.
+        }
+    }
+
     sync<std::queue<std::function<void()>>> m_queue;
     std::vector<std::thread> m_pool;
     std::atomic<bool> m_exit;
+    bool m_drain = true;                  // guarded by m_queue's mutex
+    error_handler m_on_error = default_error_handler;
+
+    static void default_error_handler(const std::exception& e) {
+        // One write of one whole string; several workers reporting at once
+        // otherwise interleave.
+        std::cerr << (std::string("jlib::sys::job_queue: a job threw: ") +
+                      e.what() + "\n") << std::flush;
+    }
 };
     
 }
