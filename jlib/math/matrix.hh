@@ -72,7 +72,30 @@ public:
     };
 
     matrix(uint rows, uint cols);
+
+    /** The roff,coff-anchored rows x cols submatrix of m, by value. */
     matrix(uint rows, uint cols, const matrix<T>& m, uint roff, uint coff);
+
+    /**
+     * A matrix is a value.
+     *
+     * It was not, before: neither of these was declared, so both were implicit
+     * and both copied the *handle* -- rep is a buffer, and a buffer holds a
+     * shared_ptr to the storage.  Two matrices, one array, and writing through
+     * either changed both.  vertex made it worse by declaring an element-wise
+     * operator= on top, so copying aliased and assigning did not.
+     *
+     * buffer keeps its reference semantics: tensor slices with it (see
+     * tensor.hh's operator[]) and that is what it is for.  What changes is that
+     * matrix no longer exposes them by accident.
+     */
+    matrix(const matrix<T>& m);
+    matrix<T>& operator=(const matrix<T>& m);
+
+    // Declaring a copy suppresses these, and a buffer moves for the price of a
+    // shared_ptr, so they are worth having back.
+    matrix(matrix<T>&& m) = default;
+    matrix<T>& operator=(matrix<T>&& m) = default;
 
     T& operator()(uint r, uint c);
     const T& operator()(uint r, uint c) const;
@@ -118,8 +141,6 @@ protected:
     // use buffer in column-major mode so we can pass data off to GL without copying
     // also, this lets us represent a column vector simply
     buffer<T> rep;
-
-    bool transposed = false;
 };
 
 
@@ -174,6 +195,23 @@ class vertex {
 public:
     vertex(uint n);
     vertex(const std::vector<T>& v);
+
+    /**
+     * A vertex is a value too, and this is where the bug in #76 actually bit.
+     *
+     * operator= below was already element-wise, so assigning copied; only
+     * copy-construction aliased, and the two read identically at the call
+     * site.  jhypermusic pushed the same vertex into two vectors, assigned one
+     * to the other expecting a snapshot, and got a no-op -- every corner
+     * reported exactly zero radial velocity for months.
+     *
+     * Note that operator= still copies min(D, v.D) elements and does not
+     * resize: it means "take these values into my shape", and change() below
+     * depends on that.  Only construction is being made to match.
+     */
+    vertex(const vertex<T>& v);
+    vertex(vertex<T>&& v) = default;
+    vertex<T>& operator=(vertex<T>&& v) = default;
 
     T& operator[](uint i);
     const T& operator[](uint i) const;
@@ -647,8 +685,53 @@ matrix<T>::matrix(uint rows, uint cols)
 template<typename T>
 inline
 matrix<T>::matrix(uint rows, uint cols, const matrix<T>& m, uint roff, uint coff)
+    : M(rows),
+      N(cols),
+      rep(rows*cols)
 {
+    // Closes #53.  The body was empty *and* there was no initialiser list, so
+    // M and N were uninitialised and rep was a null buffer -- calling this was
+    // undefined behaviour rather than a no-op.  Nothing called it, which is
+    // the only reason that never showed.
+    if(roff + rows > m.M || coff + cols > m.N)
+        throw typename matrix<T>::mismatched(rows, cols, m.M, m.N);
 
+    for(uint r = 0; r < rows; r++)
+        for(uint c = 0; c < cols; c++)
+            (*this)(r,c) = m(r + roff, c + coff);
+}
+
+template<typename T>
+inline
+matrix<T>::matrix(const matrix<T>& m)
+    : M(m.M),
+      N(m.N),
+      rep(m.M * m.N)
+{
+    const uint n = M * N;
+
+    for(uint i = 0; i < n; i++)
+        rep[i] = m.rep[i];
+}
+
+template<typename T>
+inline
+matrix<T>& matrix<T>::operator=(const matrix<T>& m) {
+    if(this == &m)
+        return *this;
+
+    // Through a temporary rather than rep.resize(): resize() keeps the array
+    // it already has when that one is big enough, so on a rep still shared
+    // from somewhere it would write through instead of taking a copy.  A fresh
+    // matrix owns its buffer alone, and handing that buffer over is the whole
+    // of the assignment.
+    matrix<T> tmp(m);
+
+    M = tmp.M;
+    N = tmp.N;
+    rep = tmp.rep;
+
+    return *this;
 }
 
 
@@ -675,20 +758,14 @@ void matrix<T>::foreach_index(std::function<void (uint,uint,T&)> handler) {
 template<typename T>
 inline
 T& matrix<T>::operator()(uint r, uint c) {
-    if(!transposed)
-	return rep[c * M + r];
-    else
-	return rep[r * N + c];
+    return rep[c * M + r];
 }
 
 
 template<typename T>
 inline
 const T& matrix<T>::operator()(uint r, uint c) const {
-    if(!transposed)
-	return rep[c * M + r];
-    else
-	return rep[r * N + c];
+    return rep[c * M + r];
 }
 
 
@@ -747,10 +824,20 @@ matrix<T>::operator const buffer<T>() const {
 template<typename T>
 inline
 matrix<T> matrix<T>::transpose() const {
+    // Materialised, where this used to hand back a view onto the same storage
+    // with a flag flipped.  That was an O(1) transpose and it was the third
+    // sharing rule in this file: writing to a transpose wrote through to its
+    // source.  Every caller in the tree uses the result read-only as an
+    // operand to *, so nothing wanted the aliasing -- and since the copy is
+    // O(MN) feeding a multiply that is O(MNK), it costs nothing that shows.
+    //
+    // Dropping the flag also takes a branch out of operator(), which is the
+    // most-called function here.
     matrix<T> ret(N, M);
 
-    ret.rep = rep;
-    ret.transposed = !transposed;
+    for(uint r = 0; r < M; r++)
+        for(uint c = 0; c < N; c++)
+            ret(c, r) = (*this)(r, c);
 
     return ret;
 }
@@ -1130,6 +1217,14 @@ vertex<T>::vertex(uint n)
       col(n+1,1)
 {
     col(n,0) = 1;
+}
+
+template<typename T>
+inline
+vertex<T>::vertex(const vertex<T>& v)
+    : D(v.D),
+      col(v.col)     // deep, now that matrix's copy is
+{
 }
 
 

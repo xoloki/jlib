@@ -153,17 +153,15 @@ public:
             m_voices.push_back(v);
             m_mix.add(v, 0.0);
 
-            // Constructed fresh, then assigned -- never copy-constructed from
-            // the shape.  See own() below: a copied vertex shares its storage,
-            // and two corners sharing one buffer is how the Doppler came out as
-            // exactly zero.
-            m_at.push_back(math::vertex<double>(d));
-            m_was.push_back(math::vertex<double>(d));
-            m_shown.push_back(math::vertex<double>(d));
-
-            m_at.back() = m_shape[i];
-            m_was.back() = m_shape[i];
-            m_shown.back() = m_shape[i];
+            // Plainly, now that a vertex is a value (#76).  This was three
+            // fresh vertices followed by three assignments, with a comment
+            // explaining that copy-constructing from the shape would make all
+            // three corners share one buffer -- which is how the Doppler came
+            // out as exactly zero.  The workaround referred the reader to an
+            // own() that had already been deleted.
+            m_at.push_back(m_shape[i]);
+            m_was.push_back(m_shape[i]);
+            m_shown.push_back(m_shape[i]);
 
             m_level.push_back(0);
             m_level_shown.push_back(0);
@@ -319,14 +317,13 @@ public:
     {
         std::lock_guard<std::mutex> lock(m_pose);
 
-        // Sized with vertices of their own before anything is assigned, for
-        // the same reason: at = m_shown would share, and the drawing thread
-        // would be reading the buffers the audio thread is writing.
-        while(at.size() < m_shown.size())
-            at.push_back(math::vertex<double>(m_shape.D));
-
-        for(std::size_t k = 0; k < m_shown.size(); k++)
-            at[k] = m_shown[k];
+        // A real snapshot, in one line.  This grew the vector with fresh
+        // vertices and then assigned element by element, because `at =
+        // m_shown` used to make the two share -- which meant the drawing
+        // thread read the buffers the audio thread was writing, under a lock
+        // that was therefore protecting nothing.  Copying is copying now, so
+        // the lock does what it looks like it does.
+        at = m_shown;
 
         level = m_level_shown;
     }
