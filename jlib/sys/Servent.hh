@@ -69,18 +69,65 @@ namespace jlib {
             typedef std::list<std::pair<std::function<bool()>, std::function<void()> > >
                                                                condition_list_type;
 
+            /**
+             * Reserved command ids.  A caller's own ids must be >= 0.
+             *
+             * WAKE exists because the loop now blocks: with nothing periodic
+             * registered it sleeps in poll() until a command arrives, so
+             * anything that changes whether periodic work *exists* has to
+             * knock.  Reading it does nothing, which is the whole job.
+             */
             static const id_type EXIT = -1;
+            static const id_type WAKE = -2;
 
             Servent();
             virtual ~Servent();
 
             void map(id_type command, std::function<void()> slot);
+
+            /**
+             * Add a predicate and what to run when it holds.
+             *
+             * Evaluated once per pass of the loop, so registering one puts the
+             * worker into polling mode -- see start().  Safe to call while the
+             * worker is running: this wakes it so it notices.
+             */
             void add(condition_list_type::value_type condition);
+
+            /**
+             * Knock, so a blocked worker goes round once more.
+             *
+             * Only needed after connecting to cycle while the worker is
+             * already running, since that is the one registration this class
+             * cannot see happen -- cycle is a public member and connecting to
+             * it does not go through here.  add() knocks for itself, and
+             * map() needs no knock: a command wakes the loop by arriving.
+             * A no-op if nothing is running.
+             */
+            void wake();
 
             void exec(id_type command, int maxwait=-1);
 
             void run();
 
+            /**
+             * The worker loop: read a command, dispatch it, evaluate the
+             * conditions, emit cycle.
+             *
+             * **It blocks when nothing periodic is registered, and polls when
+             * something is.**  Those are two different classes wearing one
+             * name: a command dispatcher has nothing to do between commands
+             * and should sleep, while a caller who registered a condition or
+             * connected to cycle asked for something to happen on a tick and
+             * must keep getting it.  So the cadence follows the configuration
+             * rather than a constant nobody chose.
+             *
+             * It used to poll at 1ms unconditionally, which cost about 13ms of
+             * CPU per idle second whether or not anyone wanted a tick.
+             *
+             * The polling interval is still 1ms and still not configurable;
+             * that is the next question, not this one.
+             */
             void start();
 
             /**
@@ -96,6 +143,9 @@ namespace jlib {
             signal<void()> cycle;
 
         protected:
+            /** True when someone has asked for work on every pass. */
+            bool periodic();
+
             pipe m_pipe;
             command_map_type m_commands;
             condition_list_type m_conditions;

@@ -75,8 +75,44 @@ namespace jlib {
         }
 
         void Servent::add(condition_list_type::value_type condition) {
+            {
+                std::lock_guard<std::mutex> lock(m_lock);
+                m_conditions.push_back(condition);
+            }
+
+            // Outside the lock, and only after the list has grown: the worker
+            // may be asleep in poll() *because* there were no conditions, and
+            // it re-reads periodic() when it wakes.  Knocking first would race
+            // with the push and knocking under the lock would deadlock a
+            // worker that woke and reached for it.
+            wake();
+        }
+
+        void Servent::wake() {
+            if(!m_worker.joinable())
+                return;
+
+            try {
+                exec(WAKE);
+            }
+            catch(std::exception& e) {
+                // Nothing to escalate to.  A knock that does not land means
+                // the loop keeps sleeping until a real command arrives, which
+                // is the behaviour this call was trying to improve on, not a
+                // failure of anything already working.
+                std::cerr << "jlib::sys::Servent::wake(): " << e.what() << std::endl;
+            }
+        }
+
+        bool Servent::periodic() {
             std::lock_guard<std::mutex> lock(m_lock);
-            m_conditions.push_back(condition);
+
+            // cycle is a public member, so connecting to it neither takes this
+            // lock nor goes through any method here -- which is why wake()
+            // exists and why connecting after run() needs one.  Reading
+            // empty() while another thread connects is the same race emit()
+            // has always had, and is not made worse here.
+            return !m_conditions.empty() || !cycle.empty();
         }
 
 
@@ -97,7 +133,13 @@ namespace jlib {
         void Servent::start() {
             while(m_bunny) {
                 try {
-                    if(m_pipe.poll(pipe::IN, 1)) {
+                    // -1 blocks until a command arrives; 1 keeps the old
+                    // cadence for a caller who registered periodic work.
+                    // Re-read every pass, because add() can change the answer
+                    // while this is running -- and knocks so that it does.
+                    const int wait = periodic() ? 1 : -1;
+
+                    if(m_pipe.poll(pipe::IN, wait)) {
                         if(std::getenv("JLIB_SYS_SERVENT_DEBUG"))
                             std::cerr << "jlib::sys::Servent::start(): m_pipe.poll(): true" << std::endl;
                         id_type command = m_pipe.read<id_type>();
@@ -106,17 +148,24 @@ namespace jlib {
                             m_bunny = false;
                             break;
                         }
-                        
+
                         if(std::getenv("JLIB_SYS_SERVENT_DEBUG"))
                             std::cerr << "jlib::sys::Servent::start(): read command: " 
                                       << command << std::endl;
-                        std::lock_guard<std::mutex> lock(m_lock);
-                        command_map_type::iterator i = m_commands.find(command);
-                        if(i == m_commands.end()) {
-                            throw exception("start(): cannot find signal for passed command");
-                        }
+
+                        // WAKE is not looked up.  Its entire purpose was to
+                        // end the poll above, and it has done that by being
+                        // read; falling through would report it as an unmapped
+                        // command every time somebody called add().
+                        if(command != Servent::WAKE) {
+                            std::lock_guard<std::mutex> lock(m_lock);
+                            command_map_type::iterator i = m_commands.find(command);
+                            if(i == m_commands.end()) {
+                                throw exception("start(): cannot find signal for passed command");
+                            }
                         
-                        i->second();
+                            i->second();
+                        }
                     }
 
                     std::lock_guard<std::mutex> lock(m_lock);
@@ -129,6 +178,18 @@ namespace jlib {
                             i->second();
                     
                     cycle.emit();
+                }
+                catch(pipe::exception& e) {
+                    // Fatal to the loop, where every other failure is not.
+                    // The pipe is both how this is woken and how it is
+                    // stopped, so a broken one cannot be retried around: with
+                    // a blocking poll, "print it and go round again" is a
+                    // tight spin on a descriptor that will fail identically
+                    // forever.  It span at 1000/s before this change, which
+                    // was survivable enough that nobody noticed.
+                    std::cerr << "jlib::sys::Servent::start(): the command pipe failed, "
+                              << "stopping: " << e.what() << std::endl;
+                    m_bunny = false;
                 }
                 catch(std::exception& e) {
                     std::cerr << "jlib::sys::Servent::start(): caught std::exception: " << e.what() << std::endl;
