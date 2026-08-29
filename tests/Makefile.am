@@ -43,6 +43,7 @@ endif
 
 TESTS = \
 	math_test \
+	math_value_test \
 	math_object_test \
 	tensor_test \
 \
@@ -256,6 +257,9 @@ x_window_test_LDADD   = $(JX_LA)
 
 math_test_SOURCES = math_test.cc
 math_test_LDADD   = $(JUTIL_LA)
+
+math_value_test_SOURCES = math_value_test.cc
+math_value_test_LDADD   = $(JUTIL_LA)
 
 math_object_test_SOURCES = math_object_test.cc
 math_object_test_LDADD   = $(JUTIL_LA)

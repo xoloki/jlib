@@ -53,7 +53,8 @@ or `cuda`.
 - `jjoystick`, `jjoy2xev` — Linux joystick → X events, with `*-{axes,buttons}-*.map`
   data files for WoW / KSP / SW:TOR on PS3 and X360 pads.
 - `jnote`, `jmelody`, `jm3u`, `jpoisoned`, `jcublas`.
-- `jhypermusic.cc` and `jneural.cc` are **not** in `bin_PROGRAMS` — scratch files.
+- `jneural.cc` is **not** in `bin_PROGRAMS` — a scratch file. (`jhypermusic` is
+  built, under the media conditional.)
 
 ## Build
 
@@ -194,9 +195,7 @@ The HTTP arc left #104 (proxy authentication — and `rfc9110.hh` already record
 that `credentials`/`challenge` need reordering under ordered choice before it
 can work) and #105 (SOCKS5). Otherwise what is left is the graphics chain that would let one `HyperPlot` serve both
 apps (#20 → #24 → #28), tessellation and face enumeration for the remaining
-shapes (#31, #35), two `math` bugs (#53, and #76 — `vertex` and `matrix` share
-storage when copied but deep-copy when assigned, which is why `jhypermusic`
-reported exactly zero Doppler for months), and some efficiency and API tidying
+shapes (#31, #35), some efficiency and API tidying
 (#47, #69).
 
 Three habits from this work worth keeping. **Measure before diagnosing** —
