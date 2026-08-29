@@ -169,11 +169,34 @@ protected:
  * What it is is a *job* queue: post a functor, and some thread in the pool
  * runs it.
  *
+ * ## A pool of none runs inline
+ *
+ * pool_size 0 is not a degenerate case, it is a mode: post() runs the job on
+ * the calling thread, then and there.  Everything else behaves the same --
+ * post() still swallows what a job throws and hands it to on_error(), stop()
+ * and join() still work, a job posted after stop() is still dropped -- so a
+ * caller can be written once and made synchronous or concurrent by one number.
+ *
+ * That is what it is for.  A server that would otherwise carry two code paths,
+ * one calling the handler inline and one dispatching it, carries neither: it
+ * always posts, and the size decides.
+ *
+ * Two consequences worth knowing.  A job that posts to its own inline queue
+ * *recurses* rather than queueing, so a job that posts itself will not stop.
+ * And with no pool nothing is ever queued, so stop(true) has nothing to drain.
+ *
+ * There is no default size, deliberately.  It was hardware_concurrency(), which
+ * is permitted to return 0 -- which used to mean a queue that accepted jobs and
+ * ran none, and would now mean a silently synchronous one.  Neither is a thing
+ * to arrive at by not choosing; a caller deriving the size from
+ * hardware_concurrency() should decide for itself what 0 means.
+ *
  * ## What it does not do
  *
- * No size(), no wait for idle, no priorities, no futures, no work stealing.  It
- * is twenty lines and its appeal is that it is twenty lines; anything that
- * wants one of those can ask for it then.
+ * No size(), no wait for idle, no priorities, no futures, no work stealing, no
+ * bound on how deep the queue may get.  It is twenty lines and its appeal is
+ * that it is twenty lines; anything that wants one of those can ask for it
+ * then.
  */
 class job_queue {
 public:
@@ -181,15 +204,12 @@ public:
     typedef std::function<void(const std::exception&)> error_handler;
 
     /**
-     * @param pool_size how many threads.  Clamped to at least one:
-     *                  hardware_concurrency() is permitted to return zero, and
-     *                  a pool with no threads accepts jobs and runs none.
+     * @param pool_size how many threads, or 0 to run each job on the thread
+     *                  that posts it.  No default: see the note above.
      */
-    job_queue(int pool_size = std::thread::hardware_concurrency()) {
+    explicit job_queue(int pool_size) {
         m_exit = false;
         m_drain = true;
-
-        if(pool_size < 1) pool_size = 1;
 
         for(int i = 0; i < pool_size; i++) {
             m_pool.push_back(std::thread([this](){ start(); }));
@@ -204,7 +224,15 @@ public:
     job_queue(const job_queue&) = delete;
     job_queue& operator=(const job_queue&) = delete;
 
-    /** Hand a job to the pool.  Ignored once the queue has been stopped. */
+    /**
+     * Hand a job to the pool, or run it here if there is no pool.
+     *
+     * Ignored once the queue has been stopped, either way.  And either way it
+     * does not throw what the job threw: an exception has nowhere to go from a
+     * worker thread, so run() catches it and on_error() gets it, and a caller
+     * whose behaviour changed with the pool size would defeat the point of
+     * being able to set that size to zero.
+     */
     void post(std::function<void()> job) {
         // Before the lock, deliberately: m_exit is atomic, so a stopped queue
         // is not worth contending a mutex to be told about.  It is an
@@ -212,6 +240,14 @@ public:
         // after this reads -- and under drain semantics that window is
         // harmless, because a job queued in it still runs.
         if(m_exit) return;
+
+        // m_pool is written once, in the constructor, and never touched again,
+        // so reading it here needs no lock.
+        if(m_pool.empty()) {
+            run(job);
+
+            return;
+        }
 
         std::unique_lock<std::mutex> lock(m_queue);
 

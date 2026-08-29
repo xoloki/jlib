@@ -324,21 +324,77 @@ static void a_job_that_throws() {
        std::to_string(after.load()) + "/4");
 }
 
-static void a_pool_of_none_is_a_pool_of_one() {
-    std::cout << "\na pool of none is a pool of one:\n";
+static void a_pool_of_none_runs_inline() {
+    std::cout << "\na pool of none runs inline:\n";
 
-    // std::thread::hardware_concurrency() is permitted to return 0, and it is
-    // the default argument -- so a queue that accepted jobs and ran none was
-    // one unlucky platform away.
+    // Not a degenerate case but a mode: with no pool, post() runs the job on
+    // the calling thread.  Which is the point -- a caller that always posts can
+    // be made synchronous or concurrent by one number, and does not carry two
+    // code paths to choose between.
     std::atomic<int> ran{0};
+    std::thread::id where;
 
     {
         sys::job_queue q(0);
 
-        for(int i = 0; i < 5; i++) q.post([&ran] { ran++; });
+        for(int i = 0; i < 5; i++) {
+            q.post([&ran, &where] {
+                where = std::this_thread::get_id();
+                ran++;
+            });
+        }
+
+        // Already, before anything is stopped or joined: post() ran it.
+        ok("the job has run by the time post() returns", ran.load() == 5,
+           std::to_string(ran.load()) + "/5");
+
+        ok("and it ran on the thread that posted it",
+           where == std::this_thread::get_id());
     }
 
-    ok("jobs still run", ran.load() == 5, std::to_string(ran.load()) + "/5");
+    // The same job on a pool runs somewhere else, which is the contrast that
+    // makes the assertion above mean something.
+    std::thread::id elsewhere;
+
+    {
+        sys::job_queue q(1);
+
+        q.post([&elsewhere] { elsewhere = std::this_thread::get_id(); });
+    }
+
+    ok("where a pool of one does not", elsewhere != std::this_thread::get_id());
+
+    // Everything else is the same, which is what lets a caller ignore the
+    // difference: a job that throws is still caught and handed to on_error,
+    // and post() does not throw it at whoever called.
+    std::atomic<int> reported{0};
+    bool post_threw = false;
+
+    {
+        sys::job_queue q(0);
+
+        q.on_error([&reported](const std::exception&) { reported++; });
+
+        try { q.post([] { throw std::runtime_error("no"); }); }
+        catch(...) { post_threw = true; }
+    }
+
+    ok("a throwing job is caught inline too", reported.load() == 1,
+       std::to_string(reported.load()));
+    ok("and post() does not throw it at the caller", !post_threw);
+
+    // And a stopped queue drops the job rather than running it here.
+    std::atomic<int> after{0};
+
+    {
+        sys::job_queue q(0);
+
+        q.stop();
+        q.post([&after] { after++; });
+    }
+
+    ok("a job posted after stop() is dropped, pool or no pool",
+       after.load() == 0, std::to_string(after.load()));
 }
 
 int main() {
@@ -349,7 +405,7 @@ int main() {
     the_destructor_drains();
     stopping_with_and_without_a_drain();
     a_job_that_throws();
-    a_pool_of_none_is_a_pool_of_one();
+    a_pool_of_none_runs_inline();
 
     // What a green run does not establish.
     //
