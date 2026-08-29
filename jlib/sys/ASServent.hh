@@ -26,6 +26,7 @@
 #include <jlib/sys/auto.hh>
 
 #include <exception>
+#include <iostream>
 #include <string>
 #include <sstream>
 #include <map>
@@ -86,6 +87,20 @@ public:
     
     void reset();
     
+    /**
+     * Stop the worker and wait for it to finish.
+     *
+     * A derived class must call this from its own destructor.  ~ASServent
+     * calls it too, but by then the derived part of the object is already
+     * gone, so anything the worker touches that a subclass owns must be shut
+     * down earlier than that -- and handle(Request) is pure virtual here, so
+     * a worker still running when the derived destructor has finished is a
+     * pure virtual call, not merely a data race.
+     *
+     * Idempotent, and safe on an ASServent that was never run().
+     */
+    void stop();
+    
     void start();
     
     /**
@@ -113,8 +128,16 @@ protected:
     
     pipe m_request_pipe;
     pipe m_response_pipe;
-    std::thread* m_worker = nullptr;
+    std::thread m_worker;
     std::mutex m_lock;
+
+    // The loop's own flag, and stop()'s fallback for when the EXIT byte cannot
+    // be written.  start() used to test a *local* bool, so the pipe was the
+    // only way to end the loop -- and the request pipe is opened non-blocking,
+    // so a full one makes write_int throw and there was no second way to ask.
+    // That would turn the leak this fixes into a hang in join().  Named to
+    // match Servent::m_bunny, which is the same flag for the same reason.
+    sync<bool> m_bunny;
     sys::sync<std::priority_queue<Request> > m_requests;
     sys::sync<std::queue<Response> > m_responses;
 };
@@ -123,7 +146,8 @@ template<typename Request, typename Response>
 inline
 ASServent<Request,Response>::ASServent()
     : m_request_pipe(false,false),
-      m_response_pipe(false,false)
+      m_response_pipe(false,false),
+      m_bunny(true)
 {
     
 }
@@ -131,7 +155,12 @@ ASServent<Request,Response>::ASServent()
 template<typename Request, typename Response>
 inline
 ASServent<Request,Response>::~ASServent() {
-    
+    // Backstop only.  By the time this runs the derived part of the object is
+    // already destroyed, so subclasses owning anything the worker touches must
+    // call stop() from their own destructor.  Without this the worker outlived
+    // the object entirely, which is strictly worse than the narrow window that
+    // remains.
+    stop();
 }
     
 template<typename Request, typename Response>
@@ -164,19 +193,42 @@ template<typename Request, typename Response>
 inline
 void 
 ASServent<Request,Response>::reset() {
-    if(m_worker) {
+    // Joined, not merely asked to leave.  Dropping the old worker left two of
+    // them reading the same request pipe until the first noticed EXIT, and
+    // which one served a given request was a race.
+    stop();
+
+    m_bunny = true;
+
+    m_worker = std::thread([this](){ this->start(); });
+}
+
+template<typename Request, typename Response>
+inline
+void 
+ASServent<Request,Response>::stop() {
+    if(!m_worker.joinable())
+        return;
+
+    try {
         m_request_pipe.write_int(EXIT);
-        m_worker = 0;
     }
-    m_worker = new std::thread([this](){ this->start(); });
+    catch(std::exception& e) {
+        // The request pipe is non-blocking and may be full, or already
+        // unwritable.  Ask the loop to leave directly rather than joining a
+        // thread that was never told to.
+        std::cerr << "jlib::sys::ASServent::stop(): " << e.what() << std::endl;
+        m_bunny = false;
+    }
+
+    m_worker.join();
 }
     
 template<typename Request, typename Response>
 inline
 void 
 ASServent<Request,Response>::start() {
-    bool cont = true;
-    while(cont) {
+    while(m_bunny) {
         try {
             while(m_request_pipe.poll()) {
                 if(getenv("JLIB_SYS_ASSERVENT_DEBUG"))
@@ -186,7 +238,7 @@ ASServent<Request,Response>::start() {
                 if(id == NEW_REQUEST) {
                     
                 } else if(id == EXIT) {
-                    cont = false;
+                    m_bunny = false;
                     break;
                 }
             }

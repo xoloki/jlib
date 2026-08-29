@@ -48,6 +48,12 @@ namespace jlib {
             
         }
 
+        ASMBox::~ASMBox() {
+            // Before m_is goes: the worker reaches it through the on_*()
+            // overrides declared here.
+            stop();
+        }
+
         
         void ASMBox::on_init() {
             push(MailBoxResponse(MailBoxResponse::STATUS, "Initializing"));

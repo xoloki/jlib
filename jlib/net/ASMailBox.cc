@@ -132,7 +132,11 @@ namespace jlib {
         }
 
         ASMailBox::~ASMailBox() {
-
+            // The worker calls handle(Request), which dispatches to the
+            // on_*() overrides.  A leaf class must stop it before its own
+            // members go; this is the same backstop ~ASServent is, one layer
+            // down, and is not a substitute for the leaf doing it.
+            stop();
         }
 
         void ASMailBox::handle(const MailBoxRequest& request) {
