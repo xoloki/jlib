@@ -23,6 +23,7 @@
 
 #include <thread>
 #include <mutex>
+#include <concepts>
 #include <condition_variable>
 #include <fstream>
 #include <exception>
@@ -113,6 +114,37 @@ public:
     
     void wait(std::unique_lock<std::mutex>& lock, std::chrono::nanoseconds timeout) {
         m_cond.wait_for(lock, timeout);
+    }
+
+    /**
+     * Wait until the predicate holds.
+     *
+     * The form to reach for, and the one this wrapper was missing.  A bare
+     * wait() has to be written inside a loop -- against a spurious wakeup, and
+     * against a notification that arrived before the wait began -- and a caller
+     * who forgets gets a hang that reproduces once a week.  This cannot be got
+     * wrong: the condition is stated once, positively, and re-checked under the
+     * lock every time.
+     *
+     * Its absence was load-bearing.  media::Player wanted a predicate wait and
+     * used a raw std::condition_variable with its own std::mutex to get one,
+     * rather than a sync<T> (Player.hh:144, Player.cc:270); sys::job_queue
+     * wrote the loop out by hand.
+     *
+     * ## Why the constraint
+     *
+     * Without `requires std::predicate`, this overload swallows the timed one
+     * above.  wait(lock, milliseconds(5)) needs a converting constructor to
+     * reach std::chrono::nanoseconds -- a user-defined conversion -- while this
+     * template matches milliseconds exactly, and an exact template match beats
+     * a converting non-template.  So the duration would bind here and fail to
+     * compile inside, trying to call a duration.  The constraint excludes
+     * anything that is not callable, which puts the timed overload back.
+     */
+    template<typename Predicate>
+        requires std::predicate<Predicate>
+    void wait(std::unique_lock<std::mutex>& lock, Predicate pred) {
+        m_cond.wait(lock, std::move(pred));
     }
     
     void notify() {
@@ -253,14 +285,14 @@ protected:
             {
                 std::unique_lock<std::mutex> lock(m_queue);
 
-                // The predicate, written out, because sync<T>::wait has no
-                // overload that takes one.  It has to be a loop and it has to
-                // re-check under the lock: a worker that tested m_exit, was
-                // descheduled, and resumed after stop() had set the flag and
-                // notified would otherwise wait for a notification that has
-                // been and gone, and join() would never return.
-                while(!m_exit && m_queue().empty())
-                    m_queue.wait(lock);
+                // Re-checked under the lock, every time, which is what the
+                // predicate form guarantees: a worker that tested m_exit
+                // outside the lock and then waited would miss a stop() that
+                // landed in between -- a notification that has been and gone --
+                // and join() would never return.
+                m_queue.wait(lock, [this] {
+                    return m_exit || !m_queue().empty();
+                });
 
                 if(m_queue().empty()) return;        // stopped, nothing left
                 if(m_exit && !m_drain) return;       // stopped, abandoning
@@ -280,8 +312,6 @@ protected:
     void run(const std::function<void()>& job) {
         try {
             job();
-
-            return;
         }
         catch(std::exception& e) {
             // The handler is read under the lock, and only here: no data race
@@ -296,8 +326,6 @@ protected:
             }
 
             if(h) h(e);
-
-            return;
         }
         catch(...) {
             // Nothing to hand a handler that takes a std::exception&.

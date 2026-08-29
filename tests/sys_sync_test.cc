@@ -112,6 +112,50 @@ static void a_value_behind_a_mutex() {
     writer.join();
 
     ok("a waiter is woken by a set()", flag.get());
+
+    // The predicate form, which is the one to reach for: the condition is
+    // stated once, positively, and re-checked under the lock every time, so
+    // there is no loop to forget.
+    sys::sync<int> counter(0);
+
+    std::thread counting([&counter] {
+        for(int n = 1; n <= 3; n++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+            counter.set(n);
+        }
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(counter.mutex());
+
+        counter.wait(lock, [&counter] { return counter() == 3; });
+
+        ok("wait() with a predicate returns when it holds", counter() == 3,
+           std::to_string(counter()));
+    }
+
+    counting.join();
+
+    // And the timed overload still resolves, which is not a formality.  An
+    // unconstrained predicate template would swallow it: milliseconds needs a
+    // converting constructor to reach nanoseconds -- a user-defined conversion
+    // -- while the template matches it exactly, and an exact template match
+    // beats a converting non-template.  The call would bind to the predicate
+    // overload and fail to compile inside, trying to call a duration.  This
+    // line is what keeps the requires-clause from being tidied away.
+    {
+        sys::sync<int> quiet(0);
+
+        std::unique_lock<std::mutex> lock(quiet.mutex());
+
+        const auto start = std::chrono::steady_clock::now();
+
+        quiet.wait(lock, std::chrono::milliseconds(20));
+
+        ok("and a duration still picks the timed overload, not this one",
+           seconds_since(start) >= 0.01, std::to_string(seconds_since(start)) + "s");
+    }
 }
 
 static void jobs_run_on_more_than_one_thread() {
@@ -321,8 +365,8 @@ int main() {
     // still a wall-clock claim on a machine that may be busy.  A failure there
     // means look at the machine before looking at the code.
     //
-    // Not sync<T> in anger.  Two threads and one condition variable is the
-    // whole of what is exercised above; the ringbuffer test is where the
+    // Not sync<T> in anger.  A handful of threads and one condition variable
+    // is the whole of what is exercised above; the ringbuffer test is where the
     // memory-ordering questions in this library actually live, and it says the
     // same thing about itself.
     std::cout << "\n" << (failures ? "FAILED" : "PASSED") << ": " << failures
