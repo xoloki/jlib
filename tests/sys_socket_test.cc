@@ -30,8 +30,12 @@
 // and takes RFC 5737's TEST-NET-1 for it.
 
 #include <jlib/sys/listener.hh>
+#include <jlib/sys/pipe.hh>
 #include <jlib/sys/socketstream.hh>
 #include <jlib/sys/sys.hh>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <iostream>
@@ -184,6 +188,93 @@ static void an_ipv6_literal_resolves() {
     }
 }
 
+static void a_listener_says_who_connected() {
+    std::cout << "a listener says who connected\n";
+
+    try {
+        jlib::sys::listener server;
+        jlib::sys::socketstream client("127.0.0.1", server.port());
+
+        jlib::sys::peer who;
+        std::unique_ptr<jlib::sys::socketstream> got = server.accept_stream(who, 5);
+
+        ok("the connection is accepted", got != nullptr);
+
+        // ::accept(m_sock, 0, 0) threw this away, so nothing could log or
+        // refuse by who was on the other end.
+        ok("and its address is there", who.address == "127.0.0.1", who.address);
+        ok("with a port", who.port != 0, std::to_string(who.port));
+        ok("and it knows loopback when it sees it", who.loopback());
+    }
+    catch(std::exception& e) {
+        ok("the connection is accepted", false, e.what());
+    }
+
+    // The platform difference most likely to ship broken.  On BSD and macOS an
+    // accepted descriptor *inherits* O_NONBLOCK from the listening socket; on
+    // Linux it does not.  So a server that polls -- and therefore makes its
+    // listener non-blocking -- would hand every handler on macOS a
+    // non-blocking socket, and every read would fail with EAGAIN, while working
+    // perfectly in the Linux container.  Asserted rather than discovered.
+    try {
+        jlib::sys::listener server;
+
+        server.set_blocking(false);
+
+        ok("a non-blocking listener accepts nothing when nothing is waiting",
+           server.accept(0) == -1);
+
+        jlib::sys::socketstream client("127.0.0.1", server.port());
+
+        jlib::sys::peer who;
+        const int fd = server.accept(who, 5);
+
+        ok("but accepts a connection that is", fd >= 0);
+
+        if(fd >= 0) {
+            const int flags = ::fcntl(fd, F_GETFL, 0);
+
+            ok("and the descriptor it hands back is blocking, on every platform",
+               flags != -1 && !(flags & O_NONBLOCK),
+               flags == -1 ? "fcntl failed" : "");
+
+            ::close(fd);
+        }
+    }
+    catch(std::exception& e) {
+        ok("a non-blocking listener behaves", false, e.what());
+    }
+}
+
+static void a_pipe_closes_what_it_opened() {
+    std::cout << "a pipe closes what it opened\n";
+
+    // The destructor deleted the descriptor array and left both files open, so
+    // a process making pipes in a loop ran out of descriptors rather than
+    // memory -- and Servent and ASServent each hold one for their lifetime.
+    // Five thousand is well past any soft limit this would have hit.
+    bool ran_out = false;
+    std::string why;
+
+    try {
+        for(int i = 0; i < 5000; i++) {
+            jlib::sys::pipe p;
+
+            if(p.get_reader() < 0 || p.get_writer() < 0) {
+                ran_out = true;
+                break;
+            }
+        }
+    }
+    catch(std::exception& e) {
+        ran_out = true;
+        why = e.what();
+    }
+
+    ok("five thousand pipes come and go without exhausting the table",
+       !ran_out, why);
+}
+
 static void a_read_can_be_bounded() {
     std::cout << "a read can be bounded\n";
 
@@ -224,6 +315,8 @@ int main() {
     a_listener_accepts_a_connection();
     a_connect_that_will_never_answer_gives_up();
     an_ipv6_literal_resolves();
+    a_listener_says_who_connected();
+    a_pipe_closes_what_it_opened();
     a_read_can_be_bounded();
 
     // What a green run does not establish: that the connect timeout is

@@ -19,6 +19,8 @@
 
 #include <jlib/net/oauth.hh>
 
+#include <jlib/net/http_server.hh>
+
 #include <jlib/sys/listener.hh>
 #include <jlib/sys/socketstream.hh>
 
@@ -266,10 +268,75 @@ pkce pkce::generate() {
 class redirect_receiver::impl {
 public:
     explicit impl(unsigned short port)
-        : listener(port, "127.0.0.1", 1)
-    {}
+        : server(port, "127.0.0.1")
+    {
+        // One handler, no routes: whatever path the provider redirects to is
+        // the redirect, and refusing an unexpected one would only mean a user
+        // staring at a 404 with their authorization already spent.
+        server.otherwise([this](const http::server::Request& q,
+                                http::server::response& r) {
+            record(q, r);
+        });
 
-    sys::listener listener;
+        // A failure on this connection is the caller's to hear about, through
+        // wait(), not something to print behind their back.
+        server.transport().on_error([](const std::exception&, const sys::peer&) {});
+    }
+
+    /**
+     * Read the callback, answer the browser, and remember what happened.
+     *
+     * The checking is deliberately *not* here.  This runs inside a handler, and
+     * an exception from a handler is caught by the server -- so throwing here
+     * would answer the browser and then lose the reason.  wait() does the
+     * deciding once the exchange is over, which also puts the state check
+     * before anything else is believed rather than merely near it.
+     */
+    void record(const http::server::Request& q, http::server::response& r) {
+        // The target is origin-form: an absolute path and a query.  URL learned
+        // to parse a relative reference two branches ago, which is exactly
+        // this shape.
+        util::URL target;
+
+        try {
+            target.parse_reference(q.target());
+        }
+        catch(std::exception&) {
+            arrived = true;
+            bad_target = true;
+
+            r.status(400).type("text/plain").body("not a redirect\n");
+
+            return;
+        }
+
+        got.code = target["code"];
+        got.state = target["state"];
+        got.error = target["error"];
+        got.error_description = target["error_description"];
+
+        arrived = true;
+
+        // One fixed page whatever happened, because the person is looking at a
+        // browser and an empty response is indistinguishable from a crash.  It
+        // never contains the code: a URL bar is shoulder-surfable and a page is
+        // saveable.
+        const bool good = got.error.empty() && !got.code.empty() &&
+                          !expect.empty() && got.state == expect;
+
+        r.status(200).type("text/html; charset=utf-8").body(
+            good
+            ? "<html><body><h1>Signed in</h1><p>You can close this window and "
+              "return to the application.</p></body></html>"
+            : "<html><body><h1>Sign-in failed</h1><p>Return to the application; "
+              "it has the details.</p></body></html>");
+    }
+
+    http::server server;
+    callback got;
+    std::string expect;
+    bool arrived = false;
+    bool bad_target = false;
 };
 
 redirect_receiver::redirect_receiver(unsigned short port)
@@ -279,7 +346,7 @@ redirect_receiver::redirect_receiver(unsigned short port)
 redirect_receiver::~redirect_receiver() = default;
 
 unsigned short redirect_receiver::port() const {
-    return m_impl->listener.port();
+    return m_impl->server.port();
 }
 
 std::string redirect_receiver::redirect_uri() const {
@@ -289,93 +356,39 @@ std::string redirect_receiver::redirect_uri() const {
 }
 
 callback redirect_receiver::wait(const std::string& expect_state, double timeout) {
-    std::unique_ptr<sys::socketstream> browser;
+    m_impl->expect = expect_state;
+    m_impl->arrived = false;
+    m_impl->bad_target = false;
+    m_impl->got = callback();
+
+    // One connection, and one request on it.  net::http::server reads the whole
+    // head against the grammar -- request-line, field-line -- where this used
+    // to read a single line and parse it by hand.
+    bool served = false;
 
     try {
-        browser = m_impl->listener.accept_stream(timeout);
+        served = m_impl->server.serve_one(timeout);
     }
     catch(std::exception& e) {
         throw error(std::string("waiting for the browser: ") + e.what());
     }
 
-    if(!browser)
+    if(!served || !m_impl->arrived) {
         throw error("no redirect arrived within " + std::to_string(timeout) +
                     " seconds");
-
-    // Reading is bounded twice over: a deadline, and a cap on the request line.
-    // Whatever connected is not necessarily a browser.
-    browser->set_timeout(10);
-
-    std::string line;
-
-    std::getline(*browser, line);
-
-    while(!line.empty() && line.back() == '\r') line.pop_back();
-
-    if(line.length() > 8192) throw error("the redirect's request line is absurd");
-
-    // "GET /?code=...&state=... HTTP/1.1".  Read with the grammar rather than
-    // with find(): request-line is RFC 9112 3, and the pieces come out of the
-    // match instead of out of offsets counted by hand.
-    const abnf::parse_result p =
-        util::http::grammar().at("request-line").try_parse(line);
-
-    if(!p) throw error("what connected to the redirect port did not send a "
-                       "request line");
-
-    const abnf::match m = p.root();
-
-    if(m["method"].str() != "GET")
-        throw error("the redirect was not a GET");
-
-    // The target is origin-form: an absolute path and a query.  URL learned to
-    // parse a relative reference two branches ago, which is exactly this.
-    util::URL target;
-
-    try {
-        target.parse_reference(m["request-target"].str());
-    }
-    catch(std::exception&) {
-        throw error("the redirect's request target is not a URI reference");
     }
 
-    callback back;
+    if(m_impl->bad_target)
+        throw error("what connected to the redirect port did not ask for a "
+                    "URI reference");
 
-    back.code = target["code"];
-    back.state = target["state"];
-    back.error = target["error"];
-    back.error_description = target["error_description"];
+    const callback back = m_impl->got;
 
     // The state first, and before anything else is believed.  RFC 6749 10.12:
     // this is the client's only defence against someone else's authorization
     // code being planted on it, and the check is worthless if it happens after
     // the code has been used.
-    const bool state_ok = !expect_state.empty() && back.state == expect_state;
-
-    // One fixed page, whatever happened, because the person is looking at a
-    // browser and an empty response is indistinguishable from a crash.  It
-    // never contains the code: a URL bar is shoulder-surfable and a page is
-    // saveable.
-    const std::string body =
-        state_ok && back.ok()
-        ? "<html><body><h1>Signed in</h1><p>You can close this window and "
-          "return to the application.</p></body></html>"
-        : "<html><body><h1>Sign-in failed</h1><p>Return to the application; "
-          "it has the details.</p></body></html>";
-
-    std::ostringstream reply;
-
-    reply << "HTTP/1.1 200 OK\r\n"
-          << "Content-Type: text/html; charset=utf-8\r\n"
-          << "Content-Length: " << body.length() << "\r\n"
-          << "Connection: close\r\n"
-          << "\r\n"
-          << body;
-
-    *browser << reply.str() << std::flush;
-    browser->close();
-
-    if(!state_ok) {
+    if(expect_state.empty() || back.state != expect_state) {
         throw error("the redirect's state does not match the one that was sent; "
                     "refusing it");
     }

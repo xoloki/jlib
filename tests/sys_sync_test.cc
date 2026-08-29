@@ -324,6 +324,141 @@ static void a_job_that_throws() {
        std::to_string(after.load()) + "/4");
 }
 
+static void how_deep_the_queue_is() {
+    std::cout << "\nhow deep the queue is:\n";
+
+    // One worker, held up, so what is posted behind it stays queued and
+    // countable.  Without a way to ask, a caller cannot bound how far ahead of
+    // its pool it runs -- which for a server means accepted connections piling
+    // up as held descriptors.
+    sys::sync<bool> go(false);
+
+    {
+        sys::job_queue q(1);
+
+        q.post([&go] {
+            std::unique_lock<std::mutex> lock(go.mutex());
+
+            go.wait(lock, [&go] { return go(); });
+        });
+
+        // Let the worker take that one, so it is running rather than queued.
+        for(int i = 0; i < 100 && q.size() != 0; i++)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+        ok("a job that has been taken is not queued", q.size() == 0,
+           std::to_string(q.size()));
+
+        for(int i = 0; i < 5; i++) q.post([] {});
+
+        ok("and five posted behind it are", q.size() == 5,
+           std::to_string(q.size()));
+
+        // The depth is what is *waiting*.  A busy pool does not make the queue
+        // look full, which is what stops an accept loop stalling against work
+        // already under way.
+        go.set(true);
+
+        ok("waiting for room returns once they drain",
+           q.wait([](std::size_t d) { return d == 0; }));
+
+        ok("and the queue is empty", q.size() == 0, std::to_string(q.size()));
+    }
+
+    // The predicate is the caller's, so "room for one more" and "nothing
+    // waiting" are the same call with different lambdas.
+    {
+        sys::job_queue q(2);
+
+        ok("an empty queue satisfies a cap at once",
+           q.wait([](std::size_t d) { return d < 4; }));
+    }
+
+    // With no pool nothing is ever queued, so the depth is 0 and can never
+    // change.  Blocking would be a deadlock with no second party: it answers
+    // pred(0) instead.
+    {
+        sys::job_queue q(0);
+
+        ok("with no pool it answers rather than blocking",
+           q.wait([](std::size_t d) { return d == 0; }));
+
+        ok("and says no to a predicate that cannot hold, rather than hanging",
+           !q.wait([](std::size_t d) { return d > 0; }));
+    }
+
+    // A stopped queue must release a waiter, or stop() has stopped nothing for
+    // that thread.  This is what the exit term in the wait's own predicate
+    // buys, and the return value is how the caller tells the two apart.
+    {
+        sys::job_queue q(1);
+        sys::sync<bool> held(false);
+
+        q.post([&held] {
+            std::unique_lock<std::mutex> lock(held.mutex());
+
+            held.wait(lock, [&held] { return held(); });
+        });
+
+        for(int i = 0; i < 100 && q.size() != 0; i++)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+        q.post([] {});
+
+        std::atomic<bool> answered{false};
+        std::atomic<bool> said{true};
+
+        std::thread waiter([&q, &answered, &said] {
+            said = q.wait([](std::size_t d) { return d == 0; });
+            answered = true;
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        ok("a waiter with work still queued is blocked", !answered.load());
+
+        q.stop(false);
+
+        held.set(true);
+        waiter.join();
+
+        ok("stop() releases it", answered.load());
+        ok("and it says it was stopped rather than satisfied", !said.load());
+
+        q.join();
+    }
+
+    // The timed form gives up and says so.
+    {
+        sys::job_queue q(1);
+        sys::sync<bool> held(false);
+
+        q.post([&held] {
+            std::unique_lock<std::mutex> lock(held.mutex());
+
+            held.wait(lock, [&held] { return held(); });
+        });
+
+        for(int i = 0; i < 100 && q.size() != 0; i++)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+        q.post([] {});
+
+        const auto start = std::chrono::steady_clock::now();
+
+        const bool got = q.wait([](std::size_t d) { return d == 0; },
+                                std::chrono::milliseconds(100));
+
+        const double took = seconds_since(start);
+
+        ok("the timed form gives up", !got);
+        ok("after about as long as it was given", took >= 0.08 && took < 2.0,
+           std::to_string(took) + "s");
+
+        held.set(true);
+    }
+}
+
 static void a_pool_of_none_runs_inline() {
     std::cout << "\na pool of none runs inline:\n";
 
@@ -405,6 +540,7 @@ int main() {
     the_destructor_drains();
     stopping_with_and_without_a_drain();
     a_job_that_throws();
+    how_deep_the_queue_is();
     a_pool_of_none_runs_inline();
 
     // What a green run does not establish.
@@ -412,7 +548,7 @@ int main() {
     // Not the absence of the lost wakeup this fixed.  A worker used to test
     // m_exit outside the lock and then wait, so a stop() landing in between
     // was a notification it never saw and a join() that never returned -- a
-    // window a few instructions wide.  What the predicate loop buys is that
+    // window a few instructions wide.  What the predicate form buys is that
     // the race cannot happen; no timing test can show it gone, and one that
     // claimed to would be worse than this paragraph.
     //
@@ -420,6 +556,12 @@ int main() {
     // assertion; "finished faster than serial would" has a wide margin and is
     // still a wall-clock claim on a machine that may be busy.  A failure there
     // means look at the machine before looking at the code.
+    //
+    // Not the wakeup on pop, directly.  "A waiter blocked with work queued is
+    // released when the queue drains" exercises it -- without the notify the
+    // section above would hang rather than fail -- but a test that hangs is a
+    // test that stops make check instead of failing it, so the timed form is
+    // what keeps that section honest.
     //
     // Not sync<T> in anger.  A handful of threads and one condition variable
     // is the whole of what is exercised above; the ringbuffer test is where the

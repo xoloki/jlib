@@ -91,8 +91,20 @@ namespace jlib {
             int get_reader() const;
             int get_writer() const;
 
+            // Deleted, and the leak below is why it matters: with a raw int*
+            // member and no copy control, copying one gave two objects owning
+            // the same array -- a double delete[], and once the destructor
+            // learned to close, a double close of two live descriptors.  A
+            // pipe is a pair of open files; it is not a value.
+            pipe(const pipe&) = delete;
+            pipe& operator=(const pipe&) = delete;
+
         private:
-            int* m_pipe;
+            // An array of two, not a new int[2].  Nothing was ever gained by
+            // the allocation and the destructor deleted it without closing
+            // either descriptor -- so every Servent and every ASServent, both
+            // of which hold one for their lifetime, leaked two.
+            int m_pipe[2] = { -1, -1 };
             bool m_block_read;
             bool m_block_write;
         };

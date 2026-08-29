@@ -46,6 +46,30 @@ namespace {
         return ntohs(reinterpret_cast<const struct sockaddr_in*>(&ss)->sin_port);
     }
 
+    std::string address_of(const struct sockaddr_storage& ss, socklen_t len) {
+        char host[NI_MAXHOST];
+
+        // NI_NUMERICHOST: no reverse lookup.  See the note on peer::address.
+        if(::getnameinfo(reinterpret_cast<const struct sockaddr*>(&ss), len,
+                         host, sizeof host, 0, 0,
+                         NI_NUMERICHOST | NI_NUMERICSERV) != 0) {
+            return std::string();
+        }
+
+        return host;
+    }
+
+}
+
+bool peer::loopback() const {
+    if(address == "::1") return true;
+
+    // The IPv4-mapped form, which is what arrives on a v6 socket accepting a v4
+    // connection -- not hypothetical the moment anything binds dual-stack.
+    const std::string v4 = address.compare(0, 7, "::ffff:") == 0
+                           ? address.substr(7) : address;
+
+    return v4.compare(0, 4, "127.") == 0;
 }
 
 listener::listener(unsigned short port, const std::string& host, int backlog) {
@@ -140,6 +164,28 @@ listener& listener::operator=(listener&& other) noexcept {
 }
 
 int listener::accept(double timeout) {
+    return accept_into(0, timeout);
+}
+
+int listener::accept(peer& from, double timeout) {
+    return accept_into(&from, timeout);
+}
+
+void listener::set_blocking(bool blocking) {
+    if(m_sock == -1) return;
+
+    const int flags = ::fcntl(m_sock, F_GETFL, 0);
+
+    if(flags == -1)
+        throw exception(std::string("error in fcntl(F_GETFL): ") + std::strerror(errno));
+
+    const int want = blocking ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK);
+
+    if(::fcntl(m_sock, F_SETFL, want) == -1)
+        throw exception(std::string("error in fcntl(F_SETFL): ") + std::strerror(errno));
+}
+
+int listener::accept_into(peer* from, double timeout) {
     if(m_sock == -1)
         throw exception("accept() on a closed listener");
 
@@ -164,25 +210,60 @@ int listener::accept(double timeout) {
             throw exception(std::string("error in poll(): ") + std::strerror(errno));
     }
 
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+
+    std::memset(&ss, 0, sizeof(ss));
+
     int fd;
 
-    while((fd = ::accept(m_sock, 0, 0)) < 0 && errno == EINTR)
-        ;
+    while((fd = ::accept(m_sock, reinterpret_cast<struct sockaddr*>(&ss), &len)) < 0 &&
+          errno == EINTR) {
+        len = sizeof(ss);
+    }
 
-    if(fd < 0)
+    if(fd < 0) {
+        // Nothing waiting, on a listener a caller has set non-blocking -- which
+        // is the same answer as "the timeout ran out", so it is the same
+        // return.  One meaning, one value.
+        if(errno == EAGAIN || errno == EWOULDBLOCK) return -1;
+
         throw exception(std::string("error in accept(): ") + std::strerror(errno));
+    }
+
+    // On BSD and macOS an accepted descriptor *inherits* O_NONBLOCK from the
+    // listening socket; on Linux it does not.  So the moment a caller sets the
+    // listener non-blocking, every connection on macOS would arrive
+    // non-blocking and every read a handler made would return EAGAIN -- while
+    // working perfectly in a Linux container, which is the worst way for a
+    // difference like this to be found.  Put it back, always.
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+
+    if(flags != -1 && (flags & O_NONBLOCK))
+        ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+
+    if(from != 0) {
+        from->address = address_of(ss, len);
+        from->port = port_of(ss);
+    }
 
     return fd;
 }
 
 std::unique_ptr<socketstream> listener::accept_stream(double timeout) {
-    const int fd = accept(timeout);
+    peer from;
+
+    return accept_stream(from, timeout);
+}
+
+std::unique_ptr<socketstream> listener::accept_stream(peer& from, double timeout) {
+    const int fd = accept(from, timeout);
 
     if(fd < 0)
         return std::unique_ptr<socketstream>();
 
     try {
-        return std::make_unique<socketstream>(adopt, fd);
+        return std::make_unique<socketstream>(adopt, fd, from.address, from.port);
     }
     catch(...) {
         ::close(fd);

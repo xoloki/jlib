@@ -22,8 +22,6 @@ MEDIA_TESTS = media_datastream_test \
               media_wavstream_test \
               sys_ringbuffer_test \
               math_lookat_test \
-              sys_sigpipe_test \
-              sys_tls_sigpipe_test \
               media_voice_test \
               media_source_test \
               media_wavetable_test \
@@ -57,6 +55,7 @@ TESTS = \
 	net_imap_test \
 	net_imap_sasl_test \
 	net_http_test \
+	net_http_server_test \
 	net_oauth_test \
 	net_oauth_authorize_test \
 	net_http_live_test \
@@ -69,6 +68,10 @@ TESTS = \
 	sys_sync_test \
 	sys_run_test \
 	sys_socket_test \
+	sys_sigpipe_test \
+	sys_tls_sigpipe_test \
+	sys_tls_server_test \
+	sys_server_test \
  \
 	util_test \
 	util_codec_test \
@@ -167,6 +170,9 @@ net_oauth_authorize_test_LDADD   = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_L
 net_oauth_test_SOURCES          = net_oauth_test.cc
 net_oauth_test_LDADD            = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
+net_http_server_test_SOURCES    = net_http_server_test.cc
+net_http_server_test_LDADD      = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
+
 net_http_test_SOURCES           = net_http_test.cc
 net_http_test_LDADD             = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
@@ -193,6 +199,12 @@ sys_sync_test_LDADD   = $(JSYS_LA)
 
 sys_socket_test_SOURCES = sys_socket_test.cc
 sys_socket_test_LDADD   = $(JSYS_LA)
+
+sys_tls_server_test_SOURCES = sys_tls_server_test.cc
+sys_tls_server_test_LDADD   = $(JSYS_LA) $(OPENSSL_LIBS)
+
+sys_server_test_SOURCES = sys_server_test.cc
+sys_server_test_LDADD   = $(JSYS_LA) $(OPENSSL_LIBS)
 
 util_json_test_SOURCES = util_json_test.cc
 util_json_test_LDADD   = $(JUTIL_LA) $(JSYS_LA) $(JSONC_LIBS)

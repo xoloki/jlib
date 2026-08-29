@@ -153,6 +153,8 @@ public:
     void open(const std::string& host, unsigned int port,
               const std::string& phost, u_int pport) 
     {
+        if(this->m_buf != 0)
+            delete this->m_buf;
         this->m_buf=new basic_proxybuf<charT,traitT>(host,port,phost,pport);
         this->init(this->m_buf);
     }

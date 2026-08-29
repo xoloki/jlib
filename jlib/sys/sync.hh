@@ -84,7 +84,7 @@ public:
     void operator()(const_reference val) { set(val); }
 
     operator T() const { return get(); }
-    operator std::mutex&() { return m_lock; }
+    operator std::mutex&() const { return m_lock; }
 
     sync<T>& operator=(const_reference val) { set(val); return *this; }
 
@@ -110,7 +110,10 @@ public:
     pointer operator->() { return &m_val; }
     const_pointer operator->() const { return &m_val; }
 
-    std::mutex& mutex() { return m_lock; }
+    // const, because m_lock is mutable and get() above already hands it to
+    // safe_get from a const member.  Without this a const sync<T> cannot be
+    // locked, which is what job_queue::size() needs.
+    std::mutex& mutex() const { return m_lock; }
 
     void lock() { m_lock.lock(); }
     void unlock() { m_lock.unlock(); }
@@ -121,6 +124,24 @@ public:
     
     void wait(std::unique_lock<std::mutex>& lock, std::chrono::nanoseconds timeout) {
         m_cond.wait_for(lock, timeout);
+    }
+
+    /**
+     * Wait until the predicate holds or the time runs out.
+     *
+     * @return what the predicate said at the end, as std::condition_variable
+     *         does -- so false means the deadline won, not that anything failed.
+     *
+     * The requires clause is not load-bearing here the way it is on the
+     * two-argument form below, since arity already tells the overloads apart.
+     * It is here so that a third argument which is not callable fails as a
+     * constraint rather than somewhere inside condition_variable.
+     */
+    template<typename Predicate>
+        requires std::predicate<Predicate>
+    bool wait(std::unique_lock<std::mutex>& lock, std::chrono::nanoseconds timeout,
+              Predicate pred) {
+        return m_cond.wait_for(lock, timeout, std::move(pred));
     }
 
     /**
@@ -290,10 +311,87 @@ public:
 
         // Push and signal in one critical section; see the note on
         // sync<T>::notify.
+        //
+        // notify_all, not notify_one, and this changed when wait() arrived.
+        // One condition variable now serves two predicates -- a worker waiting
+        // for work, a caller waiting for room -- and they are anti-correlated:
+        // a push makes the worker's true and the waiter's no more true, and a
+        // pop does the reverse.  So notify_one can hand the wakeup to a thread
+        // whose predicate is false, which sleeps again and consumes it.  It was
+        // correct here for as long as there was only one predicate.
         std::unique_lock<std::mutex> lock(m_queue);
 
         m_queue().push(std::move(job));
-        m_queue.notify();
+        m_queue.notify_all();
+    }
+
+    /**
+     * How many jobs are queued and not yet started.
+     *
+     * Not how much work is outstanding: a job that has been popped is running,
+     * not queued, and is not counted here.  Always 0 when there is no pool,
+     * because post() runs the job instead of queueing it.
+     */
+    std::size_t size() const {
+        std::unique_lock<std::mutex> lock(m_queue);
+
+        return m_queue().size();
+    }
+
+    /**
+     * Block until the queue's depth satisfies a predicate.
+     *
+     * @param pred called with the current depth, under the lock, whenever the
+     *             depth changes
+     * @return true when the predicate held, false if the queue was stopped first
+     *
+     * The queue does not decide what "full" means; a caller does.  "Room for
+     * one more" is [cap](std::size_t d) { return d < cap; }, and "nothing
+     * waiting" is [](std::size_t d) { return d == 0; }.
+     *
+     * The wait's own predicate ORs in the exit flag, which is why the return
+     * value distinguishes "the predicate held" from "we were stopped": without
+     * that term stop() would wake a waiter, it would re-evaluate the caller's
+     * predicate, find it still false and sleep again -- and stop() would have
+     * stopped nothing for that thread.
+     *
+     * **With no pool this never blocks.**  Nothing is ever queued, so the depth
+     * is 0 and can never change; blocking would be a deadlock with no second
+     * party.  It answers pred(0) -- yes to "is there room", and a truthful no
+     * to a predicate that cannot hold, rather than a hang.
+     *
+     * **Never from a job.**  A worker waiting for the queue to drain is the
+     * thread that would drain it.  And no thread may be blocked here when the
+     * queue is destroyed: join() waits for pool threads, not for foreign
+     * callers parked in this.
+     */
+    template<typename Predicate>
+        requires std::predicate<Predicate, std::size_t>
+    bool wait(Predicate pred) {
+        if(m_pool.empty()) return !m_exit && pred(0);
+
+        std::unique_lock<std::mutex> lock(m_queue);
+
+        m_queue.wait(lock, [this, &pred] {
+            return m_exit || pred(m_queue().size());
+        });
+
+        return !m_exit;
+    }
+
+    /** As above, giving up after timeout.  False for either reason. */
+    template<typename Predicate>
+        requires std::predicate<Predicate, std::size_t>
+    bool wait(Predicate pred, std::chrono::nanoseconds timeout) {
+        if(m_pool.empty()) return !m_exit && pred(0);
+
+        std::unique_lock<std::mutex> lock(m_queue);
+
+        m_queue.wait(lock, timeout, [this, &pred] {
+            return m_exit || pred(m_queue().size());
+        });
+
+        return !m_exit && pred(m_queue().size());
     }
 
     /**
@@ -380,6 +478,13 @@ protected:
                 // one mutex, so exactly one job ran at a time.
                 job = std::move(m_queue().front());
                 m_queue().pop();
+
+                // A caller parked in wait() has no other way to learn the queue
+                // got shorter.  Here rather than after run(): the slot is free
+                // the instant the job is popped, and notifying after would make
+                // a depth cap bound work in flight instead, and make the waiter
+                // wait on how long a job takes.
+                m_queue.notify_all();
             }
 
             run(job);

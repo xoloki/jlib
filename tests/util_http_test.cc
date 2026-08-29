@@ -341,6 +341,88 @@ static void reading_a_body() {
     }
 }
 
+/** Did parsing this request head throw? */
+static bool refused_request(const std::string& head) {
+    try {
+        http::parse_request_head(head);
+
+        return false;
+    }
+    catch(http::error&) {
+        return true;
+    }
+}
+
+static void a_request_head_reads_the_same_way() {
+    std::cout << "\na request head reads the same way:\n";
+
+    const http::Request r = http::parse_request_head(
+        "POST /token?a=1 HTTP/1.1\r\n"
+        "Host: accounts.example.com\r\n"
+        "Content-Type: application/x-www-form-urlencoded\r\n"
+        "Content-Length: 9\r\n"
+        "\r\n");
+
+    ok("the method is there", r.method() == "POST", r.method());
+
+    // Query and all: a target with the query stripped is a different request,
+    // and for half the requests jlib makes the query is the whole message.
+    ok("the target is as it arrived", r.target() == "/token?a=1", r.target());
+    ok("the version too", r.version() == "HTTP/1.1", r.version());
+    ok("Host is where HTTP/1.1 requires it",
+       r.host() == "accounts.example.com", r.host());
+    ok("and the field section reads",
+       r.fields().get("Content-Type") == "application/x-www-form-urlencoded");
+    ok("with its framing", r.body_framing() == http::framing::length &&
+       r.content_length() == 9);
+
+    // **The one difference from a response.**  RFC 9112 6.3: a request with
+    // neither framing field has no body.  A response with neither runs to the
+    // close -- and reading a request that way means waiting out a client that
+    // is itself waiting for an answer, which is a hang rather than a body.
+    const http::Request bare = http::parse_request_head("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+
+    ok("a request with no framing fields has no body, where a response would "
+       "read to the close",
+       bare.body_framing() == http::framing::none);
+
+    const http::Request chunked = http::parse_request_head(
+        "POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n");
+
+    ok("and chunked is chunked", chunked.body_framing() == http::framing::chunked);
+
+    // For the same reason: a coding that is not chunked leaves the server with
+    // no way to know where the request ends.
+    ok("but a Transfer-Encoding that does not end in chunked is refused",
+       refused_request("POST /x HTTP/1.1\r\nHost: x\r\n"
+                       "Transfer-Encoding: gzip\r\n\r\n"));
+
+    // Everything the response side refuses, refused here too -- the field
+    // section and the framing checks are one piece of code now.
+    ok("both Content-Length and Transfer-Encoding",
+       refused_request("POST /x HTTP/1.1\r\nContent-Length: 5\r\n"
+                       "Transfer-Encoding: chunked\r\n\r\n"));
+    ok("two Content-Lengths that disagree",
+       refused_request("POST /x HTTP/1.1\r\nContent-Length: 5\r\n"
+                       "Content-Length: 6\r\n\r\n"));
+    ok("obs-fold", refused_request("GET / HTTP/1.1\r\nX: one\r\n  two\r\n\r\n"));
+    ok("whitespace before the colon",
+       refused_request("GET / HTTP/1.1\r\nHost : x\r\n\r\n"));
+    ok("a bare LF as a line ending", refused_request("GET / HTTP/1.1\nHost: x\n\n"));
+    ok("something that is not a request line at all",
+       refused_request("HTTP/1.1 200 OK\r\n\r\n"));
+    ok("and a target that is not one",
+       refused_request("GET not a target HTTP/1.1\r\n\r\n"));
+
+    // Off a stream, which is how a server gets one.
+    std::istringstream is("GET /x HTTP/1.1\r\nHost: y\r\n\r\nleftovers");
+
+    const http::Request read = http::read_request_head(is);
+
+    ok("read off a stream, leaving the body behind",
+       read.target() == "/x" && is.peek() == 'l');
+}
+
 static void a_relative_reference_parses_now() {
     std::cout << "\na relative reference parses now:\n";
 
@@ -375,6 +457,7 @@ int main() {
     what_rfc_9112_section_6_refuses();
     reading_a_head_off_a_stream();
     reading_a_body();
+    a_request_head_reads_the_same_way();
     a_relative_reference_parses_now();
 
     // What a green run does not establish.
@@ -393,8 +476,10 @@ int main() {
     // sys_proxy_live_test runs the same reader against tinyproxy, which is one
     // real server and not a survey.
     //
-    // Anything about requests.  read_head parses a response; request-line and
-    // the four request-target forms compile and are unexercised.
+    // The four request-target forms beyond origin-form.  absolute-form (a
+    // proxy's GET http://host/path), authority-form (CONNECT) and
+    // asterisk-form (OPTIONS *) all compile and none is exercised, because
+    // nothing here is a proxy.
     std::cout << "\n" << (failures ? "FAILED" : "PASSED") << ": " << failures
               << " failure(s)\n";
 

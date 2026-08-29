@@ -121,14 +121,14 @@ std::string read_head(std::istream& is, std::size_t cap) {
         const int c = is.get();
 
         if(c == std::char_traits<char>::eof()) {
-            throw error("the connection closed before the response head ended, "
+            throw error("the connection closed before the message head ended, "
                         "after " + std::to_string(head.size()) + " octets");
         }
 
         head += static_cast<char>(c);
 
         if(head.size() > cap) {
-            throw error("no end to the response head within " +
+            throw error("no end to the message head within " +
                         std::to_string(cap) + " octets");
         }
     }
@@ -190,6 +190,160 @@ namespace {
 
 }
 
+namespace {
+
+    /**
+     * The field lines of a head, read against field-line.
+     *
+     * Shared by a request and a response because a field section is the same
+     * production in both -- RFC 9112 2.1 puts start-line above it and says
+     * nothing else differs.
+     */
+    void read_fields(const std::vector<std::string>& lines, std::size_t from,
+                     fields& into)
+    {
+        const abnf::rule field = grammar().at("field-line");
+
+        for(std::size_t i = from; i < lines.size(); i++) {
+            // obs-fold: a line beginning with SP or HTAB continues the one
+            // before it.  RFC 9112 5.2 says a recipient of a message that is
+            // not a message/http payload must either reject it or replace the
+            // fold with a space; rejecting is the safe half of that choice.
+            if(lines[i][0] == ' ' || lines[i][0] == '\t') {
+                throw error("obs-fold, an obsolete line continuation, in the "
+                            "message head: \"" + lines[i] + "\"");
+            }
+
+            const abnf::parse_result p = field.try_parse(lines[i]);
+
+            if(!p) throw error("not a header field: \"" + lines[i] + "\"");
+
+            const abnf::match m = p.root();
+
+            // The value comes from the match, not from find(':'), which is the
+            // point of having the grammar: field-line puts the OWS outside
+            // field-value, so what is captured is already trimmed at both ends.
+            into.add(m["field-name"].str(), m["field-value"].str());
+        }
+    }
+
+    /**
+     * RFC 9112 6.  Which of Content-Length and Transfer-Encoding governs, and
+     * what to refuse outright.
+     *
+     * @param no_body   this message cannot have one whatever the fields say
+     * @param bodyless  what to use when neither field is present: framing::none
+     *                  for a request, framing::until_close for a response
+     */
+    void decide_framing(const fields& f, bool no_body, framing bodyless,
+                        framing& how, std::size_t& length)
+    {
+        const bool has_te = f.has("Transfer-Encoding");
+        const bool has_cl = f.has("Content-Length");
+
+        how = bodyless;
+        length = 0;
+
+        if(has_te && has_cl) {
+            // The request-smuggling primitive.  RFC 9112 6.1: a message with
+            // both "ought to be handled as an error"; the reason it is an error
+            // rather than a preference is that a proxy in front of us may pick
+            // the other one, and then the tail of this message is the head of
+            // the next request as far as one of us is concerned.
+            throw error("both Content-Length and Transfer-Encoding are present; "
+                        "where this message ends depends on who is reading it");
+        }
+
+        if(has_cl) {
+            const std::vector<std::string> all = f.all("Content-Length");
+
+            for(const std::string& v : all) {
+                if(!all_digits(v))
+                    throw error("Content-Length is not a number: \"" + v + "\"");
+
+                if(v != all[0])
+                    throw error("two Content-Length fields that do not agree: \"" +
+                                all[0] + "\" and \"" + v + "\"");
+            }
+
+            try {
+                length = static_cast<std::size_t>(std::stoull(all[0]));
+            }
+            catch(std::exception&) {
+                throw error("Content-Length does not fit: \"" + all[0] + "\"");
+            }
+
+            how = framing::length;
+        }
+        else if(has_te) {
+            // 6.1: chunked must be the final coding.
+            const std::string te = fold(f.get("Transfer-Encoding"));
+            const std::size_t last = te.find_last_of(',');
+            const std::string final = last == std::string::npos
+                                      ? te : te.substr(last + 1);
+
+            std::string trimmed;
+
+            for(char c : final) {
+                if(c != ' ' && c != '\t') trimmed += c;
+            }
+
+            if(trimmed == "chunked") {
+                how = framing::chunked;
+            }
+            else if(bodyless == framing::none) {
+                // A request.  6.3: if the final coding is not chunked the
+                // server cannot tell where the body ends, and reading to close
+                // would mean waiting out a client that is waiting for us.
+                throw error("a request whose Transfer-Encoding does not end in "
+                            "chunked has no discernible end: \"" +
+                            f.get("Transfer-Encoding") + "\"");
+            }
+            else {
+                how = framing::until_close;
+            }
+        }
+
+        if(no_body) {
+            how = framing::none;
+            length = 0;
+        }
+    }
+
+}
+
+Request parse_request_head(std::string_view head) {
+    const std::vector<std::string> lines = split_lines(head);
+
+    if(lines.empty()) throw error("the request head is empty");
+
+    Request r;
+
+    {
+        const abnf::parse_result p = grammar().at("request-line").try_parse(lines[0]);
+
+        if(!p) throw error("not a request line: \"" + lines[0] + "\"");
+
+        const abnf::match m = p.root();
+
+        r.m_method = m["method"].str();
+        r.m_target = m["request-target"].str();
+        r.m_version = m["HTTP-version"].str();
+    }
+
+    read_fields(lines, 1, r.m_fields);
+
+    // framing::none when neither field is there, which is the whole difference
+    // from a response: RFC 9112 6.3, and see the note in the header.
+    decide_framing(r.m_fields, false, framing::none, r.m_framing, r.m_length);
+
+    return r;
+}
+
+Request read_request_head(std::istream& is, std::size_t cap) {
+    return parse_request_head(read_head(is, cap));
+}
+
 Response parse_head(std::string_view head, bool head_request) {
     const std::vector<std::string> lines = split_lines(head);
 
@@ -223,95 +377,17 @@ Response parse_head(std::string_view head, bool head_request) {
         if(reason) r.m_reason = reason.str();
     }
 
-    {
-        const abnf::rule field = grammar().at("field-line");
+    read_fields(lines, 1, r.m_fields);
 
-        for(std::size_t i = 1; i < lines.size(); i++) {
-            // obs-fold: a line beginning with SP or HTAB continues the one
-            // before it.  RFC 9112 5.2 says a recipient of a message that is
-            // not a message/http payload must either reject it or replace the
-            // fold with a space; rejecting is the safe half of that choice,
-            // and nothing has sent jlib one since HTTP/1.0.
-            if(lines[i][0] == ' ' || lines[i][0] == '\t') {
-                throw error("obs-fold, an obsolete line continuation, in the "
-                            "response head: \"" + lines[i] + "\"");
-            }
-
-            const abnf::parse_result p = field.try_parse(lines[i]);
-
-            if(!p) throw error("not a header field: \"" + lines[i] + "\"");
-
-            const abnf::match m = p.root();
-
-            // The value comes from the match, not from find(':'), which is the
-            // point of having the grammar: field-line puts the OWS outside
-            // field-value, so what is captured is already trimmed at both ends.
-            r.m_fields.add(m["field-name"].str(), m["field-value"].str());
-        }
-    }
-
-    // ------------------------------------------------------ RFC 9112 6.3
-
+    // RFC 9112 6.3.  A response with neither framing field runs until the
+    // connection closes, which is the difference from a request.
     const bool no_body = head_request ||
                          (r.m_status >= 100 && r.m_status < 200) ||
                          r.m_status == 204 ||
                          r.m_status == 304;
 
-    const bool has_te = r.m_fields.has("Transfer-Encoding");
-    const bool has_cl = r.m_fields.has("Content-Length");
-
-    if(has_te && has_cl) {
-        // The request-smuggling primitive.  RFC 9112 6.1: a message with both
-        // "ought to be handled as an error"; the reason it is an error rather
-        // than a preference is that a proxy in front of us may pick the other
-        // one, and then the tail of this message is the head of the next
-        // request as far as one of us is concerned.
-        throw error("both Content-Length and Transfer-Encoding are present; "
-                    "where this message ends depends on who is reading it");
-    }
-
-    if(has_cl) {
-        const std::vector<std::string> all = r.m_fields.all("Content-Length");
-
-        for(const std::string& v : all) {
-            if(!all_digits(v))
-                throw error("Content-Length is not a number: \"" + v + "\"");
-
-            if(v != all[0])
-                throw error("two Content-Length fields that do not agree: \"" +
-                            all[0] + "\" and \"" + v + "\"");
-        }
-
-        try {
-            r.m_length = static_cast<std::size_t>(std::stoull(all[0]));
-        }
-        catch(std::exception&) {
-            throw error("Content-Length does not fit: \"" + all[0] + "\"");
-        }
-
-        r.m_framing = framing::length;
-    }
-    else if(has_te) {
-        // 6.1: chunked must be the final coding, and if it is not there the
-        // message ends at the close of the connection.
-        const std::string te = fold(r.m_fields.get("Transfer-Encoding"));
-        const std::size_t last = te.find_last_of(',');
-        const std::string final = last == std::string::npos
-                                  ? te : te.substr(last + 1);
-
-        std::string trimmed;
-
-        for(char c : final) {
-            if(c != ' ' && c != '\t') trimmed += c;
-        }
-
-        r.m_framing = trimmed == "chunked" ? framing::chunked : framing::until_close;
-    }
-
-    if(no_body) {
-        r.m_framing = framing::none;
-        r.m_length = 0;
-    }
+    decide_framing(r.m_fields, no_body, framing::until_close,
+                   r.m_framing, r.m_length);
 
     return r;
 }
@@ -380,12 +456,18 @@ namespace {
 }
 
 std::string read_body(std::istream& is, const Response& head, std::size_t cap) {
-    switch(head.body_framing()) {
+    return read_body(is, head.body_framing(), head.content_length(), cap);
+}
+
+std::string read_body(std::istream& is, framing how, std::size_t length,
+                      std::size_t cap)
+{
+    switch(how) {
     case framing::none:
         return std::string();
 
     case framing::length:
-        return read_exactly(is, head.content_length(), cap);
+        return read_exactly(is, length, cap);
 
     case framing::chunked: {
         std::string body;

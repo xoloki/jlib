@@ -173,6 +173,80 @@ private:
 };
 
 /**
+ * One request: its head, and its body once something has read one.
+ *
+ * The mirror of Response, and here rather than in net for the same reason: the
+ * grammar, the line splitting and the framing checks are all in this file and
+ * must not be written twice.  net::http re-exports the name, so a caller says
+ * net::http::Request either way.
+ */
+class Request {
+public:
+    Request() = default;
+
+    /** "GET".  A token, and compared with case -- RFC 9110 9.1. */
+    const std::string& method() const { return m_method; }
+
+    /** The request-target exactly as it arrived, query and all. */
+    const std::string& target() const { return m_target; }
+
+    const std::string& version() const { return m_version; }
+
+    const http::fields& fields() const { return m_fields; }
+
+    const std::string& body() const { return m_body; }
+    void set_body(std::string body) { m_body = std::move(body); }
+
+    http::framing body_framing() const { return m_framing; }
+
+    /** Meaningful only when body_framing() is framing::length. */
+    std::size_t content_length() const { return m_length; }
+
+    /** The Host field, which HTTP/1.1 requires -- RFC 9112 3.2. */
+    std::string host() const { return m_fields.get("Host"); }
+
+    friend Request parse_request_head(std::string_view head);
+
+private:
+    std::string m_method;
+    std::string m_target;
+    std::string m_version;
+    http::fields m_fields;
+    std::string m_body;
+    http::framing m_framing = framing::none;
+    std::size_t m_length = 0;
+};
+
+/**
+ * Parse a request head against the grammar.
+ *
+ * The same refusals parse_head() makes -- both Content-Length and
+ * Transfer-Encoding, two Content-Lengths that disagree, a Content-Length that
+ * is not digits, obs-fold, a bare CR or LF, whitespace before a colon.
+ *
+ * **One difference from a response, and it matters.**  A request with neither
+ * framing field has *no body* (RFC 9112 6.3), where a response with neither
+ * runs until the connection closes.  framing::until_close on a request would
+ * mean reading until a client that is waiting for an answer gives up -- a hang,
+ * not a body.  So the default here is framing::none, and a Transfer-Encoding
+ * that does not end in chunked is refused rather than quietly becoming a read
+ * to end of stream.
+ */
+Request parse_request_head(std::string_view head);
+
+/** read_head() then parse_request_head(). */
+Request read_request_head(std::istream& is, std::size_t cap = 8192);
+
+/**
+ * Read a body whose framing is already known.
+ *
+ * The Response overload below forwards to this; a Request needs it because its
+ * framing is decided by different rules.
+ */
+std::string read_body(std::istream& is, framing how, std::size_t length,
+                      std::size_t cap = 1 << 20);
+
+/**
  * The composed grammar: RFC 3986, then RFC 9110, then RFC 9112.
  *
  * Built once, on first use.  Exposed so a test can ask it what it knows --
@@ -182,7 +256,10 @@ private:
 const abnf::grammar& grammar();
 
 /**
- * Read a response head from a stream, to and including the blank line.
+ * Read a message head from a stream, to and including the blank line.
+ *
+ * A response head or a request head: the two are the same shape above the
+ * start line, and this reads the shape.
  *
  * Returns everything read, CRLFs and all.  Framing is procedural here for the
  * reason written down in rfc9112.hh: abnf::rule::parse takes a string_view, so

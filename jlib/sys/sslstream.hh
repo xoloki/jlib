@@ -22,6 +22,7 @@
 #define JLIB_SYS_SSLSTREAM_HH
 
 #include <jlib/sys/socketstream.hh>
+#include <jlib/sys/tls.hh>
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -46,6 +47,14 @@ namespace jlib {
          * base, because for a proxy connection the base's m_host is the
          * *proxy's* name.  The certificate has to belong to the server that
          * was asked for.
+         *
+         * ## Both directions
+         *
+         * The same mixin answers a handshake as well as starting one.  Which it
+         * does is fixed by the constructor -- there are three, and the first
+         * argument says which: a name to verify is a client, a tls_server_t tag
+         * is a server.  Everything below the handshake is identical, which is
+         * why this is a second open_ssl() branch and not a second class.
          */
         template< typename Base, typename charT, typename traitT = std::char_traits<charT> >
         class basic_tlsbuf : public Base {
@@ -59,6 +68,8 @@ namespace jlib {
             static const unsigned int BUF_SIZE = 1024;
 
             /**
+             * A client, with a context built for this connection.
+             *
              * @param verify_host the name the certificate must be good for
              * @param delay       connect without handshaking; see start()
              * @param args        whatever Base's constructor takes
@@ -66,13 +77,57 @@ namespace jlib {
             template<typename... Args>
             basic_tlsbuf(const std::string& verify_host, bool delay, Args&&... args)
                 : Base(std::forward<Args>(args)...),
-                  m_ctx(0),
                   m_ssl(0),
                   m_verify_host(verify_host),
-                  m_delay(delay)
+                  m_delay(delay),
+                  m_accept(false)
             {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
                     std::cerr << "basic_tlsbuf::basic_tlsbuf(" << verify_host << ", "
+                              << std::boolalpha << delay << ")"<<std::endl;
+                if(!m_delay)
+                    open_ssl();
+            }
+
+            /** A client, against a context the caller keeps and shares. */
+            template<typename... Args>
+            basic_tlsbuf(tls_context ctx, const std::string& verify_host, bool delay,
+                         Args&&... args)
+                : Base(std::forward<Args>(args)...),
+                  m_ctx(std::move(ctx)),
+                  m_ssl(0),
+                  m_verify_host(verify_host),
+                  m_delay(delay),
+                  m_accept(false)
+            {
+                if(!m_delay)
+                    open_ssl();
+            }
+
+            /**
+             * A server: answer the handshake rather than start it.
+             *
+             * There is no verify_host, and that is not an omission.  A server
+             * verifies the name of a client only if the client offered a
+             * certificate, and by the note on tls_context it is never asked
+             * for one -- so there is no name here to check against anything.
+             *
+             * @param ctx    the certificate and key, shared across connections
+             * @param delay  take the connection without handshaking; start()
+             *               does it later, which is STARTTLS on this side
+             * @param args   whatever Base's constructor takes -- for a server
+             *               that is sys::adopt and an accepted descriptor
+             */
+            template<typename... Args>
+            basic_tlsbuf(tls_server_t, tls_context ctx, bool delay, Args&&... args)
+                : Base(std::forward<Args>(args)...),
+                  m_ctx(std::move(ctx)),
+                  m_ssl(0),
+                  m_delay(delay),
+                  m_accept(true)
+            {
+                if(getenv("JLIB_SYS_SOCKET_DEBUG"))
+                    std::cerr << "basic_tlsbuf::basic_tlsbuf(server, "
                               << std::boolalpha << delay << ")"<<std::endl;
                 if(!m_delay)
                     open_ssl();
@@ -159,16 +214,40 @@ namespace jlib {
                 if(m_ssl != 0) {
                     SSL_shutdown(m_ssl);
                     SSL_free(m_ssl);
-                    SSL_CTX_free(m_ctx);
                     m_ssl = 0;
-                    m_ctx = 0;
                 }
+
+                // No SSL_CTX_free: the context is refcounted now, so dropping
+                // this reference frees it only if it was the last -- which is
+                // what lets a server share one across every connection.
+                m_ctx = tls_context();
                 Base::close();
             }
 
             void start() {
                 m_delay = false;
                 open_ssl();
+            }
+
+            /**
+             * Drop the connection without a close_notify.
+             *
+             * Which is what a server that has gone down leaves behind, and what
+             * a test simulating one has to be able to produce.  close() is the
+             * polite form and is what everything else should use; this exists
+             * because sys_tls_sigpipe_test needs a peer that vanishes, and it
+             * had been calling SSL_free with no SSL_shutdown in front of it by
+             * hand to get one.
+             */
+            virtual void reset() {
+                if(m_ssl != 0) {
+                    SSL_free(m_ssl);
+                    m_ssl = 0;
+                }
+
+                m_ctx = tls_context();
+
+                Base::close();
             }
 
         protected:
@@ -230,38 +309,50 @@ namespace jlib {
                 // and SSL_load_error_strings became no-ops there and are gone
                 // in 3.0, along with the hand-rolled once-guard they needed.
 
-                // TLS_client_method, always.  It was a constructor parameter,
-                // and TLS_client_method was the only thing any caller ever
-                // passed -- the older spellings it existed to allow are
-                // SSLv2 and SSLv3, both removed from OpenSSL.
-                m_ctx = SSL_CTX_new(TLS_client_method());
-                if(m_ctx == 0) {
-                    std::cerr <<"exception in jlib::sys::sslstream::open_ssl()"<<std::endl;
-                    throw typename Base::exception("error calling SSL_CTX_new()");
+                if(m_ctx.empty()) {
+                    if(m_accept) {
+                        throw typename Base::exception("a server handshake with "
+                                                       "no certificate");
+                    }
+
+                    // What was written out here: TLS_client_method, a TLS 1.2
+                    // floor, SSL_VERIFY_PEER and the default verify paths.  A
+                    // client with no context of its own still gets one per
+                    // connection, deliberately -- see the note in tls.hh about
+                    // SSL_CERT_FILE being read when the context is built.
+                    m_ctx = tls_context::client();
                 }
 
-                // SSL_OP_NO_SSLv2 has been a no-op since 1.1 and SSLv3 is long
-                // dead; state the floor directly instead.
-                SSL_CTX_set_min_proto_version(m_ctx, TLS1_2_VERSION);
+                // So print() reports this operation rather than whatever last
+                // failed on this thread.
+                ERR_clear_error();
 
-                SSL_CTX_set_verify(m_ctx, SSL_VERIFY_PEER, nullptr);
-
-                // This used to hardcode /etc/ssl/certs, which does not exist on
-                // macOS -- so with SSL_VERIFY_PEER set, every connection there
-                // failed to validate.  Use the locations OpenSSL was built
-                // with, still overridable via SSL_CERT_FILE and SSL_CERT_DIR.
-                // NB: not print() here -- that reports via SSL_get_error(m_ssl),
-                // and m_ssl does not exist until SSL_new below.
-                if(!SSL_CTX_set_default_verify_paths(m_ctx)) {
-                    throw typename Base::exception("error calling SSL_CTX_set_default_verify_paths()");
+                try {
+                    m_ssl = m_ctx.new_ssl();
+                }
+                catch(tls_context::exception& e) {
+                    throw typename Base::exception(e.what());
                 }
 
-                m_ssl = SSL_new(m_ctx);
-                if(m_ssl == 0) {
-                    std::cerr <<"exception in jlib::sys::sslstream::open_ssl()"<<std::endl;
-                    throw typename Base::exception("error calling SSL_new()");
-                }
+                try {
+                    throw_if("SSL_set_fd", SSL_set_fd(m_ssl, this->m_sock));
 
+                    if(m_accept) accept_tls();
+                    else         connect_tls();
+                }
+                catch(...) {
+                    // A constructor that throws gets no destructor, so without
+                    // this the SSL leaks -- once per failed handshake.  On a
+                    // client that is a rare accident; on a server it is once
+                    // per connection an attacker chooses to fail.
+                    SSL_free(m_ssl);
+                    m_ssl = 0;
+                    throw;
+                }
+            }
+
+            /** Start a handshake, and insist the certificate is the right one. */
+            void connect_tls() {
                 // Check that the certificate actually belongs to the host we
                 // asked for.  Verifying the chain without this accepts any
                 // valid certificate from any server the trust store covers,
@@ -278,14 +369,27 @@ namespace jlib {
                     SSL_set_tlsext_host_name(m_ssl, m_verify_host.c_str());
                 }
 
-                throw_if("SSL_set_fd", SSL_set_fd(m_ssl, this->m_sock));
                 throw_if("SSL_connect", SSL_connect(m_ssl));
             }
-            
-            SSL_CTX* m_ctx;
+
+            /**
+             * Answer one, and nothing else.
+             *
+             * No SSL_set1_host and no SNI: there is no name to check, because
+             * the client has not offered a certificate and by the note on
+             * tls_context is not asked to.  SNI is something a client sends and
+             * a server may read; reading it would mean choosing a certificate
+             * per name, which is a virtual-hosting feature this does not have.
+             */
+            void accept_tls() {
+                throw_if("SSL_accept", SSL_accept(m_ssl));
+            }
+
+            tls_context m_ctx;
             SSL* m_ssl;
             std::string m_verify_host;
             bool m_delay;
+            bool m_accept;
         };
 
         /** TLS straight over a socket. */
@@ -322,13 +426,72 @@ namespace jlib {
             }
             
             void open(const std::string& host, unsigned int port, bool delay = false) {
+                // delete first: this replaced m_buf without freeing the old one,
+                // where basic_socketstream::open has always got it right.
+                if(this->m_buf != 0)
+                    delete this->m_buf;
                 this->m_buf = new basic_sslbuf<charT,traitT>(host, delay, host, port);
+                this->init(this->m_buf);
+            }
+
+            /**
+             * Server side: take over an accepted descriptor and answer the
+             * handshake on it.
+             *
+             * Both tags, because both facts carry weight.  tls_server_t says
+             * which direction the handshake goes; adopt_t says the int is a
+             * descriptor and not a port, which is the whole reason adopt_t
+             * exists.
+             *
+             * @param ctx      the certificate and key, shared across connections
+             * @param fd       an accepted descriptor, which this takes over
+             * @param host     what to call the peer in a message; not connected to
+             * @param timeout  seconds a read or write may block, applied to the
+             *                 descriptor *before* the handshake, so it bounds
+             *                 the handshake too.  Negative takes the library
+             *                 default, which is forever.
+             * @param delay    take the connection without handshaking; start()
+             *                 does it later, which is STARTTLS on this side
+             */
+            basic_tlsstream(tls_server_t, const tls_context& ctx, adopt_t, int fd,
+                            const std::string& host = "", unsigned int port = 0,
+                            double timeout = -1, bool delay = false)
+                : basic_socketstream<charT,traitT>()
+            {
+                this->m_buf = new basic_sslbuf<charT,traitT>(tls_server, ctx, delay,
+                                                             adopt, fd, host, port,
+                                                             timeout);
+                this->init(this->m_buf);
+            }
+
+            void open(tls_server_t, const tls_context& ctx, adopt_t, int fd,
+                      const std::string& host = "", unsigned int port = 0,
+                      double timeout = -1, bool delay = false)
+            {
+                if(this->m_buf != 0)
+                    delete this->m_buf;
+
+                this->m_buf = new basic_sslbuf<charT,traitT>(tls_server, ctx, delay,
+                                                             adopt, fd, host, port,
+                                                             timeout);
                 this->init(this->m_buf);
             }
 
             /** Handshake now, on a stream opened with delay = true. */
             void start() {
                 dynamic_cast< basic_sslbuf<charT,traitT>* >(this->m_buf)->start();
+            }
+
+            /**
+             * Drop the connection without a close_notify; see basic_tlsbuf.
+             *
+             * For a peer that has to look like it vanished.  close() is the
+             * polite form and is what everything else wants.
+             */
+            void reset() {
+                if(basic_sslbuf<charT,traitT>* b =
+                       dynamic_cast< basic_sslbuf<charT,traitT>* >(this->m_buf))
+                    b->reset();
             }
 
         };

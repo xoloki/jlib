@@ -39,6 +39,7 @@
 #include <jlib/sys/listener.hh>
 #include <jlib/sys/sslstream.hh>
 #include <jlib/sys/sys.hh>
+#include <jlib/sys/tls.hh>
 
 #include <openssl/err.h>
 #include <openssl/pem.h>
@@ -128,27 +129,32 @@ int main() {
     }
 
     // The server: accept, complete the handshake, then drop the connection.
-    SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+    //
+    // This was twenty lines of raw OpenSSL -- SSL_CTX_new(TLS_server_method),
+    // SSL_new, SSL_set_fd, SSL_accept and a descriptor closed by hand -- because
+    // basic_tlsbuf could only ever call SSL_connect.  It is jlib's own now
+    // (#112), including the part that makes this test what it is: reset() drops
+    // the connection *without* a close_notify, which is what SSL_free with no
+    // SSL_shutdown in front of it was doing here.
     bool served = false;
 
-    if(ctx) {
-        SSL_CTX_use_certificate_file(ctx, cert.c_str(), SSL_FILETYPE_PEM);
-        SSL_CTX_use_PrivateKey_file(ctx, key.c_str(), SSL_FILETYPE_PEM);
-
+    try {
         const int peer = l->accept();
-        if(peer >= 0) {
-            SSL* ssl = SSL_new(ctx);
-            if(ssl) {
-                SSL_set_fd(ssl, peer);
-                served = (SSL_accept(ssl) == 1);
 
-                // Away without a close_notify, which is how a server that has
-                // gone down leaves things.
-                SSL_free(ssl);
-            }
-            ::close(peer);
+        if(peer >= 0) {
+            jlib::sys::tlsstream server(jlib::sys::tls_server,
+                                        jlib::sys::tls_context::server(cert, key),
+                                        jlib::sys::adopt, peer, "", 0, 10);
+
+            served = true;
+
+            // Away without a close_notify, which is how a server that has gone
+            // down leaves things.
+            server.reset();
         }
-        SSL_CTX_free(ctx);
+    }
+    catch(std::exception& e) {
+        std::cerr << "the test server did not come up: " << e.what() << std::endl;
     }
 
     l->close();
