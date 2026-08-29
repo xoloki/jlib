@@ -67,6 +67,7 @@ TESTS = \
  \
 	sys_sync_test \
 	sys_asservent_test \
+	sys_servent_test \
 	sys_run_test \
 	sys_socket_test \
 	sys_sigpipe_test \
@@ -200,6 +201,9 @@ sys_sync_test_LDADD   = $(JSYS_LA)
 
 sys_asservent_test_SOURCES = sys_asservent_test.cc
 sys_asservent_test_LDADD   = $(JSYS_LA)
+
+sys_servent_test_SOURCES = sys_servent_test.cc
+sys_servent_test_LDADD   = $(JSYS_LA)
 
 sys_socket_test_SOURCES = sys_socket_test.cc
 sys_socket_test_LDADD   = $(JSYS_LA)
