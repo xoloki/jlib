@@ -142,7 +142,11 @@ buffer<T>::buffer()
 template<typename T>
 inline
 buffer<T>::buffer(unsigned int s) 
-    : mbuf(new array<T>(s)),
+      // make_shared, not shared_ptr(new): constructing a shared_ptr from a
+      // raw pointer allocates a control block *beside* the object, so every
+      // buffer cost three allocations -- the array, its new T[], and the
+      // block.  make_shared folds the block into the array's own allocation.
+    : mbuf(std::make_shared< array<T> >(s)),
       moff(0),
       msize(s)
 {
@@ -191,7 +195,7 @@ template<typename T>
 inline
 void buffer<T>::resize(unsigned int s) {
     if(!mbuf || moff || size() < s) {
-        mbuf = typename array<T>::ptr(new array<T>(s));
+        mbuf = std::make_shared< array<T> >(s);   // see the constructor
         moff = 0;
     } 
     msize = s;
