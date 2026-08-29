@@ -27,6 +27,8 @@
 
 #include <jlib/sys/ASServent.hh>
 
+#include <sys/resource.h>
+
 #include <chrono>
 #include <iostream>
 #include <mutex>
@@ -44,6 +46,16 @@ static void ok(const std::string& what, bool good, const std::string& detail = "
     std::cout << (good ? "  ok   " : "  FAIL ") << what;
     if(!detail.empty()) std::cout << ": " << detail;
     std::cout << "\n";
+}
+
+/** CPU this process has burned, user plus system. */
+static double cpu_seconds() {
+    struct rusage ru;
+
+    if(::getrusage(RUSAGE_SELF, &ru) != 0) return -1;
+
+    return ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6 +
+           ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6;
 }
 
 static double seconds_since(std::chrono::steady_clock::time_point t) {
@@ -220,6 +232,48 @@ static void the_destructor_waits_for_the_worker() {
     ok("it returns, and promptly", took < 2.0, std::to_string(took) + "s");
 }
 
+static void an_idle_worker_costs_nothing() {
+    std::cout << "\nan idle worker costs nothing:\n";
+
+    counter c;
+
+    c.run();
+
+    c.push(job{1});
+
+    ok("the worker is running", within(5, [&c] { return c.handled() == 1; }));
+
+    // Sleep rather than within(): within() polls on *this* thread, and this
+    // section measures the process, so the test's own spinning would be
+    // indistinguishable from the worker's.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    const double before = cpu_seconds();
+
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    const double used = cpu_seconds() - before;
+
+    // Process-wide CPU, but the only two threads are this one -- asleep in
+    // nanosleep -- and the worker, which should be blocked on a condition
+    // variable.  Three measurements set the threshold:
+    //
+    //   0.040s  the old loop, polling the request pipe on a 1ms timeout
+    //   0.021s  a 1ms *timed* wait on the condition variable, which is the
+    //           cheaper way to write the same mistake and so the one the
+    //           threshold has to catch
+    //   0.00004s  blocking, which is below what getrusage can resolve
+    //
+    // 5ms sits four times under the cheapest spin and a hundred times over
+    // the real figure.  An earlier 20ms threshold passed the middle case by
+    // 4%, which is not a threshold, it is a coin toss.
+    ok("three idle seconds burn no measurable CPU", used >= 0 && used < 0.005,
+       std::to_string(used) + "s over 3s idle");
+
+    ok("and the worker is still there afterwards",
+       (c.push(job{2}), within(5, [&c] { return c.handled() == 2; })));
+}
+
 static void stopping_twice_is_allowed() {
     std::cout << "\nstopping twice is allowed:\n";
 
@@ -261,6 +315,7 @@ int main() {
     a_worker_serves_what_is_pushed();
     reset_retires_the_worker_it_replaces();
     the_destructor_waits_for_the_worker();
+    an_idle_worker_costs_nothing();
     stopping_twice_is_allowed();
 
     // What a green run does not establish.
@@ -286,13 +341,20 @@ int main() {
     // still have its worker inside handle() when the derived part is gone.
     // Every subclass here and in net/ does stop(); nothing enforces it.
     //
-    // Not the response half.  push(Response) and the handle() pump on the
-    // response pipe are untouched by this branch and untested by this file.
+    // Not the response half, and it is now the interesting one.  push(Response)
+    // still writes a byte to the response pipe and still *swallows*
+    // would_block on a full one -- the same fault the request side just shed.
+    // It matters more here, because that byte is what wakes an event loop
+    // watching get_response_reader(): a dropped write means a response sits in
+    // the queue with nothing to announce it until the next push happens to
+    // succeed.  It needs 16k unread responses to reach, which is why it is
+    // recorded rather than fixed, and why the request side could not simply be
+    // given a blocking write instead.
     //
-    // Not the stop() fallback path, where write_int(EXIT) throws on a full
-    // pipe and m_bunny is what ends the loop.  Filling a pipe that only the
-    // worker reads means racing the worker, and a test that has to win a race
-    // to pass is worse than the comment saying it is untested.
+    // Not the idle measurement on a loaded machine.  getrusage is per-process
+    // and the other threads here are asleep, so load does not add CPU to this
+    // process -- but a machine thrashing hard enough to lengthen nanosleep
+    // would shorten the window rather than widen it, which fails safe.
     std::cout << "\n" << (failures ? "FAILED" : "PASSED") << ": " << failures
               << " failure(s)\n";
 

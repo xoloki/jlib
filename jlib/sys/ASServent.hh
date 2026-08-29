@@ -71,10 +71,19 @@ public:
     };
     
     typedef int id_type;
-    static const id_type NEW_REQUEST =  0x0;
+
+    /**
+     * The token written to the response pipe.  Its *value* means nothing --
+     * handle() reads it and throws it away.  What matters is that a byte
+     * arrives, because the response pipe's read end is what an event loop
+     * selects on; see get_response_reader().
+     *
+     * There is no NEW_REQUEST any more, and no EXIT.  The request side used to
+     * be a second pipe carrying those two ids, and it is a condition variable
+     * now: nothing outside this class can see a request pipe, so nothing
+     * outside needed a name for what went down it.
+     */
     static const id_type NEW_RESPONSE = 0x1;
-    
-    static const id_type EXIT =         0x666;
     
     ASServent();
     virtual ~ASServent();
@@ -104,7 +113,17 @@ public:
     void start();
     
     /**
-     * get a read descriptor for the response pipe
+     * A read descriptor for the response pipe, for an event loop to watch.
+     *
+     * This is why the response half is a pipe and the request half is not.  A
+     * GUI cannot block in wait(); it blocks in its own loop, on descriptors.
+     * So a response has to arrive as a readable fd -- select, poll, epoll,
+     * kqueue, g_io_add_watch, CFFileDescriptor, whichever the toolkit is --
+     * and then the loop calls handle() to drain what is behind it.
+     *
+     * Requests travel the other way, from that loop into the worker, and the
+     * worker *can* block.  Hence a condition variable there and a pipe here:
+     * two different problems that only looked like one.
      */
     int get_response_reader();
     
@@ -126,18 +145,16 @@ public:
     
 protected:
     
-    pipe m_request_pipe;
     pipe m_response_pipe;
     std::thread m_worker;
     std::mutex m_lock;
 
-    // The loop's own flag, and stop()'s fallback for when the EXIT byte cannot
-    // be written.  start() used to test a *local* bool, so the pipe was the
-    // only way to end the loop -- and the request pipe is opened non-blocking,
-    // so a full one makes write_int throw and there was no second way to ask.
-    // That would turn the leak this fixes into a hang in join().  Named to
-    // match Servent::m_bunny, which is the same flag for the same reason.
-    sync<bool> m_bunny;
+    // Guarded by m_requests' mutex, not atomic: it is read in the same
+    // predicate as the queue's emptiness, and two independent atomics give no
+    // guarantee that a worker seeing one sees the other.  This replaces both
+    // the EXIT byte and the sync<bool> that backed it up when the byte could
+    // not be written -- stop() cannot fail now, so it needs no fallback.
+    bool m_exit = false;
     sys::sync<std::priority_queue<Request> > m_requests;
     sys::sync<std::queue<Response> > m_responses;
 };
@@ -145,9 +162,7 @@ protected:
 template<typename Request, typename Response>
 inline
 ASServent<Request,Response>::ASServent()
-    : m_request_pipe(false,false),
-      m_response_pipe(false,false),
-      m_bunny(true)
+    : m_response_pipe(false,false)
 {
     
 }
@@ -169,17 +184,20 @@ void
 ASServent<Request,Response>::push(const Request& r) {
     if(getenv("JLIB_SYS_ASSERVENT_DEBUG"))
         std::cerr << "jlib::sys::ASServent::push(Request): enter" << std::endl;
-    auto_lock<std::mutex> lock(m_requests);
+
+    std::unique_lock<std::mutex> lock(m_requests);
+
     m_requests().push(r);
-    try {
-        if(getenv("JLIB_SYS_ASSERVENT_DEBUG"))
-            std::cerr << "jlib::sys::ASServent::push(Request): writing to pipe" << std::endl;
-        m_request_pipe.write_int(NEW_REQUEST);
-    } catch(sys::pipe::would_block&) {
-        if(getenv("JLIB_SYS_ASSERVENT_DEBUG"))
-            std::cerr << "jlib::sys::ASServent::push(Request): caught would_block" << std::endl;
-    }
-    
+
+    // Cannot fail, which is the point.  This used to write a byte down a
+    // non-blocking pipe and *swallow* would_block on a full one -- so a
+    // request could be queued with nothing to announce it, which is precisely
+    // why start() could not afford to block and polled at 1ms instead.
+    //
+    // notify_all rather than notify_one: there is only ever one worker, so the
+    // two are the same call today, and this is the one that stays correct if
+    // that ever stops being true.  Under the lock, per sync.hh's convention.
+    m_requests.notify_all();
 }
     
 template<typename Request, typename Response>
@@ -194,11 +212,15 @@ inline
 void 
 ASServent<Request,Response>::reset() {
     // Joined, not merely asked to leave.  Dropping the old worker left two of
-    // them reading the same request pipe until the first noticed EXIT, and
+    // them on the same queue until the first noticed it was meant to go, and
     // which one served a given request was a race.
     stop();
 
-    m_bunny = true;
+    {
+        std::unique_lock<std::mutex> lock(m_requests);
+
+        m_exit = false;
+    }
 
     m_worker = std::thread([this](){ this->start(); });
 }
@@ -210,15 +232,12 @@ ASServent<Request,Response>::stop() {
     if(!m_worker.joinable())
         return;
 
-    try {
-        m_request_pipe.write_int(EXIT);
-    }
-    catch(std::exception& e) {
-        // The request pipe is non-blocking and may be full, or already
-        // unwritable.  Ask the loop to leave directly rather than joining a
-        // thread that was never told to.
-        std::cerr << "jlib::sys::ASServent::stop(): " << e.what() << std::endl;
-        m_bunny = false;
+    {
+        std::unique_lock<std::mutex> lock(m_requests);
+
+        m_exit = true;
+
+        m_requests.notify_all();
     }
 
     m_worker.join();
@@ -228,36 +247,45 @@ template<typename Request, typename Response>
 inline
 void 
 ASServent<Request,Response>::start() {
-    while(m_bunny) {
+    // Blocks.  It used to poll the request pipe with a one millisecond timeout
+    // and then re-check the queue, so an idle worker woke about a thousand
+    // times a second for the lifetime of the process -- measured at ~1.3% of a
+    // core doing nothing at all, which for a mail client sitting in a tray is
+    // a battery cost rather than a CPU one.
+    while(true) {
+        std::unique_lock<std::mutex> lock(m_requests);
+
+        m_requests.wait(lock, [this] {
+            return m_exit || !m_requests().empty();
+        });
+
+        // Checked before the queue, so stop() ends the loop promptly rather
+        // than draining first.  A stop comes from a destructor or from
+        // reset(); in the first, running more handlers is exactly what the
+        // caller is trying to avoid, and in the second the requests are stale
+        // by definition.  ASMailBox::reinit() already clear()s the queue
+        // before reset()ing, which is the same view.
+        if(m_exit)
+            return;
+
+        // Copy-initialised from top() rather than declared and assigned:
+        // Request need not be default-constructible, and MailBoxRequest is
+        // not.
+        Request r = m_requests().top();
+
+        m_requests().pop();
+
+        // A handler can take as long as it likes, and can push() from inside
+        // itself without deadlocking.
+        lock.unlock();
+
         try {
-            while(m_request_pipe.poll()) {
-                if(getenv("JLIB_SYS_ASSERVENT_DEBUG"))
-                    std::cerr << "jlib::sys::ASServent::start(): m_request_pipe.poll(): true" << std::endl;
-                id_type id = m_request_pipe.read_int();
-                
-                if(id == NEW_REQUEST) {
-                    
-                } else if(id == EXIT) {
-                    m_bunny = false;
-                    break;
-                }
-            }
-            
-            auto_lock<std::mutex> lock(m_requests);
-            while(m_requests().size() > 0) {
-                Request r = m_requests().top();
-                m_requests().pop();
-                
-                m_requests.unlock();
-                
-                try { handle(r); } catch(...) {}
-                
-                m_requests.lock();
-            }
-            
-        } catch(std::exception& e) {
+            handle(r);
+        }
+        catch(std::exception& e) {
             std::cerr << "jlib::sys::ASServent::start(): got std::exception: " << e.what() << std::endl;
-        } catch(...) {
+        }
+        catch(...) {
             std::cerr << "jlib::sys::ASServent::start(): got unknown error" << std::endl;
         }
     }
