@@ -72,6 +72,8 @@ public:
     void open(const std::string& host, unsigned int port,
               const std::string& phost, u_int pport, bool delay = false)
     {
+        if(this->m_buf != 0)
+            delete this->m_buf;
         this->m_buf = new basic_sslproxybuf<charT,traitT>(host, delay,
                                                           host, port, phost, pport);
         this->init(this->m_buf);

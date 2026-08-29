@@ -34,7 +34,6 @@ namespace jlib {
             : m_block_read(block_read),
               m_block_write(block_write)
         {
-            m_pipe = new int[2];
             if(::pipe(m_pipe) == -1) {
                 exception::throw_errno("unable to create pipe");
             }
@@ -61,7 +60,14 @@ namespace jlib {
         }
 
         pipe::~pipe() {
-            delete [] m_pipe;
+            // Both descriptors, which is new.  What was here deleted the array
+            // and left the files open, so a process that made pipes in a loop
+            // ran out of descriptors rather than memory -- and the two the
+            // command queue holds were leaked once per Servent.
+            if(m_pipe[0] != -1) ::close(m_pipe[0]);
+            if(m_pipe[1] != -1) ::close(m_pipe[1]);
+
+            m_pipe[0] = m_pipe[1] = -1;
         }
         
         int pipe::read_int() {

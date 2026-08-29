@@ -58,6 +58,7 @@ namespace http {
 using jlib::util::http::error;
 using jlib::util::http::fields;
 using jlib::util::http::framing;
+using jlib::util::http::Request;
 using jlib::util::http::Response;
 
 /** How to make a request. */

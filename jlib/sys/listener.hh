@@ -48,6 +48,30 @@ namespace sys {
  * redirect that binds every interface is reachable from the network, and what
  * arrives on it is an authorization code.
  */
+/**
+ * Who connected.
+ *
+ * ::accept(m_sock, 0, 0) discarded this for the whole of the listener's first
+ * life, because nothing wanted it.  A server does: a handler that cannot tell a
+ * loopback client from a stranger cannot make the one decision a loopback
+ * receiver exists to make.
+ */
+struct peer {
+    /**
+     * Numeric, from getnameinfo(NI_NUMERICHOST).
+     *
+     * Never a name.  A reverse lookup is a stranger's DNS deciding what a log
+     * line says, it costs a round trip on the accept path, and the answer is
+     * not authenticated by anything.
+     */
+    std::string address;
+
+    unsigned short port = 0;
+
+    /** 127.0.0.0/8, ::1, or an IPv4-mapped loopback address. */
+    bool loopback() const;
+};
+
 class listener {
 public:
     class exception : public std::exception {
@@ -107,12 +131,33 @@ public:
      */
     int accept(double timeout = 0);
 
+    /** As accept(), and says who it was. */
+    int accept(peer& from, double timeout = 0);
+
     /** accept(), wrapped in a stream.  Null if the timeout ran out. */
     std::unique_ptr<socketstream> accept_stream(double timeout = 0);
 
+    std::unique_ptr<socketstream> accept_stream(peer& from, double timeout = 0);
+
     void close();
 
+    /**
+     * Take the listening socket out of blocking mode.
+     *
+     * For a caller that polls several descriptors at once and cannot let
+     * accept() block on one of them -- sys::server does.  With it set, accept()
+     * returns -1 rather than waiting when the poll and the accept disagree,
+     * which happens when a client sends an RST between the two.
+     *
+     * It does not follow the connection: an accepted descriptor is always put
+     * back into blocking mode, because on BSD and macOS it would otherwise
+     * inherit this and every read a handler made would fail with EAGAIN.
+     */
+    void set_blocking(bool blocking);
+
 private:
+    int accept_into(peer* from, double timeout);
+
     int m_sock = -1;
     unsigned short m_port = 0;
 };

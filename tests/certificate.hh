@@ -23,8 +23,11 @@
 // A self-signed certificate, generated at runtime, for a test that needs a
 // real TLS handshake.
 //
-// Shared by sys_tls_sigpipe_test, which serves TLS in-process, and
-// net_imap_live_test, which hands it to a Dovecot.  Both point the client's
+// Shared by everything that needs a TLS server for one run:
+// sys_tls_server_test, sys_server_test, net_http_server_test and
+// sys_tls_sigpipe_test all serve in-process, net_http_test and
+// net_http_live_test hand it to a test HTTP server and to nginx, and
+// net_imap_live_test hands it to a Dovecot.  Both point the client's
 // trust store at it with SSL_CERT_FILE -- which sslstream reaches through
 // SSL_CTX_set_default_verify_paths -- so nothing about the verification is
 // weakened: the handshake is real, the hostname is checked, and it succeeds

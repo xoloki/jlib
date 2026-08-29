@@ -116,11 +116,22 @@ namespace jlib {
              * and by basic_tlsbuf for the name it verifies against -- not for
              * anything to connect to.
              */
-            basic_socketbuf(adopt_t, int fd, const std::string& host = "", unsigned int port = 0) {
+            basic_socketbuf(adopt_t, int fd, const std::string& host = "",
+                            unsigned int port = 0, double timeout = -1) {
                 init_buffers();
                 m_host = host;
                 m_port = port;
                 m_sock = fd;
+
+                // Before configure(), which is the only place it can be got in
+                // front of: configure() calls apply_timeout() unconditionally,
+                // so a SO_RCVTIMEO set on the descriptor before adopting it is
+                // overwritten with the library default -- which is forever.
+                // That is why this parameter exists rather than the caller
+                // setting the option itself: a server has to bound the TLS
+                // handshake, and the handshake happens inside the constructor
+                // that adopts the descriptor.
+                m_io_timeout = timeout;
 
                 try {
                     configure(m_sock);
@@ -483,11 +494,12 @@ namespace jlib {
             }
 
             /** Take over an already-connected descriptor; see basic_socketbuf. */
-            basic_socketstream(adopt_t, int fd, const std::string& host = "", unsigned int port = 0)
+            basic_socketstream(adopt_t, int fd, const std::string& host = "",
+                               unsigned int port = 0, double timeout = -1)
                 : std::basic_iostream<charT,traitT>(NULL)
             {
                 m_buf = 0;
-                m_buf=new basic_socketbuf<charT,traitT>(adopt,fd,host,port);
+                m_buf=new basic_socketbuf<charT,traitT>(adopt,fd,host,port,timeout);
                 this->init(m_buf);
             }
 
@@ -503,21 +515,37 @@ namespace jlib {
                 this->init(m_buf);
             }
 
-            void close() {
-                m_buf->close();
+            /** As the adopting constructor.  There was no open() for one. */
+            void open(adopt_t, int fd, const std::string& host = "",
+                      unsigned int port = 0, double timeout = -1) {
+                if(m_buf != 0)
+                    delete m_buf;
+                m_buf=new basic_socketbuf<charT,traitT>(adopt,fd,host,port,timeout);
+                this->init(m_buf);
             }
 
-            bool interrupted() { return m_buf->interrupted(); }
+            // Every one of these dereferenced m_buf without checking it, so
+            // any of them on a default-constructed socketstream -- which is a
+            // perfectly ordinary thing to have, since open() exists -- was a
+            // null dereference rather than an error.
+            void close() {
+                if(m_buf != 0) m_buf->close();
+            }
+
+            bool interrupted() { return m_buf != 0 && m_buf->interrupted(); }
 
             /** Whether the last read or write gave up on a timeout. */
-            bool timed_out() const { return m_buf->timed_out(); }
+            bool timed_out() const { return m_buf != 0 && m_buf->timed_out(); }
 
             /** Seconds a read or write may block; zero is forever. */
-            void set_timeout(double seconds) { m_buf->set_timeout(seconds); }
+            void set_timeout(double seconds) {
+                if(m_buf != 0) m_buf->set_timeout(seconds);
+            }
 
-            double get_timeout() const { return m_buf->get_timeout(); }
+            double get_timeout() const { return m_buf != 0 ? m_buf->get_timeout() : 0; }
 
-            int get_socket() { return m_buf->get_socket(); }
+            /** -1 when there is no connection, as an unopened descriptor is. */
+            int get_socket() { return m_buf != 0 ? m_buf->get_socket() : -1; }
             
         protected:
             basic_socketbuf<charT,traitT>* m_buf;
