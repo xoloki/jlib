@@ -44,6 +44,7 @@ endif
 TESTS = \
 	math_test \
 	math_value_test \
+	math_plot_alloc_test \
 	math_object_test \
 	tensor_test \
 \
@@ -260,6 +261,9 @@ math_test_LDADD   = $(JUTIL_LA)
 
 math_value_test_SOURCES = math_value_test.cc
 math_value_test_LDADD   = $(JUTIL_LA)
+
+math_plot_alloc_test_SOURCES = math_plot_alloc_test.cc
+math_plot_alloc_test_LDADD   = $(JUTIL_LA)
 
 math_object_test_SOURCES = math_object_test.cc
 math_object_test_LDADD   = $(JUTIL_LA)

@@ -151,8 +151,27 @@ protected:
      */
     mutable std::vector< math::matrix<T> > m_project;
 
+    /**
+     * projection.top() * modelview.top(), built once and kept.
+     *
+     * transform() built this per vertex, and it is a (D+1)-square matrix
+     * multiplied by another: O(D^3) for every corner.  At D=14 that is 3375
+     * multiply-adds against 2475 for the whole reduction chain underneath it,
+     * so the setup cost more than the work it was setting up.
+     *
+     * A vector for the same reason m_project is one -- matrix has no default
+     * constructor -- and empty means "not built".  Discarded wherever the
+     * stacks move: push(), pop(), multiply(), setClip() and change().  Nothing
+     * outside this class touches either stack, which is what makes that list
+     * complete rather than hopeful.
+     */
+    mutable std::vector< math::matrix<T> > m_mvp;
+
     /** Build m_project if it is empty. */
     void build_projections() const;
+
+    /** Build m_mvp if it is empty. */
+    void build_mvp() const;
 
     std::vector< std::pair<T,T> > clip;
     // Held by pointer so a shape keeps its type.  These used to be stored by
@@ -287,7 +306,9 @@ inline
 math::vertex<T> Plot<T>::transform(const math::vertex<T>& vertex) const {
     math::vertex<T> ret(D);
 
-    ret = (projection.top() * modelview.top() * vertex());
+    build_mvp();
+
+    ret = (m_mvp.front() * vertex());
 
     // The outermost step: divided unless the mode is fully orthographic.
     if(m_projection != projection_mode::orthographic) {
@@ -378,6 +399,7 @@ inline
 void Plot<T>::setClip(const std::vector< std::pair<T,T> >& c) {
     clip = c;
     m_project.clear();
+    m_mvp.clear();
 }
 
 
@@ -397,7 +419,18 @@ void Plot<T>::build_projections() const {
 
 template<typename T>
 inline
+void Plot<T>::build_mvp() const {
+    if(!m_mvp.empty())
+        return;
+
+    m_mvp.push_back(projection.top() * modelview.top());
+}
+
+template<typename T>
+inline
 void Plot<T>::push() {
+    m_mvp.clear();
+
     switch(current) {
     case MODELVIEW:
         modelview.push(modelview.top());
@@ -412,6 +445,8 @@ void Plot<T>::push() {
 template<typename T>
 inline
 void Plot<T>::pop() {
+    m_mvp.clear();
+
     switch(current) {
     case MODELVIEW:
         modelview.pop();
@@ -426,6 +461,8 @@ void Plot<T>::pop() {
 template<typename T>
 inline
 void Plot<T>::multiply(const math::matrix<T>& m) {
+    m_mvp.clear();
+
     switch(current) {
     case MODELVIEW:
         modelview.top() = modelview.top() * m;
@@ -459,6 +496,8 @@ void Plot<T>::change(uint n) {
     }
     modelview.push(math::matrix<T>::identity(D+1));
     projection.push(math::matrix<T>::identity(D+1));
+
+    m_mvp.clear();
 
     if(D > 2) {
         set(PROJECTION);

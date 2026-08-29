@@ -725,6 +725,24 @@ matrix<T>& matrix<T>::operator=(const matrix<T>& m) {
     // from somewhere it would write through instead of taking a copy.  A fresh
     // matrix owns its buffer alone, and handing that buffer over is the whole
     // of the assignment.
+    // In place when the shape already fits, which is the common case and the
+    // one the plot path hits every step.  Through a temporary otherwise,
+    // because rep.resize() keeps the array it already has when that one is big
+    // enough and would leave M*N disagreeing with the storage.
+    //
+    // Safe in place only because matrices no longer share with each other
+    // (#76).  The one remaining way to get a second handle on rep is
+    // operator buffer<T>(), which returns by value and whose two callers take
+    // .data() from the temporary and drop it -- so nothing outlives this.
+    if(M == m.M && N == m.N) {
+        const uint n = M * N;
+
+        for(uint i = 0; i < n; i++)
+            rep[i] = m.rep[i];
+
+        return *this;
+    }
+
     matrix<T> tmp(m);
 
     M = tmp.M;
@@ -1335,9 +1353,26 @@ void vertex<T>::normalize() {
 template<typename T>
 inline
 void vertex<T>::change(uint n) {
-    vertex<T> ncol(n);
-    ncol = *this;
-    col = ncol;
+    if(n == D)
+        return;
+
+    // One allocation, where this was five.  It used to build a whole vertex,
+    // element-assign into it, then assign that through operator matrix<T>()
+    // -- a conversion by value -- into col, which allocated again.  The plot
+    // path calls this once per reduction step per vertex, so it was the
+    // single largest source of allocation in a frame.
+    matrix<T> ncol(n + 1, 1);
+
+    const uint keep = (n < D) ? n : D;
+
+    for(uint i = 0; i < keep; i++)
+        ncol(i, 0) = col(i, 0);
+
+    // The homogeneous coordinate the constructor would have set.
+    ncol(n, 0) = 1;
+
+    col = std::move(ncol);
+
     D = n;
 }
 
