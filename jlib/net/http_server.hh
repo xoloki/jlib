@@ -155,7 +155,30 @@ public:
     bool serve_one(double timeout = 0);
     /** serve_one() until stop().  One-shot; see sys::server::run(). */
     void run();
-    void stop();
+
+    /**
+     * Ask run(), and any serve_one() that is waiting, to return.
+     *
+     * @param drain  answer the requests already accepted but not yet started,
+     *               or drop them unanswered.  Queued work only: a handler
+     *               already running finishes either way.
+     *
+     * Passed straight to sys::server::stop(), which is where the whole story
+     * is.  The part worth repeating here is that dropping a request answers it
+     * with nothing -- not a 503, not a close-after-status, just a close -- so
+     * false is for shutting down under duress and true is for shutting down.
+     */
+    void stop(bool drain = true);
+
+    /**
+     * Wait for the handler threads to retire.  **stop() first.**
+     *
+     * sys::server::join() does not stop on its own behalf and neither does
+     * this, so a join() without a preceding stop() hangs -- with a pool.  With
+     * the default policy there is no pool, nothing to retire, and this returns
+     * at once, which is why every serial section of a test can get the order
+     * wrong and never find out.  The destructor does both, in order.
+     */
     void join();
 
     /** The transport underneath: its policy, its peers, its on_error. */

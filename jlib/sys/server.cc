@@ -119,16 +119,22 @@ std::size_t server::cap() const {
     return m_policy.max_queued != 0 ? m_policy.max_queued : m_policy.threads;
 }
 
-void server::stop() {
+void server::stop(bool drain) {
     m_stop.store(true);
+
+    // What drain decides is the fate of jobs still queued -- connections
+    // accepted but not yet started.  Abandoning one destroys the
+    // shared_ptr<held_fd> it carries, so the descriptor closes rather than
+    // leaks (see serve_one, which names this as one of the three drop paths
+    // that indirection buys).  A handler already running is not affected.
+    //
+    // Kept out of the enumeration below because it is a separate question: the
+    // call wakes a parked thread whichever way drain goes.
 
     // Three ways a thread can be blocked in here, and shutdown hangs if any one
     // is missed.  This is the second: a thread parked in the queue's depth
     // wait, whose predicate ORs in the queue's own exit flag.
-    //
-    // Drained, so a connection already accepted is still served: it is not the
-    // client's fault that we are going away.
-    m_jobs.stop(true);
+    m_jobs.stop(drain);
 
     // And the third: a thread in poll(2).  A byte down the pipe rather than
     // closing the listening descriptor, which is undefined while another thread
@@ -138,11 +144,10 @@ void server::stop() {
 }
 
 void server::join() {
-    // The stop is what makes this terminate.  job_queue's workers wait for work
-    // indefinitely, so joining them without telling them to leave waits for
-    // something that never happens.  Draining, so nothing accepted is
-    // discarded; idempotent, so ~server calling stop() first costs nothing.
-    m_jobs.stop(true);
+    // No stop() here, deliberately -- see the header.  The workers wait for
+    // work forever, so a caller who has not stopped will hang; a stop() added
+    // here to prevent that would have to pick a drain argument, and picking one
+    // overwrites what a caller who did stop already asked for.
     m_jobs.join();
 }
 

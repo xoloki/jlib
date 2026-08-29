@@ -227,7 +227,8 @@ public:
     /**
      * Ask run(), and any serve_one() that is waiting, to return.
      *
-     * Safe from any thread, including from inside a handler.  Idempotent.
+     * Safe from any thread, including from inside a handler.  Calling it twice
+     * is harmless, but it is *not* first-wins: see @p drain.
      *
      * **This is not a barrier**, and everywhere else in this library "stop"
      * means stopped.  Handlers already running keep running, and whatever they
@@ -239,23 +240,48 @@ public:
      * rather than closing the listening descriptor, because closing one that
      * another thread is blocked in poll(2) on is undefined and on macOS does
      * not wake it.
+     *
+     * @param drain  serve what has been accepted but not yet started, or throw
+     *               it away.
+     *
+     * Queued work only.  A handler already running is unaffected either way, so
+     * this draws the same line between waiting and running that max_queued
+     * draws against threads -- and for the same reason, since a job that has
+     * been popped is no longer the queue's to abandon.
+     *
+     * False drops those connections with no answer at all.  Their descriptors
+     * are closed rather than leaked, because each rides in the job's
+     * shared_ptr<held_fd> and dropping the job destroys it, so the client sees
+     * an immediate close rather than waiting out its own timeout -- but it is
+     * still a close in place of a response, which is why true is the default.
+     *
+     * job_queue::stop() assigns its drain flag every time, so a later
+     * stop(true) silently upgrades an earlier stop(false) back to draining.
+     * That is why join() does not stop on your behalf: it would have to guess
+     * at this, and guessing overwrites what the caller asked for.
      */
-    void stop();
+    void stop(bool drain = true);
 
     bool stopped() const;
 
     /**
-     * Stop taking work, and wait for what has been accepted to be served.
+     * Wait for the handler threads to retire.  **stop() first.**
      *
-     * **This stops the queue**, and that is not an implementation detail to be
-     * tidied away: a job_queue's workers wait for work forever, so "wait for
-     * them to finish" is only a terminating question once they have been told
-     * to leave.  A join() that did not stop would hang, which is exactly what
-     * an earlier version of this did.
+     * A job_queue's workers wait for work forever, so "wait for them to finish"
+     * is only a terminating question once they have been told to leave.  This
+     * does not tell them.  An earlier version called stop() here to make the
+     * ordering impossible to get wrong; it no longer does, because stop() is
+     * not first-wins and joining would have to guess at its drain argument.
      *
-     * So: serving is over when this returns.  It is the second half of the
-     * destructor, callable on its own -- not a barrier you can take in the
-     * middle of a run and carry on from.
+     * So the sequence is stop() then join(), which is what the destructor does.
+     * Serving is over when this returns.  It is not a barrier you can take in
+     * the middle of a run and carry on from.
+     *
+     * **A join() without a stop() hangs** -- and hangs only with a pool.  With
+     * threads == 0 there is nothing to retire and this returns at once, so a
+     * serial server survives the wrong order and a pooled one deadlocks on it.
+     * That is a bad failure mode to discover by adding a thread later, so the
+     * order is worth getting right even where it currently cannot bite.
      *
      * **Never from a handler**: with a pool that joins a worker to itself.  And
      * it does not wait for run() -- join the thread you started run() on

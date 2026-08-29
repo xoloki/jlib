@@ -212,6 +212,10 @@ static void several_at_once_when_asked() {
 
     for(int i = 0; i < clients; i++) srv.serve_one(10);
 
+    // stop() then join(), in that order.  join() waits for the pool to retire
+    // and does not tell it to leave, so joining a pooled server without
+    // stopping it first waits for something that never happens.
+    srv.stop();
     srv.join();
 
     const double took = seconds_since(start);
@@ -270,6 +274,7 @@ static void the_cap_holds_at_two() {
 
     for(int i = 0; i < clients; i++) srv.serve_one(10);
 
+    srv.stop();
     srv.join();
 
     for(std::thread& t : them) t.join();
@@ -332,6 +337,7 @@ static void the_two_paths_became_one() {
 
         srv.serve_one(5);
         client.join();
+        srv.stop();
         srv.join();
 
         ok("and with a pool of one it does not",
@@ -459,6 +465,75 @@ static void stopping() {
     client.join();
 
     ok("and stop() works from inside a handler", inner.stopped());
+}
+
+static void stopping_without_draining() {
+    std::cout << "\nstopping without draining:\n";
+
+    std::atomic<int> ran{0};
+
+    // One worker and a queue with room, so all three connections are posted at
+    // once and the two behind the first are still waiting when the stop lands.
+    sys::server::policy p;
+    p.threads = 1;
+    p.max_queued = 4;
+
+    const int clients = 3;
+
+    std::vector<std::string> answers(clients);
+    std::vector<std::thread> them;
+
+    double took = 0;
+
+    {
+        sys::server srv(0, [&ran](sys::socketstream& s, const sys::peer&) {
+            ran++;
+
+            std::string line;
+            std::getline(s, line);
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+            s << "served\r\n" << std::flush;
+        }, "127.0.0.1", sys::tls_context(), p);
+
+        for(int i = 0; i < clients; i++)
+            them.emplace_back([&srv, &answers, i] {
+                answers[i] = ask(srv.port(), "go");
+            });
+
+        for(int i = 0; i < clients; i++) srv.serve_one(10);
+
+        const auto start = std::chrono::steady_clock::now();
+
+        srv.stop(false);
+        srv.join();
+
+        took = seconds_since(start);
+    }
+
+    for(std::thread& t : them) t.join();
+
+    // The one already running still finishes: drain is about queued work, not
+    // about cancelling a handler mid-flight.  So this waits for that one and
+    // not for the two behind it.
+    ok("join() waits for the running handler and not for the queue",
+       took < clients * 0.4, std::to_string(took) + "s");
+
+    ok("the queued connections never reached the handler", ran.load() < clients,
+       std::to_string(ran.load()) + "/" + std::to_string(clients) + " ran");
+
+    int answered = 0;
+
+    for(const std::string& a : answers) if(!a.empty()) answered++;
+
+    // Closed rather than left hanging.  The descriptor rides in the job's
+    // shared_ptr<held_fd>, so dropping the job destroys it and the client gets
+    // an immediate EOF; ask() would otherwise sit on its own five-second
+    // timeout, and this section would take five seconds rather than one.
+    ok("and their clients were closed rather than left waiting",
+       answered < clients,
+       std::to_string(answered) + " of " + std::to_string(clients) + " answered");
 }
 
 static void the_destructor_waits_for_a_handler() {
@@ -617,6 +692,7 @@ int main() {
     the_two_paths_became_one();
     a_busy_pool_is_not_a_full_queue();
     stopping();
+    stopping_without_draining();
     the_destructor_waits_for_a_handler();
     over_tls();
 
@@ -634,6 +710,12 @@ int main() {
     //
     // Not client certificates, which the context deliberately neither asks for
     // nor examines.
+    //
+    // Not that an abandoned connection's descriptor is closed at the OS level.
+    // "Stopping without draining" infers it from the client seeing an
+    // immediate EOF, which is what a close looks like from the far end but is
+    // also what it would look like if the process had exited.  Only a
+    // descriptor count across the whole section would say it properly.
     std::cout << "\n" << (failures ? "FAILED" : "PASSED") << ": " << failures
               << " failure(s)\n";
 

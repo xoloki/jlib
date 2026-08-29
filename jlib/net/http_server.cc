@@ -203,7 +203,7 @@ bool server::serve_one(double timeout) { return m_transport->serve_one(timeout);
 
 void server::run() { m_transport->run(); }
 
-void server::stop() { m_transport->stop(); }
+void server::stop(bool drain) { m_transport->stop(drain); }
 
 void server::join() { m_transport->join(); }
 
