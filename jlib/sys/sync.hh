@@ -93,8 +93,15 @@ public:
     }
 
     void set(const_reference val) {
-        safe_set(m_val, val, m_lock);
-        notify_all();
+        // One critical section, covering the assignment *and* the notify.  See
+        // the note on notify() below: releasing first leaves a window in which
+        // a waiter can observe the new value, act on it, and destroy this
+        // object before the notify lands on it.
+        std::unique_lock<std::mutex> lock(m_lock);
+
+        m_val = val;
+
+        m_cond.notify_all();
     }
 
     reference ref() { return m_val; }
@@ -147,6 +154,38 @@ public:
         m_cond.wait(lock, std::move(pred));
     }
     
+    /**
+     * Wake one waiter, or all of them.
+     *
+     * ## Everything inside this class notifies with the lock held
+     *
+     * set() above does, and so does job_queue.  The reason is lifetime, not
+     * speed.  Notify after releasing the lock and there is a window in which a
+     * waiter can take the lock, see the condition it was waiting for, act on
+     * it, and destroy this object -- and then the notifier touches a dead
+     * condition variable.  It is the classic shape:
+     *
+     *     { lock; done = true; }
+     *     cv.notify_one();          // the waiter may already have deleted us
+     *
+     * Holding the lock across the notify makes that impossible, and a
+     * general-purpose primitive should be safe by construction rather than
+     * safe because its current callers happen to be arranged well.  Nothing in
+     * jlib can reach that window today; the point is that nothing using this
+     * later has to check.
+     *
+     * The cost is that a woken waiter may only get as far as blocking on the
+     * mutex the notifier still holds -- though an implementation is allowed to
+     * move it straight from this condition variable's queue onto the mutex's
+     * instead of scheduling it, so how much that costs is implementation
+     * dependent and nobody here has measured it.  For one waiter it is at most
+     * one thread either way.
+     *
+     * A caller that invokes this directly makes its own choice; jlib has one
+     * such place, media::Player, which notifies outside the lock and takes the
+     * lock and drops it first as a barrier -- aimed at a lost wakeup rather
+     * than at lifetime, and commented where it happens.
+     */
     void notify() {
         m_cond.notify_one();
     }
@@ -249,6 +288,8 @@ public:
             return;
         }
 
+        // Push and signal in one critical section; see the note on
+        // sync<T>::notify.
         std::unique_lock<std::mutex> lock(m_queue);
 
         m_queue().push(std::move(job));
@@ -301,9 +342,9 @@ public:
 
             m_drain = drain;
             m_exit = true;
-        }
 
-        m_queue.notify_all();
+            m_queue.notify_all();
+        }
     }
 
     /** Wait for every worker to leave.  Idempotent. */
