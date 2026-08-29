@@ -66,6 +66,7 @@ TESTS = \
 	net_same_address_test \
  \
 	sys_sync_test \
+	sys_asservent_test \
 	sys_run_test \
 	sys_socket_test \
 	sys_sigpipe_test \
@@ -196,6 +197,9 @@ sys_run_test_LDADD              = $(JSYS_LA) $(JUTIL_LA)
 
 sys_sync_test_SOURCES = sys_sync_test.cc
 sys_sync_test_LDADD   = $(JSYS_LA)
+
+sys_asservent_test_SOURCES = sys_asservent_test.cc
+sys_asservent_test_LDADD   = $(JSYS_LA)
 
 sys_socket_test_SOURCES = sys_socket_test.cc
 sys_socket_test_LDADD   = $(JSYS_LA)

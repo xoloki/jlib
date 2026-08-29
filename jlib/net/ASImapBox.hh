@@ -36,6 +36,17 @@ namespace jlib {
         public:
             ASImapBox(jlib::util::URL url, bool idle = false);
 
+            /**
+             * Stops the worker before this object's own state goes away.
+             *
+             * ~ASServent stops it too, but by then the on_*() overrides the
+             * worker calls through handle(Request) have already been
+             * destroyed -- and they are pure virtual in ASMailBox, so that is
+             * a pure virtual call rather than merely a race.  See
+             * ASServent::stop().
+             */
+            virtual ~ASImapBox();
+
             virtual void on_init();
 
             virtual void on_set_password(const std::string& password);

@@ -37,6 +37,12 @@ namespace jlib {
         {
         }
 
+        ASImapBox::~ASImapBox() {
+            // Before m_sock and the Imap4 half go: the worker reaches both
+            // through the on_*() overrides declared here.
+            stop();
+        }
+
         
         void ASImapBox::on_init() {
             if(m_sock) {
