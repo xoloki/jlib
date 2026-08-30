@@ -159,6 +159,34 @@ static void a_vertex_is_a_value() {
     }
 }
 
+static void data_points_at_d_plus_one() {
+    std::cout << "\ndata() points at D+1 components:\n";
+
+    // The invariant jhardhyper's dimension floor rests on.  vertex(n) builds
+    // an (n+1)x1 column -- n coordinates and a homogeneous 1 -- so data()
+    // addresses D+1 doubles and no more.  A fixed-arity read of four, which
+    // is what glVertex4dv does, therefore needs D >= 3.
+    for(uint d = 1; d <= 5; d++) {
+        vertex<double> v(d);
+
+        for(uint i = 0; i < d; i++)
+            v[i] = i + 1;
+
+        bool placed = true;
+
+        for(uint i = 0; i < d; i++)
+            if(v.data()[i] != double(i + 1)) placed = false;
+
+        ok("D=" + std::to_string(d) + ": every coordinate is where data() says",
+           placed);
+
+        // Index D is the homogeneous coordinate, and reaching it is what says
+        // the buffer really holds D+1 rather than D.
+        ok("  and index D is the homogeneous 1", v.data()[d] == 1.0,
+           std::to_string(v.data()[d]));
+    }
+}
+
 static void the_jhypermusic_case() {
     std::cout << "\nthe case from the field:\n";
 
@@ -280,6 +308,7 @@ int main() {
 
     a_matrix_is_a_value();
     a_vertex_is_a_value();
+    data_points_at_d_plus_one();
     the_jhypermusic_case();
     transpose_is_a_value_too();
     the_submatrix_constructor_works();

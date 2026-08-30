@@ -1175,7 +1175,22 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
     } else if(key == 'e' || key == 'd') {
         uint d = (key == 'e' ? this->D + 1 : this->D - 1);
 
-        if(d < 1)
+        // Three, not one.  This app reduces N to three and hands real 3-D to
+        // GL; below three there is nothing to reduce and nothing to hand over,
+        // so the state is meaningless rather than merely unsupported.
+        //
+        // It was also unsafe.  The reduction stops at d > 3, so a vertex
+        // arrives at draw_point with whatever D the plot is set to, and
+        // vertex::data() points at D+1 doubles -- the coordinates plus the
+        // homogeneous w.  glVertex4dv reads four of them, so D=2 read one
+        // past the end and D=1 read two.  From the default D=5, pressing 'd'
+        // three times reached it.
+        //
+        // The other hyper apps keep their floor at 1: they reduce all the way
+        // to two and go through pixel pairs, where those dimensions both mean
+        // something and are safe.  This is jhardhyper's constraint, not the
+        // library's, which is why it is here and not in Hyper.hh.
+        if(d < 3)
             return;
 
         initialize(d);
@@ -1372,8 +1387,21 @@ public:
 
 int main(int argc, char** argv) {
     uint D = 5;
+
     if(argc > 1) {
-        D = atoi(argv[1]);
+        const int d = atoi(argv[1]);
+
+        // Same floor as the d key, and for the same reason -- but reachable
+        // here without pressing anything, and atoi answers 0 for a word, so
+        // `jhardhyper foo` was as far out of bounds as `jhardhyper 2`.
+        if(d < 3) {
+            std::cerr << argv[0] << ": dimension must be at least 3"
+                      << " (this reduces N to three and draws that; below"
+                      << " three there is nothing to reduce)\n";
+            exit(1);
+        }
+
+        D = static_cast<uint>(d);
     }
 
     try {
