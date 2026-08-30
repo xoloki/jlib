@@ -402,6 +402,61 @@ static void the_activation_survives_a_round_trip() {
     ok("an unknown name is refused rather than defaulted", threw);
 }
 
+static void the_multiply_can_be_replaced() {
+    std::cout << "\nthe multiply can be replaced:\n";
+
+    // Everything expensive in this class is a GEMM, so this hook is the whole
+    // of what a GPU takes over.  Injected rather than depended on: jlib/ai
+    // builds before jlib/metal and must not need it, so the caller supplies
+    // one.  See jneural-alpha's --metal.
+    NeuralNetwork<double> nn(0.1, I, hidden(), O);
+
+    int calls = 0;
+
+    nn.set_multiply([&calls](const matrix<double>& a, const matrix<double>& b) {
+            calls++;
+            return a * b;
+        });
+
+    nn.train(input(0), target(0));
+
+    // One per layer forward, one per layer backward, give or take: what
+    // matters is that it is used at all rather than the exact count, which is
+    // an implementation detail of train().
+    ok("an injected multiply is actually used", calls > 0,
+       std::to_string(calls) + " calls");
+
+    const int after_train = calls;
+
+    nn.query(input(0));
+
+    ok("and by query() too", calls > after_train,
+       std::to_string(calls - after_train) + " more");
+
+    // The results must not depend on who did the multiplying.
+    NeuralNetwork<double> plain(0.1, I, hidden(), O);
+    NeuralNetwork<double> hooked(plain.json());
+
+    hooked.set_multiply([](const matrix<double>& a, const matrix<double>& b) {
+            return a * b;
+        });
+
+    plain.train(input(1), target(1));
+    hooked.train(input(1), target(1));
+
+    ok("and a multiply that agrees gives an identical network",
+       worst(weights(plain), weights(hooked)) == 0.0,
+       std::to_string(worst(weights(plain), weights(hooked))));
+
+    // Passing nothing puts the default back rather than leaving a null in the
+    // hot path, which would be a crash on the next train().
+    hooked.set_multiply(nullptr);
+
+    hooked.query(input(0));
+
+    ok("and clearing it restores the default rather than crashing", true);
+}
+
 static void a_mismatched_batch_is_refused() {
     std::cout << "\na mismatched batch is refused:\n";
 
@@ -426,6 +481,7 @@ int main() {
     weights_are_scaled_by_the_fan_in();
     each_activation_and_its_slope();
     the_activation_survives_a_round_trip();
+    the_multiply_can_be_replaced();
     a_mismatched_batch_is_refused();
 
     // What a green run does not establish.
