@@ -32,11 +32,18 @@ namespace {
 /**
  * The elementwise kernels, compiled at load.
  *
- * Source rather than a precompiled .metallib, deliberately for now: a
- * metallib means .metal files and a compile step in the build, and this is
- * four small kernels.  It costs one compile the first time a stream is made,
- * measured below a tenth of a second, and it keeps the build ordinary.
- * Precompiling is the right answer once there are enough kernels to matter.
+ * Source rather than a precompiled .metallib: that would mean .metal files and
+ * a compile step in the build, and this is five small kernels.
+ *
+ * Measured, on an M5: **0.8 to 2.6 ms**, once, on the first stream a process
+ * makes.  Every stream after it is free -- the library and the five pipeline
+ * states are built once and kept.  The spread is the system's own shader
+ * cache warming across runs; the 2.6ms is the coldest observed.
+ *
+ * So precompiling would buy about a millisecond of startup, which is not a
+ * reason to put a shader toolchain in the build.  That changes if the kernel
+ * count grows a lot, or if something needs to run where compiling at load is
+ * not allowed.
  *
  * The activation codes match jlib::metal::activation, and the test asserts
  * they match jlib::ai::activation too.
