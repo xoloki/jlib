@@ -45,7 +45,12 @@ endif
 # itself also exits 77 if there is no device, which covers a machine that has
 # the frameworks and no hardware.
 if HAVE_METAL
-METAL_TESTS = metal_gemm_test metal_tensor_test
+METAL_TESTS    = metal_gemm_test metal_tensor_test
+METAL_CPPFLAGS = -DHAVE_METAL
+METAL_LA       = $(top_builddir)/jlib/metal/libjmetal.la $(METAL_LIBS)
+else
+METAL_CPPFLAGS =
+METAL_LA       =
 endif
 
 TESTS = \
@@ -54,6 +59,7 @@ TESTS = \
 	math_plot_alloc_test \
 	math_dump_test \
 	ai_neural_test \
+	ai_backend_test \
 	math_object_test \
 	tensor_test \
 \
@@ -301,3 +307,7 @@ metal_gemm_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(METAL_LIBS)
 
 metal_tensor_test_SOURCES = metal_tensor_test.cc
 metal_tensor_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(JUTIL_LA) $(JSYS_LA) $(METAL_LIBS)
+
+ai_backend_test_SOURCES  = ai_backend_test.cc
+ai_backend_test_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)
+ai_backend_test_LDADD    = $(top_builddir)/jlib/ai/libjai.la $(JUTIL_LA) $(JSYS_LA) $(METAL_LA)

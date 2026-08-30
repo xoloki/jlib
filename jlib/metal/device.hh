@@ -96,8 +96,12 @@ private:
     std::unique_ptr<impl> m_impl;
 
     friend class matrix_multiply;
-    friend class tensor;
-    friend class stream;
+
+    // Templates, so the friend declarations are too -- a plain `friend class
+    // tensor;` forward-declares a non-template of that name and the real
+    // definition then collides with it.
+    template<typename> friend class tensor;
+    template<typename> friend class stream;
 };
 
 }

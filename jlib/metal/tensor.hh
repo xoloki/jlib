@@ -24,6 +24,8 @@
 
 #include <jlib/math/matrix.hh>
 
+#include <jlib/ai/backend.hh>
+
 #include <memory>
 #include <string>
 
@@ -45,6 +47,24 @@ enum class activation { sigmoid, tanh, relu, leaky_relu };
 inline constexpr float LEAK = 0.01f;
 
 /**
+ * The element types this module supports.
+ *
+ * float and _Float16, and nothing else.  Metal Shading Language has no double
+ * -- the compiler refuses it in as many words -- so metal::tensor<double> must
+ * fail with something a reader can act on rather than a page of template
+ * errors.  bfloat compiles in MSL too and is the better type for inference;
+ * adding it is a third instantiation and a third kernel name, not a design
+ * change.
+ *
+ * _Float16 is a compiler extension rather than standard C++: clang and gcc
+ * both have it, C23 standardises it, C++ has not yet.  Verified working with
+ * math::matrix on Apple clang arm64 and gcc 13 x86_64.
+ */
+template<typename T> struct supported { static constexpr bool value = false; };
+template<> struct supported<float> { static constexpr bool value = true; };
+template<> struct supported<_Float16> { static constexpr bool value = true; };
+
+/**
  * A matrix that lives on the GPU.
  *
  * The whole reason this exists.  gemm.hh takes math::matrix, so every call
@@ -60,24 +80,20 @@ inline constexpr float LEAK = 0.01f;
  * Column-major, matching math::matrix -- see stream::multiply for why that
  * costs nothing.
  */
+template<typename T>
 class tensor {
+    static_assert(supported<T>::value,
+                  "metal::tensor supports float and _Float16.  Metal Shading "
+                  "Language has no double, so there is no fp64 path to add.");
+
 public:
-    class exception : public std::exception {
-    public:
-        exception(const std::string& msg = "") {
-            m_msg = "jlib::metal::tensor exception" + (msg.empty() ? "" : ": " + msg);
-        }
-        virtual ~exception() {}
-        virtual const char* what() const noexcept { return m_msg.c_str(); }
-    protected:
-        std::string m_msg;
-    };
+    typedef ai::backend_error exception;
 
     /** Uninitialised, on the device. */
     tensor(std::shared_ptr<device> d, unsigned int rows, unsigned int cols);
 
     /** Uploaded from the host. */
-    tensor(std::shared_ptr<device> d, const math::matrix<float>& m);
+    tensor(std::shared_ptr<device> d, const math::matrix<T>& m);
 
     ~tensor();
 
@@ -98,10 +114,10 @@ public:
      * stream::wait().  Reading a tensor a stream is still building is a race,
      * and nothing here can detect it for you.
      */
-    math::matrix<float> read() const;
+    math::matrix<T> read() const;
 
     /** Copy in from the host, overwriting. */
-    void write(const math::matrix<float>& m);
+    void write(const math::matrix<T>& m);
 
 private:
     std::shared_ptr<device> m_device;
@@ -112,7 +128,7 @@ private:
     struct impl;
     std::unique_ptr<impl> m_impl;
 
-    friend class stream;
+    template<typename> friend class stream;
 };
 
 /**
@@ -126,18 +142,12 @@ private:
  * whatever it held before, which is the one sharp edge in the design and the
  * price of not stalling between every operation.
  */
+template<typename T>
 class stream {
+    static_assert(supported<T>::value, "metal::stream supports float and _Float16");
+
 public:
-    class exception : public std::exception {
-    public:
-        exception(const std::string& msg = "") {
-            m_msg = "jlib::metal::stream exception" + (msg.empty() ? "" : ": " + msg);
-        }
-        virtual ~exception() {}
-        virtual const char* what() const noexcept { return m_msg.c_str(); }
-    protected:
-        std::string m_msg;
-    };
+    typedef ai::backend_error exception;
 
     explicit stream(std::shared_ptr<device> d = device::shared());
 
@@ -147,31 +157,31 @@ public:
     stream& operator=(const stream&) = delete;
 
     /** c = alpha * a * b + beta * c. */
-    void multiply(const tensor& a, const tensor& b, tensor& c,
+    void multiply(const tensor<T>& a, const tensor<T>& b, tensor<T>& c,
                   float alpha = 1.0f, float beta = 0.0f);
 
     /** c = alpha * a^T * b + beta * c, without materialising the transpose. */
-    void multiply_tn(const tensor& a, const tensor& b, tensor& c,
+    void multiply_tn(const tensor<T>& a, const tensor<T>& b, tensor<T>& c,
                      float alpha = 1.0f, float beta = 0.0f);
 
     /** c = alpha * a * b^T + beta * c. */
-    void multiply_nt(const tensor& a, const tensor& b, tensor& c,
+    void multiply_nt(const tensor<T>& a, const tensor<T>& b, tensor<T>& c,
                      float alpha = 1.0f, float beta = 0.0f);
 
     /** out = f(in). */
-    void activate(activation kind, const tensor& in, tensor& out);
+    void activate(activation kind, const tensor<T>& in, tensor<T>& out);
 
     /** out = f'(x), taken from f's own output.  See ai::activation. */
-    void slope(activation kind, const tensor& out_of_layer, tensor& out);
+    void slope(activation kind, const tensor<T>& out_of_layer, tensor<T>& out);
 
     /** c = a * b, elementwise. */
-    void hadamard(const tensor& a, const tensor& b, tensor& c);
+    void hadamard(const tensor<T>& a, const tensor<T>& b, tensor<T>& c);
 
     /** c = a - b. */
-    void subtract(const tensor& a, const tensor& b, tensor& c);
+    void subtract(const tensor<T>& a, const tensor<T>& b, tensor<T>& c);
 
     /** y += alpha * x. */
-    void add_scaled(float alpha, const tensor& x, tensor& y);
+    void add_scaled(float alpha, const tensor<T>& x, tensor<T>& y);
 
     /** Commit everything encoded so far and block until the GPU is done. */
     void wait();
