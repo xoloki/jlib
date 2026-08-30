@@ -24,6 +24,7 @@
 
 #include <cmath>
 #include <memory>
+#include <limits>
 #include <sstream>
 #include <string>
 
@@ -157,6 +158,34 @@ public:
     /** dst = src.  Same shape, no reallocation. */
     virtual void assign(const tensor_ptr& src, tensor_ptr& dst) = 0;
 
+    /**
+     * Softmax down each column.
+     *
+     * A column is a sample -- matrices here are (features x batch) -- so this
+     * reduces over features and leaves each column summing to one.
+     *
+     * The maximum is subtracted first.  exp() of a score of 90 overflows a
+     * float and every score in that column becomes nan; subtracting the
+     * column's own maximum shifts the largest exponent to zero, which changes
+     * nothing about the result and everything about whether it exists.  In
+     * fp16 the ceiling is 65504, which arrives at a score of about 11.
+     */
+    virtual void softmax(const tensor_ptr& in, tensor_ptr& out) = 0;
+
+    /**
+     * Root-mean-square normalisation down each column, scaled per feature.
+     *
+     * out[r,c] = in[r,c] / sqrt(mean(in[:,c]^2) + eps) * weight[r]
+     *
+     * What a transformer uses in place of layer normalisation: no mean
+     * subtraction and no bias, which makes it cheaper and, in practice, no
+     * worse.  weight is one column of `rows` entries -- the learned scale --
+     * and is taken as an argument rather than applied afterwards because
+     * there is no broadcast operation to apply it with.
+     */
+    virtual void rms_norm(const tensor_ptr& in, const tensor_ptr& weight,
+                          tensor_ptr& out, float eps = 1e-5f) = 0;
+
     /** Everything encoded so far has finished when this returns. */
     virtual void wait() = 0;
 };
@@ -191,6 +220,9 @@ public:
     void subtract(const tensor_ptr& a, const tensor_ptr& b, tensor_ptr& c);
     void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y);
     void assign(const tensor_ptr& src, tensor_ptr& dst);
+    void softmax(const tensor_ptr& in, tensor_ptr& out);
+    void rms_norm(const tensor_ptr& in, const tensor_ptr& weight,
+                  tensor_ptr& out, float eps = 1e-5f);
 
     void wait() {}
 
@@ -395,6 +427,71 @@ void host_backend<T>::add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y) {
 template<typename T>
 void host_backend<T>::assign(const tensor_ptr& src, tensor_ptr& dst) {
     at(dst) = at(src);
+}
+
+template<typename T>
+void host_backend<T>::softmax(const tensor_ptr& in, tensor_ptr& out) {
+    const math::matrix<T>& x = at(in);
+    math::matrix<T>& y = at(out);
+
+    if(x.M != y.M || x.N != y.N)
+        throw backend_error("softmax: shapes differ");
+
+    // In double regardless of T.  This is the reference the GPU is checked
+    // against, so it should be the more accurate of the two rather than
+    // matching its rounding.
+    //
+    // Which moves the overflow this guards against but does not remove it:
+    // exp() in double survives to about 709 rather than 88, so the
+    // max-subtraction is still load-bearing here and is still tested.
+    for(uint c = 0; c < x.N; c++) {
+        double m = -std::numeric_limits<double>::infinity();
+
+        for(uint r = 0; r < x.M; r++)
+            m = std::max(m, double(x(r,c)));
+
+        double sum = 0;
+
+        for(uint r = 0; r < x.M; r++) {
+            const double e = std::exp(double(x(r,c)) - m);
+
+            y(r,c) = T(e);
+            sum += e;
+        }
+
+        // A column of all -inf would divide by zero.  Cannot arise from a
+        // finite input, since subtracting the maximum leaves at least one
+        // exponent at zero and so at least one term at one.
+        for(uint r = 0; r < x.M; r++)
+            y(r,c) = T(double(y(r,c)) / sum);
+    }
+}
+
+template<typename T>
+void host_backend<T>::rms_norm(const tensor_ptr& in, const tensor_ptr& weight,
+                               tensor_ptr& out, float eps)
+{
+    const math::matrix<T>& x = at(in);
+    const math::matrix<T>& w = at(weight);
+    math::matrix<T>& y = at(out);
+
+    if(x.M != y.M || x.N != y.N)
+        throw backend_error("rms_norm: shapes differ");
+
+    if(w.M != x.M || w.N != 1)
+        throw backend_error("rms_norm: the weight must be one column of rows entries");
+
+    for(uint c = 0; c < x.N; c++) {
+        double ss = 0;
+
+        for(uint r = 0; r < x.M; r++)
+            ss += double(x(r,c)) * double(x(r,c));
+
+        const double inv = 1.0 / std::sqrt(ss / double(x.M) + double(eps));
+
+        for(uint r = 0; r < x.M; r++)
+            y(r,c) = T(double(x(r,c)) * inv * double(w(r,0)));
+    }
 }
 
 }

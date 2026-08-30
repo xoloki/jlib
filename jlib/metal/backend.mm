@@ -148,6 +148,18 @@ void backend<T>::assign(const tensor_ptr& src, tensor_ptr& dst) {
 }
 
 template<typename T>
+void backend<T>::softmax(const tensor_ptr& in, tensor_ptr& out) {
+    m_stream->softmax(at<T>(in), at<T>(out));
+}
+
+template<typename T>
+void backend<T>::rms_norm(const tensor_ptr& in, const tensor_ptr& weight,
+                          tensor_ptr& out, float eps)
+{
+    m_stream->rms_norm(at<T>(in), at<T>(weight), at<T>(out), eps);
+}
+
+template<typename T>
 void backend<T>::wait() {
     m_stream->wait();
 }

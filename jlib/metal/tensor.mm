@@ -128,6 +128,78 @@ kernel void k_add_scaled(device const T* x [[buffer(0)]],
     if(i < n) y[i] = T(float(y[i]) + alpha * float(x[i]));
 }
 
+// The reductions.  One thread per *column*, looping down the rows.
+//
+// Parallel across columns and serial within one, which is the right shape for
+// what this is for: a batch or a set of attention heads gives many columns,
+// and the feature dimension is what a column is.  A threadgroup reduction per
+// column would beat it when there are few very tall columns; that is a
+// measurement nobody has taken, and this is the version that is obviously
+// correct.
+
+template<typename T>
+kernel void k_softmax(device const T* in [[buffer(0)]],
+                      device T* out [[buffer(1)]],
+                      constant uint& rows [[buffer(2)]],
+                      constant uint& cols [[buffer(3)]],
+                      uint c [[thread_position_in_grid]])
+{
+    if(c >= cols) return;
+
+    // Column-major, so a column is contiguous.
+    device const T* x = in + (ulong)c * rows;
+    device T* y = out + (ulong)c * rows;
+
+    // The maximum first.  exp() of a large score overflows and takes the whole
+    // column to nan with it; subtracting the column's own maximum puts the
+    // largest exponent at zero and changes nothing else.
+    float m = -INFINITY;
+
+    for(uint r = 0; r < rows; r++)
+        m = max(m, float(x[r]));
+
+    float sum = 0.0f;
+
+    for(uint r = 0; r < rows; r++) {
+        const float e = exp(float(x[r]) - m);
+
+        y[r] = T(e);
+        sum += e;
+    }
+
+    for(uint r = 0; r < rows; r++)
+        y[r] = T(float(y[r]) / sum);
+}
+
+template<typename T>
+kernel void k_rms_norm(device const T* in [[buffer(0)]],
+                       device const T* w [[buffer(1)]],
+                       device T* out [[buffer(2)]],
+                       constant uint& rows [[buffer(3)]],
+                       constant uint& cols [[buffer(4)]],
+                       constant float& eps [[buffer(5)]],
+                       uint c [[thread_position_in_grid]])
+{
+    if(c >= cols) return;
+
+    device const T* x = in + (ulong)c * rows;
+    device T* y = out + (ulong)c * rows;
+
+    // Accumulated in float even when T is half: a sum of squares over a few
+    // thousand features overflows fp16 long before the values themselves do.
+    float ss = 0.0f;
+
+    for(uint r = 0; r < rows; r++) {
+        const float v = float(x[r]);
+        ss += v * v;
+    }
+
+    const float inv = rsqrt(ss / float(rows) + eps);
+
+    for(uint r = 0; r < rows; r++)
+        y[r] = T(float(x[r]) * inv * float(w[r]));
+}
+
 #define INSTANTIATE(NAME, T, SUFFIX)                                        \
     template [[host_name(#NAME SUFFIX)]] kernel void NAME<T>
 
@@ -151,6 +223,16 @@ INSTANTIATE(k_add_scaled, float, "_f32")(device const float*, device float*,
                                          constant float&, constant uint&, uint);
 INSTANTIATE(k_add_scaled, half, "_f16")(device const half*, device half*,
                                         constant float&, constant uint&, uint);
+INSTANTIATE(k_softmax, float, "_f32")(device const float*, device float*,
+                                      constant uint&, constant uint&, uint);
+INSTANTIATE(k_softmax, half, "_f16")(device const half*, device half*,
+                                     constant uint&, constant uint&, uint);
+INSTANTIATE(k_rms_norm, float, "_f32")(device const float*, device const float*,
+                                       device float*, constant uint&,
+                                       constant uint&, constant float&, uint);
+INSTANTIATE(k_rms_norm, half, "_f16")(device const half*, device const half*,
+                                      device half*, constant uint&,
+                                      constant uint&, constant float&, uint);
 )METAL";
 
 /** The per-type details: what MPS calls it, and what the kernels are named. */
@@ -254,6 +336,8 @@ struct stream<T>::impl {
     id<MTLComputePipelineState> hadamard = nil;
     id<MTLComputePipelineState> subtract = nil;
     id<MTLComputePipelineState> add_scaled = nil;
+    id<MTLComputePipelineState> softmax = nil;
+    id<MTLComputePipelineState> rms_norm = nil;
 
     unsigned int pending = 0;
 };
@@ -266,6 +350,8 @@ struct pipelines {
     id<MTLComputePipelineState> hadamard = nil;
     id<MTLComputePipelineState> subtract = nil;
     id<MTLComputePipelineState> add_scaled = nil;
+    id<MTLComputePipelineState> softmax = nil;
+    id<MTLComputePipelineState> rms_norm = nil;
 };
 
 /**
@@ -315,6 +401,8 @@ pipelines& compiled(id<MTLDevice> gpu) {
         { "k_hadamard",   &p.hadamard },
         { "k_subtract",   &p.subtract },
         { "k_add_scaled", &p.add_scaled },
+        { "k_softmax",    &p.softmax },
+        { "k_rms_norm",   &p.rms_norm },
     };
 
     for(auto& w : wanted) {
@@ -376,6 +464,8 @@ stream<T>::stream(std::shared_ptr<device> d)
     m_impl->hadamard = p.hadamard;
     m_impl->subtract = p.subtract;
     m_impl->add_scaled = p.add_scaled;
+    m_impl->softmax = p.softmax;
+    m_impl->rms_norm = p.rms_norm;
 }
 
 template<typename T>
@@ -511,6 +601,54 @@ void stream<T>::add_scaled(float alpha, const tensor<T>& x, tensor<T>& y) {
     [m_impl->enc setBytes:&n length:sizeof(n) atIndex:3];
 
     dispatch(m_impl->enc, m_impl->add_scaled, n);
+
+    m_impl->pending++;
+}
+
+template<typename T>
+void stream<T>::softmax(const tensor<T>& in, tensor<T>& out) {
+    same_shape(in, out, "softmax");
+
+    open();
+
+    const unsigned int rows = in.rows();
+    const unsigned int cols = in.cols();
+
+    [m_impl->enc setComputePipelineState:m_impl->softmax];
+    [m_impl->enc setBuffer:in.m_impl->buf offset:0 atIndex:0];
+    [m_impl->enc setBuffer:out.m_impl->buf offset:0 atIndex:1];
+    [m_impl->enc setBytes:&rows length:sizeof(rows) atIndex:2];
+    [m_impl->enc setBytes:&cols length:sizeof(cols) atIndex:3];
+
+    // One thread per column, not per element.
+    dispatch(m_impl->enc, m_impl->softmax, cols);
+
+    m_impl->pending++;
+}
+
+template<typename T>
+void stream<T>::rms_norm(const tensor<T>& in, const tensor<T>& weight,
+                         tensor<T>& out, float eps)
+{
+    same_shape(in, out, "rms_norm");
+
+    if(weight.rows() != in.rows() || weight.cols() != 1)
+        throw ai::backend_error("rms_norm: the weight must be one column of rows entries");
+
+    open();
+
+    const unsigned int rows = in.rows();
+    const unsigned int cols = in.cols();
+
+    [m_impl->enc setComputePipelineState:m_impl->rms_norm];
+    [m_impl->enc setBuffer:in.m_impl->buf offset:0 atIndex:0];
+    [m_impl->enc setBuffer:weight.m_impl->buf offset:0 atIndex:1];
+    [m_impl->enc setBuffer:out.m_impl->buf offset:0 atIndex:2];
+    [m_impl->enc setBytes:&rows length:sizeof(rows) atIndex:3];
+    [m_impl->enc setBytes:&cols length:sizeof(cols) atIndex:4];
+    [m_impl->enc setBytes:&eps length:sizeof(eps) atIndex:5];
+
+    dispatch(m_impl->enc, m_impl->rms_norm, cols);
 
     m_impl->pending++;
 }

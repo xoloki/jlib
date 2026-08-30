@@ -151,6 +151,144 @@ static void one_type(const char* name, std::vector<ai::backend<T>*>& backends) {
     }
 }
 
+/** Softmax and RMS norm, which are the first operations that reduce. */
+template<typename T>
+static void the_reductions(const char* name, std::vector<ai::backend<T>*>& backends) {
+    std::cout << "\nreductions, " << name << ":\n";
+
+    std::mt19937 gen(31);
+
+    // Rectangular, and taller than it is wide, because these reduce down a
+    // column: a square would let a rows/cols mix-up produce a plausible answer.
+    const matrix<T> x = random_matrix<T>(7, 4, gen);
+
+    matrix<T> w(7, 1);
+    for(uint r = 0; r < 7; r++) w(r,0) = T(0.5f + 0.1f * r);
+
+    std::vector<matrix<T> > soft, rms;
+
+    for(ai::backend<T>* b : backends) {
+        typename ai::backend<T>::tensor_ptr tx = b->make(x);
+        typename ai::backend<T>::tensor_ptr tw = b->make(w);
+        typename ai::backend<T>::tensor_ptr ts = b->make(7, 4);
+        typename ai::backend<T>::tensor_ptr tr = b->make(7, 4);
+
+        b->softmax(tx, ts);
+        b->rms_norm(tx, tw, tr, 1e-5f);
+        b->wait();
+
+        soft.push_back(ts->read());
+        rms.push_back(tr->read());
+    }
+
+    // Each column sums to one, which is the defining property and does not
+    // need a second implementation to check.
+    for(std::size_t i = 0; i < backends.size(); i++) {
+        double furthest = 0;
+
+        for(uint c = 0; c < 4; c++) {
+            double sum = 0;
+
+            for(uint r = 0; r < 7; r++) sum += double(float(soft[i](r,c)));
+
+            furthest = std::max(furthest, std::fabs(sum - 1.0));
+        }
+
+        ok(std::string("  ") + backends[i]->name() + ": every softmax column sums to one",
+           furthest < ((sizeof(T) == 2) ? 5e-3 : 1e-6),
+           "furthest from 1 was " + std::to_string(furthest));
+    }
+
+    // And RMS norm leaves each column with unit root-mean-square, once the
+    // per-feature weight is divided back out.
+    for(std::size_t i = 0; i < backends.size(); i++) {
+        double furthest = 0;
+
+        for(uint c = 0; c < 4; c++) {
+            double ss = 0;
+
+            for(uint r = 0; r < 7; r++) {
+                const double v = double(float(rms[i](r,c))) / double(float(w(r,0)));
+                ss += v * v;
+            }
+
+            furthest = std::max(furthest, std::fabs(std::sqrt(ss / 7.0) - 1.0));
+        }
+
+        // Just *under* one, not exactly one, and deliberately: eps sits in the
+        // denominator, so the result is scaled by 1/sqrt(1 + eps/ms).  For
+        // values in [-1,1] that is about 1.4e-5 low, which is what this
+        // measures -- the first version of this assertion used 1e-5 and caught
+        // eps rather than a bug.  A real error here is of order one.
+        ok(std::string("  ") + backends[i]->name() + ": rms_norm leaves unit RMS",
+           furthest < ((sizeof(T) == 2) ? 5e-3 : 1e-3),
+           "furthest from 1 was " + std::to_string(furthest));
+    }
+
+    for(std::size_t i = 1; i < backends.size(); i++) {
+        const double tol = (sizeof(T) == 2) ? 2e-2 : 1e-5;
+
+        ok(std::string("  ") + backends[i]->name() + " agrees on softmax",
+           worst(soft[0], soft[i]) < tol, std::to_string(worst(soft[0], soft[i])));
+
+        ok(std::string("  ") + backends[i]->name() + " agrees on rms_norm",
+           worst(rms[0], rms[i]) < tol, std::to_string(worst(rms[0], rms[i])));
+    }
+}
+
+/** The reason softmax subtracts the column maximum. */
+template<typename T>
+static void softmax_survives_a_large_score(const char* name,
+                                           std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nsoftmax survives a large score, " << name << ":\n";
+
+    // 800, not 90.  exp(90) overflows a float and this test was written with
+    // that in mind -- but the host reference accumulates in double, where
+    // exp(90) is about 1.2e39 and perfectly finite, so removing the
+    // max-subtraction from the host failed to fail.  exp(800) overflows every
+    // type involved, so one value covers both backends.
+    //
+    // The input itself stays representable: 800 fits in fp16, whose ceiling is
+    // 65504.  It is exp() that cannot survive it.
+    const float big = 800.0f;
+
+    matrix<T> x(3, 2);
+    x(0,0) = T(big);   x(0,1) = T(0.0f);
+    x(1,0) = T(0.0f);  x(1,1) = T(big);
+    x(2,0) = T(-big);  x(2,1) = T(0.0f);
+
+    for(ai::backend<T>* b : backends) {
+        typename ai::backend<T>::tensor_ptr tx = b->make(x);
+        typename ai::backend<T>::tensor_ptr ts = b->make(3, 2);
+
+        b->softmax(tx, ts);
+        b->wait();
+
+        const matrix<T> got = ts->read();
+
+        bool finite = true;
+        double sum0 = 0;
+
+        for(uint r = 0; r < 3; r++) {
+            for(uint c = 0; c < 2; c++)
+                if(!std::isfinite(float(got(r,c)))) finite = false;
+
+            sum0 += double(float(got(r,0)));
+        }
+
+        ok(std::string("  ") + b->name() + ": no nan or inf", finite);
+
+        ok(std::string("  ") + b->name() + ": and the column still sums to one",
+           std::fabs(sum0 - 1.0) < ((sizeof(T) == 2) ? 5e-3 : 1e-6),
+           std::to_string(sum0));
+
+        // The largest score should take essentially all of the mass.
+        ok(std::string("  ") + b->name() + ": with the mass on the largest score",
+           double(float(got(0,0))) > 0.99, std::to_string(float(got(0,0))));
+    }
+}
+
 static void a_tensor_from_the_wrong_backend_is_refused() {
     std::cout << "\na tensor from the wrong backend is refused:\n";
 
@@ -197,8 +335,12 @@ int main() {
         try { g.reset(new jlib::metal::backend<float>); b.push_back(g.get()); }
         catch(std::exception& e) { std::cout << "  (no Metal device: " << e.what() << ")\n"; }
         one_type<float>("float", b);
+        the_reductions<float>("float", b);
+        softmax_survives_a_large_score<float>("float", b);
 #else
         one_type<float>("float", b);
+        the_reductions<float>("float", b);
+        softmax_survives_a_large_score<float>("float", b);
 #endif
     }
 
@@ -212,6 +354,8 @@ int main() {
         catch(std::exception&) {}
 #endif
         one_type<_Float16>("_Float16", b);
+        the_reductions<_Float16>("_Float16", b);
+        softmax_survives_a_large_score<_Float16>("_Float16", b);
     }
 
     a_tensor_from_the_wrong_backend_is_refused();
@@ -230,6 +374,14 @@ int main() {
     // which exists.  fp16 is for inference.
     //
     // Not double, which Metal has no type for and cannot be given one.
+    //
+    // The agreement assertions above would not, on their own, have caught a
+    // missing max-subtraction: at the magnitudes random_matrix produces, both
+    // backends give the same answer with or without it.  That is what
+    // softmax_survives_a_large_score is for, and it was checked by deleting the
+    // subtraction from each backend in turn and confirming each deletion fails
+    // the test.  No other assertion here has been mutation-checked, so the rest
+    // carry only the usual claim: they pass.
     std::cout << "\n" << (failures ? "FAILED" : "PASSED") << ": " << failures
               << " failure(s)\n";
 
