@@ -96,6 +96,8 @@ private:
     std::unique_ptr<impl> m_impl;
 
     friend class matrix_multiply;
+    friend class tensor;
+    friend class stream;
 };
 
 }

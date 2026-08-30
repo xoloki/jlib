@@ -561,7 +561,13 @@ template<typename T>
 inline
 matrix<T> operator+(const matrix<T>& a, const matrix<T>& b) {
     if(a.M != b.M || a.N != b.N)
-        throw matrix<T>::mismatch();
+        // typename, and mismatched rather than mismatch.  Without the first
+        // this does not compile at all -- which nothing noticed, because
+        // adding two matrices had never been instantiated anywhere in the
+        // library or its tests.  The second is for the message: operator* and
+        // operator^ two hundred lines up both report the shapes, and a bare
+        // std::exception from the third binary operator is no use to anyone.
+        throw typename matrix<T>::mismatched(a.M, a.N, b.M, b.N);
 
     matrix<T> ret(a.M, a.N);
     for(uint i = 0; i < a.M; i++) {

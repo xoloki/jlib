@@ -5,7 +5,7 @@ AM_CPPFLAGS = -I$(top_srcdir)
 
 lib_LTLIBRARIES = libjmetal.la
 
-libjmetal_la_SOURCES = device.mm gemm.mm
+libjmetal_la_SOURCES = device.mm gemm.mm tensor.mm
 noinst_HEADERS       = impl.hh
 libjmetal_la_LDFLAGS = -version-info $(LIBJ_SO_VERSION) -release $(JLIB_RELEASE) -no-undefined
 libjmetal_la_LIBADD  = $(METAL_LIBS)
@@ -15,4 +15,4 @@ libjmetal_la_LIBADD  = $(METAL_LIBS)
 libjmetal_la_OBJCXXFLAGS = $(AM_OBJCXXFLAGS) -fobjc-arc -std=c++20
 
 libjmetalincludedir = $(includedir)/jlib-1.2/jlib/metal
-libjmetalinclude_HEADERS = device.hh gemm.hh
+libjmetalinclude_HEADERS = device.hh gemm.hh tensor.hh
