@@ -180,20 +180,15 @@ static void it_is_the_mean_of_the_samples() {
     const std::vector<double> db = delta(before, weights(b));
     const std::vector<double> dboth = delta(before, weights(both));
 
-    // The output layer's step is exactly the average of the two single steps,
+    // Every layer's step is exactly the average of the two single steps,
     // because all three gradients are taken at the same weights.
     //
-    // The hidden layer's is only close, and that is not a rounding story: it
-    // is 1.5e-6 where the output layer is 5.6e-17.  train() updates m_who and
-    // *then* backpropagates through the updated m_who, so the hidden gradient
-    // is not evaluated at the weights the step started from.  Textbook
-    // backprop takes every gradient at the same weights and applies them
-    // afterwards.  See the issue filed alongside this branch -- it predates
-    // batching, and changing it would change how every existing network
-    // trains, so it is recorded rather than fixed here.
-    //
-    // The split is asserted rather than glossed, so that if anyone does fix
-    // it, this test says which half was already right.
+    // The hidden half of this used to be only *close* -- 1.5e-6 where the
+    // output layer was 5.6e-17 -- because train() updated m_who and then
+    // backpropagated through the updated m_who (#130).  The two halves are
+    // still asserted separately rather than together: the output layer was
+    // right all along, and keeping them apart is what made the difference
+    // between them visible in the first place.
     std::vector<double> mean_who, batch_who, mean_wih, batch_wih;
 
     for(std::size_t i = 0; i < da.size(); i++) {
@@ -209,9 +204,11 @@ static void it_is_the_mean_of_the_samples() {
     ok("the output layer's step is exactly the average", wo < 1e-14,
        "worst difference " + std::to_string(wo));
 
-    ok("the hidden layer's is close but not exact", wi > 1e-12 && wi < 1e-3,
-       "worst difference " + std::to_string(wi) +
-       " -- backprop goes through the already-updated m_who");
+    // 1e-14 rather than 0: the two sides reach the same value by different
+    // routes -- one averages two products, the other averages inside the
+    // gradient -- so last-bit rounding is allowed and 1.5e-6 is not.
+    ok("and so is the hidden layer's, which it was not before #130", wi < 1e-14,
+       "worst difference " + std::to_string(wi));
 
     // And it is not the same as taking them one after the other, which is a
     // different algorithm rather than a slower version of the same one.

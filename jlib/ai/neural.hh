@@ -346,18 +346,34 @@ math::matrix<T> NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> 
     math::matrix<T> output_errors = targets - final_outputs;
     //std::cout << "output_errors[" << output_errors.M << "," << output_errors.N << "] \n" << output_errors << std::endl;
 
+    // Captured before the update, not after.  Closes #130.
+    //
+    // This read m_who *after* adding its own step, so the error arriving at
+    // every layer below had been propagated through weights that already
+    // moved -- and the deep loop repeated it, once per layer.
+    // Backpropagation evaluates every gradient at the weights the step
+    // started from and applies them afterwards.
+    //
+    // It was first measured on a one-hidden-layer network, where the effect
+    // is about 0.1% of a step, and dismissed on that basis.  That was the
+    // wrong measurement: an error that compounds once per layer compounds
+    // least at one layer.  At three and four it is the difference between
+    // learning and not.
+    math::matrix<T> deep = m_who;
+
     m_who += rate * (((output_errors ^ activate_slope(m_output_activation, final_outputs))
                       * deep_outputs.transpose()));
 
     math::matrix<T> deep_errors = output_errors;
-    math::matrix<T> deep = m_who;
-    
-    //for(auto x = m_deep.rbegin(); x != m_deep.rend(); x++) {
+
     for(int i = m_deep.size() - 1; i >= 0; i--) {
         deep_errors = deep.transpose() * deep_errors;
+
+        math::matrix<T> before = m_deep[i];
+
         m_deep[i] += rate * (((deep_errors ^ activate_slope(m_hidden_activation, deep_outputs_cache[i]))
                               * deep_inputs_cache[i].transpose()));
-        deep = m_deep[i];
+        deep = before;
     }
 
     math::matrix<T> hidden_errors = deep.transpose() * deep_errors;
