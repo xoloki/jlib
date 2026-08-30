@@ -226,6 +226,61 @@ static void it_is_the_mean_of_the_samples() {
        "difference " + std::to_string(s));
 }
 
+static void weights_are_scaled_by_the_fan_in() {
+    std::cout << "\nweights are scaled by the fan in:\n";
+
+    // 1/sqrt(fan-in) is the heuristic, and the fan-in of a weight matrix is
+    // the layer feeding it, not the layer it feeds.  Deliberately asymmetric
+    // sizes: with equal widths the two readings coincide, which is exactly why
+    // the wrong one survived (#131).
+    const uint ni = 100, no = 4;
+    const std::vector<uint> deep{ 25, 9 };
+
+    NeuralNetwork<double> nn(0.1, ni, deep, no);
+
+    json::object::ptr p = nn.json();
+
+    double wih = 0, who = 0, d0 = 0;
+
+    for(uint i = 0; i < deep.front() * ni; i++)
+        wih = std::max(wih, std::fabs(double(p->obj("wih")->get(i))));
+
+    for(uint i = 0; i < no * deep.back(); i++)
+        who = std::max(who, std::fabs(double(p->obj("who")->get(i))));
+
+    for(uint i = 0; i < deep[1] * deep[0]; i++)
+        d0 = std::max(d0, std::fabs(double(p->obj("deep")->obj(0)->get(i))));
+
+    // Each bound, and the one the old code would have used.  The gap between
+    // them is what makes these assertions worth anything: 1/sqrt(100) = 0.1
+    // against 1/sqrt(25) = 0.2, and 1/sqrt(9) = 0.333 against 1/sqrt(4) = 0.5.
+    ok("wih is bounded by 1/sqrt(inputs)", wih <= std::pow(double(ni), -0.5),
+       std::to_string(wih) + " <= " + std::to_string(std::pow(double(ni), -0.5)));
+
+    ok("  and not by 1/sqrt(first hidden), which is looser",
+       wih <= std::pow(double(deep.front()), -0.5) &&
+       std::pow(double(ni), -0.5) < std::pow(double(deep.front()), -0.5));
+
+    ok("who is bounded by 1/sqrt(last hidden)",
+       who <= std::pow(double(deep.back()), -0.5),
+       std::to_string(who) + " <= " + std::to_string(std::pow(double(deep.back()), -0.5)));
+
+    ok("  and not by 1/sqrt(outputs), which is looser",
+       who <= std::pow(double(no), -0.5) &&
+       std::pow(double(deep.back()), -0.5) < std::pow(double(no), -0.5));
+
+    ok("a deep layer is bounded by 1/sqrt(the layer below)",
+       d0 <= std::pow(double(deep[0]), -0.5),
+       std::to_string(d0) + " <= " + std::to_string(std::pow(double(deep[0]), -0.5)));
+
+    // A bound nothing reaches is not a bound anyone can check, so the
+    // distribution has to actually fill it.  Uniform over the range, so the
+    // largest of a few hundred draws sits close to the edge.
+    ok("and the range is used rather than merely respected",
+       wih > 0.8 * std::pow(double(ni), -0.5),
+       std::to_string(wih));
+}
+
 static void a_mismatched_batch_is_refused() {
     std::cout << "\na mismatched batch is refused:\n";
 
@@ -247,6 +302,7 @@ int main() {
     a_batch_is_accepted();
     the_gradient_is_a_mean();
     it_is_the_mean_of_the_samples();
+    weights_are_scaled_by_the_fan_in();
     a_mismatched_batch_is_refused();
 
     // What a green run does not establish.

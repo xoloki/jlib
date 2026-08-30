@@ -43,3 +43,11 @@ m4/lt~obsolete.m4
 *.la
 *.deps
 *.libs
+
+# MNIST, for measuring what #131 changes.  Fetched rather than vendored:
+# mnist_train.csv is 110MB, and jneural-alpha takes its path on the command
+# line, so there is no reason for it to be in the tree.
+#
+#   curl -O https://pjreddie.com/media/files/mnist_train.csv
+#   curl -O https://pjreddie.com/media/files/mnist_test.csv
+mnist_*.csv
