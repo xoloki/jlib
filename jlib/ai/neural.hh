@@ -91,14 +91,27 @@ NeuralNetwork<T>::NeuralNetwork(double lrate, uint ninput, const std::vector<uin
     if(m_nhidden.empty())
         throw std::runtime_error("Need at least one hidden layer");
     
-    T hbound = pow(m_nhidden[0], -0.5);
+    // Fan-in, not fan-out.  1/sqrt(fan) is the right heuristic and was always
+    // the intent, but each of the three below passed the wrong dimension:
+    // m_wih is (hidden x input), so the number of weights feeding each hidden
+    // unit is m_ninput, not m_nhidden[0].  See #131 -- with 784 inputs and 200
+    // hidden this was twice as wide as it should be, and m_who below was four
+    // and a half times.
+    //
+    // Weights that are too large push the sigmoids toward their flat ends,
+    // where the derivative approaches zero, which starves the backward pass on
+    // top of the attenuation it already suffers per layer.
+    T hbound = pow(m_ninput, -0.5);
     std::uniform_real_distribution<T> hdist(-hbound, hbound);
         
     m_wih.foreach([&](T& x) {
             x = hdist(m_generator);
         });
         
-    T obound = pow(m_noutput, -0.5);
+    // m_who is (output x hidden): the fan-in is the hidden layer feeding it,
+    // not the number of classes coming out.  This was the worst of the three
+    // and the one the backward pass starts from.
+    T obound = pow(m_nhidden.back(), -0.5);
     std::uniform_real_distribution<T> odist(-obound, obound);
         
     m_who.foreach([&](T& x) {
@@ -107,7 +120,11 @@ NeuralNetwork<T>::NeuralNetwork(double lrate, uint ninput, const std::vector<uin
 
     for(int i = 1; i < m_nhidden.size(); i++) {
         // add a deep matrix from [i-1] to [i]
-	T dbound = pow(m_nhidden[i], -0.5);
+	// m_deep[i-1] is (n[i] x n[i-1]), so the fan-in is the layer below.
+	// Identical to the old expression when every hidden layer is the same
+	// width, which is why the case people try first is the case this got
+	// right.
+	T dbound = pow(m_nhidden[i-1], -0.5);
 	std::uniform_real_distribution<T> ddist(-dbound, dbound);
 	
 	m_deep.push_back(math::matrix<T>(m_nhidden[i], m_nhidden[i-1]));
