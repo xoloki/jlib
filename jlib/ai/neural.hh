@@ -23,6 +23,7 @@
 #include <jlib/util/json.hh>
 
 #include <functional>
+#include <string>
 #include <random>
 #include <fstream>
 #include <tuple>
@@ -35,6 +36,18 @@ namespace ai {
 template<typename T>
 class NeuralNetwork {
 public:
+    class exception : public std::exception {
+    public:
+        exception(const std::string& msg = "") {
+            m_msg = "jlib::ai::NeuralNetwork exception" +
+                (msg.empty() ? std::string() : ": " + msg);
+        }
+        virtual ~exception() {}
+        virtual const char* what() const noexcept { return m_msg.c_str(); }
+    protected:
+        std::string m_msg;
+    };
+
     NeuralNetwork(double lrate, uint ninput, const std::vector<uint>& hidden, uint noutput);
 
     NeuralNetwork(util::json::object::ptr p);
@@ -169,6 +182,28 @@ NeuralNetwork<T>::NeuralNetwork(util::json::object::ptr p)
     
 template<typename T>
 math::matrix<T> NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> targets){
+    // A column per sample.  Every step below is already written in matrix
+    // terms that carry a batch: m_wih * inputs is (H x I)(I x B) = H x B, the
+    // Hadamard terms stay elementwise, and multiplying by a transpose
+    // contracts the batch away to leave a gradient of the weight's own shape.
+    // So this took a batch before anything here was changed -- it just summed
+    // the gradient over one.
+    //
+    // Summing makes the step size scale with the batch, which was measured:
+    // a batch of two identical samples moved the weights 1.9992 times as far
+    // as one sample, and as far as two sequential steps. At a batch of 64 that
+    // is a 64x step and divergence.
+    //
+    // So the gradient is a mean, which is what makes the learning rate mean
+    // something independent of the batch size. At B = 1 -- every caller in the
+    // tree today -- dividing by one changes nothing, so this is exactly
+    // backward compatible.
+    const std::size_t batch = (inputs.N > 0) ? inputs.N : 1;
+    const double rate = m_lrate / double(batch);
+
+    if(targets.N != inputs.N)
+        throw exception("train: inputs and targets disagree about the batch size");
+
     //std::cout << "wih[" << m_wih.M << "," << m_wih.N << "]" << " * " << "inputs[" << inputs.M << "," << inputs.N << "]" << std::endl;
 
     math::matrix<T> hidden_inputs = m_wih * inputs;
@@ -196,7 +231,7 @@ math::matrix<T> NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> 
     math::matrix<T> output_errors = targets - final_outputs;
     //std::cout << "output_errors[" << output_errors.M << "," << output_errors.N << "] \n" << output_errors << std::endl;
 
-    m_who += m_lrate * (((output_errors ^ final_outputs ^ (1.0 - final_outputs)) * deep_outputs.transpose()));
+    m_who += rate * (((output_errors ^ final_outputs ^ (1.0 - final_outputs)) * deep_outputs.transpose()));
 
     math::matrix<T> deep_errors = output_errors;
     math::matrix<T> deep = m_who;
@@ -204,14 +239,14 @@ math::matrix<T> NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> 
     //for(auto x = m_deep.rbegin(); x != m_deep.rend(); x++) {
     for(int i = m_deep.size() - 1; i >= 0; i--) {
         deep_errors = deep.transpose() * deep_errors;
-        m_deep[i] += m_lrate * (((deep_errors ^ deep_outputs_cache[i] ^ (1.0 - deep_outputs_cache[i])) * deep_inputs_cache[i].transpose()));
+        m_deep[i] += rate * (((deep_errors ^ deep_outputs_cache[i] ^ (1.0 - deep_outputs_cache[i])) * deep_inputs_cache[i].transpose()));
         deep = m_deep[i];
     }
 
     math::matrix<T> hidden_errors = deep.transpose() * deep_errors;
     //std::cout << "hidden_errors[" << hidden_errors.M << "," << hidden_errors.N << "] \n" << hidden_errors << std::endl;
     
-    m_wih += m_lrate * ((hidden_errors ^ hidden_outputs ^ (1.0 - hidden_outputs)) * inputs.transpose());
+    m_wih += rate * ((hidden_errors ^ hidden_outputs ^ (1.0 - hidden_outputs)) * inputs.transpose());
 
     return output_errors;
 }

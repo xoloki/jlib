@@ -53,6 +53,7 @@ TESTS = \
 	math_value_test \
 	math_plot_alloc_test \
 	math_dump_test \
+	ai_neural_test \
 	math_object_test \
 	tensor_test \
 \
@@ -276,6 +277,9 @@ math_plot_alloc_test_LDADD   = $(JUTIL_LA)
 
 math_dump_test_SOURCES = math_dump_test.cc
 math_dump_test_LDADD   = $(JUTIL_LA)
+
+ai_neural_test_SOURCES = ai_neural_test.cc
+ai_neural_test_LDADD   = $(JUTIL_LA) $(JSYS_LA)
 
 math_object_test_SOURCES = math_object_test.cc
 math_object_test_LDADD   = $(JUTIL_LA)
