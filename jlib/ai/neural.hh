@@ -33,6 +33,85 @@
 namespace jlib {
 namespace ai {
 
+/**
+ * Which nonlinearity a layer applies.
+ *
+ * Every one of these has a derivative expressible in terms of its own
+ * *output*, which is the fact that makes them interchangeable here: train()
+ * already caches each layer's output to build `out * (1 - out)`, so nothing
+ * needs the pre-activation kept as well.
+ *
+ *   sigmoid      s (1 - s)
+ *   tanh         1 - s^2
+ *   relu         s > 0 ? 1 : 0          -- output > 0 exactly when input was
+ *   leaky_relu   s > 0 ? 1 : LEAK       -- likewise, since LEAK is positive
+ */
+enum class activation { sigmoid, tanh, relu, leaky_relu };
+
+/** The slope a leaky ReLU keeps below zero. */
+inline constexpr double LEAK = 0.01;
+
+inline std::string name_of(activation a) {
+    switch(a) {
+    case activation::sigmoid:    return "sigmoid";
+    case activation::tanh:       return "tanh";
+    case activation::relu:       return "relu";
+    case activation::leaky_relu: return "leaky_relu";
+    }
+
+    return "sigmoid";
+}
+
+inline activation activation_from_name(const std::string& s) {
+    if(s == "sigmoid")    return activation::sigmoid;
+    if(s == "tanh")       return activation::tanh;
+    if(s == "relu")       return activation::relu;
+    if(s == "leaky_relu") return activation::leaky_relu;
+
+    throw std::runtime_error("unknown activation '" + s + "'");
+}
+
+template<typename T>
+math::matrix<T> activate(activation a, const math::matrix<T>& in) {
+    math::matrix<T> out(in.M, in.N);
+
+    for(uint r = 0; r < in.M; r++) {
+        for(uint c = 0; c < in.N; c++) {
+            const T x = in(r, c);
+
+            switch(a) {
+            case activation::sigmoid:    out(r,c) = T(1) / (T(1) + std::exp(-x)); break;
+            case activation::tanh:       out(r,c) = std::tanh(x);                 break;
+            case activation::relu:       out(r,c) = (x > 0) ? x : T(0);           break;
+            case activation::leaky_relu: out(r,c) = (x > 0) ? x : T(LEAK) * x;    break;
+            }
+        }
+    }
+
+    return out;
+}
+
+/** The derivative, from the output rather than the input.  See activation. */
+template<typename T>
+math::matrix<T> activate_slope(activation a, const math::matrix<T>& out) {
+    math::matrix<T> d(out.M, out.N);
+
+    for(uint r = 0; r < out.M; r++) {
+        for(uint c = 0; c < out.N; c++) {
+            const T s = out(r, c);
+
+            switch(a) {
+            case activation::sigmoid:    d(r,c) = s * (T(1) - s);        break;
+            case activation::tanh:       d(r,c) = T(1) - s * s;          break;
+            case activation::relu:       d(r,c) = (s > 0) ? T(1) : T(0); break;
+            case activation::leaky_relu: d(r,c) = (s > 0) ? T(1) : T(LEAK); break;
+            }
+        }
+    }
+
+    return d;
+}
+
 template<typename T>
 class NeuralNetwork {
 public:
@@ -66,6 +145,29 @@ public:
     std::default_random_engine& get_generator();
 
     void set_rate(double rate);
+
+    /**
+     * Which nonlinearity the hidden layers use, and which the output uses.
+     *
+     * Both default to sigmoid, so a network that says nothing behaves exactly
+     * as it did before these existed.
+     *
+     * **They are separate on purpose.**  ReLU is what lets a deep network
+     * train -- the sigmoid's derivative peaks at 0.25, so the gradient is
+     * attenuated at every hop and at three hidden layers nothing reaches the
+     * input end (#131).  But ReLU on the *output* is wrong for a classifier
+     * scored against targets of 0.01 and 0.99: its derivative is zero
+     * wherever the output is, so an output unit that goes negative stops
+     * learning and never comes back.
+     *
+     * Hidden relu with a sigmoid output is the ordinary arrangement, and it is
+     * what the measurements in #131 were taken with.
+     */
+    activation get_hidden_activation() const { return m_hidden_activation; }
+    void set_hidden_activation(activation a) { m_hidden_activation = a; }
+
+    activation get_output_activation() const { return m_output_activation; }
+    void set_output_activation(activation a) { m_output_activation = a; }
     
 protected:
     uint m_ninput;
@@ -75,7 +177,13 @@ protected:
     math::matrix<T> m_wih;
     math::matrix<T> m_who;
     std::vector<math::matrix<T>> m_deep;
-    std::function<math::matrix<T>(math::matrix<T>)> m_activation_function;
+    // Was a std::function holding a sigmoid, with the matching derivative
+    // written out by hand in train() as `out ^ (1 - out)`.  The function was
+    // replaceable and the derivative was not, so replacing it silently trained
+    // against the wrong slope.  A pair of enums keeps them together and
+    // serialises, which a lambda could not.
+    activation m_hidden_activation = activation::sigmoid;
+    activation m_output_activation = activation::sigmoid;
     std::default_random_engine m_generator;
 };
 
@@ -133,14 +241,6 @@ NeuralNetwork<T>::NeuralNetwork(double lrate, uint ninput, const std::vector<uin
             });
     }
 
-    // sigmoid function
-    m_activation_function = [](math::matrix<T> input) {
-        math::matrix<T> output(input.M, input.N);
-        input.foreach_index([&](uint r, uint c, T& val) {
-                output(r, c) = (1.0 / (1.0 + exp(-val))); //tanh(val);
-            });
-        return output;
-    }; 
 }
 
 
@@ -150,6 +250,12 @@ NeuralNetwork<T>::NeuralNetwork(util::json::object::ptr p)
     : m_ninput(p->get("ninput")),
       m_noutput(p->get("noutput")),
       m_lrate(p->get("lrate")),
+      m_hidden_activation(p->has("hidden_activation")
+                          ? activation_from_name(p->get("hidden_activation"))
+                          : activation::sigmoid),
+      m_output_activation(p->has("output_activation")
+                          ? activation_from_name(p->get("output_activation"))
+                          : activation::sigmoid),
       m_wih(1, 1),
       m_who(1, 1)
 {
@@ -187,14 +293,6 @@ NeuralNetwork<T>::NeuralNetwork(util::json::object::ptr p)
             x = p->obj("who")->get(r*m_nhidden.back() + c);
         });
     
-    // sigmoid function
-    m_activation_function = [](math::matrix<T> input) {
-        math::matrix<T> output(input.M, input.N);
-        input.foreach_index([&](uint r, uint c, T& val) {
-                output(r, c) = (1.0 / (1.0 + exp(-val))); //tanh(val);
-            });
-        return output;
-    }; 
 }
     
 template<typename T>
@@ -224,7 +322,7 @@ math::matrix<T> NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> 
     //std::cout << "wih[" << m_wih.M << "," << m_wih.N << "]" << " * " << "inputs[" << inputs.M << "," << inputs.N << "]" << std::endl;
 
     math::matrix<T> hidden_inputs = m_wih * inputs;
-    math::matrix<T> hidden_outputs = m_activation_function(hidden_inputs);
+    math::matrix<T> hidden_outputs = activate(m_hidden_activation, hidden_inputs);
 
     math::matrix<T> deep_inputs = hidden_inputs;
     math::matrix<T> deep_outputs = hidden_outputs;
@@ -236,19 +334,20 @@ math::matrix<T> NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> 
         deep_inputs_cache.push_back(deep_outputs);
 
         deep_inputs = deep * deep_outputs;
-        deep_outputs = m_activation_function(deep_inputs);
+        deep_outputs = activate(m_hidden_activation, deep_inputs);
 
         deep_outputs_cache.push_back(deep_outputs);
     }
 
     math::matrix<T> final_inputs = m_who * deep_outputs;
-    math::matrix<T> final_outputs = m_activation_function(final_inputs);
+    math::matrix<T> final_outputs = activate(m_output_activation, final_inputs);
     //std::cout << "final_outputs[" << final_outputs.M << "," << final_outputs.N << "] \n" << final_outputs << std::endl;
     
     math::matrix<T> output_errors = targets - final_outputs;
     //std::cout << "output_errors[" << output_errors.M << "," << output_errors.N << "] \n" << output_errors << std::endl;
 
-    m_who += rate * (((output_errors ^ final_outputs ^ (1.0 - final_outputs)) * deep_outputs.transpose()));
+    m_who += rate * (((output_errors ^ activate_slope(m_output_activation, final_outputs))
+                      * deep_outputs.transpose()));
 
     math::matrix<T> deep_errors = output_errors;
     math::matrix<T> deep = m_who;
@@ -256,14 +355,16 @@ math::matrix<T> NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> 
     //for(auto x = m_deep.rbegin(); x != m_deep.rend(); x++) {
     for(int i = m_deep.size() - 1; i >= 0; i--) {
         deep_errors = deep.transpose() * deep_errors;
-        m_deep[i] += rate * (((deep_errors ^ deep_outputs_cache[i] ^ (1.0 - deep_outputs_cache[i])) * deep_inputs_cache[i].transpose()));
+        m_deep[i] += rate * (((deep_errors ^ activate_slope(m_hidden_activation, deep_outputs_cache[i]))
+                              * deep_inputs_cache[i].transpose()));
         deep = m_deep[i];
     }
 
     math::matrix<T> hidden_errors = deep.transpose() * deep_errors;
     //std::cout << "hidden_errors[" << hidden_errors.M << "," << hidden_errors.N << "] \n" << hidden_errors << std::endl;
     
-    m_wih += rate * ((hidden_errors ^ hidden_outputs ^ (1.0 - hidden_outputs)) * inputs.transpose());
+    m_wih += rate * ((hidden_errors ^ activate_slope(m_hidden_activation, hidden_outputs))
+                     * inputs.transpose());
 
     return output_errors;
 }
@@ -271,15 +372,15 @@ math::matrix<T> NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> 
 template<typename T>
 math::matrix<T> NeuralNetwork<T>::query(math::matrix<T> inputs) {
     math::matrix<T> hidden_inputs = m_wih * inputs;
-    math::matrix<T> hidden_outputs = m_activation_function(hidden_inputs);
+    math::matrix<T> hidden_outputs = activate(m_hidden_activation, hidden_inputs);
 
     for(auto& deep : m_deep) {
         hidden_inputs = deep * hidden_outputs;
-        hidden_outputs = m_activation_function(hidden_inputs);
+        hidden_outputs = activate(m_hidden_activation, hidden_inputs);
     }
 
     math::matrix<T> final_inputs = m_who * hidden_outputs;
-    math::matrix<T> final_outputs = m_activation_function(final_inputs);
+    math::matrix<T> final_outputs = activate(m_output_activation, final_inputs);
     
     return final_outputs;
 }
@@ -291,6 +392,11 @@ util::json::object::ptr NeuralNetwork<T>::json() {
     p->add("ninput", m_ninput);
     p->add("noutput", m_noutput);
     p->add("lrate", m_lrate);
+
+    // By name rather than by number, so a saved network stays readable and a
+    // reordering of the enum cannot silently change what a file means.
+    p->add("hidden_activation", name_of(m_hidden_activation));
+    p->add("output_activation", name_of(m_output_activation));
 
     util::json::array::ptr nhidden = util::json::array::create();
     //m_nhidden.foreach([&](T& x) {
