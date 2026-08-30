@@ -24,7 +24,13 @@
 #include <jlib/sys/Directory.hh>
 #include <jlib/sys/sys.hh>
 #include <jlib/ai/neural.hh>
+
+#ifdef HAVE_METAL
+#include <jlib/metal/gemm.hh>
+#endif
 #include <jlib/apps/magick.hh>
+
+#include <algorithm>
 
 #include <functional>
 #include <random>
@@ -41,12 +47,27 @@ std::default_random_engine generator;
 using namespace jlib;
 using namespace jlib::util;
 
-typedef double T;
+// float, not double.  Metal Shading Language has no double at all -- the
+// compiler refuses it in as many words -- so a GPU multiply can only be
+// offered in float, and there is no point in the network being wider than the
+// thing that is supposed to accelerate it.  Nothing trains in fp64 anyway.
+typedef float T;
 
 math::matrix<T> load(const std::string& path, uint r, uint c, bool greyscale = true);
 char convert(int n);
 int convert(char c);
-char capitalize(char c);
+/**
+ * The same letter in the other case, or the character unchanged.
+ *
+ * Was called capitalize(), which reads as "make this uppercase" and is not
+ * what it does or what it is for.  It has to work both ways: this is a 62-way
+ * classifier -- ten digits, then A-Z, then a-z -- and the scorer uses the case
+ * twin to count "right letter, wrong case" apart from "wrong letter", which
+ * are different kinds of failure.
+ *
+ * A digit has no twin, so it comes back unchanged and scores no bonus.
+ */
+char swap_case(char c);
 
 std::tuple<uint,double> getmax(math::matrix<T> m);
 
@@ -65,6 +86,12 @@ int main(int argc, char** argv) {
     // classifier scored against 0.01/0.99 targets kills any unit that goes
     // negative.  See ai::activation.
     std::string hidden_activation = "sigmoid", output_activation = "sigmoid";
+
+    // One sample at a time by default, which is what this always did.  The GPU
+    // needs a batch to be worth using at all: at a batch of one its dispatch
+    // costs more than the multiply.
+    int batch_size = 1;
+    bool use_metal = false;
     double train_rate = 0.1;
     int train_decay = -1;
     
@@ -92,6 +119,10 @@ int main(int argc, char** argv) {
             load_file = argv[++i];
         } else if(arg == "--output-file") {
             output_file = argv[++i];
+        } else if(arg == "--batch-size") {
+            batch_size = util::int_value(argv[++i]);
+        } else if(arg == "--metal") {
+            use_metal = true;
         } else if(arg == "--hidden-activation") {
             hidden_activation = argv[++i];
         } else if(arg == "--output-activation") {
@@ -111,10 +142,10 @@ int main(int argc, char** argv) {
 
     int INODES = R*C;
 
-    std::unique_ptr<ai::NeuralNetwork<double>> nn;
+    std::unique_ptr<ai::NeuralNetwork<T>> nn;
     
     if(load_file.empty()) {
-        nn.reset(new ai::NeuralNetwork<double>(train_rate, INODES, HNODES, ONODES));
+        nn.reset(new ai::NeuralNetwork<T>(train_rate, INODES, HNODES, ONODES));
 
         nn->set_hidden_activation(ai::activation_from_name(hidden_activation));
         nn->set_output_activation(ai::activation_from_name(output_activation));
@@ -127,11 +158,35 @@ int main(int argc, char** argv) {
 	
         json::object::ptr o = json::object::create(cache);
 	
-        nn.reset(new ai::NeuralNetwork<double>(o));
+        nn.reset(new ai::NeuralNetwork<T>(o));
     }
 
     std::vector<std::tuple<int,math::matrix<T>>> inputs;
     std::mutex mutex;
+
+#ifdef HAVE_METAL
+    // Held here rather than in the lambda: the kernel and the queue are worth
+    // keeping across calls, and a training loop makes the same shapes over and
+    // over.
+    std::unique_ptr<jlib::metal::matrix_multiply> mm;
+
+    if(use_metal) {
+        mm.reset(new jlib::metal::matrix_multiply);
+
+        nn->set_multiply([&mm](const math::matrix<T>& a, const math::matrix<T>& b) {
+                return (*mm)(a, b);
+            });
+
+        std::cout << "Multiplying on " << jlib::metal::device::shared()->name()
+                  << (jlib::metal::device::shared()->unified()
+                      ? " (unified memory)" : " (discrete)")
+                  << ", batch " << batch_size << std::endl;
+    }
+#else
+    if(use_metal) {
+        std::cerr << "WARNING: --metal, but this build has no Metal" << std::endl;
+    }
+#endif
 
     if(!train_path.empty()) {
         std::cout << "Loading handwriting from " << train_path << std::endl;
@@ -175,7 +230,7 @@ int main(int argc, char** argv) {
                 //std::cout << "Got " << size << " elements" << std::endl;
 		
                 int label = util::int_value(inlist.front());
-                math::matrix<double> input(size, 1);
+                math::matrix<T> input(size, 1);
 		
                 for(std::size_t i = 0; i < size; i++) {
                     input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
@@ -211,15 +266,29 @@ int main(int argc, char** argv) {
             }
             std::cout << "done" << std::endl;
             
-            for(auto i : inputs) {
-                int n = std::get<0>(i);
-                math::matrix<T> input = std::get<1>(i);
-                
-                target(n, 0) = 0.99;
-		
-                nn->train(input, target);
-		
-                target(n, 0) = 0.01;
+            // A column per sample.  train() has taken a batch since the
+            // gradient became a mean, and one column is the old behaviour
+            // exactly, so batch_size = 1 changes nothing.
+            for(std::size_t s = 0; s < inputs.size(); s += batch_size) {
+                const std::size_t b =
+                    std::min<std::size_t>(batch_size, inputs.size() - s);
+
+                math::matrix<T> x(INODES, b), y(ONODES, b);
+
+                for(std::size_t c = 0; c < b; c++) {
+                    const auto& item = inputs[s + c];
+                    const math::matrix<T>& in = std::get<1>(item);
+
+                    for(int r = 0; r < INODES; r++)
+                        x(r, c) = in(r, 0);
+
+                    for(int r = 0; r < ONODES; r++)
+                        y(r, c) = 0.01;
+
+                    y(std::get<0>(item), c) = 0.99;
+                }
+
+                nn->train(x, y);
             }
         }
     }
@@ -250,13 +319,13 @@ int main(int argc, char** argv) {
                 //std::cout << "Got " << size << " elements" << std::endl;
       
                 int label = util::int_value(inlist.front());
-                math::matrix<double> input(size, 1);
+                math::matrix<T> input(size, 1);
       
                 for(std::size_t i = 0; i < size; i++) {
                     input(i, 0) = ((util::int_value(inlist[i+1]) / 255.0) * 0.99) + 0.01;
                 }
 
-                math::matrix<double> output = nn->query(input);
+                math::matrix<T> output = nn->query(input);
 
                 double max = output(0, 0);
                 uint x = 0;
@@ -300,9 +369,13 @@ int main(int argc, char** argv) {
             if(n >= ONODES)
                 continue;
                 
-            char c = convert(n);
-            char oc = capitalize(c);
-            int o = convert(oc);
+            // The class this sample would be if its case were the other one,
+            // so a prediction of "a" for an "A" can be counted separately from
+            // a prediction of "4".  For a digit the twin is the digit itself,
+            // so twin == n and the bonus below can never fire.
+            const char expect = convert(n);
+            const char twin_char = swap_case(expect);
+            const int twin = convert(twin_char);
             
             //std::cout << "Parsed label " << n << std::endl;
 	    
@@ -313,7 +386,7 @@ int main(int argc, char** argv) {
                 //std::cout << "Opening image " << image << std::endl;
 		
                 math::matrix<T> input = load(image, R, C);
-                math::matrix<double> output = nn->query(input);
+                math::matrix<T> output = nn->query(input);
 		
                 double max = output(0, 0);
                 uint x = 0;
@@ -328,7 +401,7 @@ int main(int argc, char** argv) {
                 count++;
                 scount++;
                 if(n != x) {
-                    if(o == x) {
+                    if(twin == x) {
                         ocorrect++;
                     }
                 } else {
@@ -339,8 +412,8 @@ int main(int argc, char** argv) {
             
             double ratio = scorrect / double(scount);
             double oratio = (scorrect + ocorrect) / double(scount);
-            if(o != n)
-                std::cout << "Got " << ratio * 100 << "% success rate for " << convert(n) << ", " << 100 * oratio << " including " << oc << std::endl;
+            if(twin != n)
+                std::cout << "Got " << ratio * 100 << "% success rate for " << convert(n) << ", " << 100 * oratio << " including " << twin_char << std::endl;
             else
                 std::cout << "Got " << ratio * 100 << "% success rate for " << convert(n) << std::endl;
 
@@ -367,7 +440,7 @@ int main(int argc, char** argv) {
                 std::cout << "Parsed label " << n << std::endl;
 	    
                 math::matrix<T> input = load(file, R, C);
-                math::matrix<double> output = nn->query(input);
+                math::matrix<T> output = nn->query(input);
                 auto rmax = getmax(output);
                 int x = std::get<0>(rmax);
                 double max = std::get<1>(rmax);
@@ -433,7 +506,7 @@ math::matrix<T> load(const std::string& path, uint r, uint c, bool greyscale) {
         image.zoom(Magick::Geometry(r, c));
     }
     
-    math::matrix<double> input(r*c, 1);
+    math::matrix<T> input(r*c, 1);
     for(uint y = 0; y < image.rows(); y++) {
         for(uint x = 0; x < image.columns(); x++) {
             Magick::Color color = image.pixelColor(x, y);
@@ -464,7 +537,7 @@ int convert(char c) {
         return 36 + (c - 'a');
 }
 
-char capitalize(char c) {
+char swap_case(char c) {
     if(std::isalpha(c)) {
         if(std::isupper(c))
             return std::tolower(c);

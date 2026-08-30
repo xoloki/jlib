@@ -168,6 +168,40 @@ public:
 
     activation get_output_activation() const { return m_output_activation; }
     void set_output_activation(activation a) { m_output_activation = a; }
+
+    /** How two matrices are multiplied.  See set_multiply(). */
+    typedef std::function<math::matrix<T>(const math::matrix<T>&,
+                                          const math::matrix<T>&)> multiply_type;
+
+    /**
+     * Replace the matrix multiply with somebody else's.
+     *
+     * Everything expensive here is a GEMM, so this is the whole of what a GPU
+     * would want to take over.  Injected rather than depended on: jlib/ai must
+     * not need jlib/metal -- it builds before it, and on a machine with no
+     * Metal it does not build at all -- so the *caller* supplies one.
+     *
+     *     metal::matrix_multiply mm;
+     *     nn.set_multiply([&mm](const auto& a, const auto& b) { return mm(a, b); });
+     *
+     * Only the matrix-by-matrix products go through this.  The elementwise
+     * work -- the Hadamard terms, the scalar rate -- stays where it is: it is
+     * a fraction of the arithmetic and all of the awkwardness.
+     *
+     * **Batch first.**  A GPU loses on this network at a batch of one: the
+     * dispatch alone is about 0.35ms against 0.11ms to do the whole multiply
+     * on the CPU.  At a batch of 64 it wins by 9.7x and at 256 by 27x.
+     * Setting this without batching makes training slower.
+     */
+    void set_multiply(multiply_type m) {
+        m_multiply = m ? m : default_multiply();
+    }
+
+    static multiply_type default_multiply() {
+        return [](const math::matrix<T>& a, const math::matrix<T>& b) {
+            return a * b;
+        };
+    }
     
 protected:
     uint m_ninput;
@@ -184,6 +218,8 @@ protected:
     // serialises, which a lambda could not.
     activation m_hidden_activation = activation::sigmoid;
     activation m_output_activation = activation::sigmoid;
+
+    multiply_type m_multiply = default_multiply();
     std::default_random_engine m_generator;
 };
 
@@ -314,14 +350,19 @@ math::matrix<T> NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> 
     // tree today -- dividing by one changes nothing, so this is exactly
     // backward compatible.
     const std::size_t batch = (inputs.N > 0) ? inputs.N : 1;
-    const double rate = m_lrate / double(batch);
+
+    // In T, not double: the scalar-times-matrix operator takes both in the
+    // matrix's own type, so a double rate against a matrix<float> does not
+    // compile.  The division stays in double so a small rate over a large
+    // batch does not lose digits before it is narrowed.
+    const T rate = static_cast<T>(m_lrate / double(batch));
 
     if(targets.N != inputs.N)
         throw exception("train: inputs and targets disagree about the batch size");
 
     //std::cout << "wih[" << m_wih.M << "," << m_wih.N << "]" << " * " << "inputs[" << inputs.M << "," << inputs.N << "]" << std::endl;
 
-    math::matrix<T> hidden_inputs = m_wih * inputs;
+    math::matrix<T> hidden_inputs = m_multiply(m_wih, inputs);
     math::matrix<T> hidden_outputs = activate(m_hidden_activation, hidden_inputs);
 
     math::matrix<T> deep_inputs = hidden_inputs;
@@ -333,13 +374,13 @@ math::matrix<T> NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> 
     for(auto& deep : m_deep) {
         deep_inputs_cache.push_back(deep_outputs);
 
-        deep_inputs = deep * deep_outputs;
+        deep_inputs = m_multiply(deep, deep_outputs);
         deep_outputs = activate(m_hidden_activation, deep_inputs);
 
         deep_outputs_cache.push_back(deep_outputs);
     }
 
-    math::matrix<T> final_inputs = m_who * deep_outputs;
+    math::matrix<T> final_inputs = m_multiply(m_who, deep_outputs);
     math::matrix<T> final_outputs = activate(m_output_activation, final_inputs);
     //std::cout << "final_outputs[" << final_outputs.M << "," << final_outputs.N << "] \n" << final_outputs << std::endl;
     
@@ -361,41 +402,41 @@ math::matrix<T> NeuralNetwork<T>::train(math::matrix<T> inputs, math::matrix<T> 
     // learning and not.
     math::matrix<T> deep = m_who;
 
-    m_who += rate * (((output_errors ^ activate_slope(m_output_activation, final_outputs))
-                      * deep_outputs.transpose()));
+    m_who += rate * m_multiply(output_errors ^ activate_slope(m_output_activation, final_outputs),
+                               deep_outputs.transpose());
 
     math::matrix<T> deep_errors = output_errors;
 
     for(int i = m_deep.size() - 1; i >= 0; i--) {
-        deep_errors = deep.transpose() * deep_errors;
+        deep_errors = m_multiply(deep.transpose(), deep_errors);
 
         math::matrix<T> before = m_deep[i];
 
-        m_deep[i] += rate * (((deep_errors ^ activate_slope(m_hidden_activation, deep_outputs_cache[i]))
-                              * deep_inputs_cache[i].transpose()));
+        m_deep[i] += rate * m_multiply(deep_errors ^ activate_slope(m_hidden_activation, deep_outputs_cache[i]),
+                                       deep_inputs_cache[i].transpose());
         deep = before;
     }
 
-    math::matrix<T> hidden_errors = deep.transpose() * deep_errors;
+    math::matrix<T> hidden_errors = m_multiply(deep.transpose(), deep_errors);
     //std::cout << "hidden_errors[" << hidden_errors.M << "," << hidden_errors.N << "] \n" << hidden_errors << std::endl;
     
-    m_wih += rate * ((hidden_errors ^ activate_slope(m_hidden_activation, hidden_outputs))
-                     * inputs.transpose());
+    m_wih += rate * m_multiply(hidden_errors ^ activate_slope(m_hidden_activation, hidden_outputs),
+                               inputs.transpose());
 
     return output_errors;
 }
     
 template<typename T>
 math::matrix<T> NeuralNetwork<T>::query(math::matrix<T> inputs) {
-    math::matrix<T> hidden_inputs = m_wih * inputs;
+    math::matrix<T> hidden_inputs = m_multiply(m_wih, inputs);
     math::matrix<T> hidden_outputs = activate(m_hidden_activation, hidden_inputs);
 
     for(auto& deep : m_deep) {
-        hidden_inputs = deep * hidden_outputs;
+        hidden_inputs = m_multiply(deep, hidden_outputs);
         hidden_outputs = activate(m_hidden_activation, hidden_inputs);
     }
 
-    math::matrix<T> final_inputs = m_who * hidden_outputs;
+    math::matrix<T> final_inputs = m_multiply(m_who, hidden_outputs);
     math::matrix<T> final_outputs = activate(m_output_activation, final_inputs);
     
     return final_outputs;

@@ -48,7 +48,6 @@ std::vector<std::tuple<int,math::matrix<T>>> load_mnist(const std::string& path)
 
 char convert(int n);
 int convert(char c);
-char capitalize(char c);
 
 std::tuple<uint,double> getmax(math::matrix<T> m);
 
@@ -414,16 +413,6 @@ int convert(char c) {
         return 36 + (c - 'a');
 }
 
-char capitalize(char c) {
-    if(std::isalpha(c)) {
-        if(std::isupper(c))
-            return std::tolower(c);
-        else
-            return std::toupper(c);
-    } else {
-        return c;
-    }
-}
 
 std::tuple<uint,double> getmax(math::matrix<T> output) {
     double max = output(0, 0);

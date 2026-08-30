@@ -48,7 +48,7 @@ typedef float T;
 math::matrix<T> load(const std::string& path, uint r, uint c, bool greyscale = true);
 char convert(int n);
 int convert(char c);
-char capitalize(char c);
+char swap_case(char c);   /* the same letter in the other case */
 
 std::tuple<uint,T> getmax(math::matrix<T> m);
 
@@ -291,7 +291,7 @@ int main(int argc, char** argv) {
                 continue;
                 
             char c = convert(n);
-            char oc = capitalize(c);
+            char oc = swap_case(c);
             int o = convert(oc);
             
             //std::cout << "Parsed label " << n << std::endl;
@@ -454,7 +454,7 @@ int convert(char c) {
         return 36 + (c - 'a');
 }
 
-char capitalize(char c) {
+char swap_case(char c) {
     if(std::isalpha(c)) {
         if(std::isupper(c))
             return std::tolower(c);

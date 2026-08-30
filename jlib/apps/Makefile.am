@@ -91,9 +91,21 @@ jneural_zero_SOURCES   = jneural-zero.cc
 jneural_zero_CPPFLAGS  = $(AM_CPPFLAGS) $(MAGICK_CFLAGS)
 jneural_zero_LDADD     = $(JUTIL_LA) $(JSYS_LA) $(MAGICK_LIBS)
 
+# jneural-alpha can multiply on the GPU where there is one.  Guarded both ways:
+# -DHAVE_METAL for the #ifdef in the source, and the library only where it was
+# built.  jlib/ai itself stays free of this -- it takes the multiply as an
+# argument, so the dependency lives here in the app and not in the library.
+if HAVE_METAL
+METAL_CPPFLAGS = -DHAVE_METAL
+METAL_LA       = $(top_builddir)/jlib/metal/libjmetal.la $(METAL_LIBS)
+else
+METAL_CPPFLAGS =
+METAL_LA       =
+endif
+
 jneural_alpha_SOURCES  = jneural-alpha.cc
-jneural_alpha_CPPFLAGS = $(AM_CPPFLAGS) $(MAGICK_CFLAGS)
-jneural_alpha_LDADD    = $(JUTIL_LA) $(JSYS_LA) $(MAGICK_LIBS)
+jneural_alpha_CPPFLAGS = $(AM_CPPFLAGS) $(MAGICK_CFLAGS) $(METAL_CPPFLAGS)
+jneural_alpha_LDADD    = $(JUTIL_LA) $(JSYS_LA) $(MAGICK_LIBS) $(METAL_LA)
 
 jneural_search_SOURCES  = jneural-search.cc
 jneural_search_CPPFLAGS = $(AM_CPPFLAGS) $(MAGICK_CFLAGS)
