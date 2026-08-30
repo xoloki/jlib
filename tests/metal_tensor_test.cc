@@ -31,7 +31,7 @@
 #include <jlib/metal/tensor.hh>
 #include <jlib/metal/device.hh>
 
-#include <jlib/ai/neural.hh>
+#include <jlib/ai/backend.hh>
 #include <jlib/math/matrix.hh>
 
 #include <cmath>
@@ -104,7 +104,7 @@ static void a_tensor_round_trips(std::shared_ptr<metal::device> dev) {
     // Rectangular, so a row/column mix-up in the upload cannot hide.
     const matrix<float> m = random_matrix(3, 7);
 
-    metal::tensor t(dev, m);
+    metal::tensor<float> t(dev, m);
 
     ok("the shape survives", t.rows() == 3 && t.cols() == 7,
        std::to_string(t.rows()) + "x" + std::to_string(t.cols()));
@@ -131,9 +131,9 @@ static void the_elementwise_ops(std::shared_ptr<metal::device> dev) {
     const matrix<float> a = random_matrix(5, 9);
     const matrix<float> b = random_matrix(5, 9);
 
-    metal::tensor ta(dev, a), tb(dev, b), tc(dev, 5, 9);
+    metal::tensor<float> ta(dev, a), tb(dev, b), tc(dev, 5, 9);
 
-    metal::stream s(dev);
+    metal::stream<float> s(dev);
 
     s.hadamard(ta, tb, tc);
     s.wait();
@@ -156,7 +156,7 @@ static void the_elementwise_ops(std::shared_ptr<metal::device> dev) {
     ok("subtract", worst(want, tc.read()) < 1e-6);
 
     // y += alpha * x, which is the weight update.
-    metal::tensor ty(dev, b);
+    metal::tensor<float> ty(dev, b);
 
     s.add_scaled(0.25f, ta, ty);
     s.wait();
@@ -185,15 +185,15 @@ static void the_activations_match_the_cpu(std::shared_ptr<metal::device> dev) {
         { metal::activation::leaky_relu, ai::activation::leaky_relu, "leaky_relu" },
     };
 
-    metal::stream s(dev);
+    metal::stream<float> s(dev);
 
     for(const auto& k : kinds) {
-        metal::tensor in(dev, x), out(dev, 1, 8), sl(dev, 1, 8);
+        metal::tensor<float> in(dev, x), out(dev, 1, 8), sl(dev, 1, 8);
 
         s.activate(k.m, in, out);
         s.wait();
 
-        const matrix<float> want = ai::activate(k.a, x);
+        const matrix<float> want = ai::activate_matrix(k.a, x);
         const matrix<float> got = out.read();
 
         // 1e-6 rather than exact: the GPU's exp and tanh are its own, and are
@@ -205,8 +205,8 @@ static void the_activations_match_the_cpu(std::shared_ptr<metal::device> dev) {
         s.wait();
 
         ok(std::string("  and its slope"),
-           worst(ai::activate_slope(k.a, want), sl.read()) < 1e-6,
-           std::to_string(worst(ai::activate_slope(k.a, want), sl.read())));
+           worst(ai::slope_matrix(k.a, want), sl.read()) < 1e-6,
+           std::to_string(worst(ai::slope_matrix(k.a, want), sl.read())));
     }
 }
 
@@ -218,9 +218,9 @@ static void the_multiplies(std::shared_ptr<metal::device> dev) {
     const matrix<float> a = random_matrix(4, 6);
     const matrix<float> b = random_matrix(6, 3);
 
-    metal::tensor ta(dev, a), tb(dev, b), tc(dev, 4, 3);
+    metal::tensor<float> ta(dev, a), tb(dev, b), tc(dev, 4, 3);
 
-    metal::stream s(dev);
+    metal::stream<float> s(dev);
 
     s.multiply(ta, tb, tc);
     s.wait();
@@ -231,7 +231,7 @@ static void the_multiplies(std::shared_ptr<metal::device> dev) {
     // a^T * b, without materialising the transpose.
     const matrix<float> at = random_matrix(6, 4);
 
-    metal::tensor tat(dev, at), tc2(dev, 4, 3);
+    metal::tensor<float> tat(dev, at), tc2(dev, 4, 3);
 
     s.multiply_tn(tat, tb, tc2);
     s.wait();
@@ -242,7 +242,7 @@ static void the_multiplies(std::shared_ptr<metal::device> dev) {
     // a * b^T.
     const matrix<float> bt = random_matrix(3, 6);
 
-    metal::tensor tbt(dev, bt), tc3(dev, 4, 3);
+    metal::tensor<float> tbt(dev, bt), tc3(dev, 4, 3);
 
     s.multiply_nt(ta, tbt, tc3);
     s.wait();
@@ -251,7 +251,7 @@ static void the_multiplies(std::shared_ptr<metal::device> dev) {
        std::to_string(worst(a * bt.transpose(), tc3.read())));
 
     // beta, which is what makes an accumulate possible.
-    metal::tensor acc(dev, a * b);
+    metal::tensor<float> acc(dev, a * b);
 
     s.multiply(ta, tb, acc, 1.0f, 1.0f);
     s.wait();
@@ -260,7 +260,7 @@ static void the_multiplies(std::shared_ptr<metal::device> dev) {
        std::to_string(worst((a * b) + (a * b), acc.read())));
 
     bool threw = false;
-    try { metal::tensor bad(dev, 9, 9); s.multiply(ta, tb, bad); }
+    try { metal::tensor<float> bad(dev, 9, 9); s.multiply(ta, tb, bad); }
     catch(std::exception&) { threw = true; }
 
     ok("a result of the wrong shape is refused", threw);
@@ -275,9 +275,9 @@ static void many_ops_one_wait(std::shared_ptr<metal::device> dev) {
     const matrix<float> w = random_matrix(6, 4);
     const matrix<float> x = random_matrix(4, 5);
 
-    metal::tensor tw(dev, w), tx(dev, x), tz(dev, 6, 5), ta(dev, 6, 5);
+    metal::tensor<float> tw(dev, w), tx(dev, x), tz(dev, 6, 5), ta(dev, 6, 5);
 
-    metal::stream s(dev);
+    metal::stream<float> s(dev);
 
     s.multiply(tw, tx, tz);
     s.activate(metal::activation::relu, tz, ta);
@@ -289,7 +289,7 @@ static void many_ops_one_wait(std::shared_ptr<metal::device> dev) {
     ok("and afterwards nothing is pending", s.pending() == 0,
        std::to_string(s.pending()));
 
-    const matrix<float> want = ai::activate(ai::activation::relu, w * x);
+    const matrix<float> want = ai::activate_matrix(ai::activation::relu, w * x);
 
     ok("the layer is right", worst(want, ta.read()) < 1e-5,
        std::to_string(worst(want, ta.read())));
@@ -298,7 +298,7 @@ static void many_ops_one_wait(std::shared_ptr<metal::device> dev) {
     // elementwise kernels into a compute encoder, so the stream has to close
     // and reopen one around the other.  Doing it several times over is the
     // case that would break if it did not.
-    metal::tensor t2(dev, 6, 5), t3(dev, 6, 5);
+    metal::tensor<float> t2(dev, 6, 5), t3(dev, 6, 5);
 
     s.multiply(tw, tx, tz);
     s.activate(metal::activation::sigmoid, tz, t2);
@@ -308,7 +308,7 @@ static void many_ops_one_wait(std::shared_ptr<metal::device> dev) {
 
     matrix<float> expect(6, 5);
     const matrix<float> wx = w * x;
-    const matrix<float> sig = ai::activate(ai::activation::sigmoid, wx);
+    const matrix<float> sig = ai::activate_matrix(ai::activation::sigmoid, wx);
 
     for(uint r = 0; r < 6; r++)
         for(uint c = 0; c < 5; c++)
