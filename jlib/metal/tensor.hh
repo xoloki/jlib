@@ -183,6 +183,13 @@ public:
     /** y += alpha * x. */
     void add_scaled(float alpha, const tensor<T>& x, tensor<T>& y);
 
+    /** Softmax down each column, with the column's maximum subtracted. */
+    void softmax(const tensor<T>& in, tensor<T>& out);
+
+    /** RMS normalisation down each column, scaled by a per-row weight. */
+    void rms_norm(const tensor<T>& in, const tensor<T>& weight, tensor<T>& out,
+                  float eps = 1e-5f);
+
     /** Commit everything encoded so far and block until the GPU is done. */
     void wait();
 
