@@ -1,5 +1,7 @@
 # Public jlib headers include <gpgme.h>, <sodium.h>, <openssl/*.h> and
 # <json.h> directly, so anything compiling against them needs those -I flags.
+JAI_LA = $(top_builddir)/jlib/ai/libjai.la
+
 AM_CPPFLAGS = -I$(top_srcdir) \
 	$(GPGME_CFLAGS) $(GPGERROR_CFLAGS) $(SODIUM_CFLAGS) $(OPENSSL_CFLAGS) $(JSONC_CFLAGS) $(PORTAUDIO_CFLAGS)
 
@@ -105,11 +107,11 @@ endif
 
 jneural_alpha_SOURCES  = jneural-alpha.cc
 jneural_alpha_CPPFLAGS = $(AM_CPPFLAGS) $(MAGICK_CFLAGS) $(METAL_CPPFLAGS)
-jneural_alpha_LDADD    = $(JUTIL_LA) $(JSYS_LA) $(MAGICK_LIBS) $(METAL_LA)
+jneural_alpha_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA) $(MAGICK_LIBS) $(METAL_LA)
 
 jneural_search_SOURCES  = jneural-search.cc
 jneural_search_CPPFLAGS = $(AM_CPPFLAGS) $(MAGICK_CFLAGS)
-jneural_search_LDADD    = $(JUTIL_LA) $(JSYS_LA) $(MAGICK_LIBS)
+jneural_search_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA) $(MAGICK_LIBS)
 
 jcublas_SOURCES  = jcublas.cc
 jcublas_CPPFLAGS = $(AM_CPPFLAGS) $(CUDA_CFLAGS) $(MAGICK_CFLAGS)

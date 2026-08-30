@@ -67,8 +67,16 @@ public:
 
 class Environment : public ai::Environment {
 public:
-    static const Percept::sense LOCATION = 0;
-    static const Percept::sense CLEANLINESS = 1;
+    // constexpr, not const.  A `static const` with an in-class initialiser is
+    // only a declaration: using one where an lvalue is required -- ret[LOCATION]
+    // in vacuum.cc does -- odr-uses it and wants a definition that was never
+    // written.  constexpr is implicitly inline in C++17 and supplies one.
+    //
+    // Latent since this was written and found only now, because nothing had
+    // ever linked libjai: on Linux the shared object carried undefined
+    // references to both, and the first executable to link it failed.
+    static constexpr Percept::sense LOCATION = 0;
+    static constexpr Percept::sense CLEANLINESS = 1;
 
     Environment();
     virtual ~Environment() {}

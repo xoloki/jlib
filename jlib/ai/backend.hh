@@ -154,6 +154,9 @@ public:
     /** y += alpha * x */
     virtual void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y) = 0;
 
+    /** dst = src.  Same shape, no reallocation. */
+    virtual void assign(const tensor_ptr& src, tensor_ptr& dst) = 0;
+
     /** Everything encoded so far has finished when this returns. */
     virtual void wait() = 0;
 };
@@ -187,6 +190,7 @@ public:
     void hadamard(const tensor_ptr& a, const tensor_ptr& b, tensor_ptr& c);
     void subtract(const tensor_ptr& a, const tensor_ptr& b, tensor_ptr& c);
     void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y);
+    void assign(const tensor_ptr& src, tensor_ptr& dst);
 
     void wait() {}
 
@@ -208,8 +212,23 @@ math::matrix<T> slope_matrix(activation a, const math::matrix<T>& out);
 // keeps only the two functions that do not depend on the element type.
 // ---------------------------------------------------------------------------
 
+/**
+ * What to compute an activation in, given what it is stored as.
+ *
+ * float for float and _Float16 -- computing a half in half is no more accurate
+ * than computing it in float and rounding, and it keeps the host answer beside
+ * the GPU's, which works in float.  double keeps its own precision: going
+ * through float there would quietly throw away half the digits.
+ */
+template<typename T>
+struct compute_in { typedef float type; };
+
+template<> struct compute_in<double> { typedef double type; };
+
 template<typename T>
 math::matrix<T> activate_matrix(activation a, const math::matrix<T>& in) {
+    typedef typename compute_in<T>::type C;
+
     math::matrix<T> out(in.M, in.N);
 
     for(uint r = 0; r < in.M; r++) {
@@ -217,13 +236,13 @@ math::matrix<T> activate_matrix(activation a, const math::matrix<T>& in) {
             // Through float: std::exp and std::tanh have no _Float16 overload,
             // and a half computed in half is no more accurate than one
             // computed in float and rounded.
-            const float x = float(in(r, c));
+            const C x = C(in(r, c));
 
             switch(a) {
-            case activation::sigmoid:    out(r,c) = T(1.0f / (1.0f + std::exp(-x))); break;
+            case activation::sigmoid:    out(r,c) = T(C(1) / (C(1) + std::exp(-x))); break;
             case activation::tanh:       out(r,c) = T(std::tanh(x));                 break;
-            case activation::relu:       out(r,c) = T((x > 0) ? x : 0.0f);           break;
-            case activation::leaky_relu: out(r,c) = T((x > 0) ? x : float(LEAK) * x); break;
+            case activation::relu:       out(r,c) = T((x > 0) ? x : C(0));           break;
+            case activation::leaky_relu: out(r,c) = T((x > 0) ? x : C(LEAK) * x);    break;
             }
         }
     }
@@ -233,17 +252,19 @@ math::matrix<T> activate_matrix(activation a, const math::matrix<T>& in) {
 
 template<typename T>
 math::matrix<T> slope_matrix(activation a, const math::matrix<T>& out) {
+    typedef typename compute_in<T>::type C;
+
     math::matrix<T> d(out.M, out.N);
 
     for(uint r = 0; r < out.M; r++) {
         for(uint c = 0; c < out.N; c++) {
-            const float s = float(out(r, c));
+            const C s = C(out(r, c));
 
             switch(a) {
-            case activation::sigmoid:    d(r,c) = T(s * (1.0f - s));        break;
-            case activation::tanh:       d(r,c) = T(1.0f - s * s);          break;
-            case activation::relu:       d(r,c) = T((s > 0) ? 1.0f : 0.0f); break;
-            case activation::leaky_relu: d(r,c) = T((s > 0) ? 1.0f : float(LEAK)); break;
+            case activation::sigmoid:    d(r,c) = T(s * (C(1) - s));      break;
+            case activation::tanh:       d(r,c) = T(C(1) - s * s);        break;
+            case activation::relu:       d(r,c) = T((s > 0) ? C(1) : C(0)); break;
+            case activation::leaky_relu: d(r,c) = T((s > 0) ? C(1) : C(LEAK)); break;
             }
         }
     }
@@ -307,9 +328,11 @@ namespace detail {
 /** out = alpha * p + beta * out, which every multiply below ends with. */
 template<typename T>
 void blend(const math::matrix<T>& p, math::matrix<T>& out, T alpha, T beta) {
+    typedef typename compute_in<T>::type C;
+
     for(uint r = 0; r < out.M; r++)
         for(uint c = 0; c < out.N; c++)
-            out(r,c) = T(float(alpha) * float(p(r,c)) + float(beta) * float(out(r,c)));
+            out(r,c) = T(C(alpha) * C(p(r,c)) + C(beta) * C(out(r,c)));
 }
 
 }
@@ -362,9 +385,16 @@ void host_backend<T>::add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y) {
     math::matrix<T>& out = at(y);
     const math::matrix<T>& in = at(x);
 
+    typedef typename compute_in<T>::type C;
+
     for(uint r = 0; r < out.M; r++)
         for(uint c = 0; c < out.N; c++)
-            out(r,c) = T(float(out(r,c)) + float(alpha) * float(in(r,c)));
+            out(r,c) = T(C(out(r,c)) + C(alpha) * C(in(r,c)));
+}
+
+template<typename T>
+void host_backend<T>::assign(const tensor_ptr& src, tensor_ptr& dst) {
+    at(dst) = at(src);
 }
 
 }

@@ -26,7 +26,7 @@
 #include <jlib/ai/neural.hh>
 
 #ifdef HAVE_METAL
-#include <jlib/metal/gemm.hh>
+#include <jlib/metal/backend.hh>
 #endif
 #include <jlib/apps/magick.hh>
 
@@ -168,18 +168,16 @@ int main(int argc, char** argv) {
     // Held here rather than in the lambda: the kernel and the queue are worth
     // keeping across calls, and a training loop makes the same shapes over and
     // over.
-    std::unique_ptr<jlib::metal::matrix_multiply> mm;
-
     if(use_metal) {
-        mm.reset(new jlib::metal::matrix_multiply);
+        // The whole network moves, not just the multiply.  A hook that took
+        // only the matrix product left everything else on the CPU, so each
+        // layer bounced the data across and a step paid eight
+        // synchronisations rather than one.
+        std::shared_ptr<jlib::metal::backend<T> > gpu(new jlib::metal::backend<T>);
 
-        nn->set_multiply([&mm](const math::matrix<T>& a, const math::matrix<T>& b) {
-                return (*mm)(a, b);
-            });
+        nn->set_backend(gpu);
 
-        std::cout << "Multiplying on " << jlib::metal::device::shared()->name()
-                  << (jlib::metal::device::shared()->unified()
-                      ? " (unified memory)" : " (discrete)")
+        std::cout << "Training on " << gpu->name()
                   << ", batch " << batch_size << std::endl;
     }
 #else

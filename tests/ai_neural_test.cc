@@ -28,6 +28,7 @@
 // returns would put a sigmoid between the assertion and the thing asserted.
 
 #include <jlib/ai/neural.hh>
+#include <jlib/ai/backend.hh>
 
 #include <cmath>
 #include <iostream>
@@ -36,6 +37,8 @@
 
 using jlib::ai::NeuralNetwork;
 using jlib::math::matrix;
+
+namespace ai = jlib::ai;
 
 namespace json = jlib::util::json;
 
@@ -282,17 +285,17 @@ static void each_activation_and_its_slope() {
     std::cout << "\neach activation and its slope:\n";
 
     using jlib::ai::activation;
-    using jlib::ai::activate;
-    using jlib::ai::activate_slope;
+    using jlib::ai::activate_matrix;
+    using jlib::ai::slope_matrix;
     using jlib::ai::LEAK;
 
     matrix<double> x(1, 4);
     x(0,0) = -2.0; x(0,1) = -0.5; x(0,2) = 0.5; x(0,3) = 2.0;
 
-    const matrix<double> sig = activate(activation::sigmoid, x);
-    const matrix<double> rel = activate(activation::relu, x);
-    const matrix<double> lky = activate(activation::leaky_relu, x);
-    const matrix<double> tnh = activate(activation::tanh, x);
+    const matrix<double> sig = activate_matrix(activation::sigmoid, x);
+    const matrix<double> rel = activate_matrix(activation::relu, x);
+    const matrix<double> lky = activate_matrix(activation::leaky_relu, x);
+    const matrix<double> tnh = activate_matrix(activation::tanh, x);
 
     ok("sigmoid is 1/(1+exp(-x))",
        std::fabs(sig(0,2) - 1.0/(1.0+std::exp(-0.5))) < 1e-15,
@@ -309,10 +312,10 @@ static void each_activation_and_its_slope() {
 
     // The slope is taken from the *output*, which is what lets these be
     // interchangeable without train() caching the pre-activations as well.
-    const matrix<double> dsig = activate_slope(activation::sigmoid, sig);
-    const matrix<double> drel = activate_slope(activation::relu, rel);
-    const matrix<double> dlky = activate_slope(activation::leaky_relu, lky);
-    const matrix<double> dtnh = activate_slope(activation::tanh, tnh);
+    const matrix<double> dsig = slope_matrix(activation::sigmoid, sig);
+    const matrix<double> drel = slope_matrix(activation::relu, rel);
+    const matrix<double> dlky = slope_matrix(activation::leaky_relu, lky);
+    const matrix<double> dtnh = slope_matrix(activation::tanh, tnh);
 
     ok("sigmoid's slope is s(1-s)",
        std::fabs(dsig(0,2) - sig(0,2)*(1.0-sig(0,2))) < 1e-15);
@@ -402,59 +405,40 @@ static void the_activation_survives_a_round_trip() {
     ok("an unknown name is refused rather than defaulted", threw);
 }
 
-static void the_multiply_can_be_replaced() {
-    std::cout << "\nthe multiply can be replaced:\n";
+static void the_backend_can_be_replaced() {
+    std::cout << "\nthe backend can be replaced:\n";
 
-    // Everything expensive in this class is a GEMM, so this hook is the whole
-    // of what a GPU takes over.  Injected rather than depended on: jlib/ai
-    // builds before jlib/metal and must not need it, so the caller supplies
-    // one.  See jneural-alpha's --metal.
     NeuralNetwork<double> nn(0.1, I, hidden(), O);
 
-    int calls = 0;
+    ok("it starts on the host", nn.get_backend().name() == "host",
+       nn.get_backend().name());
 
-    nn.set_multiply([&calls](const matrix<double>& a, const matrix<double>& b) {
-            calls++;
-            return a * b;
-        });
+    // Swapping to another instance of the same kind is the part that can be
+    // checked without a GPU: the weights have to survive the move, and the
+    // network has to go on training identically.
+    NeuralNetwork<double> other(nn.json());
+
+    const std::vector<double> before = weights(nn);
+
+    nn.set_backend(std::shared_ptr<ai::backend<double> >(new ai::host_backend<double>));
+
+    ok("and the weights survive a move", worst(before, weights(nn)) == 0.0,
+       std::to_string(worst(before, weights(nn))));
 
     nn.train(input(0), target(0));
+    other.train(input(0), target(0));
 
-    // One per layer forward, one per layer backward, give or take: what
-    // matters is that it is used at all rather than the exact count, which is
-    // an implementation detail of train().
-    ok("an injected multiply is actually used", calls > 0,
-       std::to_string(calls) + " calls");
+    ok("and it trains the same afterwards",
+       worst(weights(nn), weights(other)) == 0.0,
+       std::to_string(worst(weights(nn), weights(other))));
 
-    const int after_train = calls;
+    // A null puts the default back rather than leaving the network without
+    // one, which would be a crash on the next call rather than an error.
+    nn.set_backend(std::shared_ptr<ai::backend<double> >());
 
     nn.query(input(0));
 
-    ok("and by query() too", calls > after_train,
-       std::to_string(calls - after_train) + " more");
-
-    // The results must not depend on who did the multiplying.
-    NeuralNetwork<double> plain(0.1, I, hidden(), O);
-    NeuralNetwork<double> hooked(plain.json());
-
-    hooked.set_multiply([](const matrix<double>& a, const matrix<double>& b) {
-            return a * b;
-        });
-
-    plain.train(input(1), target(1));
-    hooked.train(input(1), target(1));
-
-    ok("and a multiply that agrees gives an identical network",
-       worst(weights(plain), weights(hooked)) == 0.0,
-       std::to_string(worst(weights(plain), weights(hooked))));
-
-    // Passing nothing puts the default back rather than leaving a null in the
-    // hot path, which would be a crash on the next train().
-    hooked.set_multiply(nullptr);
-
-    hooked.query(input(0));
-
-    ok("and clearing it restores the default rather than crashing", true);
+    ok("and passing nothing leaves it usable", true);
 }
 
 static void a_mismatched_batch_is_refused() {
@@ -481,7 +465,7 @@ int main() {
     weights_are_scaled_by_the_fan_in();
     each_activation_and_its_slope();
     the_activation_survives_a_round_trip();
-    the_multiply_can_be_replaced();
+    the_backend_can_be_replaced();
     a_mismatched_batch_is_refused();
 
     // What a green run does not establish.

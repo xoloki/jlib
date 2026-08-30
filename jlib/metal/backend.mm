@@ -140,6 +140,14 @@ void backend<T>::add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y) {
 }
 
 template<typename T>
+void backend<T>::assign(const tensor_ptr& src, tensor_ptr& dst) {
+    // Through add_scaled with the destination zeroed first would need a zero
+    // kernel; subtracting a tensor from itself is one op and no new kernel.
+    m_stream->subtract(at<T>(src), at<T>(src), at<T>(dst));   // dst = 0
+    m_stream->add_scaled(1.0f, at<T>(src), at<T>(dst));       // dst += src
+}
+
+template<typename T>
 void backend<T>::wait() {
     m_stream->wait();
 }
