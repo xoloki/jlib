@@ -39,6 +39,12 @@ dnl Toolchain
 dnl ------------------------------------------------------------------
 
 AC_PROG_CXX
+
+dnl Objective-C++, for jlib/metal.  Metal's API is Objective-C, so its .mm
+dnl files need this even though nothing else in the tree does -- and automake
+dnl refuses to emit rules for a .mm without it.  Harmless where there is no
+dnl Objective-C++ compiler: the module that uses it is gated on HAVE_METAL.
+AC_PROG_OBJCXX
 AM_PROG_AR
 LT_INIT
 AC_LANG([C++])
@@ -273,6 +279,41 @@ AC_SUBST([CUDA_LIBS])
 AM_CONDITIONAL([HAVE_CUDA], [test "x$have_cuda" = xyes])
 
 dnl ------------------------------------------------------------------
+dnl Metal (Apple GPU compute), for jlib/metal
+dnl ------------------------------------------------------------------
+
+dnl Frameworks rather than headers: Metal and MetalPerformanceShaders ship
+dnl with the OS and have no pkg-config.  The compile test also settles whether
+dnl the toolchain can build Objective-C++ at all, which is what jlib/metal is
+dnl written in -- the headers there are plain C++ so nothing else has to be.
+dnl
+dnl Note this buys float and half only.  Metal Shading Language has no double
+dnl ("'double' is not supported in Metal", straight from the compiler), which
+dnl is why jlib/metal offers gemm<float> and nothing wider.
+
+AC_ARG_WITH([metal],
+  [AS_HELP_STRING([--without-metal],
+                  [do not build the Metal GPU backend even on macOS])],
+  [want_metal=$withval], [want_metal=yes])
+
+have_metal=no
+AS_IF([test "x$want_metal" != xno],
+  [AC_MSG_CHECKING([for Metal and MetalPerformanceShaders])
+   jlib_save_LIBS="$LIBS"
+   LIBS="$LIBS -framework Metal -framework MetalPerformanceShaders -framework Foundation"
+   AC_LINK_IFELSE(
+     [AC_LANG_PROGRAM([[]], [[]])],
+     [have_metal=yes], [have_metal=no])
+   LIBS="$jlib_save_LIBS"
+   AC_MSG_RESULT([$have_metal])])
+
+AS_IF([test "x$have_metal" = xyes],
+  [METAL_LIBS="-framework Metal -framework MetalPerformanceShaders -framework Foundation"],
+  [METAL_LIBS=""])
+AC_SUBST([METAL_LIBS])
+AM_CONDITIONAL([HAVE_METAL], [test "x$have_metal" = xyes])
+
+dnl ------------------------------------------------------------------
 dnl Installed pkg-config file
 dnl ------------------------------------------------------------------
 
@@ -286,6 +327,7 @@ AS_IF([test "x$have_glfw" = xyes], [jlib_libs="-ljglfw $jlib_libs"])
 AS_IF([test "x$have_glu"  = xyes], [jlib_libs="-ljglu $jlib_libs"])
 AS_IF([test "x$have_gl"   = xyes], [jlib_libs="-ljgl $jlib_libs"])
 AS_IF([test "x$have_cuda" = xyes], [jlib_libs="-ljcuda $jlib_libs"])
+AS_IF([test "x$have_metal" = xyes], [jlib_libs="-ljmetal $jlib_libs"])
 
 AC_SUBST([JLIB_PC_CFLAGS], ["-I\${includedir}/jlib-$jlib_release"])
 AC_SUBST([JLIB_PC_LIBS],   ["-L\${libdir} $jlib_libs"])
@@ -305,6 +347,7 @@ AC_CONFIG_FILES([Makefile
     jlib/x/Makefile
     jlib/ai/Makefile
     jlib/cuda/Makefile
+    jlib/metal/Makefile
     jlib/apps/Makefile
     tests/Makefile
     jlib/jlib-1.2.pc
@@ -330,6 +373,7 @@ AC_MSG_NOTICE([
     glfw ................. $have_glfw
     ImageMagick++ ........ $have_magick
     cuda ................. $have_cuda
+    metal ................ $have_metal
 
   windowing
     x11 .................. $have_x

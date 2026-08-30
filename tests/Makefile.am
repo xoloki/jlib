@@ -41,6 +41,13 @@ if HAVE_X
 X_TESTS = x_window_test
 endif
 
+# Metal is macOS-only and needs a GPU, so it is gated the same way.  The test
+# itself also exits 77 if there is no device, which covers a machine that has
+# the frameworks and no hardware.
+if HAVE_METAL
+METAL_TESTS = metal_gemm_test
+endif
+
 TESTS = \
 	math_test \
 	math_value_test \
@@ -94,6 +101,7 @@ TESTS = \
 	util_abnf_compile_test \
  \
 	$(X_TESTS) \
+	$(METAL_TESTS) \
 	$(MEDIA_TESTS) \
 	$(CURVE_TESTS)
 
@@ -283,3 +291,6 @@ crypt_schnorr_test_LDADD   = $(JUTIL_LA) $(JCRYPT_LA) $(SODIUM_LIBS)
 
 crypt_groth_test_SOURCES = crypt_groth_test.cc
 crypt_groth_test_LDADD   = $(JUTIL_LA) $(JCRYPT_LA) $(SODIUM_LIBS)
+
+metal_gemm_test_SOURCES = metal_gemm_test.cc
+metal_gemm_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(METAL_LIBS)
