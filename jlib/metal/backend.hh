@@ -67,6 +67,7 @@ public:
     void hadamard(const tensor_ptr& a, const tensor_ptr& b, tensor_ptr& c);
     void subtract(const tensor_ptr& a, const tensor_ptr& b, tensor_ptr& c);
     void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y);
+    void assign(const tensor_ptr& src, tensor_ptr& dst);
 
     void wait();
 

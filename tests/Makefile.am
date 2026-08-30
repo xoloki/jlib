@@ -7,6 +7,7 @@ EXTRA_DIST = audio_test.hh certificate.hh mailserver.hh httpserver.hh
 
 JSYS_LA   = $(top_builddir)/jlib/sys/libjsys.la
 JUTIL_LA  = $(top_builddir)/jlib/util/libjutil.la
+JAI_LA    = $(top_builddir)/jlib/ai/libjai.la
 JCRYPT_LA = $(top_builddir)/jlib/crypt/libjcrypt.la
 JNET_LA   = $(top_builddir)/jlib/net/libjnet.la
 JMEDIA_LA = $(top_builddir)/jlib/media/libjmedia.la
@@ -285,7 +286,7 @@ math_dump_test_SOURCES = math_dump_test.cc
 math_dump_test_LDADD   = $(JUTIL_LA)
 
 ai_neural_test_SOURCES = ai_neural_test.cc
-ai_neural_test_LDADD   = $(JUTIL_LA) $(JSYS_LA)
+ai_neural_test_LDADD   = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 
 math_object_test_SOURCES = math_object_test.cc
 math_object_test_LDADD   = $(JUTIL_LA)
@@ -310,4 +311,4 @@ metal_tensor_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(JUTIL_LA) 
 
 ai_backend_test_SOURCES  = ai_backend_test.cc
 ai_backend_test_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)
-ai_backend_test_LDADD    = $(top_builddir)/jlib/ai/libjai.la $(JUTIL_LA) $(JSYS_LA) $(METAL_LA)
+ai_backend_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA) $(METAL_LA)
