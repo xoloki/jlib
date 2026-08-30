@@ -59,6 +59,12 @@ int main(int argc, char** argv) {
     const std::string I = "img";
     uint epochs = 1, train_multi = 1;
     std::string train_path, test_train_path, test_my_path, load_file, output_file, train_mnist_path, test_mnist_path;
+
+    // Hidden and output are named separately because they want different
+    // answers: relu is what lets depth train, and relu on the output of a
+    // classifier scored against 0.01/0.99 targets kills any unit that goes
+    // negative.  See ai::activation.
+    std::string hidden_activation = "sigmoid", output_activation = "sigmoid";
     double train_rate = 0.1;
     int train_decay = -1;
     
@@ -86,6 +92,10 @@ int main(int argc, char** argv) {
             load_file = argv[++i];
         } else if(arg == "--output-file") {
             output_file = argv[++i];
+        } else if(arg == "--hidden-activation") {
+            hidden_activation = argv[++i];
+        } else if(arg == "--output-activation") {
+            output_activation = argv[++i];
         } else if(arg == "--hidden-nodes") {
             HNODES.push_back(std::stoi(argv[++i]));
         } else if(arg == "--output-nodes") {
@@ -105,6 +115,9 @@ int main(int argc, char** argv) {
     
     if(load_file.empty()) {
         nn.reset(new ai::NeuralNetwork<double>(train_rate, INODES, HNODES, ONODES));
+
+        nn->set_hidden_activation(ai::activation_from_name(hidden_activation));
+        nn->set_output_activation(ai::activation_from_name(output_activation));
     } else {
         std::cout << "Loading json output from " << load_file << std::endl;
 

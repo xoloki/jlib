@@ -281,6 +281,130 @@ static void weights_are_scaled_by_the_fan_in() {
        std::to_string(wih));
 }
 
+static void each_activation_and_its_slope() {
+    std::cout << "\neach activation and its slope:\n";
+
+    using jlib::ai::activation;
+    using jlib::ai::activate;
+    using jlib::ai::activate_slope;
+    using jlib::ai::LEAK;
+
+    matrix<double> x(1, 4);
+    x(0,0) = -2.0; x(0,1) = -0.5; x(0,2) = 0.5; x(0,3) = 2.0;
+
+    const matrix<double> sig = activate(activation::sigmoid, x);
+    const matrix<double> rel = activate(activation::relu, x);
+    const matrix<double> lky = activate(activation::leaky_relu, x);
+    const matrix<double> tnh = activate(activation::tanh, x);
+
+    ok("sigmoid is 1/(1+exp(-x))",
+       std::fabs(sig(0,2) - 1.0/(1.0+std::exp(-0.5))) < 1e-15,
+       std::to_string(sig(0,2)));
+
+    ok("relu zeroes what is negative and passes what is not",
+       rel(0,0) == 0.0 && rel(0,1) == 0.0 && rel(0,2) == 0.5 && rel(0,3) == 2.0);
+
+    ok("leaky relu leans rather than flattens",
+       std::fabs(lky(0,0) - LEAK * -2.0) < 1e-15 && lky(0,3) == 2.0,
+       std::to_string(lky(0,0)));
+
+    ok("tanh is tanh", std::fabs(tnh(0,3) - std::tanh(2.0)) < 1e-15);
+
+    // The slope is taken from the *output*, which is what lets these be
+    // interchangeable without train() caching the pre-activations as well.
+    const matrix<double> dsig = activate_slope(activation::sigmoid, sig);
+    const matrix<double> drel = activate_slope(activation::relu, rel);
+    const matrix<double> dlky = activate_slope(activation::leaky_relu, lky);
+    const matrix<double> dtnh = activate_slope(activation::tanh, tnh);
+
+    ok("sigmoid's slope is s(1-s)",
+       std::fabs(dsig(0,2) - sig(0,2)*(1.0-sig(0,2))) < 1e-15);
+
+    ok("relu's slope is one above zero and nothing at or below",
+       drel(0,0) == 0.0 && drel(0,1) == 0.0 && drel(0,2) == 1.0 && drel(0,3) == 1.0);
+
+    // The reason leaky exists: a unit that has gone negative still has a
+    // gradient, so it can come back.  relu's cannot.
+    ok("leaky relu keeps a slope where relu has none",
+       dlky(0,0) == LEAK && drel(0,0) == 0.0,
+       std::to_string(dlky(0,0)));
+
+    ok("tanh's slope is 1 - s^2",
+       std::fabs(dtnh(0,3) - (1.0 - tnh(0,3)*tnh(0,3))) < 1e-15);
+}
+
+static void the_activation_survives_a_round_trip() {
+    std::cout << "\nthe activation survives a round trip:\n";
+
+    using jlib::ai::activation;
+
+    NeuralNetwork<double> a(0.1, I, hidden(), O);
+
+    ok("both default to sigmoid",
+       a.get_hidden_activation() == activation::sigmoid &&
+       a.get_output_activation() == activation::sigmoid);
+
+    a.set_hidden_activation(activation::relu);
+
+    // Hidden and output are set separately because they want different
+    // answers -- relu hidden with a sigmoid output is the ordinary
+    // arrangement, and relu on the output of a classifier scored against
+    // 0.01/0.99 kills any unit that goes negative.
+    NeuralNetwork<double> b(a.json());
+
+    ok("the hidden choice comes back",
+       b.get_hidden_activation() == activation::relu);
+
+    ok("and the output was not dragged along with it",
+       b.get_output_activation() == activation::sigmoid);
+
+    // Written by name, so reordering the enum cannot silently change what a
+    // saved file means.
+    json::object::ptr p = a.json();
+
+    ok("it is stored by name", std::string(p->get("hidden_activation")) == "relu",
+       std::string(p->get("hidden_activation")));
+
+    // A network saved before these fields existed must still load.  Simulated
+    // by serialising one and cutting the fields back out of the text, which is
+    // what such a file is.
+    std::string text = a.json()->str(false);
+
+    for(const char* key : { "\"hidden_activation\"", "\"output_activation\"" }) {
+        const std::size_t at = text.find(key);
+
+        if(at == std::string::npos) continue;
+
+        std::size_t end = text.find(',', at);
+
+        if(end == std::string::npos) {
+            // Last member: take the preceding comma instead.
+            end = text.rfind(',', at);
+            text.erase(end, text.find('}', at) - end);
+        }
+        else {
+            text.erase(at, end - at + 1);
+        }
+    }
+
+    ok("the fields really are gone from the text",
+       text.find("hidden_activation") == std::string::npos,
+       text.substr(0, 60) + "...");
+
+    NeuralNetwork<double> old(json::object::create(text));
+
+    ok("and a file that predates them loads as sigmoid",
+       old.get_hidden_activation() == activation::sigmoid &&
+       old.get_output_activation() == activation::sigmoid,
+       jlib::ai::name_of(old.get_hidden_activation()));
+
+    bool threw = false;
+    try { jlib::ai::activation_from_name("wibble"); }
+    catch(std::exception&) { threw = true; }
+
+    ok("an unknown name is refused rather than defaulted", threw);
+}
+
 static void a_mismatched_batch_is_refused() {
     std::cout << "\na mismatched batch is refused:\n";
 
@@ -303,6 +427,8 @@ int main() {
     the_gradient_is_a_mean();
     it_is_the_mean_of_the_samples();
     weights_are_scaled_by_the_fan_in();
+    each_activation_and_its_slope();
+    the_activation_survives_a_round_trip();
     a_mismatched_batch_is_refused();
 
     // What a green run does not establish.
