@@ -45,7 +45,7 @@ endif
 # itself also exits 77 if there is no device, which covers a machine that has
 # the frameworks and no hardware.
 if HAVE_METAL
-METAL_TESTS = metal_gemm_test
+METAL_TESTS = metal_gemm_test metal_tensor_test
 endif
 
 TESTS = \
@@ -298,3 +298,6 @@ crypt_groth_test_LDADD   = $(JUTIL_LA) $(JCRYPT_LA) $(SODIUM_LIBS)
 
 metal_gemm_test_SOURCES = metal_gemm_test.cc
 metal_gemm_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(METAL_LIBS)
+
+metal_tensor_test_SOURCES = metal_tensor_test.cc
+metal_tensor_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(JUTIL_LA) $(JSYS_LA) $(METAL_LIBS)
