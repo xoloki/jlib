@@ -85,8 +85,24 @@ namespace jlib {
              *                 sys::get_default_connect_timeout(), zero waits
              *                 forever.
              */
-            basic_socketbuf(const std::string& host, unsigned int port, double timeout = -1) {
+            /**
+             * @param timeout    seconds to allow the *connect*
+             * @param io_timeout seconds a later read or write may block, 0 for
+             *        forever.  Separate from the connect deadline and set here
+             *        rather than afterwards for the same reason the adopting
+             *        constructor below takes one: configure() applies it, and a
+             *        TLS handshake started by a derived buffer happens before
+             *        any caller has a chance to set it.  A client pointed at a
+             *        port that does not speak TLS blocks in the handshake, and
+             *        set_timeout() called after construction is already too
+             *        late to matter.
+             */
+            basic_socketbuf(const std::string& host, unsigned int port,
+                            double timeout = -1, double io_timeout = 0) {
                 init_buffers();
+
+                // Before open_socket, which calls configure, which applies it.
+                m_io_timeout = io_timeout;
 
                 // A constructor that throws gets no destructor, so the two
                 // buffers just allocated would be lost -- and a failing
@@ -484,12 +500,13 @@ namespace jlib {
                 //exceptions(std::ios_base::badbit);
             }
 
-            basic_socketstream(const std::string& host, unsigned int port, double timeout = -1)
+            basic_socketstream(const std::string& host, unsigned int port,
+                               double timeout = -1, double io_timeout = 0)
                 : std::basic_iostream<charT,traitT>(NULL)
             {
                 m_buf = 0;
                 //exceptions(std::ios_base::badbit);
-                m_buf=new basic_socketbuf<charT,traitT>(host,port,timeout);
+                m_buf=new basic_socketbuf<charT,traitT>(host,port,timeout,io_timeout);
                 this->init(m_buf);
             }
 
@@ -508,10 +525,11 @@ namespace jlib {
                     delete m_buf;
             }
             
-            void open(const std::string& host, unsigned int port, double timeout = -1) {
+            void open(const std::string& host, unsigned int port, double timeout = -1,
+                      double io_timeout = 0) {
                 if(m_buf != 0)
                     delete m_buf;
-                m_buf=new basic_socketbuf<charT,traitT>(host,port,timeout);
+                m_buf=new basic_socketbuf<charT,traitT>(host,port,timeout,io_timeout);
                 this->init(m_buf);
             }
 

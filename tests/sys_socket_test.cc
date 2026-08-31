@@ -32,6 +32,7 @@
 #include <jlib/sys/listener.hh>
 #include <jlib/sys/pipe.hh>
 #include <jlib/sys/socketstream.hh>
+#include <jlib/sys/sslstream.hh>
 #include <jlib/sys/sys.hh>
 
 #include <fcntl.h>
@@ -70,6 +71,46 @@ struct pair {
         peer = server.accept_stream(5);
     }
 };
+
+/**
+ * A TLS handshake against a server that never says anything gives up.
+ *
+ * The listener here is never accept()ed, which the harness note above explains
+ * is enough: the kernel completes the three-way handshake out of the backlog,
+ * so the client connects to something that will never speak. No real server
+ * behaves that way, which is why nothing else in the suite covers it -- and why
+ * a client that waits forever looks fine until it does not.
+ *
+ * The deadline has to be in the **constructor**. With delay false the handshake
+ * happens inside it, so there is no later moment at which set_timeout() could
+ * be reached: the call has not returned. That is the same reason the adopting
+ * constructor in socketstream.hh takes one for the server side.
+ */
+static void a_handshake_against_a_silent_server_gives_up() {
+    std::cout << "a handshake against a silent server gives up\n";
+
+    jlib::sys::listener server;
+
+    const auto began = std::chrono::steady_clock::now();
+
+    bool threw = false;
+
+    try {
+        // Never accepted, so nothing will ever answer the ClientHello.
+        jlib::sys::sslstream s("127.0.0.1", server.port(), false, -1, 1.0);
+    }
+    catch(std::exception&) { threw = true; }
+
+    const double took = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - began).count();
+
+    ok("it fails rather than waiting", threw, std::to_string(took) + "s");
+
+    // The number is the assertion. Without a deadline this waits for the peer,
+    // and the peer is this process, which is not going to say anything.
+    ok("on its own deadline", took > 0.5 && took < 5.0,
+       std::to_string(took) + "s");
+}
 
 static void a_listener_accepts_a_connection() {
     std::cout << "a listener accepts a connection\n";
@@ -313,6 +354,7 @@ static void a_read_can_be_bounded() {
 
 int main() {
     a_listener_accepts_a_connection();
+    a_handshake_against_a_silent_server_gives_up();
     a_connect_that_will_never_answer_gives_up();
     an_ipv6_literal_resolves();
     a_listener_says_who_connected();

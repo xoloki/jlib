@@ -232,7 +232,10 @@ sys_servent_test_SOURCES = sys_servent_test.cc
 sys_servent_test_LDADD   = $(JSYS_LA)
 
 sys_socket_test_SOURCES = sys_socket_test.cc
-sys_socket_test_LDADD   = $(JSYS_LA)
+# OPENSSL_LIBS since the silent-server handshake test uses sslstream.  macOS
+# resolved it transitively through libjsys; gcc with --as-needed does not, so
+# this failed only in the container.
+sys_socket_test_LDADD   = $(JSYS_LA) $(OPENSSL_LIBS)
 
 sys_tls_server_test_SOURCES = sys_tls_server_test.cc
 sys_tls_server_test_LDADD   = $(JSYS_LA) $(OPENSSL_LIBS)

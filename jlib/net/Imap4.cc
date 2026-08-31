@@ -451,7 +451,10 @@ namespace jlib {
                                                                  phost, 
                                                                  pport);
                         } else {
-                            sock = new sys::sslstream(m_host,m_port);
+                            // In the constructor because that is where the
+                            // handshake is; see Pop3::connect.
+                            sock = new sys::sslstream(m_host, m_port, false,
+                                                      -1, m_timeout);
                         }
                     }
                     else if(use_starttls()) {
@@ -468,7 +471,8 @@ namespace jlib {
                             sock = new sys::tlsproxystream(m_host, m_port,
                                                            phost, pport, true);
                         } else {
-                            sock = new sys::tlsstream(m_host, m_port, true);
+                            sock = new sys::tlsstream(m_host, m_port, true,
+                                                      -1, m_timeout);
                         }
                     }
                     else {
@@ -500,7 +504,12 @@ namespace jlib {
             if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "done opening"<<std::endl;
 
             sock->exceptions(std::ios_base::failbit | std::ios_base::badbit | std::ios_base::eofbit );
-            
+
+            // The proxying paths do not take it in their constructors yet, so
+            // they get it here -- which covers the greeting below but not a
+            // handshake inside a constructor. The two direct paths pass it in.
+            if(m_timeout > 0) sock->set_timeout(m_timeout);
+
             std::string buf;
             sys::getline(*sock, buf);
             if(getenv("JLIB_NET_IMAP4_DEBUG")) std::cout << "read first line: " << buf << std::endl;
