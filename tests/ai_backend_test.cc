@@ -775,6 +775,215 @@ static void the_gather(const char* name, std::vector<ai::backend<T>*>& backends)
     }
 }
 
+/** The write half of gather: columns placed where they are asked for. */
+template<typename T>
+static void the_column_copy(const char* name, std::vector<ai::backend<T>*>& backends) {
+    std::cout << "\ncopy_columns, " << name << ":\n";
+
+    const uint d = 4;
+
+    matrix<T> src(d, 2);
+
+    for(uint c = 0; c < 2; c++)
+        for(uint r = 0; r < d; r++)
+            src(r,c) = T(float(c) * 10.0f + float(r) + 1.0f);
+
+    for(ai::backend<T>* b : backends) {
+        typename ai::backend<T>::tensor_ptr s = b->make(src);
+        typename ai::backend<T>::tensor_ptr dst = b->make(d, 6);
+
+        b->copy_columns(s, dst, 3);
+        b->wait();
+
+        const matrix<T> got = dst->read();
+
+        bool placed = true;
+
+        for(uint c = 0; c < 2; c++)
+            for(uint r = 0; r < d; r++)
+                if(float(got(r, 3 + c)) != float(src(r,c))) placed = false;
+
+        ok(std::string("  ") + b->name() + ": the columns land where asked",
+           placed);
+
+        // Everything else untouched, which is what makes this an append rather
+        // than a write.
+        bool rest_zero = true;
+
+        for(uint c = 0; c < 6; c++) {
+            if(c >= 3 && c < 5) continue;
+
+            for(uint r = 0; r < d; r++)
+                if(float(got(r,c)) != 0.0f) rest_zero = false;
+        }
+
+        ok(std::string("  ") + b->name() + ": and nothing else moves", rest_zero);
+
+        bool threw = false;
+
+        try { b->copy_columns(s, dst, 5); b->wait(); }
+        catch(std::exception&) { threw = true; }
+
+        ok(std::string("  ") + b->name() + ": columns that would not fit are refused",
+           threw);
+    }
+}
+
+/**
+ * The offset mask, which has to do two jobs with one number.
+ *
+ * With a key-value cache the queries are the tail of the sequence, so query
+ * column c sits at absolute position `offset + c` and the causal test becomes
+ * `row > col + offset`. The second job is free: a cache is allocated for the
+ * whole context and filled as it goes, so rows past what has been written hold
+ * zeros -- and the same test masks them, because a row at or beyond the
+ * cache's length always exceeds `offset + col`.
+ *
+ * That is the property the whole design rests on, so it is asserted directly
+ * rather than inferred from attention working.
+ */
+template<typename T>
+static void the_offset_mask(const char* name, std::vector<ai::backend<T>*>& backends) {
+    std::cout << "\nthe offset mask, " << name << ":\n";
+
+    // Eight rows of keys, three columns of queries: a cache of six valid keys
+    // with three new tokens just written, in a buffer sized for eight.
+    const uint keys = 8;
+    const uint queries = 3;
+    const uint valid = 6;
+    const uint offset = valid - queries;
+
+    for(ai::backend<T>* b : backends) {
+        matrix<T> ones(keys, queries);
+
+        for(uint r = 0; r < keys; r++)
+            for(uint c = 0; c < queries; c++)
+                ones(r,c) = T(1.0f);
+
+        typename ai::backend<T>::tensor_ptr t = b->make(ones);
+
+        b->causal_mask(t, offset);
+        b->wait();
+
+        const matrix<T> got = t->read();
+
+        bool right = true;
+
+        for(uint c = 0; c < queries; c++)
+            for(uint r = 0; r < keys; r++) {
+                const bool masked = !std::isfinite(float(got(r,c)));
+
+                if(masked != (r > c + offset)) right = false;
+            }
+
+        ok(std::string("  ") + b->name() + ": masks exactly row > col + offset",
+           right);
+
+        // The second job, stated on its own: nothing beyond the cache's length
+        // survives in any column.
+        bool beyond_gone = true;
+
+        for(uint c = 0; c < queries; c++)
+            for(uint r = valid; r < keys; r++)
+                if(std::isfinite(float(got(r,c)))) beyond_gone = false;
+
+        ok(std::string("  ") + b->name() +
+           ": so the rows past the cache are masked in every column", beyond_gone);
+
+        // And the diagonal survives, or a column would be entirely -inf and
+        // softmax would give nan.
+        bool diagonal = true;
+
+        for(uint c = 0; c < queries; c++)
+            if(!std::isfinite(float(got(c + offset, c)))) diagonal = false;
+
+        ok(std::string("  ") + b->name() + ": while each query still sees itself",
+           diagonal);
+    }
+}
+
+/**
+ * A beta of zero does not read the output, which is not the same as
+ * multiplying it by zero.
+ *
+ * BLAS specifies it that way so that whatever is already in C -- uninitialised
+ * memory, or -infinity left by a previous caller -- cannot affect the result.
+ * `0 * -inf` is nan, and a host implementation that wrote the formula out
+ * literally produced one.
+ *
+ * Found through a key-value cache reusing one score matrix across steps: the
+ * mask writes -infinity into the rows past the cache, the next step recomputes
+ * with beta zero, and every logit came back nan. MPS follows the convention,
+ * so the GPU was right and the host was not -- which is exactly the sort of
+ * difference a two-backend comparison exists to find, and did not, because
+ * nothing had ever left -infinity in an output before.
+ */
+template<typename T>
+static void beta_zero_does_not_read_the_output(const char* name,
+                                               std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nbeta zero does not read the output, " << name << ":\n";
+
+    std::mt19937 gen(83);
+
+    const matrix<T> a = random_matrix<T>(4, 3, gen);
+    const matrix<T> b_ = random_matrix<T>(3, 5, gen);
+
+    // What the answer is when the output starts clean.
+    matrix<T> poisoned(4, 5);
+
+    for(uint r = 0; r < 4; r++)
+        for(uint c = 0; c < 5; c++)
+            poisoned(r,c) = T(-std::numeric_limits<float>::infinity());
+
+    for(ai::backend<T>* bk : backends) {
+        typename ai::backend<T>::tensor_ptr ta = bk->make(a);
+        typename ai::backend<T>::tensor_ptr tb = bk->make(b_);
+
+        typename ai::backend<T>::tensor_ptr clean = bk->make(4, 5);
+        typename ai::backend<T>::tensor_ptr dirty = bk->make(poisoned);
+
+        bk->multiply(ta, tb, clean, T(1), T(0));
+        bk->multiply(ta, tb, dirty, T(1), T(0));
+        bk->wait();
+
+        const matrix<T> c1 = clean->read();
+        const matrix<T> c2 = dirty->read();
+
+        bool finite = true;
+
+        for(uint r = 0; r < 4; r++)
+            for(uint c = 0; c < 5; c++)
+                if(!std::isfinite(float(c2(r,c)))) finite = false;
+
+        ok(std::string("  ") + bk->name() + ": no infinity survives into the result",
+           finite);
+
+        ok(std::string("  ") + bk->name() + ": which is what it would have been anyway",
+           worst(c1, c2) == 0.0, std::to_string(worst(c1, c2)));
+
+        // And the transposing forms, which go through the same blend.
+        typename ai::backend<T>::tensor_ptr tn = bk->make(3, 4);
+        typename ai::backend<T>::tensor_ptr d2 = bk->make(poisoned);
+
+        tn->write(random_matrix<T>(3, 4, gen));
+
+        bk->multiply_tn(tn, tb, d2, T(1), T(0));
+        bk->wait();
+
+        bool finite_tn = true;
+
+        const matrix<T> got = d2->read();
+
+        for(uint r = 0; r < 4; r++)
+            for(uint c = 0; c < 5; c++)
+                if(!std::isfinite(float(got(r,c)))) finite_tn = false;
+
+        ok(std::string("  ") + bk->name() + ": and the transposing form agrees",
+           finite_tn);
+    }
+}
+
 static void a_tensor_from_the_wrong_backend_is_refused() {
     std::cout << "\na tensor from the wrong backend is refused:\n";
 
@@ -838,6 +1047,9 @@ int main() {
         rope_makes_the_score_relative<float>("float", b);
         the_two_rope_layouts_differ<float>("float", b);
         the_gather<float>("float", b);
+        the_column_copy<float>("float", b);
+        the_offset_mask<float>("float", b);
+        beta_zero_does_not_read_the_output<float>("float", b);
 #else
         one_type<float>("float", b);
         the_reductions<float>("float", b);
@@ -850,6 +1062,9 @@ int main() {
         rope_makes_the_score_relative<float>("float", b);
         the_two_rope_layouts_differ<float>("float", b);
         the_gather<float>("float", b);
+        the_column_copy<float>("float", b);
+        the_offset_mask<float>("float", b);
+        beta_zero_does_not_read_the_output<float>("float", b);
 #endif
     }
 
@@ -873,6 +1088,9 @@ int main() {
         rope_makes_the_score_relative<_Float16>("_Float16", b);
         the_two_rope_layouts_differ<_Float16>("_Float16", b);
         the_gather<_Float16>("_Float16", b);
+        the_column_copy<_Float16>("_Float16", b);
+        the_offset_mask<_Float16>("_Float16", b);
+        beta_zero_does_not_read_the_output<_Float16>("_Float16", b);
     }
 
     a_tensor_from_the_wrong_backend_is_refused();

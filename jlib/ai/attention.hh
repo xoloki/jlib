@@ -71,6 +71,10 @@ namespace ai {
  * is unchecked and untested.
  *
  * @param causal whether a query may see keys that come after it
+ * @param key_offset how many keys precede the first query.  Zero when the
+ *        queries are the whole sequence; with a key-value cache they are its
+ *        tail, and k and v are the cache rather than this step's keys alone.
+ *        See backend::causal_mask, which does two jobs with this one number.
  */
 template<typename T>
 void attention(backend<T>& b,
@@ -80,7 +84,8 @@ void attention(backend<T>& b,
                typename backend<T>::tensor_ptr& scores,
                typename backend<T>::tensor_ptr& probs,
                typename backend<T>::tensor_ptr& out,
-               bool causal = true)
+               bool causal = true,
+               unsigned int key_offset = 0)
 {
     const unsigned int d  = q->rows();
     const unsigned int tq = q->cols();
@@ -107,7 +112,7 @@ void attention(backend<T>& b,
     b.multiply_tn(k, q, scores, T(1.0f / std::sqrt(float(d))), T(0));
 
     if(causal)
-        b.causal_mask(scores);
+        b.causal_mask(scores, key_offset);
 
     b.softmax(scores, probs);
 

@@ -120,6 +120,25 @@ public:
      */
     void load(const gguf& g);
 
+    /**
+     * Keep every block's keys and values, so a later call supplies only what
+     * is new.  See block::enable_cache.
+     *
+     * Defaults to the context the file declared, which is the most a model can
+     * be asked to hold anyway.
+     */
+    void enable_cache(unsigned int context = 0);
+
+    /** Forget it, for a conversation that starts again. */
+    void reset_cache();
+
+    bool caching() const { return !m_layers.empty() && m_layers[0]->caching(); }
+
+    /** How many positions are cached. */
+    unsigned int cached() const {
+        return m_layers.empty() ? 0 : m_layers[0]->cached();
+    }
+
     /** Size every intermediate for a sequence of this length. */
     void reserve(unsigned int seq);
 
@@ -342,9 +361,25 @@ void model<T>::load(const gguf& g) {
 }
 
 template<typename T>
+void model<T>::enable_cache(unsigned int context) {
+    const unsigned int n = context ? context : m_conf.context;
+
+    for(std::size_t i = 0; i < m_layers.size(); i++)
+        m_layers[i]->enable_cache(n);
+}
+
+template<typename T>
+void model<T>::reset_cache() {
+    for(std::size_t i = 0; i < m_layers.size(); i++)
+        m_layers[i]->reset_cache();
+}
+
+template<typename T>
 void model<T>::reserve(unsigned int seq) {
     if(seq == 0)
         throw backend_error("model: a sequence of no positions");
+
+    if(seq == m_seq) return;   // see block::reserve
 
     m_seq = seq;
 

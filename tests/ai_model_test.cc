@@ -28,6 +28,7 @@
 #endif
 
 #include <cmath>
+#include <random>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -415,6 +416,148 @@ static void generation_stops_when_asked() {
     }
 }
 
+/** A small model with random weights, so the two paths have something to differ about. */
+static void fill_randomly(ai::model<float>& m, std::mt19937& gen) {
+    std::uniform_real_distribution<float> d(-0.5f, 0.5f);
+
+    auto rnd = [&](unsigned int rows, unsigned int cols) {
+        jlib::math::matrix<float> a(rows, cols);
+
+        for(unsigned int r = 0; r < rows; r++)
+            for(unsigned int c = 0; c < cols; c++)
+                a(r,c) = d(gen);
+
+        return a;
+    };
+
+    const typename ai::model<float>::config& c = m.conf();
+
+    m.embedding()->write(rnd(c.d_model, c.vocab));
+    m.head()->write(rnd(c.d_model, c.vocab));
+
+    jlib::math::matrix<float> ones(c.d_model, 1);
+
+    for(unsigned int r = 0; r < c.d_model; r++) ones(r,0) = 1.0f;
+
+    m.final_norm()->write(ones);
+
+    const unsigned int dh = c.d_model / c.heads;
+
+    for(unsigned int i = 0; i < c.layers; i++) {
+        ai::block<float>& l = m.layer(i);
+
+        l.attn_norm()->write(ones);
+        l.ffn_norm()->write(ones);
+
+        for(unsigned int h = 0; h < c.heads; h++) {
+            l.wq(h)->write(rnd(dh, c.d_model));
+            l.wo(h)->write(rnd(c.d_model, dh));
+        }
+
+        for(unsigned int h = 0; h < c.kv_heads; h++) {
+            l.wk(h)->write(rnd(dh, c.d_model));
+            l.wv(h)->write(rnd(dh, c.d_model));
+        }
+
+        l.w_gate()->write(rnd(c.d_ff, c.d_model));
+        l.w_up()->write(rnd(c.d_ff, c.d_model));
+        l.w_down()->write(rnd(c.d_model, c.d_ff));
+    }
+}
+
+/**
+ * A cache changes what it costs and not what comes out.
+ *
+ * The whole correctness condition, and it is exact: greedy generation with a
+ * key-value cache must produce the identical tokens to generation without one.
+ * Not close, identical -- the arithmetic is the same arithmetic, reordered.
+ *
+ * On a small model with **random** weights rather than the zeros the other
+ * tests here use, because a model of zeros produces token 0 either way and
+ * would agree for reasons that have nothing to do with the cache.
+ */
+static void the_cache_changes_nothing() {
+    std::cout << "\nthe cache changes nothing:\n";
+
+    typename ai::model<float>::config c;
+
+    c.d_model = 16;
+    c.heads = 2;
+    c.kv_heads = 1;
+    c.d_ff = 32;
+    c.layers = 2;
+    c.vocab = 64;
+    c.context = 128;
+
+    ai::host_backend<float> b;
+    ai::model<float> m(b, c);
+
+    std::mt19937 gen(2024);
+
+    fill_randomly(m, gen);
+
+    ai::sampler::config sc;
+    sc.temperature = 0.0f;
+
+    const std::vector<int> prompt{ 1, 7, 13, 2 };
+
+    ai::sampler s1(sc);
+
+    const std::vector<int> plain = ai::generate<float>(m, b, prompt, 12, s1);
+
+    ok("  without a cache it generates", plain.size() == prompt.size() + 12,
+       std::to_string(plain.size() - prompt.size()));
+
+    m.enable_cache();
+
+    ok("  the cache starts empty", m.caching() && m.cached() == 0);
+
+    ai::sampler s2(sc);
+
+    const std::vector<int> cached = ai::generate<float>(m, b, prompt, 12, s2);
+
+    ok("  and with one it generates the identical tokens", plain == cached);
+
+    // Fifteen, not sixteen: four of prompt and eleven fed back.  The twelfth
+    // generated token ends the loop and is never shown to the model, so its
+    // keys are never computed -- counted wrong here first, which is the sort of
+    // arithmetic worth writing down rather than adjusting until it passes.
+    ok("  having cached every position it was shown", m.cached() == 15,
+       std::to_string(m.cached()));
+
+    // The capacity starts at what the prompt needed and doubles, so getting to
+    // sixteen from four means it grew twice.  If growth lost what was in it,
+    // the tokens above would not have matched.
+    ai::sampler s3(sc);
+
+    m.reset_cache();
+
+    ok("  resetting empties it", m.cached() == 0);
+
+    const std::vector<int> again = ai::generate<float>(m, b, prompt, 12, s3);
+
+    ok("  and it generates the same again from a reset cache", again == plain);
+
+    // A cache with less room than the conversation needs has to say so rather
+    // than write past the end.
+    typename ai::model<float>::config small = c;
+
+    ai::model<float> tight(b, small);
+
+    fill_randomly(tight, gen);
+
+    tight.enable_cache(6);
+
+    ai::sampler s4(sc);
+
+    bool threw = false;
+
+    try { ai::generate<float>(tight, b, prompt, 12, s4); }
+    catch(std::exception&) { threw = true; }
+
+    ok("  a cache too small for the conversation is refused", threw);
+}
+
 int main(int argc, char** argv) {
     std::cout << std::unitbuf;
 
@@ -423,6 +566,7 @@ int main(int argc, char** argv) {
     // Runs with or without a model, so the generation loop is covered on a
     // machine that has neither the file nor a GPU.
     generation_stops_when_asked();
+    the_cache_changes_nothing();
 
     if(path.empty()) {
         std::cout << "\n  (no model file, so only the generation loop is "

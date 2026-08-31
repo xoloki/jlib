@@ -188,8 +188,12 @@ public:
     /** Softmax down each column, with the column's maximum subtracted. */
     void softmax(const tensor<T>& in, tensor<T>& out);
 
-    /** Set everything strictly below the diagonal to -infinity, in place. */
-    void causal_mask(tensor<T>& s);
+    /** Mask below the diagonal, offset by how many keys precede the queries. */
+    void causal_mask(tensor<T>& s, unsigned int key_offset);
+
+    /** Copy src's columns into dst starting at a column. */
+    void copy_columns(const tensor<T>& src, tensor<T>& dst,
+                      unsigned int dst_first);
 
     /** Rotary position embedding, in place; see ai::backend::rope. */
     void rope(tensor<T>& x, unsigned int base_pos, float theta, bool split);

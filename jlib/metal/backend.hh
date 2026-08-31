@@ -69,7 +69,9 @@ public:
     void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y);
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
-    void causal_mask(tensor_ptr& s);
+    void causal_mask(tensor_ptr& s, unsigned int key_offset = 0);
+    void copy_columns(const tensor_ptr& src, tensor_ptr& dst,
+                      unsigned int dst_first);
     void gather(const tensor_ptr& table, const std::vector<int>& ids,
                 tensor_ptr& out);
     void rope(tensor_ptr& x, unsigned int base_pos = 0, float theta = 10000.0f,

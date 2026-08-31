@@ -225,9 +225,36 @@ public:
      * -infinity rather than a large negative number, because softmax subtracts
      * the column maximum and exp(-inf - m) is exactly zero for finite m.  A
      * fully masked column would give nan; this mask cannot produce one, since
-     * element (c,c) is always kept.
+     * element (c + key_offset, c) is always kept.
+     *
+     * @param key_offset how many keys precede the first query.  Zero when the
+     *        queries are the whole sequence.  With a key-value cache they are
+     *        only its tail, so query column c is at absolute position
+     *        `key_offset + c` and the condition becomes `row > col + offset`.
+     *
+     *        That one number also does a second job.  A cache is allocated for
+     *        the whole context and filled as it goes, so the rows past what
+     *        has been written hold zeros rather than keys -- and they are
+     *        masked by the same test, because a row at or beyond the cache's
+     *        length is always greater than `key_offset + col`.  One mask, both
+     *        jobs, which is why this needs no notion of how full the cache is.
      */
-    virtual void causal_mask(tensor_ptr& s) = 0;
+    virtual void causal_mask(tensor_ptr& s, unsigned int key_offset = 0) = 0;
+
+    /**
+     * Copy src's columns into dst starting at a column: the write half of
+     * gather.
+     *
+     * For appending to a key-value cache, where the keys for the tokens just
+     * processed go after the ones already there. Column-major storage makes a
+     * column range contiguous, so this is a run of memcpy rather than a
+     * gather -- but it is a kernel rather than a memcpy because on a GPU the
+     * destination is device memory.
+     *
+     * @throws backend_error if the columns would not fit
+     */
+    virtual void copy_columns(const tensor_ptr& src, tensor_ptr& dst,
+                              unsigned int dst_first) = 0;
 
     /**
      * Pick columns out of a table: out[:,i] = table[:,ids[i]].
@@ -322,7 +349,9 @@ public:
     void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y);
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
-    void causal_mask(tensor_ptr& s);
+    void causal_mask(tensor_ptr& s, unsigned int key_offset = 0);
+    void copy_columns(const tensor_ptr& src, tensor_ptr& dst,
+                      unsigned int dst_first);
     void gather(const tensor_ptr& table, const std::vector<int>& ids,
                 tensor_ptr& out);
     void rope(tensor_ptr& x, unsigned int base_pos = 0, float theta = 10000.0f,
@@ -478,6 +507,24 @@ template<typename T>
 void blend(const math::matrix<T>& p, math::matrix<T>& out, T alpha, T beta) {
     typedef typename compute_in<T>::type C;
 
+    // beta of zero means out is **not read**, which is what BLAS specifies and
+    // is not the same thing as multiplying it by zero.  Whatever is already
+    // there may be uninitialised, or -infinity left by a previous caller's
+    // mask, and `0 * -inf` is nan -- which then poisons the sum and everything
+    // downstream of it.
+    //
+    // Found by a key-value cache reusing one score matrix across steps: the
+    // mask writes -infinity into the rows past the cache, the next step
+    // recomputes the scores with beta zero, and every logit came back nan.
+    // MPS follows the convention, so the GPU was right and this was not.
+    if(beta == T(0)) {
+        for(uint r = 0; r < out.M; r++)
+            for(uint c = 0; c < out.N; c++)
+                out(r,c) = T(C(alpha) * C(p(r,c)));
+
+        return;
+    }
+
     for(uint r = 0; r < out.M; r++)
         for(uint c = 0; c < out.N; c++)
             out(r,c) = T(C(alpha) * C(p(r,c)) + C(beta) * C(out(r,c)));
@@ -584,7 +631,25 @@ void host_backend<T>::softmax(const tensor_ptr& in, tensor_ptr& out) {
 }
 
 template<typename T>
-void host_backend<T>::causal_mask(tensor_ptr& s) {
+void host_backend<T>::copy_columns(const tensor_ptr& src, tensor_ptr& dst,
+                                   unsigned int dst_first)
+{
+    const math::matrix<T>& a = at(src);
+    math::matrix<T>& b = at(dst);
+
+    if(a.M != b.M)
+        throw backend_error("copy_columns: the two must be the same height");
+
+    if(dst_first + a.N > b.N)
+        throw backend_error("copy_columns: the columns would not fit");
+
+    for(uint c = 0; c < a.N; c++)
+        for(uint r = 0; r < a.M; r++)
+            b(r, dst_first + c) = a(r, c);
+}
+
+template<typename T>
+void host_backend<T>::causal_mask(tensor_ptr& s, unsigned int key_offset) {
     math::matrix<T>& x = at(s);
 
     // Through float, not std::numeric_limits<T>: _Float16 is a compiler
@@ -593,7 +658,7 @@ void host_backend<T>::causal_mask(tensor_ptr& s) {
     const T neg_inf = T(-std::numeric_limits<float>::infinity());
 
     for(uint c = 0; c < x.N; c++)
-        for(uint r = c + 1; r < x.M; r++)
+        for(uint r = c + key_offset + 1; r < x.M; r++)
             x(r,c) = neg_inf;
 }
 
