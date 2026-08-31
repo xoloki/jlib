@@ -83,13 +83,42 @@ double now() {
 }
 
 /**
- * The screen: a transcript that scrolls and a prompt that does not.
+  * Which colour a line is wearing.
+  *
+  * There is deliberately no tone for the reply: it is most of what is on the
+  * screen, so colouring it colours the screen.  Colour marks what is *not* the
+  * reply -- the question that prompted it and the note that closes it -- which
+  * is what makes those two findable when scrolling back through a long
+  * transcript.
+  */
+enum tone { plain = 1, you = 2, note = 3 };
+
+/**
+ * Logical keys that arrive as escape sequences rather than as keys.
+ *
+ * Above ncurses' own range, which stops well below this, so they cannot
+ * collide with a KEY_ constant.
+ */
+enum { KEY_WORD_LEFT = 0x1000, KEY_WORD_RIGHT, KEY_BARE_ESC };
+
+/**
+ * The screen: a transcript with scrollback, and a prompt that stays put.
  *
  * endwin() runs from the destructor, so a throw on the way out of main still
  * hands the terminal back. That is the whole reason this is a class.
+ *
+ * ### Why the transcript is a pad
+ *
+ * A window scrolls and forgets: what leaves the top is gone, so there is
+ * nothing for PageUp to go back to. A pad holds the whole transcript and the
+ * window shows a moving view of it. The depth is bounded -- PAD_ROWS lines,
+ * after which the oldest scroll off -- because a pad is allocated up front and
+ * a conversation is not.
  */
 class screen {
 public:
+    static const int PAD_ROWS = 4000;
+
     screen() {
         initscr();
         cbreak();               // keys arrive unbuffered, which Escape needs
@@ -97,109 +126,406 @@ public:
         keypad(stdscr, TRUE);
         curs_set(1);
 
+        if(has_colors()) {
+            start_color();
+            use_default_colors();
+
+            // -1 is the terminal's own foreground and background, which
+            // use_default_colors makes available: the reply then reads as
+            // whatever the user set their terminal to, rather than as this
+            // program's opinion of white.
+            init_pair(plain, -1, -1);
+            init_pair(you,   COLOR_CYAN, -1);
+            init_pair(note,  COLOR_YELLOW, -1);
+
+            m_colour = true;
+        }
+
         layout();
     }
 
-    ~screen() {
-        endwin();
-    }
+    ~screen() { endwin(); }
 
     screen(const screen&) = delete;
     screen& operator=(const screen&) = delete;
 
-    /** Rebuild both windows for the terminal's current size. */
+    /** Rebuild for the terminal's current size, keeping the transcript. */
     void layout() {
-        int rows = 0, cols = 0;
+        getmaxyx(stdscr, m_rows, m_cols);
 
-        getmaxyx(stdscr, rows, cols);
-
-        if(m_transcript) delwin(m_transcript);
         if(m_input) delwin(m_input);
 
-        // Two rows at the bottom: one for the prompt, one for the rule above
-        // it, so a long reply never runs into what is being typed.
-        m_rows = rows;
-        m_cols = cols;
+        m_view = m_rows - 2;
 
-        m_transcript = newwin(rows - 2, cols, 0, 0);
-        m_input = newwin(1, cols, rows - 1, 0);
+        if(m_view < 1) m_view = 1;
 
-        scrollok(m_transcript, TRUE);
-        idlok(m_transcript, TRUE);
+        // The pad is remade only when the width changes, since its contents are
+        // wrapped to that width and cannot be rewrapped without re-rendering
+        // everything -- which would need the transcript kept as text as well.
+        if(!m_pad || m_cols != m_pad_cols) {
+            if(m_pad) delwin(m_pad);
+
+            m_pad = newpad(PAD_ROWS, m_cols);
+            m_pad_cols = m_cols;
+            m_used = 0;
+
+            scrollok(m_pad, TRUE);
+        }
+
+        m_input = newwin(1, m_cols, m_rows - 1, 0);
+
         nodelay(m_input, TRUE);
         keypad(m_input, TRUE);
 
-        redraw_rule();
-    }
-
-    void redraw_rule() {
         mvhline(m_rows - 2, 0, ACS_HLINE, m_cols);
         refresh();
+
+        show();
     }
 
-    /** Add text to the transcript, wrapping as the window does. */
-    void say(const std::string& text) {
-        waddstr(m_transcript, text.c_str());
-        wrefresh(m_transcript);
+    /** Add text to the transcript in a colour. */
+    void say(const std::string& text, tone t = plain) {
+        if(m_colour) wattron(m_pad, COLOR_PAIR(t));
+
+        waddstr(m_pad, text.c_str());
+
+        if(m_colour) wattroff(m_pad, COLOR_PAIR(t));
+
+        int y = 0, x = 0;
+
+        getyx(m_pad, y, x);
+
+        m_used = y + (x > 0 ? 1 : 0);
+
+        // Anything arriving while the reader is scrolled back should not yank
+        // them to the bottom; anything arriving while they are at the bottom
+        // should be visible.
+        if(m_scroll == 0) show();
     }
 
-    void say_line(const std::string& text) { say(text + "\n"); }
+    void say_line(const std::string& text, tone t = plain) { say(text + "\n", t); }
 
-    void prompt(const std::string& so_far) {
+    /** Move the view; positive is towards the top. */
+    void scroll_by(int lines) {
+        m_scroll += lines;
+
+        const int most = m_used - m_view;
+
+        if(m_scroll > (most > 0 ? most : 0)) m_scroll = most > 0 ? most : 0;
+        if(m_scroll < 0) m_scroll = 0;
+
+        show();
+    }
+
+    void prompt(const std::string& line, std::size_t cursor) {
         werase(m_input);
+
+        if(m_colour) wattron(m_input, COLOR_PAIR(you));
+
         mvwaddstr(m_input, 0, 0, "> ");
-        waddnstr(m_input, so_far.c_str(), m_cols - 3);
+
+        if(m_colour) wattroff(m_input, COLOR_PAIR(you));
+
+        // Only what fits, scrolled so the cursor is always on screen.
+        const int room = m_cols - 3;
+        std::size_t from = 0;
+
+        if(room > 0 && cursor > std::size_t(room)) from = cursor - room;
+
+        waddnstr(m_input, line.c_str() + from, room);
+        wmove(m_input, 0, int(2 + (cursor - from)));
         wrefresh(m_input);
     }
 
-    /** A keystroke if one is waiting, or ERR. Never blocks. */
-    int poll_key() { return wgetch(m_input); }
-
     /**
-     * Read a line, redrawing as it is typed.
+     * The next key, with escape sequences folded into single values.
      *
-     * @return false at end of input or on a second interrupt
+     * A bare Escape and the start of a sequence are the same byte, so the only
+     * way to tell them apart is to wait a moment and see whether anything
+     * follows. Option-arrow sends `ESC b` and `ESC f` on some terminals and
+     * `ESC [1;3D` and `ESC [1;3C` on others; both are read here.
+     *
+     * @return ERR when nothing is waiting
      */
-    bool read_line(std::string& out) {
-        out.clear();
+    int key() {
+        const int c = wgetch(m_input);
+
+        if(c == ERR) return ERR;
+
+        // Extended keys. ncurses allocates a code for these from terminfo at
+        // run time, so there is no constant to compare against and the name is
+        // the only stable handle: Option-left is "kLFT3" and control-left
+        // "kLFT5" on the terminals that distinguish them.
+        //
+        // Which of the two paths a sequence takes is not predictable. Measured
+        // on one terminal in one run: Option-left and PageUp arrived assembled
+        // as 545 and 339, while plain Up arrived as ESC, '[', 'A' -- because
+        // with nodelay set ncurses cannot wait for the rest of a sequence and
+        // only assembles the ones whose bytes had already landed. Both paths
+        // have to work.
+        if(c > KEY_MAX) {
+            const char* n = keyname(c);
+
+            if(n) {
+                const std::string name = n;
+
+                if(name == "kLFT3" || name == "kLFT5") return KEY_WORD_LEFT;
+                if(name == "kRIT3" || name == "kRIT5") return KEY_WORD_RIGHT;
+            }
+
+            return ERR;
+        }
+
+        if(c != 27) return c;
+
+        // Something within this window is part of a sequence; nothing is a
+        // bare Escape. Long enough not to lose a fast terminal, short enough
+        // not to be felt.
+        wtimeout(m_input, 40);
+
+        const int next = wgetch(m_input);
+
+        int out = KEY_BARE_ESC;
+
+        if(next == 'b') out = KEY_WORD_LEFT;
+        else if(next == 'f') out = KEY_WORD_RIGHT;
+        else if(next == '[') {
+            // A CSI, and this has to read them all rather than only the ones
+            // it wants. With nodelay set, ncurses does **not** assemble escape
+            // sequences itself -- it cannot wait for the rest -- so every
+            // arrow key arrives here as ESC, '[', and a letter. Recognising
+            // only Option-arrow meant swallowing plain Up and Down, which is
+            // exactly what the history test caught.
+            std::string seq;
+
+            for(int i = 0; i < 8; i++) {
+                const int ch = wgetch(m_input);
+
+                if(ch == ERR) break;
+
+                seq += char(ch);
+
+                if((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                   ch == '~')
+                    break;
+            }
+
+            // ESC, '[' and then nothing: not a sequence this can name, and
+            // the '[' is not a keystroke the user made either -- Escape then
+            // a literal '[' is indistinguishable from a truncated CSI, and
+            // guessing wrong inserts a bracket into somebody's question.
+            if(seq.empty()) { nodelay(m_input, TRUE); return KEY_BARE_ESC; }
+
+            const char last = seq[seq.size() - 1];
+
+            // A modifier arrives as a parameter: ESC[1;3C is Option-right where
+            // ESC[C is plain right. The semicolon is the whole difference.
+            const bool modified = seq.find(';') != std::string::npos;
+
+            switch(last) {
+            case 'A': out = KEY_UP; break;
+            case 'B': out = KEY_DOWN; break;
+            case 'C': out = modified ? KEY_WORD_RIGHT : KEY_RIGHT; break;
+            case 'D': out = modified ? KEY_WORD_LEFT : KEY_LEFT; break;
+            case 'H': out = 1; break;                   // Home, as Ctrl-A
+            case 'F': out = 5; break;                   // End, as Ctrl-E
+            case '~':
+                if(seq.compare(0, 1, "5") == 0) out = KEY_PPAGE;
+                else if(seq.compare(0, 1, "6") == 0) out = KEY_NPAGE;
+                else if(seq.compare(0, 1, "3") == 0) out = KEY_DC;
+                else if(seq.compare(0, 1, "1") == 0) out = 1;
+                else if(seq.compare(0, 1, "4") == 0) out = 5;
+                else out = ERR;
+                break;
+            default: out = ERR; break;  // better ignored than guessed at
+            }
+        }
+        else if(next != ERR) {
+            // Escape followed by something this does not recognise. The
+            // Escape was therefore a bare one, and the character after it is
+            // an ordinary keystroke that has not been typed yet as far as the
+            // editor is concerned -- so it goes back, rather than being eaten
+            // as the tail of a sequence that turned out not to exist.
+            //
+            // This is also what stops the 40ms above from having to be right.
+            // Measured: typing Escape and then a letter two thirds of a second
+            // later still delivered the letter as `next`, so the window is not
+            // honoured as exactly as the call reads. Without the pushback that
+            // lost the letter *and* the Escape; with it, a window that is too
+            // long costs nothing but a redraw.
+            ungetch(next);
+        }
+
+        nodelay(m_input, TRUE);
+
+        return out;
+    }
+
+    int columns() const { return m_cols; }
+    int view_rows() const { return m_view; }
+
+private:
+    void show() {
+        if(!m_pad) return;
+
+        int top = m_used - m_view - m_scroll;
+
+        if(top < 0) top = 0;
+
+        prefresh(m_pad, top, 0, 0, 0, m_view - 1, m_cols - 1);
+    }
+
+    WINDOW* m_pad = 0;
+    WINDOW* m_input = 0;
+
+    int m_rows = 0;
+    int m_cols = 0;
+    int m_pad_cols = 0;
+    int m_view = 0;
+
+    /** Lines written to the pad, and how far back the view is. */
+    int m_used = 0;
+    int m_scroll = 0;
+
+    bool m_colour = false;
+};
+
+/**
+ * The prompt line: a buffer, a cursor, and a history.
+ *
+ * Not readline, and not trying to be. What is here is what a person reaches for
+ * within the first minute: moving about, killing a word, and getting the last
+ * thing back.
+ */
+class editor {
+public:
+    /** @return false at end of input */
+    bool read(screen& s, std::string& out) {
+        m_line.clear();
+        m_cursor = 0;
+        m_browse = m_history.size();
 
         for(;;) {
-            prompt(out);
+            s.prompt(m_line, m_cursor);
 
-            const int c = wgetch(m_input);
+            const int c = s.key();
 
             if(c == ERR) {
-                napms(20);      // nothing waiting; do not spin
+                napms(15);
 
                 if(g_interrupted) { g_interrupted = 0; return false; }
 
                 continue;
             }
 
-            if(c == KEY_RESIZE) { layout(); continue; }
+            switch(c) {
+            case KEY_RESIZE: s.layout(); continue;
 
-            if(c == '\n' || c == '\r') return true;
+            case KEY_PPAGE: s.scroll_by(s.view_rows() / 2); continue;
+            case KEY_NPAGE: s.scroll_by(-(s.view_rows() / 2)); continue;
 
-            if(c == 27) { out.clear(); continue; }          // Escape clears
+            case KEY_UP:   recall(-1); continue;
+            case KEY_DOWN: recall(1); continue;
 
-            if(c == KEY_BACKSPACE || c == 127 || c == 8) {
-                if(!out.empty()) out.erase(out.size() - 1);
+            case KEY_LEFT:  if(m_cursor) m_cursor--; continue;
+            case KEY_RIGHT: if(m_cursor < m_line.size()) m_cursor++; continue;
 
+            case KEY_WORD_LEFT:  m_cursor = word_left(); continue;
+            case KEY_WORD_RIGHT: m_cursor = word_right(); continue;
+
+            case 1:  m_cursor = 0; continue;                  // Ctrl-A
+            case 5:  m_cursor = m_line.size(); continue;      // Ctrl-E
+            case 23: kill_word(); continue;                   // Ctrl-W
+
+            case 11: m_line.erase(m_cursor); continue;        // Ctrl-K
+            case 21: m_line.erase(0, m_cursor); m_cursor = 0; continue;   // Ctrl-U
+
+            case 4: return false;                             // Ctrl-D
+
+            case KEY_BARE_ESC: m_line.clear(); m_cursor = 0; continue;
+
+            case KEY_BACKSPACE:
+            case 127:
+            case 8:
+                if(m_cursor) { m_line.erase(--m_cursor, 1); }
+                continue;
+
+            case KEY_DC:
+                if(m_cursor < m_line.size()) m_line.erase(m_cursor, 1);
+                continue;
+
+            case '\n':
+            case '\r':
+                out = m_line;
+
+                // Kept only if it is not what was just said, which is what
+                // stops a repeated question filling the history with itself.
+                if(!m_line.empty() &&
+                   (m_history.empty() || m_history.back() != m_line))
+                    m_history.push_back(m_line);
+
+                return true;
+
+            default:
+                if(c >= 32 && c < 256) {
+                    m_line.insert(m_cursor, 1, char(c));
+                    m_cursor++;
+                }
                 continue;
             }
-
-            if(c == 4) return false;                        // Ctrl-D
-
-            if(c >= 32 && c < 256) out += char(c);
         }
     }
 
 private:
-    WINDOW* m_transcript = 0;
-    WINDOW* m_input = 0;
+    static bool part_of_word(char c) { return c != ' ' && c != '\t'; }
 
-    int m_rows = 0;
-    int m_cols = 0;
+    std::size_t word_left() const {
+        std::size_t at = m_cursor;
+
+        while(at && !part_of_word(m_line[at - 1])) at--;
+        while(at && part_of_word(m_line[at - 1])) at--;
+
+        return at;
+    }
+
+    std::size_t word_right() const {
+        std::size_t at = m_cursor;
+
+        while(at < m_line.size() && part_of_word(m_line[at])) at++;
+        while(at < m_line.size() && !part_of_word(m_line[at])) at++;
+
+        return at;
+    }
+
+    void kill_word() {
+        const std::size_t to = word_left();
+
+        m_line.erase(to, m_cursor - to);
+        m_cursor = to;
+    }
+
+    /** Step through the history; -1 is older. */
+    void recall(int by) {
+        if(m_history.empty()) return;
+
+        long at = long(m_browse) + by;
+
+        if(at < 0) at = 0;
+        if(at > long(m_history.size())) at = long(m_history.size());
+
+        m_browse = std::size_t(at);
+
+        // Past the newest is the empty line the person was typing on, which is
+        // where Down should end up rather than sticking on the last entry.
+        m_line = m_browse < m_history.size() ? m_history[m_browse] : std::string();
+        m_cursor = m_line.size();
+    }
+
+    std::string m_line;
+    std::size_t m_cursor = 0;
+
+    std::vector<std::string> m_history;
+    std::size_t m_browse = 0;
 };
 
 struct options {
@@ -221,7 +547,14 @@ bool parse(int argc, char** argv, options& o) {
             std::cout << "usage: " << argv[0] << " [options] <model.gguf>\n"
                       << "\n"
                       << "  A transcript above, a prompt below.  Escape stops a\n"
-                      << "  reply; Ctrl-D or an empty Escape at the prompt quits.\n"
+                      << "  reply; Ctrl-D quits.\n"
+                      << "\n"
+                      << "  PageUp/PageDown  scroll the transcript\n"
+                      << "  Up/Down          walk back through what was asked\n"
+                      << "  Ctrl-A/Ctrl-E    start and end of the line\n"
+                      << "  Ctrl-W           kill the word behind the cursor\n"
+                      << "  Ctrl-U/Ctrl-K    kill to the start, to the end\n"
+                      << "  Opt-Left/Right   move a word at a time\n"
                       << "\n"
                       << "  --system TEXT   a system turn before the conversation\n"
                       << "  --tokens N      most tokens in one reply (default 512)\n"
@@ -293,9 +626,12 @@ int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
 
     s.say_line("jlib " + std::string(b.name()) + " -- " +
                std::to_string(c.layers) + " layers, loaded in " +
-               std::to_string(took).substr(0, 4) + "s");
-    s.say_line("Escape stops a reply.  Ctrl-D quits.");
+               std::to_string(took).substr(0, 4) + "s", note);
+    s.say_line("Escape stops a reply.  PageUp scrolls back.  Ctrl-D quits.",
+               note);
     s.say_line("");
+
+    editor input;
 
     ai::sampler sampler(o.sampling);
 
@@ -306,15 +642,15 @@ int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
     for(;;) {
         std::string line;
 
-        if(!s.read_line(line)) break;
+        if(!input.read(s, line)) break;
 
         if(line.empty()) continue;
 
         // Into the transcript, and out of the input window: the prompt should
         // be empty while the reply arrives, or what was asked appears twice --
         // once where it was typed and once where it now belongs.
-        s.say_line("> " + line);
-        s.prompt("");
+        s.say_line("> " + line, you);
+        s.prompt("", 0);
 
         turns.push_back({ "user", line });
 
@@ -357,12 +693,19 @@ int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
                 s.say(p);
 
                 // Between tokens, which is where stopping is safe and where a
-                // keystroke can be looked for without blocking.
-                const int key = s.poll_key();
+                // keystroke can be looked for without blocking.  Scrolling back
+                // mid-reply works for the same reason.
+                const int key = s.key();
 
-                if(key == 27 || g_interrupted) { stopped = true; return false; }
+                if(key == KEY_BARE_ESC || g_interrupted) {
+                    stopped = true;
+
+                    return false;
+                }
 
                 if(key == KEY_RESIZE) s.layout();
+                else if(key == KEY_PPAGE) s.scroll_by(s.view_rows() / 2);
+                else if(key == KEY_NPAGE) s.scroll_by(-(s.view_rows() / 2));
 
                 return true;
             });
@@ -375,7 +718,7 @@ int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
         s.say_line("");
         s.say_line(std::string("[") + std::to_string(out.size() - ids.size()) +
                    " tokens, " + std::to_string(rate).substr(0, 5) + "/s" +
-                   (stopped ? ", stopped]" : "]"));
+                   (stopped ? ", stopped]" : "]"), note);
         s.say_line("");
 
         turns.push_back({ "assistant", reply });
