@@ -104,20 +104,65 @@ public:
      * `<0xXX>` token -- so any input encodes, and nothing silently becomes
      * `<unk>`.
      *
+     * ### Special tokens
+     *
+     * With `parse_special`, a control token written out in the text -- `</s>`
+     * -- becomes that token rather than the characters that spell it. That
+     * matters more than it sounds: a chat template closes every turn with
+     * `</s>`, and without this the model is handed `</`, `s`, `>` and learns
+     * from its own context that a reply ends by *typing* those characters. It
+     * then does, which is a bug you can read in the output.
+     *
+     * Note what this does **not** cover. `<|user|>` is not in a Llama
+     * vocabulary at all, so it is byte-pair encoded like any other text --
+     * correctly, since that is the byte sequence the model was tuned on.
+     * Only tokens the vocabulary actually has are recognised.
+     *
+     * **Turn it off for anything a stranger wrote.** Text containing `</s>`
+     * from a user would otherwise end the turn early and let the rest be read
+     * as though the model had said it. jchat does not do this yet -- it
+     * tokenizes a whole formatted prompt in one call -- and doing it properly
+     * means tokenizing the markers and the content separately.
+     *
      * Cost is quadratic in the number of symbols: each merge rescans for the
      * best remaining pair. A priority queue over the pairs would make it
      * roughly linear, which llama.cpp does and this does not, because a prompt
      * is short and being able to read this one matters more. Measured at about
      * a millisecond for the twenty-token prompt in the tests.
      */
-    std::vector<int> encode(const std::string& text, bool add_bos = true) const;
+    std::vector<int> encode(const std::string& text, bool add_bos = true,
+                            bool parse_special = true) const;
 
     /** Ids back to text, undoing the space marker and the dummy prefix. */
     std::string decode(const std::vector<int>& ids) const;
 
+    /**
+     * One token's text, with the space marker expanded and **nothing
+     * stripped**.
+     *
+     * For streaming, where decode() is the wrong tool: it removes a leading
+     * space, because encode() put one there as the dummy prefix, and that is
+     * right exactly once at the start of a whole reply. Called per token it
+     * would eat the space in front of every word.
+     *
+     * A control token yields the empty string, as it does in decode().
+     */
+    std::string piece(int id) const;
+
 private:
     /** How many bytes the UTF-8 character starting here occupies. */
     static std::size_t char_len(const std::string& s, std::size_t at);
+
+    /**
+     * Byte-pair encode one run of ordinary text, appending to out.
+     *
+     * add_prefix only for the run that starts the input.  The dummy prefix
+     * belongs to the text as a whole, and giving one to every run either side
+     * of a control token inserts spaces that nobody wrote -- "a</s>b" came
+     * back as "a b" while this took its argument for granted.
+     */
+    void encode_run(const std::string& text, bool add_prefix,
+                    std::vector<int>& out) const;
 
     std::vector<std::string> m_tokens;
     std::vector<type> m_types;

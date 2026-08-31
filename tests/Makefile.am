@@ -67,6 +67,7 @@ TESTS = \
 	ai_tokenizer_test \
 	ai_sampler_test \
 	ai_chat_test \
+	app_jchat_test \
 	math_object_test \
 	tensor_test \
 \
@@ -314,6 +315,9 @@ metal_gemm_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(METAL_LIBS)
 
 metal_tensor_test_SOURCES = metal_tensor_test.cc
 metal_tensor_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(JUTIL_LA) $(JSYS_LA) $(METAL_LIBS)
+
+app_jchat_test_SOURCES  = app_jchat_test.cc
+app_jchat_test_LDADD    = $(JSYS_LA)
 
 ai_chat_test_SOURCES  = ai_chat_test.cc
 ai_chat_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)

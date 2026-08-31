@@ -166,6 +166,93 @@ static void anything_encodes(const ai::tokenizer& t) {
        t.encode("") == std::vector<int>({ 1 }), spell(t, t.encode("")));
 }
 
+/**
+ * piece() is decode() without the one thing decode() must do.
+ *
+ * decode() strips a leading space because encode() adds one as the dummy
+ * prefix, and that is right exactly once for a whole reply. Streaming calls it
+ * per token, where it would eat the space in front of every word -- so the
+ * assertion is that concatenating pieces gives back what decode() gives,
+ * except for that single leading space.
+ */
+/**
+ * A control token written out in the text is that token.
+ *
+ * Found by reading jchat's output: the second reply of a conversation ended
+ * with a literal "</s>". A chat template closes every turn with it, and
+ * without this it was handed to the model as `</`, `s`, `>` -- so the model
+ * learned from its own context that a reply ends by typing those characters,
+ * and did.
+ */
+static void a_control_token_in_the_text_is_that_token(const ai::tokenizer& t) {
+    std::cout << "\na control token in the text is that token:\n";
+
+    ok("  </s> is one token, not three",
+       t.encode("</s>", false) == std::vector<int>({ 2 }),
+       spell(t, t.encode("</s>", false)));
+
+    ok("  and <s> likewise",
+       t.encode("<s>", false) == std::vector<int>({ 1 }),
+       spell(t, t.encode("<s>", false)));
+
+    // The dummy prefix belongs to the text, not to each run either side of a
+    // split.  Giving one to every run put a space in that nobody wrote.
+    const std::vector<int> around = t.encode("a</s>b", false);
+
+    ok("  the text around it keeps its shape", around.size() == 3 &&
+       around[1] == 2, spell(t, around));
+
+    ok("  with no space invented at the split",
+       t.decode(around) == "a</s>b" || t.decode(around) == "ab",
+       "\"" + t.decode(around) + "\"");
+
+    // Off, for text a stranger wrote: otherwise "</s>" typed by a user ends
+    // the turn and the rest is read as though the model had said it.
+    const std::vector<int> literal = t.encode("</s>", false, false);
+
+    ok("  and with parse_special off it is spelled out again",
+       literal.size() > 1 && literal[0] != 2, spell(t, literal));
+
+    // The whole reason it matters: a formatted turn has exactly one of them.
+    int twos = 0;
+
+    for(int id : t.encode("<|user|>\nHi</s>\n<|assistant|>\n"))
+        if(id == 2) twos++;
+
+    ok("  so a formatted turn carries one end-of-sequence", twos == 1,
+       std::to_string(twos));
+}
+
+static void pieces_concatenate_to_the_whole(const ai::tokenizer& t) {
+    std::cout << "\npieces concatenate to the whole:\n";
+
+    const std::string text = "The capital of Italy is Rome.";
+
+    const std::vector<int> ids = t.encode(text);
+
+    std::string joined;
+
+    for(std::size_t i = 0; i < ids.size(); i++) joined += t.piece(ids[i]);
+
+    ok("  the pieces put back together are the text, with its leading space",
+       joined == " " + text, "\"" + joined + "\"");
+
+    ok("  and decode is that with the space gone", t.decode(ids) == text);
+
+    // Which is the failure mode this exists to avoid: a per-token decode()
+    // loses the space in front of every word, and the result is unreadable.
+    std::string wrong;
+
+    for(std::size_t i = 0; i < ids.size(); i++)
+        wrong += t.decode(std::vector<int>(1, ids[i]));
+
+    ok("  where decoding token by token would run the words together",
+       wrong.find("capitalof") != std::string::npos ||
+       wrong.find("Thecapital") != std::string::npos, "\"" + wrong + "\"");
+
+    ok("  a control token has no text of its own", t.piece(t.bos()).empty());
+}
+
 static void it_round_trips(const ai::tokenizer& t) {
     std::cout << "\nit round trips:\n";
 
@@ -237,7 +324,9 @@ int main(int argc, char** argv) {
         the_vocabulary_is_what_the_file_said(t);
         the_space_marker_and_the_dummy_prefix(t);
         anything_encodes(t);
-        it_round_trips(t);
+        a_control_token_in_the_text_is_that_token(t);
+    pieces_concatenate_to_the_whole(t);
+    it_round_trips(t);
         it_is_quick_enough(t);
     }
     catch(std::exception& e) {
@@ -252,6 +341,13 @@ int main(int argc, char** argv) {
     // checked against ids from outside this library, and the rest is
     // round-tripping -- which a consistently wrong encoder would also pass,
     // since decode() only has to invert whatever encode() did.
+    //
+    // That a conversation is safe against what a user types.  encode() takes
+    // parse_special and jchat does not use it: a whole formatted prompt goes
+    // through in one call, so a user writing "</s>" ends the turn early and
+    // what follows is read as though the model said it.  Doing it properly
+    // means tokenizing the markers and the content separately, which nothing
+    // here does.
     //
     // Nothing about the score-driven path.  The file this was written against
     // has all-zero scores, so merges are the only usable signal in it; a
