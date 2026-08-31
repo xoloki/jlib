@@ -9,4 +9,4 @@ libjai_la_LIBADD = $(top_builddir)/jlib/util/libjutil.la \
 
 libjaiincludedir = $(includedir)/jlib-1.2/jlib/ai
 libjaiinclude_HEADERS = environment.hh agent.hh percept.hh action.hh vacuum.hh \
-                        neural.hh backend.hh attention.hh
+                        neural.hh backend.hh attention.hh transformer.hh

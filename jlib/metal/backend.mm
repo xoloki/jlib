@@ -121,6 +121,14 @@ template<typename T>
 void backend<T>::slope(ai::activation kind, const tensor_ptr& out_of_layer,
                        tensor_ptr& out)
 {
+    // Here rather than in the kernel, which has no way to refuse: a compute
+    // kernel cannot throw, and returning a plausible wrong number is how a
+    // forward-only activation would silently train.
+    if(!ai::slope_from_output(kind))
+        throw ai::backend_error("slope: this activation is not invertible from "
+                                "its output, so its derivative cannot be "
+                                "recovered from one -- it is forward-only");
+
     m_stream->slope(as_metal(kind), at<T>(out_of_layer), at<T>(out));
 }
 
