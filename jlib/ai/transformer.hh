@@ -76,19 +76,46 @@ public:
     typedef typename backend<T>::tensor_ptr tensor_ptr;
 
     /**
-     * @param heads must divide d_model
-     * @param d_ff  the feed-forward width, conventionally a few times d_model
+     * @param heads    must divide d_model
+     * @param kv_heads how many key-value heads the query heads share between
+     *                 them; must divide heads.  Equal to heads is ordinary
+     *                 multi-head attention
+     * @param d_ff     the feed-forward width, conventionally a few times d_model
      */
     block(backend<T>& b, unsigned int d_model, unsigned int heads,
-          unsigned int d_ff);
+          unsigned int kv_heads, unsigned int d_ff);
 
     unsigned int d_model() const { return m_d_model; }
     unsigned int heads() const { return m_heads; }
+
+    /**
+     * How many key-value heads the query heads share.
+     *
+     * Grouped-query attention: query head h reads the key-value head
+     * `h / (heads / kv_heads)`, so heads are grouped **contiguously** -- the
+     * first group of query heads shares the first key-value head, and so on.
+     *
+     * That is a convention, and it is the one llama.cpp and every conversion
+     * tool use, which is what matters since it decides how a file's weights
+     * line up.  The alternative -- `h % kv_heads`, striping instead of
+     * grouping -- is equally coherent and would load the same weights into
+     * different places.  No test here can tell them apart; only generating text
+     * and comparing it with a reference can.  Named and written down for the
+     * same reason w_gate() and rope_layout are.
+     */
+    unsigned int kv_heads() const { return m_kv_heads; }
+
+    /** Which key-value head a query head reads. */
+    unsigned int kv_head_for(unsigned int h) const {
+        return h / (m_heads / m_kv_heads);
+    }
     unsigned int d_head() const { return m_d_head; }
     unsigned int d_ff() const { return m_d_ff; }
 
-    /** (d_head x d_model), one per head. */
+    /** (d_head x d_model), one per *query* head. */
     tensor_ptr& wq(unsigned int h) { return m_wq[h]; }
+
+    /** (d_head x d_model), one per *key-value* head -- there are fewer. */
     tensor_ptr& wk(unsigned int h) { return m_wk[h]; }
     tensor_ptr& wv(unsigned int h) { return m_wv[h]; }
 
@@ -151,6 +178,7 @@ private:
 
     unsigned int m_d_model;
     unsigned int m_heads;
+    unsigned int m_kv_heads;
     unsigned int m_d_head;
     unsigned int m_d_ff;
     unsigned int m_seq = 0;
@@ -163,30 +191,47 @@ private:
     tensor_ptr m_gate, m_down, m_up;
     tensor_ptr m_attn_norm, m_ffn_norm;
 
-    tensor_ptr m_norm, m_q, m_k, m_v, m_scores, m_probs, m_head, m_attn;
+    tensor_ptr m_norm, m_q, m_scores, m_probs, m_head, m_attn;
+
+    // One per key-value head, not one per query head: the whole point of
+    // grouping is that a group's key and value are computed once and read by
+    // every query head in it.
+    std::vector<tensor_ptr> m_k, m_v;
     tensor_ptr m_h1, m_h3, m_ffn;
 };
 
 template<typename T>
 block<T>::block(backend<T>& b, unsigned int d_model, unsigned int heads,
-                unsigned int d_ff)
+                unsigned int kv_heads, unsigned int d_ff)
     : m_b(b),
       m_d_model(d_model),
       m_heads(heads),
+      m_kv_heads(kv_heads),
       m_d_head(heads ? d_model / heads : 0),
       m_d_ff(d_ff)
 {
-    if(heads == 0 || d_model == 0 || d_ff == 0)
+    if(heads == 0 || kv_heads == 0 || d_model == 0 || d_ff == 0)
         throw backend_error("block: every dimension must be non-zero");
 
     if(d_model % heads)
         throw backend_error("block: heads must divide d_model");
 
+    if(heads % kv_heads)
+        throw backend_error("block: kv_heads must divide heads, since each "
+                            "key-value head serves a whole group of query "
+                            "heads");
+
     for(unsigned int h = 0; h < heads; h++) {
         m_wq.push_back(b.make(m_d_head, d_model));
+        m_wo.push_back(b.make(d_model, m_d_head));
+    }
+
+    // Fewer of these, which is the entire saving: TinyLlama has 32 query heads
+    // and 4 key-value heads, so its attn_k is [2048, 256] where attn_q is
+    // [2048, 2048].
+    for(unsigned int h = 0; h < kv_heads; h++) {
         m_wk.push_back(b.make(m_d_head, d_model));
         m_wv.push_back(b.make(m_d_head, d_model));
-        m_wo.push_back(b.make(d_model, m_d_head));
     }
 
     m_gate = b.make(d_ff, d_model);
@@ -220,9 +265,16 @@ void block<T>::reserve(unsigned int seq) {
 
     m_norm   = m_b.make(m_d_model, seq);
     m_q      = m_b.make(m_d_head, seq);
-    m_k      = m_b.make(m_d_head, seq);
-    m_v      = m_b.make(m_d_head, seq);
     m_scores = m_b.make(seq, seq);
+
+    m_k.clear();
+    m_v.clear();
+
+    for(unsigned int h = 0; h < m_kv_heads; h++) {
+        m_k.push_back(m_b.make(m_d_head, seq));
+        m_v.push_back(m_b.make(m_d_head, seq));
+    }
+
     m_probs  = m_b.make(seq, seq);
     m_head   = m_b.make(m_d_head, seq);
     m_attn   = m_b.make(m_d_model, seq);
@@ -248,18 +300,28 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
 
     m_b.rms_norm(x, m_attn_norm, m_norm);
 
+    // Every key and value first, once each.  Computing them inside the query
+    // loop instead would give the same answer and do the work heads/kv_heads
+    // times over -- which is exactly the cost grouping exists to avoid.
+    for(unsigned int g = 0; g < m_kv_heads; g++) {
+        m_b.multiply(m_wk[g], m_norm, m_k[g]);
+        m_b.multiply(m_wv[g], m_norm, m_v[g]);
+
+        // Keys are rotated here, once, for the same reason.  Values are not
+        // rotated at all -- see set_rope.
+        if(m_rope)
+            m_b.rope(m_k[g], base_pos, m_theta, m_layout);
+    }
+
     for(unsigned int h = 0; h < m_heads; h++) {
         m_b.multiply(m_wq[h], m_norm, m_q);
-        m_b.multiply(m_wk[h], m_norm, m_k);
-        m_b.multiply(m_wv[h], m_norm, m_v);
 
-        // Queries and keys only.  See set_rope.
-        if(m_rope) {
+        if(m_rope)
             m_b.rope(m_q, base_pos, m_theta, m_layout);
-            m_b.rope(m_k, base_pos, m_theta, m_layout);
-        }
 
-        attention(m_b, m_q, m_k, m_v, m_scores, m_probs, m_head, causal);
+        const unsigned int g = kv_head_for(h);
+
+        attention(m_b, m_q, m_k[g], m_v[g], m_scores, m_probs, m_head, causal);
 
         // beta 0 for the first head and 1 for the rest, which sums the heads
         // in place of concatenating them and projecting once.

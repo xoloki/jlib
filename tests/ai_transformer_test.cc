@@ -73,20 +73,31 @@ static const unsigned int H = 2;
 static const unsigned int F = 16;
 static const unsigned int N = 5;
 
-/** Every weight in a block, so two backends can be given the same one. */
+/**
+ * Every weight in a block, so two backends can be given the same one.
+ *
+ * Sized by heads *and* by kv heads, which are not the same count: wq and wo
+ * are per query head, wk and wv per key-value head.
+ */
 template<typename T>
 struct weights {
+    unsigned int heads, kv;
+
     std::vector<matrix<T> > wq, wk, wv, wo;
     matrix<T> w1, w3, w2, an, fn;
 
-    weights(std::mt19937& gen)
-        : w1(F, D), w3(F, D), w2(D, F), an(D, 1), fn(D, 1)
+    weights(std::mt19937& gen, unsigned int nh = H, unsigned int nkv = H)
+        : heads(nh), kv(nkv),
+          w1(F, D), w3(F, D), w2(D, F), an(D, 1), fn(D, 1)
     {
-        for(unsigned int h = 0; h < H; h++) {
-            wq.push_back(random_matrix<T>(D / H, D, gen, 0.5f));
-            wk.push_back(random_matrix<T>(D / H, D, gen, 0.5f));
-            wv.push_back(random_matrix<T>(D / H, D, gen, 0.5f));
-            wo.push_back(random_matrix<T>(D, D / H, gen, 0.5f));
+        for(unsigned int h = 0; h < heads; h++) {
+            wq.push_back(random_matrix<T>(D / heads, D, gen, 0.5f));
+            wo.push_back(random_matrix<T>(D, D / heads, gen, 0.5f));
+        }
+
+        for(unsigned int g = 0; g < kv; g++) {
+            wk.push_back(random_matrix<T>(D / heads, D, gen, 0.5f));
+            wv.push_back(random_matrix<T>(D / heads, D, gen, 0.5f));
         }
 
         w1 = random_matrix<T>(F, D, gen, 0.5f);
@@ -99,11 +110,14 @@ struct weights {
 
 template<typename T>
 static void load(ai::block<T>& blk, const weights<T>& w) {
-    for(unsigned int h = 0; h < H; h++) {
+    for(unsigned int h = 0; h < w.heads; h++) {
         blk.wq(h)->write(w.wq[h]);
-        blk.wk(h)->write(w.wk[h]);
-        blk.wv(h)->write(w.wv[h]);
         blk.wo(h)->write(w.wo[h]);
+    }
+
+    for(unsigned int g = 0; g < w.kv; g++) {
+        blk.wk(g)->write(w.wk[g]);
+        blk.wv(g)->write(w.wv[g]);
     }
 
     blk.w_gate()->write(w.w1);
@@ -115,9 +129,10 @@ static void load(ai::block<T>& blk, const weights<T>& w) {
 
 template<typename T>
 static matrix<T> run(ai::backend<T>& b, const weights<T>& w, const matrix<T>& x,
-                     bool causal = true, bool rope = false)
+                     bool causal = true, bool rope = false,
+                     unsigned int base_pos = 0)
 {
-    ai::block<T> blk(b, D, H, F);
+    ai::block<T> blk(b, D, w.heads, w.kv, F);
 
     load(blk, w);
 
@@ -128,7 +143,7 @@ static matrix<T> run(ai::backend<T>& b, const weights<T>& w, const matrix<T>& x,
     typename ai::backend<T>::tensor_ptr tx = b.make(x);
     typename ai::backend<T>::tensor_ptr out = b.make(D, N);
 
-    blk.forward(tx, out, causal);
+    blk.forward(tx, out, causal, base_pos);
     b.wait();
 
     return out->read();
@@ -505,6 +520,184 @@ static void rope_gives_the_block_a_sense_of_position(
     }
 }
 
+/**
+ * A shared key-value head is exactly a duplicated one.
+ *
+ * The definition of grouping, stated as an equality that can be checked: a
+ * block with one key-value head must equal a block with one *per* query head
+ * whose key and value weights all happen to be identical.  Same arithmetic
+ * either way, so the outputs are bit-identical, and any mistake in which query
+ * head reads which key-value head breaks it.
+ *
+ * This is the assertion that could not exist before the branch -- there was
+ * nothing to be equal to.
+ */
+/**
+ * Sliding the whole sequence along must change nothing.
+ *
+ * Every score is an inner product between a rotated query and a rotated key, so
+ * it depends on the difference of their positions and not on either one.  Move
+ * the whole window from position 0 to position 7 and every difference is the
+ * same, so the output is the same.  The causal mask is by index rather than by
+ * position, so it does not move either.
+ *
+ * This is the block-level form of what rope_makes_the_score_relative checks on
+ * the primitive, and it is here because the other rope test was not enough:
+ * measured, dropping the rotation of the *keys* and rotating only the queries
+ * fails nothing else.  The block is still position-dependent that way -- so the
+ * permutation test still passes -- while the property that made rope worth
+ * having is gone.
+ */
+template<typename T>
+static void sliding_the_window_changes_nothing(
+    const char* name, std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nsliding the window changes nothing, " << name << ":\n";
+
+    std::mt19937 gen(67);
+
+    const weights<T> w(gen);
+    const matrix<T> x = random_matrix<T>(D, N, gen);
+
+    for(ai::backend<T>* b : backends) {
+        const matrix<T> at0 = run(*b, w, x, true, true, 0);
+        const matrix<T> at7 = run(*b, w, x, true, true, 7);
+
+        // Close rather than identical: the angles really are different, and it
+        // is only their differences that agree, so the two arrive at the same
+        // number by different roundings.
+        ok(std::string("  ") + b->name() +
+           ": the same sequence at position 7 gives the same answer",
+           worst(at0, at7) < ((sizeof(T) == 2) ? 3e-2 : 1e-4),
+           std::to_string(worst(at0, at7)));
+
+        // The control: without rope, base_pos is not consulted at all, so this
+        // would pass for a block that ignored position entirely.
+        const matrix<T> flat0 = run(*b, w, x, true, false, 0);
+        const matrix<T> flat7 = run(*b, w, x, true, false, 7);
+
+        ok(std::string("  ") + b->name() +
+           ": and without rope it is ignored rather than honoured",
+           worst(flat0, flat7) == 0.0);
+    }
+}
+
+template<typename T>
+static void sharing_a_head_equals_duplicating_it(
+    const char* name, std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nsharing a key-value head equals duplicating it, " << name << ":\n";
+
+    std::mt19937 gen(71);
+
+    // Four query heads, one key-value head between them.
+    weights<T> grouped(gen, 4, 1);
+
+    // And the same thing spelled out: four query heads with four key-value
+    // heads that are all copies of the one above.
+    weights<T> spelled = grouped;
+
+    spelled.kv = 4;
+    spelled.wk.assign(4, grouped.wk[0]);
+    spelled.wv.assign(4, grouped.wv[0]);
+
+    const matrix<T> x = random_matrix<T>(D, N, gen);
+
+    for(ai::backend<T>* b : backends) {
+        const matrix<T> a = run(*b, grouped, x);
+        const matrix<T> c = run(*b, spelled, x);
+
+        ok(std::string("  ") + b->name() + ": bit-identical to the duplicated form",
+           worst(a, c) == 0.0, std::to_string(worst(a, c)));
+    }
+}
+
+/**
+ * The grouping is contiguous, and which query heads share is not arbitrary.
+ *
+ * With four query heads over two key-value heads, heads 0 and 1 read key-value
+ * head 0 and heads 2 and 3 read key-value head 1.  Silence heads 2 and 3 at the
+ * output and key-value head 1 can no longer reach anything -- while key-value
+ * head 0 still must, or the test would pass on a block that ignored its keys.
+ *
+ * What this pins is the shape of the mapping, not the choice of it: striping
+ * (h % kv_heads) instead of grouping (h / group) would fail this, but only
+ * because this test was written to match the implementation.  Which convention
+ * a *file* means is settled by comparing generated text with a reference.  See
+ * block::kv_heads().
+ */
+template<typename T>
+static void the_grouping_is_contiguous(const char* name,
+                                       std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nthe grouping is contiguous, " << name << ":\n";
+
+    std::mt19937 gen(73);
+
+    weights<T> w(gen, 4, 2);
+
+    for(unsigned int r = 0; r < D; r++)
+        for(unsigned int c = 0; c < D / 4; c++) {
+            w.wo[2](r,c) = T(0.0f);
+            w.wo[3](r,c) = T(0.0f);
+        }
+
+    const matrix<T> x = random_matrix<T>(D, N, gen);
+
+    weights<T> bump_kv1 = w;
+    weights<T> bump_kv0 = w;
+
+    for(unsigned int r = 0; r < D / 4; r++)
+        for(unsigned int c = 0; c < D; c++) {
+            bump_kv1.wk[1](r,c) = T(float(bump_kv1.wk[1](r,c)) + 1.0f);
+            bump_kv0.wk[0](r,c) = T(float(bump_kv0.wk[0](r,c)) + 1.0f);
+        }
+
+    for(ai::backend<T>* b : backends) {
+        const matrix<T> base = run(*b, w, x);
+
+        ok(std::string("  ") + b->name() +
+           ": the second group's key head cannot reach the silenced heads",
+           worst(base, run(*b, bump_kv1, x)) == 0.0);
+
+        ok(std::string("  ") + b->name() + ": while the first group's still does",
+           worst(base, run(*b, bump_kv0, x)) > 0.0);
+    }
+}
+
+/** The counts a real file states, which is what all of this was for. */
+template<typename T>
+static void a_tinyllama_shaped_block(const char* name, ai::backend<T>& b) {
+    std::cout << "\na tinyllama-shaped block, " << name << ":\n";
+
+    // 32 query heads over 4 key-value heads is what the GGUF says, and 2048
+    // wide is what it says too -- but at 22 blocks that is a gigabyte of
+    // weights, so this checks the arithmetic of the shape rather than
+    // allocating it.
+    ai::block<T> blk(b, 2048, 32, 4, 5632);
+
+    ok("  32 query heads over 4 key-value heads",
+       blk.heads() == 32 && blk.kv_heads() == 4);
+
+    ok("  a head is 64 wide", blk.d_head() == 64,
+       std::to_string(blk.d_head()));
+
+    // 8 query heads per key-value head, contiguously.
+    bool mapped = true;
+
+    for(unsigned int h = 0; h < 32; h++)
+        if(blk.kv_head_for(h) != h / 8) mapped = false;
+
+    ok("  and each group of eight query heads shares one", mapped);
+
+    // Which makes the key projection a quarter the width of the query
+    // projection -- exactly the [2048, 256] against [2048, 2048] in the file.
+    ok("  so the key weights are a quarter the width of the query weights",
+       blk.wk(0)->rows() * blk.kv_heads() == 256 &&
+       blk.wq(0)->rows() * blk.heads() == 2048,
+       std::to_string(blk.wk(0)->rows() * blk.kv_heads()));
+}
+
 template<typename T>
 static void the_backends_agree(const char* name,
                                std::vector<ai::backend<T>*>& backends)
@@ -531,12 +724,18 @@ static void the_shapes_are_checked(const char* name, ai::backend<T>& b) {
     std::cout << "\nthe shapes are checked, " << name << ":\n";
 
     bool threw = false;
-    try { ai::block<T> bad(b, 8, 3, 16); }
+    try { ai::block<T> bad(b, 8, 3, 3, 16); }
     catch(std::exception&) { threw = true; }
 
     ok("  heads must divide d_model", threw);
 
-    ai::block<T> blk(b, D, H, F);
+    threw = false;
+    try { ai::block<T> bad(b, 8, 4, 3, 16); }
+    catch(std::exception&) { threw = true; }
+
+    ok("  and kv heads must divide heads", threw);
+
+    ai::block<T> blk(b, D, H, H, F);
 
     typename ai::backend<T>::tensor_ptr x = b.make(D, N);
     typename ai::backend<T>::tensor_ptr out = b.make(D, N);
@@ -566,6 +765,10 @@ static void everything(const char* name, std::vector<ai::backend<T>*>& b) {
     the_heads_are_summed<T>(name, b);
     the_branch_input_is_normalised<T>(name, b);
     rope_gives_the_block_a_sense_of_position<T>(name, b);
+    sliding_the_window_changes_nothing<T>(name, b);
+    sharing_a_head_equals_duplicating_it<T>(name, b);
+    the_grouping_is_contiguous<T>(name, b);
+    a_tinyllama_shaped_block<T>(name, *b[0]);
     silu_is_x_times_sigmoid<T>(name, b);
     the_backends_agree<T>(name, b);
     the_shapes_are_checked<T>(name, *b[0]);
