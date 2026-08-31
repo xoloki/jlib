@@ -301,6 +301,33 @@ static void buffer_keeps_its_reference_semantics() {
 
     ok("and a tensor slice still writes through to its parent",
        t[0][0] == 5, std::to_string(t[0][0]));
+
+    // Index 0 at the outer level, which is what the assertion above uses, is
+    // the one case where a view of a view cannot tell a composed offset from a
+    // rebased one.  These are the cases that can.
+    buffer<double> whole(4);
+
+    for(unsigned int i = 0; i < 4; i++) whole[i] = double(i);
+
+    buffer<double> tail(whole, 2, 2);
+    buffer<double> last(tail, 1, 1);
+
+    ok("a view of a view composes offsets rather than rebasing",
+       last[0] == 3, std::to_string(last[0]));
+
+    last[0] = 7;
+
+    ok("and writes through both levels to the original",
+       whole[3] == 7, std::to_string(whole[3]));
+
+    t[0][0] = 1;
+    t[1][1] = 2;
+
+    // Before the fix these were the same element, so the second write landed on
+    // the first and both read back as 2.
+    ok("so two tensor elements two levels down do not alias",
+       t[0][0] == 1 && t[1][1] == 2,
+       std::to_string(t[0][0]) + " and " + std::to_string(t[1][1]));
 }
 
 int main() {
