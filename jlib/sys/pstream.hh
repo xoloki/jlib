@@ -22,6 +22,7 @@
 #define JLIB_SYS_PSTREAM_HH
 
 
+#include <cstring>
 #include <iostream>
 #include <exception>
 #include <string>
@@ -38,6 +39,16 @@
 namespace jlib {
     namespace sys {
 
+        /**
+         * A streambuf over popen(3).
+         *
+         * Every call into the base is written `this->eback()` rather than
+         * `eback()`, and has to be: the base depends on the template
+         * parameters, so an unqualified name is looked up when the template is
+         * defined, at which point it does not exist.  Not a style choice --
+         * without it this header does not compile at all, which nothing
+         * noticed for as long as nothing instantiated it.
+         */
         template< typename charT, typename traitT = std::char_traits<charT> >
         class basic_procbuf : public std::basic_streambuf<charT,traitT> {
         public:
@@ -53,10 +64,10 @@ namespace jlib {
                 char_type* tmp;
                 
                 tmp = new char_type[BUF_SIZE];
-                setg(tmp,tmp,tmp);
+                this->setg(tmp,tmp,tmp);
                 
                 tmp = new char_type[BUF_SIZE];
-                setp(tmp,tmp+BUF_SIZE);
+                this->setp(tmp,tmp+BUF_SIZE);
                 
                 //_M_mode = (std::ios_base::in | std::ios_base::out);
                 
@@ -69,8 +80,8 @@ namespace jlib {
                     std::cerr << "basic_procbuf::~basic_procbuf()"<<std::endl;
                 close();
 
-                delete [] eback();
-                delete [] pbase();
+                delete [] this->eback();
+                delete [] this->pbase();
             }
 
             virtual int_type underflow() {
@@ -78,7 +89,7 @@ namespace jlib {
                     std::cerr << "basic_procbuf::underflow()"<<std::endl;
 
                 m_eintr = false;
-                int count = ::read(m_pd, eback(), BUF_SIZE);
+                int count = ::read(m_pd, this->eback(), BUF_SIZE);
                 
                 if(count < 0) {
                     if(getenv("JLIB_SYS_SOCKET_DEBUG"))
@@ -96,24 +107,24 @@ namespace jlib {
                     return traits_type::eof();
                 }
                 else {
-                    char_type* end = eback()+count;
-                    setg(eback(), eback(), end);
+                    char_type* end = this->eback()+count;
+                    this->setg(this->eback(), this->eback(), end);
                     
-                    return *gptr();
+                    return *this->gptr();
                 }
             }
 
             virtual int_type overflow(int_type c=traits_type::eof()) {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
                     std::cerr << "basic_procbuf::overflow("<<c<<")"<<std::endl;
-                if(pptr() >= epptr()) {
+                if(this->pptr() >= this->epptr()) {
                     if(sync() == -1) {
                         return traits_type::eof();
                     }
                 }
                 
-                *pptr() = c;
-                pbump(1);
+                *this->pptr() = c;
+                this->pbump(1);
                 return c;
             }
 
@@ -121,10 +132,10 @@ namespace jlib {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
                     std::cerr << "basic_procbuf::sync()"<<std::endl;
                 int sofar = 0;
-                int total = pptr() - pbase();
+                int total = this->pptr() - this->pbase();
                 int diff;
                 int count;
-                char_type* current = pbase();
+                char_type* current = this->pbase();
                 
                 while( (diff=(total-sofar)) > 0 ) {
                     m_eintr = false;
@@ -144,7 +155,7 @@ namespace jlib {
                     current += count;
                 }
                 
-                setp(pbase(), pbase()+BUF_SIZE);
+                this->setp(this->pbase(), this->pbase()+BUF_SIZE);
                 return 0;                
             }
 

@@ -167,18 +167,82 @@ std::size_t tokenizer::char_len(const std::string& s, std::size_t at) {
     return n;
 }
 
-std::vector<int> tokenizer::encode(const std::string& text, bool add_bos) const {
+std::vector<int> tokenizer::encode(const std::string& text, bool add_bos,
+                                   bool parse_special) const
+{
     std::vector<int> out;
 
     if(add_bos && m_bos >= 0) out.push_back(m_bos);
 
     // Empty in, nothing but the sentence marker out.  Without this the dummy
-    // prefix below would be the whole input and encode to a lone space token,
-    // which is a word that was never written.
+    // prefix would be the whole input and encode to a lone space token, which
+    // is a word that was never written.
     if(text.empty()) return out;
 
+    if(!parse_special) {
+        encode_run(text, true, out);
+
+        return out;
+    }
+
+    // Walk the text, splitting at every control token written out in it, so
+    // "Hi</s>" is two tokens and not five.  Only the run that begins the input
+    // gets the dummy prefix.
+    std::size_t at = 0;
+    bool first = true;
+
+    while(at < text.size()) {
+        std::size_t where = std::string::npos;
+        int which = -1;
+
+        for(std::size_t i = 0; i < m_tokens.size(); i++) {
+            if(m_types[i] != control && m_types[i] != user_defined) continue;
+
+            if(m_tokens[i].empty()) continue;
+
+            const std::size_t found = text.find(m_tokens[i], at);
+
+            // Earliest wins, and the longest of those, so a vocabulary holding
+            // both "<|end|>" and "<|end|>!" cannot have the shorter eat the
+            // start of the longer.
+            if(found != std::string::npos &&
+               (found < where ||
+                (found == where &&
+                 m_tokens[i].size() > m_tokens[std::size_t(which)].size())))
+            {
+                where = found;
+                which = int(i);
+            }
+        }
+
+        if(which < 0) {
+            encode_run(text.substr(at), first, out);
+
+            return out;
+        }
+
+        if(where > at) {
+            encode_run(text.substr(at, where - at), first, out);
+
+            first = false;
+        }
+
+        out.push_back(which);
+
+        first = false;
+        at = where + m_tokens[std::size_t(which)].size();
+    }
+
+    return out;
+}
+
+void tokenizer::encode_run(const std::string& text, bool add_prefix,
+                           std::vector<int>& out) const
+{
+    if(text.empty()) return;
+
     // The marker for every space, and one in front: see the header.
-    std::string prepared = MARKER;
+    std::string prepared = add_prefix ? MARKER : "";
 
     for(std::size_t i = 0; i < text.size(); i++) {
         if(text[i] == ' ') prepared += MARKER;
@@ -238,6 +302,28 @@ std::vector<int> tokenizer::encode(const std::string& text, bool add_bos) const 
 
             out.push_back(bt >= 0 ? bt : m_unk);
         }
+    }
+}
+
+std::string tokenizer::piece(int id) const {
+    if(id < 0 || std::size_t(id) >= m_tokens.size())
+        throw exception("piece: an id outside the vocabulary");
+
+    if(m_types[std::size_t(id)] == control) return std::string();
+
+    if(m_types[std::size_t(id)] == byte) {
+        const int v = hex_pair(m_tokens[std::size_t(id)], 3);
+
+        if(v >= 0) return std::string(1, char(v));
+    }
+
+    const std::string& t = m_tokens[std::size_t(id)];
+
+    std::string out;
+
+    for(std::size_t at = 0; at < t.size(); ) {
+        if(t.compare(at, 3, MARKER) == 0) { out += ' '; at += 3; }
+        else { out += t[at]; at++; }
     }
 
     return out;

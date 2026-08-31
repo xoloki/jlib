@@ -48,7 +48,7 @@ if HAVE_GLFW
 glfw_programs = jglfwhyper jgltorus jhardhyper
 endif
 
-bin_PROGRAMS = jlib-mail jcrypt jm3u \
+bin_PROGRAMS = jlib-mail jcrypt jm3u jchat \
 	$(curve_programs) \
 	$(neural_programs) \
 	$(cuda_programs) \
@@ -85,6 +85,10 @@ jcrypt_LDADD   = $(JCRYPT_LA) $(JSYS_LA)
 
 jm3u_SOURCES = jm3u.cc
 jm3u_LDADD   = $(JSYS_LA) $(JUTIL_LA)
+
+jchat_SOURCES  = jchat.cc
+jchat_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)
+jchat_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA) $(METAL_LA)
 
 jcurve_SOURCES = jcurve.cc
 jcurve_LDADD   = $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) $(SODIUM_LIBS)
