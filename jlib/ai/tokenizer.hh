@@ -133,6 +133,22 @@ public:
     std::vector<int> encode(const std::string& text, bool add_bos = true,
                             bool parse_special = true) const;
 
+    /**
+     * Append one run of text to a sequence already being built.
+     *
+     * For a caller assembling a prompt out of parts that need different
+     * treatment -- a chat layout, where the markers are the template's and the
+     * content is a stranger's, and only the markers may be allowed to mean
+     * anything. See chat::encode.
+     *
+     * @param add_prefix the space marker in front, which belongs to the start
+     *        of the whole input and so to the first run only
+     * @param parse_special whether a control token spelled out in this run
+     *        becomes that token, or the characters that spell it
+     */
+    void append(const std::string& text, bool add_prefix, bool parse_special,
+                std::vector<int>& out) const;
+
     /** Ids back to text, undoing the space marker and the dummy prefix. */
     std::string decode(const std::vector<int>& ids) const;
 
