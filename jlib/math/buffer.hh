@@ -156,7 +156,14 @@ template<typename T>
 inline
 buffer<T>::buffer(buffer<T> b, unsigned int o, unsigned int s)
     : mbuf(b.mbuf),
-      moff(o),
+      // b.moff + o, not o.  The offset is into the shared array, so a view of
+      // a view has to compose them; taking o alone silently rebased the second
+      // view onto the start of the array.  Nothing caught it because nothing
+      // indexed two levels deep: tensor::operator[] slices one axis per call,
+      // so t[i][j] is a view of a view, and both the 1999 tensor_test and
+      // math_value_test's slice check use index 0 at the outer level, where
+      // b.moff is 0 and the two agree.
+      moff(b.moff + o),
       msize(s)
 {
 }
