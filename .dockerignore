@@ -38,3 +38,8 @@ m4/lt~obsolete.m4
 .libs/
 .deps/
 *~
+
+# Model files, which are gigabytes and which no container test needs -- the
+# Dockerfile copies named paths rather than the tree, so this is belt and
+# braces against that changing.  ai_gguf_test skips without one.
+*.gguf

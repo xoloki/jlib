@@ -51,3 +51,10 @@ m4/lt~obsolete.m4
 #   curl -O https://pjreddie.com/media/files/mnist_train.csv
 #   curl -O https://pjreddie.com/media/files/mnist_test.csv
 mnist_*.csv
+
+# GGUF model files, fetched rather than vendored: the smallest one worth
+# testing against is over a gigabyte, and ai_gguf_test takes its path on the
+# command line and skips when it is absent.
+#
+#   curl -LO https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q8_0.gguf
+*.gguf
