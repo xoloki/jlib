@@ -41,6 +41,7 @@
 #endif
 
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -51,6 +52,41 @@
 namespace ai = jlib::ai;
 
 namespace {
+
+/**
+ * Set by the interrupt handler, read between tokens.
+ *
+ * sig_atomic_t and volatile because a handler may run between any two
+ * instructions, and nothing else in here is safe to touch from one -- no
+ * allocation, no iostreams, no locks. The handler sets a number; everything
+ * that has to happen because of it happens in the generation loop, where it is
+ * allowed to.
+ */
+volatile std::sig_atomic_t g_interrupted = 0;
+
+void interrupted(int) { g_interrupted = 1; }
+
+/**
+ * Ask for SIGINT **without** SA_RESTART.
+ *
+ * signal(2) on a BSD restarts an interrupted read, which is usually what you
+ * want and here is not: with it, Ctrl-C at the prompt would be noticed only
+ * after the next line was typed. sigaction with no flags lets getline fail so
+ * the loop can see it.
+ */
+void catch_interrupts() {
+    struct sigaction sa;
+
+    std::memset(&sa, 0, sizeof(sa));
+
+    sa.sa_handler = interrupted;
+
+    sigemptyset(&sa.sa_mask);
+
+    sa.sa_flags = 0;
+
+    sigaction(SIGINT, &sa, 0);
+}
 
 struct options {
     std::string model;
@@ -139,17 +175,26 @@ double now() {
     return duration<double>(steady_clock::now().time_since_epoch()).count();
 }
 
+/** What one exchange produced, and whether it got to finish. */
+struct reply {
+    std::string text;
+    bool stopped = false;
+};
+
 /**
  * One exchange: lay out the turns, generate, stream the reply to stdout.
  *
- * @return the reply, so the caller can put it in the history
+ * Reports whether it was interrupted rather than leaving the caller to read
+ * the flag afterwards -- this clears it, so a caller checking it later would
+ * always see zero, which is a mistake this returned a bare string long enough
+ * to make.
  */
 template<typename T>
-std::string answer(ai::model<T>& m, ai::backend<T>& b, const ai::tokenizer& tok,
+reply answer(ai::model<T>& m, ai::backend<T>& b, const ai::tokenizer& tok,
                    const std::vector<int>& ids, const options& o,
                    ai::sampler& s)
 {
-    std::string reply;
+    reply said;
     bool first = true;
 
     const double start = now();
@@ -167,9 +212,13 @@ std::string answer(ai::model<T>& m, ai::backend<T>& b, const ai::tokenizer& tok,
                 first = false;
             }
 
-            reply += p;
+            said.text += p;
 
             std::cout << p << std::flush;
+
+            // Between tokens, which is where it is safe to stop: nothing is
+            // half-printed and the reply so far is a whole thing.
+            return g_interrupted == 0;
         });
 
     std::cout << "\n";
@@ -177,10 +226,20 @@ std::string answer(ai::model<T>& m, ai::backend<T>& b, const ai::tokenizer& tok,
     const double took = now() - start;
     const std::size_t made = out.size() - ids.size();
 
-    std::cerr << "[" << made << " tokens in " << took << "s, "
-              << (took > 0 ? double(made) / took : 0.0) << "/s]\n";
+    if(g_interrupted) {
+        said.stopped = true;
 
-    return reply;
+        std::cerr << "[stopped after " << made << " tokens]\n";
+
+        // Cleared here rather than by the handler, so the next reply starts
+        // fresh and a second Ctrl-C at the prompt is a separate decision.
+        g_interrupted = 0;
+    }
+    else
+        std::cerr << "[" << made << " tokens in " << took << "s, "
+                  << (took > 0 ? double(made) / took : 0.0) << "/s]\n";
+
+    return said;
 }
 
 /**
@@ -231,6 +290,8 @@ int run(ai::backend<T>& b, const ai::gguf& g, const options& o) {
 
     std::cerr << "[loaded in " << (now() - t0) << "s]\n";
 
+    catch_interrupts();
+
     ai::sampler s(o.sampling);
 
     // Raw mode never lays anything out, so it needs no template -- which is
@@ -265,9 +326,10 @@ int run(ai::backend<T>& b, const ai::gguf& g, const options& o) {
             ids = ch->encode(turns, tok);
         }
 
-        answer(m, b, tok, ids, o, s);
-
-        return 0;
+        // 128 + SIGINT, which is what a shell reports for a program that was
+        // interrupted -- true here even though it was handled rather than
+        // fatal, because a script wants to know the answer is not complete.
+        return answer(m, b, tok, ids, o, s).stopped ? 130 : 0;
     }
 
     if(o.raw) {
@@ -283,7 +345,13 @@ int run(ai::backend<T>& b, const ai::gguf& g, const options& o) {
 
         std::string line;
 
-        if(!std::getline(std::cin, line)) break;
+        if(!std::getline(std::cin, line)) {
+            // Either the input ended or Ctrl-C arrived while waiting for it.
+            // Both mean stop; only one of them is an interruption.
+            if(g_interrupted) { std::cerr << "\n"; return 130; }
+
+            break;
+        }
 
         if(line.empty()) continue;
 
@@ -291,10 +359,11 @@ int run(ai::backend<T>& b, const ai::gguf& g, const options& o) {
 
         fit(turns, *ch, tok, c.context, o.tokens);
 
-        const std::string said =
-            answer(m, b, tok, ch->encode(turns, tok), o, s);
-
-        turns.push_back({ "assistant", said });
+        // Kept whether or not it finished: a stopped reply is still what the
+        // model said, and dropping it would leave the conversation with a
+        // question nobody answered.
+        turns.push_back({ "assistant",
+                          answer(m, b, tok, ch->encode(turns, tok), o, s).text });
     }
 
     std::cerr << "\n";

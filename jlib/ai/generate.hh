@@ -91,7 +91,17 @@ std::vector<float> last_logits(const math::matrix<T>& logits) {
  * the cache rather than competing with it.
  *
  * @param on_token called with each new token as it is produced, for a caller
- *                 that wants to stream rather than wait
+ *                 that wants to stream rather than wait.  **Return false to
+ *                 stop**, which ends the generation after that token rather
+ *                 than before it -- so what a caller has already printed is
+ *                 what the result contains, and a partial reply is a real
+ *                 reply rather than something to be undone.
+ *
+ *                 This is how an interrupt reaches the loop: a signal handler
+ *                 sets a flag, the callback reads it, and generation ends
+ *                 between tokens at a point where nothing is half-written. A
+ *                 caller passing no callback cannot stop early, which is the
+ *                 honest consequence of there being nothing to ask.
  * @return the prompt followed by everything generated
  */
 template<typename T>
@@ -100,7 +110,7 @@ std::vector<int> generate(model<T>& m, backend<T>& b,
                           unsigned int max_new,
                           sampler& s,
                           int eos = -1,
-                          std::function<void(int)> on_token = nullptr)
+                          std::function<bool(int)> on_token = nullptr)
 {
     if(prompt.empty())
         throw backend_error("generate: an empty prompt has no last position");
@@ -128,7 +138,7 @@ std::vector<int> generate(model<T>& m, backend<T>& b,
 
         ids.push_back(next);
 
-        if(on_token) on_token(next);
+        if(on_token && !on_token(next)) break;
 
         if(eos >= 0 && next == eos) break;
     }
