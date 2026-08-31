@@ -223,14 +223,95 @@ kernel void k_causal_mask(device T* s [[buffer(0)]],
                           constant uint& rows [[buffer(1)]],
                           constant uint& cols [[buffer(2)]],
                           constant uint& key_offset [[buffer(3)]],
+                          constant uint& queries [[buffer(4)]],
                           uint c [[thread_position_in_grid]])
 {
     if(c >= cols) return;
 
+    // Which query this column is, when every head's scores sit side by side.
+    const uint per_head = queries ? queries : cols;
+    const uint i = c % per_head;
+
     device T* x = s + (ulong)c * rows;
 
-    for(uint r = c + key_offset + 1; r < rows; r++)
+    for(uint r = i + key_offset + 1; r < rows; r++)
         x[r] = T(-INFINITY);
+}
+
+/**
+ * Every head's scores in one dispatch; see ai::backend::attention_scores.
+ *
+ * One thread per element of the result. The head index is arithmetic here
+ * rather than a separate call, which is the whole point: the per-head loop this
+ * replaces was 77% of the time to produce a token, almost all of it the cost of
+ * asking rather than of doing.
+ */
+template<typename T>
+kernel void k_attn_scores(device const T* q [[buffer(0)]],
+                          device const T* k [[buffer(1)]],
+                          device T* s [[buffer(2)]],
+                          constant uint& queries [[buffer(3)]],
+                          constant uint& keys [[buffer(4)]],
+                          constant uint& heads [[buffer(5)]],
+                          constant uint& group [[buffer(6)]],
+                          constant uint& d_head [[buffer(7)]],
+                          constant float& scale [[buffer(8)]],
+                          uint gid [[thread_position_in_grid]])
+{
+    const uint total = keys * queries * heads;
+
+    if(gid >= total) return;
+
+    const uint j = gid % keys;
+    const uint rest = gid / keys;
+    const uint i = rest % queries;
+    const uint h = rest / queries;
+
+    const uint g = h / group;
+
+    device const T* qc = q + (ulong)i * heads * d_head + (ulong)h * d_head;
+    device const T* kc = k + (ulong)j * (heads / group) * d_head + (ulong)g * d_head;
+
+    float sum = 0.0f;
+
+    for(uint d = 0; d < d_head; d++)
+        sum += float(qc[d]) * float(kc[d]);
+
+    s[(ulong)(h * queries + i) * keys + j] = T(sum * scale);
+}
+
+/** The weighted sum over values, every head at once. */
+template<typename T>
+kernel void k_attn_weighted(device const T* v [[buffer(0)]],
+                            device const T* p [[buffer(1)]],
+                            device T* out [[buffer(2)]],
+                            constant uint& queries [[buffer(3)]],
+                            constant uint& keys [[buffer(4)]],
+                            constant uint& heads [[buffer(5)]],
+                            constant uint& group [[buffer(6)]],
+                            constant uint& d_head [[buffer(7)]],
+                            uint gid [[thread_position_in_grid]])
+{
+    const uint total = heads * d_head * queries;
+
+    if(gid >= total) return;
+
+    const uint d = gid % d_head;
+    const uint rest = gid / d_head;
+    const uint h = rest % heads;
+    const uint i = rest / heads;
+
+    const uint g = h / group;
+    const uint kv_heads = heads / group;
+
+    device const T* pc = p + (ulong)(h * queries + i) * keys;
+
+    float sum = 0.0f;
+
+    for(uint j = 0; j < keys; j++)
+        sum += float(v[(ulong)j * kv_heads * d_head + g * d_head + d]) * float(pc[j]);
+
+    out[(ulong)i * heads * d_head + h * d_head + d] = T(sum);
 }
 
 /** Copy src's columns into dst starting at a column; see ai::backend. */
@@ -265,22 +346,30 @@ kernel void k_rope(device T* x [[buffer(0)]],
                    constant uint& base_pos [[buffer(3)]],
                    constant float& theta [[buffer(4)]],
                    constant uint& split [[buffer(5)]],
+                   constant uint& d_head [[buffer(6)]],
                    uint i [[thread_position_in_grid]])
 {
     // Not `half`: that is the fp16 type in MSL, and naming a variable after it
     // fails to compile in a way whose message points at the declaration rather
     // than at the name.
-    const uint planes = rows / 2;
+    // One head unless told otherwise: a rotation happens inside a head and
+    // never across the boundary between two stacked in the same column.
+    const uint dh = d_head ? d_head : rows;
+    const uint planes = dh / 2;
+    const uint per_col = (rows / dh) * planes;
 
-    if(i >= cols * planes) return;
+    if(i >= cols * per_col) return;
 
-    const uint c = i / planes;
-    const uint j = i % planes;
+    const uint c = i / per_col;
+    const uint within = i % per_col;
+    const uint head = within / planes;
+    const uint j = within % planes;
 
-    const uint a = split ? j : 2 * j;
-    const uint b = split ? j + planes : 2 * j + 1;
+    const uint base = head * dh;
+    const uint a = base + (split ? j : 2 * j);
+    const uint b = base + (split ? j + planes : 2 * j + 1);
 
-    const float freq = pow(theta, -2.0f * float(j) / float(rows));
+    const float freq = pow(theta, -2.0f * float(j) / float(dh));
     const float angle = float(base_pos + c) * freq;
 
     const float co = cos(angle);
@@ -408,9 +497,29 @@ INSTANTIATE(k_softmax, float, "_f32")(device const float*, device float*,
 INSTANTIATE(k_softmax, half, "_f16")(device const half*, device half*,
                                      constant uint&, constant uint&, uint);
 INSTANTIATE(k_causal_mask, float, "_f32")(device float*, constant uint&,
-                                          constant uint&, constant uint&, uint);
+                                          constant uint&, constant uint&,
+                                          constant uint&, uint);
 INSTANTIATE(k_causal_mask, half, "_f16")(device half*, constant uint&,
-                                         constant uint&, constant uint&, uint);
+                                         constant uint&, constant uint&,
+                                         constant uint&, uint);
+INSTANTIATE(k_attn_scores, float, "_f32")(device const float*, device const float*,
+                                          device float*, constant uint&,
+                                          constant uint&, constant uint&,
+                                          constant uint&, constant uint&,
+                                          constant float&, uint);
+INSTANTIATE(k_attn_scores, half, "_f16")(device const half*, device const half*,
+                                         device half*, constant uint&,
+                                         constant uint&, constant uint&,
+                                         constant uint&, constant uint&,
+                                         constant float&, uint);
+INSTANTIATE(k_attn_weighted, float, "_f32")(device const float*, device const float*,
+                                            device float*, constant uint&,
+                                            constant uint&, constant uint&,
+                                            constant uint&, constant uint&, uint);
+INSTANTIATE(k_attn_weighted, half, "_f16")(device const half*, device const half*,
+                                           device half*, constant uint&,
+                                           constant uint&, constant uint&,
+                                           constant uint&, constant uint&, uint);
 INSTANTIATE(k_copy_columns, float, "_f32")(device const float*, device float*,
                                            constant uint&, constant uint&,
                                            constant uint&, uint);
@@ -433,10 +542,10 @@ INSTANTIATE(k_gather, half, "_f16")(device const half*, device half*,
                                     constant uint&, uint);
 INSTANTIATE(k_rope, float, "_f32")(device float*, constant uint&, constant uint&,
                                    constant uint&, constant float&,
-                                   constant uint&, uint);
+                                   constant uint&, constant uint&, uint);
 INSTANTIATE(k_rope, half, "_f16")(device half*, constant uint&, constant uint&,
                                   constant uint&, constant float&,
-                                  constant uint&, uint);
+                                  constant uint&, constant uint&, uint);
 INSTANTIATE(k_rms_norm, float, "_f32")(device const float*, device const float*,
                                        device float*, constant uint&,
                                        constant uint&, constant float&, uint);
@@ -552,6 +661,8 @@ struct stream<T>::impl {
     id<MTLComputePipelineState> rope = nil;
     id<MTLComputePipelineState> gather = nil;
     id<MTLComputePipelineState> q8_gemv = nil;
+    id<MTLComputePipelineState> attn_scores = nil;
+    id<MTLComputePipelineState> attn_weighted = nil;
     id<MTLComputePipelineState> rms_norm = nil;
 
     // Buffers made for one encoded operation and needed until the command
@@ -578,6 +689,8 @@ struct pipelines {
     id<MTLComputePipelineState> rope = nil;
     id<MTLComputePipelineState> gather = nil;
     id<MTLComputePipelineState> q8_gemv = nil;
+    id<MTLComputePipelineState> attn_scores = nil;
+    id<MTLComputePipelineState> attn_weighted = nil;
     id<MTLComputePipelineState> rms_norm = nil;
 };
 
@@ -634,6 +747,8 @@ pipelines& compiled(id<MTLDevice> gpu) {
         { "k_rope",       &p.rope },
         { "k_gather",     &p.gather },
         { "k_q8_gemv",    &p.q8_gemv },
+        { "k_attn_scores", &p.attn_scores },
+        { "k_attn_weighted", &p.attn_weighted },
         { "k_rms_norm",   &p.rms_norm },
     };
 
@@ -702,6 +817,8 @@ stream<T>::stream(std::shared_ptr<device> d)
     m_impl->rope = p.rope;
     m_impl->gather = p.gather;
     m_impl->q8_gemv = p.q8_gemv;
+    m_impl->attn_scores = p.attn_scores;
+    m_impl->attn_weighted = p.attn_weighted;
     m_impl->held = [NSMutableArray array];
     m_impl->rms_norm = p.rms_norm;
 }
@@ -865,7 +982,9 @@ void stream<T>::softmax(const tensor<T>& in, tensor<T>& out) {
 }
 
 template<typename T>
-void stream<T>::causal_mask(tensor<T>& s, unsigned int key_offset) {
+void stream<T>::causal_mask(tensor<T>& s, unsigned int key_offset,
+                            unsigned int queries)
+{
     open();
 
     const unsigned int rows = s.rows();
@@ -876,6 +995,7 @@ void stream<T>::causal_mask(tensor<T>& s, unsigned int key_offset) {
     [m_impl->enc setBytes:&rows length:sizeof(rows) atIndex:1];
     [m_impl->enc setBytes:&cols length:sizeof(cols) atIndex:2];
     [m_impl->enc setBytes:&key_offset length:sizeof(key_offset) atIndex:3];
+    [m_impl->enc setBytes:&queries length:sizeof(queries) atIndex:4];
 
     dispatch(m_impl->enc, m_impl->causal_mask, cols);
 
@@ -915,7 +1035,7 @@ void stream<T>::copy_columns(const tensor<T>& src, tensor<T>& dst,
 
 template<typename T>
 void stream<T>::rope(tensor<T>& x, unsigned int base_pos, float theta,
-                     bool split)
+                     bool split, unsigned int d_head)
 {
     if(x.rows() % 2)
         throw typename tensor<T>::exception("rope: rotates in planes, so it "
@@ -934,6 +1054,7 @@ void stream<T>::rope(tensor<T>& x, unsigned int base_pos, float theta,
     [m_impl->enc setBytes:&base_pos length:sizeof(base_pos) atIndex:3];
     [m_impl->enc setBytes:&theta length:sizeof(theta) atIndex:4];
     [m_impl->enc setBytes:&is_split length:sizeof(is_split) atIndex:5];
+    [m_impl->enc setBytes:&d_head length:sizeof(d_head) atIndex:6];
 
     // One thread per rotation plane per column, not per column: d_head is
     // small and the sequence can be long, so this is where the parallelism is.
@@ -1050,6 +1171,60 @@ void stream<T>::multiply_tn(const qweight& w, const tensor<T>& x, tensor<T>& y,
     [m_impl->enc setBytes:&beta length:sizeof(beta) atIndex:7];
 
     dispatch(m_impl->enc, m_impl->q8_gemv, N * ncols);
+
+    m_impl->pending++;
+}
+
+template<typename T>
+void stream<T>::attention_scores(const tensor<T>& q, const tensor<T>& k,
+                                 tensor<T>& s, unsigned int heads,
+                                 unsigned int kv_heads, unsigned int d_head,
+                                 float scale)
+{
+    open();
+
+    const unsigned int queries = q.cols();
+    const unsigned int keys = k.cols();
+    const unsigned int group = heads / kv_heads;
+
+    [m_impl->enc setComputePipelineState:m_impl->attn_scores];
+    [m_impl->enc setBuffer:q.m_impl->buf offset:0 atIndex:0];
+    [m_impl->enc setBuffer:k.m_impl->buf offset:0 atIndex:1];
+    [m_impl->enc setBuffer:s.m_impl->buf offset:0 atIndex:2];
+    [m_impl->enc setBytes:&queries length:sizeof(queries) atIndex:3];
+    [m_impl->enc setBytes:&keys length:sizeof(keys) atIndex:4];
+    [m_impl->enc setBytes:&heads length:sizeof(heads) atIndex:5];
+    [m_impl->enc setBytes:&group length:sizeof(group) atIndex:6];
+    [m_impl->enc setBytes:&d_head length:sizeof(d_head) atIndex:7];
+    [m_impl->enc setBytes:&scale length:sizeof(scale) atIndex:8];
+
+    dispatch(m_impl->enc, m_impl->attn_scores, keys * queries * heads);
+
+    m_impl->pending++;
+}
+
+template<typename T>
+void stream<T>::attention_weighted(const tensor<T>& v, const tensor<T>& p,
+                                   tensor<T>& out, unsigned int heads,
+                                   unsigned int kv_heads, unsigned int d_head)
+{
+    open();
+
+    const unsigned int keys = v.cols();
+    const unsigned int queries = out.cols();
+    const unsigned int group = heads / kv_heads;
+
+    [m_impl->enc setComputePipelineState:m_impl->attn_weighted];
+    [m_impl->enc setBuffer:v.m_impl->buf offset:0 atIndex:0];
+    [m_impl->enc setBuffer:p.m_impl->buf offset:0 atIndex:1];
+    [m_impl->enc setBuffer:out.m_impl->buf offset:0 atIndex:2];
+    [m_impl->enc setBytes:&queries length:sizeof(queries) atIndex:3];
+    [m_impl->enc setBytes:&keys length:sizeof(keys) atIndex:4];
+    [m_impl->enc setBytes:&heads length:sizeof(heads) atIndex:5];
+    [m_impl->enc setBytes:&group length:sizeof(group) atIndex:6];
+    [m_impl->enc setBytes:&d_head length:sizeof(d_head) atIndex:7];
+
+    dispatch(m_impl->enc, m_impl->attn_weighted, heads * d_head * queries);
 
     m_impl->pending++;
 }

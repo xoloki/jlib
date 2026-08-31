@@ -161,8 +161,29 @@ void backend<T>::softmax(const tensor_ptr& in, tensor_ptr& out) {
 }
 
 template<typename T>
-void backend<T>::causal_mask(tensor_ptr& s, unsigned int key_offset) {
-    m_stream->causal_mask(at<T>(s), key_offset);
+void backend<T>::causal_mask(tensor_ptr& s, unsigned int key_offset,
+                             unsigned int queries)
+{
+    m_stream->causal_mask(at<T>(s), key_offset, queries);
+}
+
+template<typename T>
+void backend<T>::attention_scores(const tensor_ptr& q, const tensor_ptr& k,
+                                  tensor_ptr& scores, unsigned int heads,
+                                  unsigned int kv_heads, unsigned int d_head,
+                                  T scale)
+{
+    m_stream->attention_scores(at<T>(q), at<T>(k), at<T>(scores), heads,
+                               kv_heads, d_head, float(scale));
+}
+
+template<typename T>
+void backend<T>::attention_weighted(const tensor_ptr& v, const tensor_ptr& probs,
+                                    tensor_ptr& out, unsigned int heads,
+                                    unsigned int kv_heads, unsigned int d_head)
+{
+    m_stream->attention_weighted(at<T>(v), at<T>(probs), at<T>(out), heads,
+                                 kv_heads, d_head);
 }
 
 /** What make_q8_0 hands back: a device-side weight, and nothing else. */
@@ -220,9 +241,10 @@ void backend<T>::gather(const tensor_ptr& table, const std::vector<int>& ids,
 
 template<typename T>
 void backend<T>::rope(tensor_ptr& x, unsigned int base_pos, float theta,
-                      ai::rope_layout layout)
+                      ai::rope_layout layout, unsigned int d_head)
 {
-    m_stream->rope(at<T>(x), base_pos, theta, layout == ai::rope_layout::split);
+    m_stream->rope(at<T>(x), base_pos, theta,
+                   layout == ai::rope_layout::split, d_head);
 }
 
 template<typename T>

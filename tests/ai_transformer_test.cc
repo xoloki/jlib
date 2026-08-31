@@ -81,24 +81,22 @@ static const unsigned int N = 5;
  */
 template<typename T>
 struct weights {
-    unsigned int heads, kv;
+    unsigned int heads, kv, dh;
 
-    std::vector<matrix<T> > wq, wk, wv, wo;
-    matrix<T> w1, w3, w2, an, fn;
+    // One matrix each, in the file's orientation: wq is d_model by every
+    // head's width, wo the other way round with the heads on its input side.
+    matrix<T> wq, wk, wv, wo, w1, w3, w2, an, fn;
 
     weights(std::mt19937& gen, unsigned int nh = H, unsigned int nkv = H)
-        : heads(nh), kv(nkv),
+        : heads(nh), kv(nkv), dh(D / nh),
+          wq(D, nh * (D / nh)), wk(D, nkv * (D / nh)), wv(D, nkv * (D / nh)),
+          wo(nh * (D / nh), D),
           w1(D, F), w3(D, F), w2(F, D), an(D, 1), fn(D, 1)
     {
-        for(unsigned int h = 0; h < heads; h++) {
-            wq.push_back(random_matrix<T>(D / heads, D, gen, 0.5f));
-            wo.push_back(random_matrix<T>(D, D / heads, gen, 0.5f));
-        }
-
-        for(unsigned int g = 0; g < kv; g++) {
-            wk.push_back(random_matrix<T>(D / heads, D, gen, 0.5f));
-            wv.push_back(random_matrix<T>(D / heads, D, gen, 0.5f));
-        }
+        wq = random_matrix<T>(D, heads * dh, gen, 0.5f);
+        wk = random_matrix<T>(D, kv * dh, gen, 0.5f);
+        wv = random_matrix<T>(D, kv * dh, gen, 0.5f);
+        wo = random_matrix<T>(heads * dh, D, gen, 0.5f);
 
         w1 = random_matrix<T>(D, F, gen, 0.5f);
         w3 = random_matrix<T>(D, F, gen, 0.5f);
@@ -106,19 +104,34 @@ struct weights {
 
         for(unsigned int r = 0; r < D; r++) { an(r,0) = T(1.0f); fn(r,0) = T(1.0f); }
     }
+
+    /** Head h's own columns of wq, which is where it reads its queries from. */
+    void bump_query_head(unsigned int h, float by) {
+        for(unsigned int r = 0; r < D; r++)
+            for(unsigned int c = h * dh; c < (h + 1) * dh; c++)
+                wq(r,c) = T(float(wq(r,c)) + by);
+    }
+
+    /** And head h's own *rows* of wo, which is where it reaches the output. */
+    void silence_output_head(unsigned int h) {
+        for(unsigned int r = h * dh; r < (h + 1) * dh; r++)
+            for(unsigned int c = 0; c < D; c++)
+                wo(r,c) = T(0.0f);
+    }
+
+    void bump_kv_head(unsigned int g, float by) {
+        for(unsigned int r = 0; r < D; r++)
+            for(unsigned int c = g * dh; c < (g + 1) * dh; c++)
+                wk(r,c) = T(float(wk(r,c)) + by);
+    }
 };
 
 template<typename T>
 static void load(ai::block<T>& blk, const weights<T>& w) {
-    for(unsigned int h = 0; h < w.heads; h++) {
-        blk.wq(h)->write(w.wq[h]);
-        blk.wo(h)->write(w.wo[h]);
-    }
-
-    for(unsigned int g = 0; g < w.kv; g++) {
-        blk.wk(g)->write(w.wk[g]);
-        blk.wv(g)->write(w.wv[g]);
-    }
+    blk.wq()->write(w.wq);
+    blk.wk()->write(w.wk);
+    blk.wv()->write(w.wv);
+    blk.wo()->write(w.wo);
 
     blk.w_gate()->write(w.w1);
     blk.w_up()->write(w.w3);
@@ -167,10 +180,7 @@ static void a_zeroed_block_is_the_identity(const char* name,
 
     weights<T> w(gen);
 
-    for(unsigned int h = 0; h < H; h++)
-        for(unsigned int r = 0; r < D; r++)
-            for(unsigned int c = 0; c < D / H; c++)
-                w.wo[h](r,c) = T(0.0f);
+    for(unsigned int h = 0; h < H; h++) w.silence_output_head(h);
 
     for(unsigned int r = 0; r < F; r++)
         for(unsigned int c = 0; c < D; c++)
@@ -258,20 +268,15 @@ static void heads_are_routed_separately(const char* name,
 
     weights<T> w(gen);
 
-    for(unsigned int r = 0; r < D; r++)
-        for(unsigned int c = 0; c < D / H; c++)
-            w.wo[1](r,c) = T(0.0f);
+    w.silence_output_head(1);
 
     const matrix<T> x = random_matrix<T>(D, N, gen);
 
     weights<T> bumped_1 = w;
     weights<T> bumped_0 = w;
 
-    for(unsigned int r = 0; r < D / H; r++)
-        for(unsigned int c = 0; c < D; c++) {
-            bumped_1.wq[1](r,c) = T(float(bumped_1.wq[1](r,c)) + 1.0f);
-            bumped_0.wq[0](r,c) = T(float(bumped_0.wq[0](r,c)) + 1.0f);
-        }
+    bumped_1.bump_query_head(1, 1.0f);
+    bumped_0.bump_query_head(0, 1.0f);
 
     for(ai::backend<T>* b : backends) {
         const matrix<T> base = run(*b, w, x);
@@ -303,27 +308,32 @@ static void the_heads_are_summed(const char* name,
 
     weights<T> one(gen);
 
-    one.wq[1] = one.wq[0];
-    one.wk[1] = one.wk[0];
-    one.wv[1] = one.wv[0];
-    one.wo[1] = one.wo[0];
+    // Both heads given the same weights, so they compute the same thing.
+    for(unsigned int r = 0; r < D; r++)
+        for(unsigned int c = 0; c < one.dh; c++) {
+            one.wq(r, one.dh + c) = one.wq(r, c);
+            one.wk(r, one.dh + c) = one.wk(r, c);
+            one.wv(r, one.dh + c) = one.wv(r, c);
+        }
+
+    for(unsigned int r = 0; r < one.dh; r++)
+        for(unsigned int c = 0; c < D; c++)
+            one.wo(one.dh + r, c) = one.wo(r, c);
 
     weights<T> split = one;
 
-    for(unsigned int r = 0; r < D; r++)
-        for(unsigned int c = 0; c < D / H; c++) {
-            const float half = float(one.wo[0](r,c)) * 0.5f;
+    for(unsigned int r = 0; r < one.dh; r++)
+        for(unsigned int c = 0; c < D; c++) {
+            const float half = float(one.wo(r,c)) * 0.5f;
 
-            split.wo[0](r,c) = T(half);
-            split.wo[1](r,c) = T(half);
+            split.wo(r,c) = T(half);
+            split.wo(one.dh + r, c) = T(half);
         }
 
     // And the single-head reference: all of it through head 0, none through 1.
     weights<T> only_0 = one;
 
-    for(unsigned int r = 0; r < D; r++)
-        for(unsigned int c = 0; c < D / H; c++)
-            only_0.wo[1](r,c) = T(0.0f);
+    only_0.silence_output_head(1);
 
     const matrix<T> x = random_matrix<T>(D, N, gen);
 
@@ -595,11 +605,22 @@ static void sharing_a_head_equals_duplicating_it(
 
     // And the same thing spelled out: four query heads with four key-value
     // heads that are all copies of the one above.
-    weights<T> spelled = grouped;
+    // The same key and value repeated across four heads, which is what one
+    // shared between four means.
+    weights<T> spelled(gen, 4, 4);
 
-    spelled.kv = 4;
-    spelled.wk.assign(4, grouped.wk[0]);
-    spelled.wv.assign(4, grouped.wv[0]);
+    spelled.wq = grouped.wq;
+    spelled.wo = grouped.wo;
+    spelled.w1 = grouped.w1;
+    spelled.w3 = grouped.w3;
+    spelled.w2 = grouped.w2;
+
+    for(unsigned int g = 0; g < 4; g++)
+        for(unsigned int r = 0; r < D; r++)
+            for(unsigned int c = 0; c < spelled.dh; c++) {
+                spelled.wk(r, g * spelled.dh + c) = grouped.wk(r, c);
+                spelled.wv(r, g * spelled.dh + c) = grouped.wv(r, c);
+            }
 
     const matrix<T> x = random_matrix<T>(D, N, gen);
 
@@ -636,22 +657,16 @@ static void the_grouping_is_contiguous(const char* name,
 
     weights<T> w(gen, 4, 2);
 
-    for(unsigned int r = 0; r < D; r++)
-        for(unsigned int c = 0; c < D / 4; c++) {
-            w.wo[2](r,c) = T(0.0f);
-            w.wo[3](r,c) = T(0.0f);
-        }
+    w.silence_output_head(2);
+    w.silence_output_head(3);
 
     const matrix<T> x = random_matrix<T>(D, N, gen);
 
     weights<T> bump_kv1 = w;
     weights<T> bump_kv0 = w;
 
-    for(unsigned int r = 0; r < D / 4; r++)
-        for(unsigned int c = 0; c < D; c++) {
-            bump_kv1.wk[1](r,c) = T(float(bump_kv1.wk[1](r,c)) + 1.0f);
-            bump_kv0.wk[0](r,c) = T(float(bump_kv0.wk[0](r,c)) + 1.0f);
-        }
+    bump_kv1.bump_kv_head(1, 1.0f);
+    bump_kv0.bump_kv_head(0, 1.0f);
 
     for(ai::backend<T>* b : backends) {
         const matrix<T> base = run(*b, w, x);
@@ -693,9 +708,8 @@ static void a_tinyllama_shaped_block(const char* name, ai::backend<T>& b) {
     // Which makes the key projection a quarter the width of the query
     // projection -- exactly the [2048, 256] against [2048, 2048] in the file.
     ok("  so the key weights are a quarter the width of the query weights",
-       blk.wk(0)->rows() * blk.kv_heads() == 256 &&
-       blk.wq(0)->rows() * blk.heads() == 2048,
-       std::to_string(blk.wk(0)->rows() * blk.kv_heads()));
+       blk.wk()->cols() == 256 && blk.wq()->cols() == 2048,
+       std::to_string(blk.wk()->cols()));
 }
 
 template<typename T>

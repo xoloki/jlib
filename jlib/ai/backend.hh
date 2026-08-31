@@ -280,7 +280,49 @@ public:
      *        length is always greater than `key_offset + col`.  One mask, both
      *        jobs, which is why this needs no notion of how full the cache is.
      */
-    virtual void causal_mask(tensor_ptr& s, unsigned int key_offset = 0) = 0;
+    /**
+     * @param queries how many columns belong to one head, when the scores hold
+     *        every head side by side.  Zero means the whole width is one head's,
+     *        which is what a single-head caller wants.
+     */
+    virtual void causal_mask(tensor_ptr& s, unsigned int key_offset = 0,
+                             unsigned int queries = 0) = 0;
+
+    /**
+     * Every head's scores in one call: `s[j, h*queries + i]` is the dot product
+     * of query i of head h with key j, scaled.
+     *
+     * ### Why this exists rather than a loop
+     *
+     * The obvious way is one matrix multiply per head, and it is what this did
+     * until it was measured: **the per-head loop was 81.5ms of a 105.7ms
+     * decode step**, 77% of the time to produce one token. Not arithmetic --
+     * 4928 small multiplies per token at about 16us each, almost all of it the
+     * cost of asking for one rather than doing it. The same work in one call
+     * runs at nine times the bandwidth.
+     *
+     * So the head index moves inside the kernel. Nothing here is sliced, no
+     * view is needed, and one dispatch does what 704 did.
+     *
+     * @param q      (heads * d_head) x queries, head h in rows h*d_head
+     * @param k      (kv_heads * d_head) x keys, likewise
+     * @param scores keys x (queries * heads), head h in columns h*queries
+     */
+    virtual void attention_scores(const tensor_ptr& q, const tensor_ptr& k,
+                                  tensor_ptr& scores, unsigned int heads,
+                                  unsigned int kv_heads, unsigned int d_head,
+                                  T scale) = 0;
+
+    /**
+     * The other half: every head's weighted sum over values, in one call.
+     *
+     * `out[h*d_head + d, i] = sum_j v[g*d_head + d, j] * probs[j, h*queries+i]`
+     * with g the key-value head that head h reads.
+     */
+    virtual void attention_weighted(const tensor_ptr& v, const tensor_ptr& probs,
+                                    tensor_ptr& out, unsigned int heads,
+                                    unsigned int kv_heads,
+                                    unsigned int d_head) = 0;
 
     /**
      * Copy src's columns into dst starting at a column: the write half of
@@ -333,13 +375,17 @@ public:
      * for decoding one token at a time against a cache, where the single
      * column being processed is at position n rather than 0.
      *
+     * @param d_head when several heads are stacked in one column, how tall
+     *        each is: the rotation happens inside a head and not across the
+     *        boundary between two.  Zero means the column is one head.
      * @param theta  the frequency base, 10000 by convention
      * @param layout which dimensions get paired; see rope_layout, and note
      *               that no test can check this one for you
      */
     virtual void rope(tensor_ptr& x, unsigned int base_pos = 0,
                       float theta = 10000.0f,
-                      rope_layout layout = rope_layout::interleaved) = 0;
+                      rope_layout layout = rope_layout::interleaved,
+                      unsigned int d_head = 0) = 0;
 
     /**
      * Root-mean-square normalisation down each column, scaled per feature.
@@ -399,13 +445,21 @@ public:
     void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y);
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
-    void causal_mask(tensor_ptr& s, unsigned int key_offset = 0);
+    void causal_mask(tensor_ptr& s, unsigned int key_offset = 0,
+                     unsigned int queries = 0);
     void copy_columns(const tensor_ptr& src, tensor_ptr& dst,
                       unsigned int dst_first);
+    void attention_scores(const tensor_ptr& q, const tensor_ptr& k,
+                          tensor_ptr& scores, unsigned int heads,
+                          unsigned int kv_heads, unsigned int d_head, T scale);
+    void attention_weighted(const tensor_ptr& v, const tensor_ptr& probs,
+                            tensor_ptr& out, unsigned int heads,
+                            unsigned int kv_heads, unsigned int d_head);
     void gather(const tensor_ptr& table, const std::vector<int>& ids,
                 tensor_ptr& out);
     void rope(tensor_ptr& x, unsigned int base_pos = 0, float theta = 10000.0f,
-              rope_layout layout = rope_layout::interleaved);
+              rope_layout layout = rope_layout::interleaved,
+              unsigned int d_head = 0);
     void rms_norm(const tensor_ptr& in, const tensor_ptr& weight,
                   tensor_ptr& out, float eps = 1e-5f);
 
@@ -775,7 +829,83 @@ void host_backend<T>::multiply_tn(const typename backend<T>::quantised_ptr& a,
 }
 
 template<typename T>
-void host_backend<T>::causal_mask(tensor_ptr& s, unsigned int key_offset) {
+void host_backend<T>::attention_scores(const tensor_ptr& q, const tensor_ptr& k,
+                                       tensor_ptr& scores, unsigned int heads,
+                                       unsigned int kv_heads,
+                                       unsigned int d_head, T scale)
+{
+    const math::matrix<T>& a = at(q);
+    const math::matrix<T>& b = at(k);
+    math::matrix<T>& s = at(scores);
+
+    const uint queries = a.N;
+    const uint keys = b.N;
+    const uint group = heads / kv_heads;
+
+    if(a.M != heads * d_head || b.M != kv_heads * d_head)
+        throw backend_error("attention_scores: the heads do not fit the shapes");
+
+    if(s.M != keys || s.N != queries * heads)
+        throw backend_error("attention_scores: scores must be keys by queries "
+                            "times heads");
+
+    typedef typename compute_in<T>::type C;
+
+    for(uint h = 0; h < heads; h++) {
+        const uint g = h / group;
+
+        for(uint i = 0; i < queries; i++)
+            for(uint j = 0; j < keys; j++) {
+                C sum = 0;
+
+                for(uint d = 0; d < d_head; d++)
+                    sum += C(a(h * d_head + d, i)) * C(b(g * d_head + d, j));
+
+                s(j, h * queries + i) = T(sum * C(scale));
+            }
+    }
+}
+
+template<typename T>
+void host_backend<T>::attention_weighted(const tensor_ptr& v,
+                                         const tensor_ptr& probs,
+                                         tensor_ptr& out, unsigned int heads,
+                                         unsigned int kv_heads,
+                                         unsigned int d_head)
+{
+    const math::matrix<T>& b = at(v);
+    const math::matrix<T>& p = at(probs);
+    math::matrix<T>& o = at(out);
+
+    const uint keys = b.N;
+    const uint queries = p.N / heads;
+    const uint group = heads / kv_heads;
+
+    if(o.M != heads * d_head || o.N != queries)
+        throw backend_error("attention_weighted: out must be the heads' depth "
+                            "by queries");
+
+    typedef typename compute_in<T>::type C;
+
+    for(uint h = 0; h < heads; h++) {
+        const uint g = h / group;
+
+        for(uint i = 0; i < queries; i++)
+            for(uint d = 0; d < d_head; d++) {
+                C sum = 0;
+
+                for(uint j = 0; j < keys; j++)
+                    sum += C(b(g * d_head + d, j)) * C(p(j, h * queries + i));
+
+                o(h * d_head + d, i) = T(sum);
+            }
+    }
+}
+
+template<typename T>
+void host_backend<T>::causal_mask(tensor_ptr& s, unsigned int key_offset,
+                                  unsigned int queries)
+{
     math::matrix<T>& x = at(s);
 
     // Through float, not std::numeric_limits<T>: _Float16 is a compiler
@@ -783,8 +913,11 @@ void host_backend<T>::causal_mask(tensor_ptr& s, unsigned int key_offset) {
     // float infinity to half gives a half infinity.
     const T neg_inf = T(-std::numeric_limits<float>::infinity());
 
+    // Which query a column belongs to, when the heads sit side by side.
+    const uint per_head = queries ? queries : x.N;
+
     for(uint c = 0; c < x.N; c++)
-        for(uint r = c + key_offset + 1; r < x.M; r++)
+        for(uint r = (c % per_head) + key_offset + 1; r < x.M; r++)
             x(r,c) = neg_inf;
 }
 
@@ -816,15 +949,19 @@ void host_backend<T>::gather(const tensor_ptr& table, const std::vector<int>& id
 
 template<typename T>
 void host_backend<T>::rope(tensor_ptr& x, unsigned int base_pos, float theta,
-                           rope_layout layout)
+                           rope_layout layout, unsigned int d_head)
 {
     math::matrix<T>& m = at(x);
 
-    if(m.M % 2)
-        throw backend_error("rope: rotates in planes, so it needs an even "
-                            "number of rows");
+    // One head unless told otherwise; several heads stacked in a column rotate
+    // inside themselves and never across the boundary between two.
+    const uint dh = d_head ? d_head : m.M;
 
-    const uint half = m.M / 2;
+    if(dh % 2 || (m.M % dh))
+        throw backend_error("rope: rotates in planes, so it needs an even head "
+                            "that divides the column");
+
+    const uint half = dh / 2;
 
     // In double, like softmax and for the same reason: this is the reference
     // the GPU is checked against.  It matters more here than elsewhere -- the
@@ -834,12 +971,15 @@ void host_backend<T>::rope(tensor_ptr& x, unsigned int base_pos, float theta,
     for(uint c = 0; c < m.N; c++) {
         const double pos = double(base_pos + c);
 
+        for(uint head = 0; head < m.M / dh; head++)
         for(uint j = 0; j < half; j++) {
-            const uint a = (layout == rope_layout::split) ? j : 2 * j;
-            const uint b = (layout == rope_layout::split) ? j + half : 2 * j + 1;
+            const uint base = head * dh;
+            const uint a = base + ((layout == rope_layout::split) ? j : 2 * j);
+            const uint b = base + ((layout == rope_layout::split) ? j + half
+                                                                 : 2 * j + 1);
 
             const double freq = std::pow(double(theta),
-                                         -2.0 * double(j) / double(m.M));
+                                         -2.0 * double(j) / double(dh));
             const double angle = pos * freq;
 
             const double co = std::cos(angle);
