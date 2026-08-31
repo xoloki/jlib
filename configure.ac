@@ -158,6 +158,17 @@ dnl GLFW replaces GLUT as the portable windowing backend.
 PKG_CHECK_MODULES([GLFW], [glfw3 >= 3.3], [have_glfw=yes], [have_glfw=no])
 AM_CONDITIONAL([HAVE_GLFW], [test "x$have_glfw" = xyes])
 
+dnl ncurses, for the jtui front end.  Two names because Apple ships a .pc for
+dnl "ncurses" while several Linuxes only have "ncursesw", and a plain -lncurses
+dnl as a last resort for the ones with the library and no pkg-config file at
+dnl all -- which is where macOS was before its Command Line Tools grew one.
+PKG_CHECK_MODULES([CURSES], [ncursesw], [have_curses=yes],
+  [PKG_CHECK_MODULES([CURSES], [ncurses], [have_curses=yes],
+    [AC_CHECK_LIB([ncurses], [initscr],
+      [have_curses=yes; CURSES_LIBS=-lncurses; CURSES_CFLAGS=],
+      [have_curses=no])])])
+AM_CONDITIONAL([HAVE_CURSES], [test "x$have_curses" = xyes])
+
 dnl ImageMagick++ is only used by the jneural image classifiers.  IM7
 dnl renamed the module, so try the new spelling before the old one.
 PKG_CHECK_MODULES([MAGICK], [Magick++-7.Q16HDRI], [have_magick=yes],
@@ -371,6 +382,7 @@ AC_MSG_NOTICE([
     libsodium/ristretto .. $have_sodium/$have_ristretto
     portaudio ............ $have_portaudio
     glfw ................. $have_glfw
+    ncurses .............. $have_curses
     ImageMagick++ ........ $have_magick
     cuda ................. $have_cuda
     metal ................ $have_metal

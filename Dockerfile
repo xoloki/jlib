@@ -43,6 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         autoconf-archive \
         ca-certificates \
+        libncurses-dev \
         libjson-c-dev \
         libgpgme-dev \
         libssl-dev \
