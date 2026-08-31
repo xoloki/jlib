@@ -179,17 +179,27 @@ std::vector<int> tokenizer::encode(const std::string& text, bool add_bos,
     // is a word that was never written.
     if(text.empty()) return out;
 
-    if(!parse_special) {
-        encode_run(text, true, out);
+    append(text, true, parse_special, out);
 
-        return out;
+    return out;
+}
+
+void tokenizer::append(const std::string& text, bool add_prefix,
+                       bool parse_special, std::vector<int>& out) const
+{
+    if(text.empty()) return;
+
+    if(!parse_special) {
+        encode_run(text, add_prefix, out);
+
+        return;
     }
 
     // Walk the text, splitting at every control token written out in it, so
     // "Hi</s>" is two tokens and not five.  Only the run that begins the input
     // gets the dummy prefix.
     std::size_t at = 0;
-    bool first = true;
+    bool first = add_prefix;
 
     while(at < text.size()) {
         std::size_t where = std::string::npos;
@@ -218,7 +228,7 @@ std::vector<int> tokenizer::encode(const std::string& text, bool add_bos,
         if(which < 0) {
             encode_run(text.substr(at), first, out);
 
-            return out;
+            return;
         }
 
         if(where > at) {
@@ -232,8 +242,6 @@ std::vector<int> tokenizer::encode(const std::string& text, bool add_bos,
         first = false;
         at = where + m_tokens[std::size_t(which)].size();
     }
-
-    return out;
 }
 
 void tokenizer::encode_run(const std::string& text, bool add_prefix,

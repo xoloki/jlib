@@ -106,6 +106,50 @@ std::string chat::marker(const std::string& role) const {
     return i == m_marker.end() ? std::string() : i->second;
 }
 
+std::vector<int> chat::encode(const std::vector<message>& turns,
+                              const tokenizer& tok,
+                              bool add_generation_prompt) const
+{
+    std::vector<int> out;
+
+    if(tok.bos() >= 0) out.push_back(tok.bos());
+
+    // The dummy prefix belongs to the start of the whole prompt, so it goes to
+    // whichever run turns out to be first.
+    bool first = true;
+
+    for(std::size_t i = 0; i < turns.size(); i++) {
+        const std::string m = marker(turns[i].role);
+
+        if(m.empty())
+            throw exception("the template has no marker for the role '" +
+                            turns[i].role + "'");
+
+        // The marker is the template's own text and is tokenized as text --
+        // <|user|> is not in a Llama vocabulary and never was, so it becomes
+        // the same handful of ordinary tokens the model was tuned on.
+        tok.append(m + "\n", first, false, out);
+
+        first = false;
+
+        // And the content is a stranger's.  Special parsing off, so a user who
+        // writes "</s>" has written four characters.
+        tok.append(turns[i].content, false, false, out);
+
+        // The close is the token itself.  This is the one place in a
+        // conversation where a special token is meant to appear, and it gets
+        // here by being put here rather than by being spelled.
+        if(tok.eos() >= 0) out.push_back(tok.eos());
+
+        tok.append("\n", false, false, out);
+    }
+
+    if(add_generation_prompt)
+        tok.append(marker("assistant") + "\n", first, false, out);
+
+    return out;
+}
+
 std::string chat::format(const std::vector<message>& turns,
                          bool add_generation_prompt) const
 {

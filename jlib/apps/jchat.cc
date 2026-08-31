@@ -194,7 +194,7 @@ void fit(std::vector<ai::message>& turns, const ai::chat& ch,
          const ai::tokenizer& tok, unsigned int context, unsigned int reserve)
 {
     for(;;) {
-        const std::size_t n = tok.encode(ch.format(turns)).size();
+        const std::size_t n = ch.encode(turns, tok).size();
 
         if(n + reserve <= context) return;
 
@@ -259,7 +259,10 @@ int run(ai::backend<T>& b, const ai::gguf& g, const options& o) {
         else {
             turns.push_back({ "user", o.prompt });
             fit(turns, *ch, tok, c.context, o.tokens);
-            ids = tok.encode(ch->format(turns));
+
+            // chat::encode, not encode(format(...)): what a user typed must
+            // not be able to close the turn and start a new one.
+            ids = ch->encode(turns, tok);
         }
 
         answer(m, b, tok, ids, o, s);
@@ -289,7 +292,7 @@ int run(ai::backend<T>& b, const ai::gguf& g, const options& o) {
         fit(turns, *ch, tok, c.context, o.tokens);
 
         const std::string said =
-            answer(m, b, tok, tok.encode(ch->format(turns)), o, s);
+            answer(m, b, tok, ch->encode(turns, tok), o, s);
 
         turns.push_back({ "assistant", said });
     }
