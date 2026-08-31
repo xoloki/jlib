@@ -717,6 +717,64 @@ static void the_two_rope_layouts_differ(const char* name,
     }
 }
 
+/** The embedding lookup: pick columns out of a table by index. */
+template<typename T>
+static void the_gather(const char* name, std::vector<ai::backend<T>*>& backends) {
+    std::cout << "\ngather, " << name << ":\n";
+
+    const uint d = 5;
+    const uint vocab = 7;
+
+    matrix<T> table(d, vocab);
+
+    // Distinct per column, so a gather that took the wrong one is visible.
+    for(uint c = 0; c < vocab; c++)
+        for(uint r = 0; r < d; r++)
+            table(r,c) = T(float(c) * 10.0f + float(r));
+
+    // Out of order and with a repeat, because a token can occur twice and
+    // nothing says the ids ascend.
+    const std::vector<int> ids{ 3, 0, 6, 3 };
+
+    for(ai::backend<T>* b : backends) {
+        typename ai::backend<T>::tensor_ptr t = b->make(table);
+        typename ai::backend<T>::tensor_ptr out = b->make(d, uint(ids.size()));
+
+        b->gather(t, ids, out);
+        b->wait();
+
+        const matrix<T> got = out->read();
+
+        double furthest = 0;
+
+        for(std::size_t i = 0; i < ids.size(); i++)
+            for(uint r = 0; r < d; r++)
+                furthest = std::max(furthest,
+                                    std::fabs(double(float(got(r, uint(i)))) -
+                                              double(float(table(r, uint(ids[i]))))));
+
+        ok(std::string("  ") + b->name() + ": every column is the one asked for",
+           furthest == 0.0, std::to_string(furthest));
+
+        // An id off the end reads whatever is next in the buffer if nothing
+        // checks it, which is a wrong token rather than a crash -- so it is
+        // checked, and on the GPU it has to be checked before the kernel runs.
+        bool threw = false;
+
+        try { b->gather(t, std::vector<int>{ 0, 7 }, out); b->wait(); }
+        catch(std::exception&) { threw = true; }
+
+        ok(std::string("  ") + b->name() + ": an id past the end is refused", threw);
+
+        threw = false;
+
+        try { b->gather(t, std::vector<int>{ 0, -1 }, out); b->wait(); }
+        catch(std::exception&) { threw = true; }
+
+        ok(std::string("  ") + b->name() + ": and so is a negative one", threw);
+    }
+}
+
 static void a_tensor_from_the_wrong_backend_is_refused() {
     std::cout << "\na tensor from the wrong backend is refused:\n";
 
@@ -779,6 +837,7 @@ int main() {
         rope_is_a_rotation<float>("float", b);
         rope_makes_the_score_relative<float>("float", b);
         the_two_rope_layouts_differ<float>("float", b);
+        the_gather<float>("float", b);
 #else
         one_type<float>("float", b);
         the_reductions<float>("float", b);
@@ -790,6 +849,7 @@ int main() {
         rope_is_a_rotation<float>("float", b);
         rope_makes_the_score_relative<float>("float", b);
         the_two_rope_layouts_differ<float>("float", b);
+        the_gather<float>("float", b);
 #endif
     }
 
@@ -812,6 +872,7 @@ int main() {
         rope_is_a_rotation<_Float16>("_Float16", b);
         rope_makes_the_score_relative<_Float16>("_Float16", b);
         the_two_rope_layouts_differ<_Float16>("_Float16", b);
+        the_gather<_Float16>("_Float16", b);
     }
 
     a_tensor_from_the_wrong_backend_is_refused();
