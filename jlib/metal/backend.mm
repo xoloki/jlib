@@ -166,6 +166,13 @@ void backend<T>::causal_mask(tensor_ptr& s) {
 }
 
 template<typename T>
+void backend<T>::gather(const tensor_ptr& table, const std::vector<int>& ids,
+                        tensor_ptr& out)
+{
+    m_stream->gather(at<T>(table), ids, at<T>(out));
+}
+
+template<typename T>
 void backend<T>::rope(tensor_ptr& x, unsigned int base_pos, float theta,
                       ai::rope_layout layout)
 {

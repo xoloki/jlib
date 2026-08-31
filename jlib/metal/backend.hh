@@ -70,6 +70,8 @@ public:
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
     void causal_mask(tensor_ptr& s);
+    void gather(const tensor_ptr& table, const std::vector<int>& ids,
+                tensor_ptr& out);
     void rope(tensor_ptr& x, unsigned int base_pos = 0, float theta = 10000.0f,
               ai::rope_layout layout = ai::rope_layout::interleaved);
     void rms_norm(const tensor_ptr& in, const tensor_ptr& weight,

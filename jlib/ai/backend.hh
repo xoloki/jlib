@@ -23,6 +23,7 @@
 #include <jlib/math/matrix.hh>
 
 #include <cmath>
+#include <vector>
 #include <memory>
 #include <limits>
 #include <sstream>
@@ -229,6 +230,24 @@ public:
     virtual void causal_mask(tensor_ptr& s) = 0;
 
     /**
+     * Pick columns out of a table: out[:,i] = table[:,ids[i]].
+     *
+     * The embedding lookup.  A token is an index into a table of vectors, and
+     * a column is a sample here, so a token's vector is a column and this is a
+     * column gather.  GGUF stores token_embd.weight as [d_model, vocab], which
+     * lands as exactly that table with no rearrangement.
+     *
+     * ids are host-side ints rather than a tensor because they are indices,
+     * not arithmetic: routing them through T would lose them.  fp16 represents
+     * integers exactly only to 2048, and vocabularies are far larger than
+     * that, so a token id in a half is a silently wrong token.
+     *
+     * @throws backend_error if any id is outside the table
+     */
+    virtual void gather(const tensor_ptr& table, const std::vector<int>& ids,
+                        tensor_ptr& out) = 0;
+
+    /**
      * Rotary position embedding, in place.
      *
      * Rotates each column by an angle that grows with its position, in
@@ -304,6 +323,8 @@ public:
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
     void causal_mask(tensor_ptr& s);
+    void gather(const tensor_ptr& table, const std::vector<int>& ids,
+                tensor_ptr& out);
     void rope(tensor_ptr& x, unsigned int base_pos = 0, float theta = 10000.0f,
               rope_layout layout = rope_layout::interleaved);
     void rms_norm(const tensor_ptr& in, const tensor_ptr& weight,
@@ -574,6 +595,32 @@ void host_backend<T>::causal_mask(tensor_ptr& s) {
     for(uint c = 0; c < x.N; c++)
         for(uint r = c + 1; r < x.M; r++)
             x(r,c) = neg_inf;
+}
+
+template<typename T>
+void host_backend<T>::gather(const tensor_ptr& table, const std::vector<int>& ids,
+                             tensor_ptr& out)
+{
+    const math::matrix<T>& t = at(table);
+    math::matrix<T>& o = at(out);
+
+    if(o.M != t.M || o.N != ids.size())
+        throw backend_error("gather: out must be the table's height by the "
+                            "number of ids");
+
+    for(std::size_t i = 0; i < ids.size(); i++) {
+        if(ids[i] < 0 || std::size_t(ids[i]) >= t.N) {
+            std::ostringstream e;
+
+            e << "gather: token id " << ids[i] << " is outside a table of "
+              << t.N;
+
+            throw backend_error(e.str());
+        }
+
+        for(uint r = 0; r < t.M; r++)
+            o(r, uint(i)) = t(r, uint(ids[i]));
+    }
 }
 
 template<typename T>

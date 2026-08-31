@@ -1,0 +1,388 @@
+/* -*- mode: C++ c-basic-offset: 4  -*-
+ *
+ * Copyright (c) 2026 Joey Yandle <xoloki@gmail.com>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
+#ifndef JLIB_AI_MODEL_HH
+#define JLIB_AI_MODEL_HH
+
+#include <jlib/ai/gguf.hh>
+#include <jlib/ai/transformer.hh>
+
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
+
+namespace jlib {
+namespace ai {
+
+/**
+ * A Llama-architecture language model: embed, a stack of blocks, norm, project.
+ *
+ *   x = embedding[:, ids]
+ *   x = block_i(x)                 for each of layers
+ *   x = rms_norm(x, final_norm)
+ *   logits = head^T x              (vocab x positions)
+ *
+ * Nothing here is new arithmetic -- every step is a primitive or a block. What
+ * is new is that the weights come from a file somebody else wrote, which is
+ * what makes this the first thing in the library that can be *wrong* in a way
+ * the tests could not have told it was.
+ */
+template<typename T>
+class model {
+public:
+    typedef typename backend<T>::tensor_ptr tensor_ptr;
+
+    /** What a file says about its own shape. */
+    struct config {
+        unsigned int d_model = 0;
+        unsigned int heads = 0;
+        unsigned int kv_heads = 0;
+        unsigned int d_ff = 0;
+        unsigned int layers = 0;
+        unsigned int vocab = 0;
+        unsigned int context = 0;
+
+        float rope_theta = 10000.0f;
+        float rms_eps = 1e-5f;
+
+        rope_layout layout = rope_layout::interleaved;
+
+        /**
+         * Read the llama.* keys.
+         *
+         * head_count_kv is optional in the format and absent on models from
+         * before grouped-query attention existed; absent means every query
+         * head has its own, which is what head_count says.
+         */
+        static config from(const gguf& g);
+    };
+
+    model(backend<T>& b, const config& c);
+
+    const config& conf() const { return m_conf; }
+
+    block<T>& layer(unsigned int i) { return *m_layers[i]; }
+
+    /** (d_model x vocab): one column per token, which is how gather wants it. */
+    tensor_ptr& embedding() { return m_embed; }
+
+    /** (d_model x 1). */
+    tensor_ptr& final_norm() { return m_final_norm; }
+
+    /** (d_model x vocab), read through multiply_tn -- see the note on load(). */
+    tensor_ptr& head() { return m_head; }
+
+    /**
+     * Place every weight in the file.
+     *
+     * ### Orientation, which is where the work is
+     *
+     * gguf.hh explains that a GGUF weight arrives as `[n_in, n_out]` and that
+     * the product a layer wants is therefore `W^T x`. Two of the tensors are
+     * used exactly that way and need no rearrangement at all: the embedding is
+     * a table of columns, and the head is multiplied with multiply_tn.
+     *
+     * The block's weights are the other case. It holds `wq(h)` as
+     * (d_head x d_model) and multiplies straight, so each head's slice has to
+     * be transposed as it is placed -- and the slice differs by role:
+     *
+     *   attn_q, attn_k, attn_v   a *column* range, transposed
+     *   attn_output              a *row* range, transposed
+     *   ffn_gate, ffn_up, down   the whole matrix, transposed
+     *
+     * The alternative is to store the block's weights in the file's
+     * orientation and reach for multiply_tn there too, which would make this
+     * function a memcpy. That is very likely the better design and it is not
+     * this branch's to make: it changes block's public shapes and every test
+     * that fills them. Written down here so the choice is visible rather than
+     * inherited.
+     *
+     * @throws gguf::exception or backend_error if a tensor is missing or the
+     *         wrong shape for what the config said
+     */
+    void load(const gguf& g);
+
+    /** Size every intermediate for a sequence of this length. */
+    void reserve(unsigned int seq);
+
+    /**
+     * ids -> logits, which come back (vocab x positions).
+     *
+     * One column of logits per input position, not just for the last one. A
+     * generator wants only the last; a perplexity measurement wants them all,
+     * and dropping the rest here would be deciding that for both.
+     */
+    void forward(const std::vector<int>& ids, tensor_ptr& logits,
+                 unsigned int base_pos = 0);
+
+private:
+    /** Columns [c0, c0+n) of W, transposed: result(a,b) = W(b, c0+a). */
+    static math::matrix<T> col_slice_t(const math::matrix<float>& w,
+                                       unsigned int c0, unsigned int n);
+
+    /** Rows [r0, r0+n) of W, transposed: result(a,b) = W(r0+b, a). */
+    static math::matrix<T> row_slice_t(const math::matrix<float>& w,
+                                       unsigned int r0, unsigned int n);
+
+    /** Straight across, narrowing to T. */
+    static math::matrix<T> narrowed(const math::matrix<float>& w);
+
+    void expect(const gguf& g, const std::string& name,
+                unsigned int d0, unsigned int d1) const;
+
+    backend<T>& m_b;
+    config m_conf;
+
+    std::vector<std::shared_ptr<block<T> > > m_layers;
+
+    tensor_ptr m_embed, m_final_norm, m_head;
+    tensor_ptr m_x, m_y;
+
+    unsigned int m_seq = 0;
+};
+
+template<typename T>
+typename model<T>::config model<T>::config::from(const gguf& g) {
+    config c;
+
+    const std::string arch = g.str("general.architecture");
+
+    if(arch != "llama")
+        throw backend_error("model: this reads llama-architecture files, and "
+                            "that one says '" + arch + "'");
+
+    c.d_model = static_cast<unsigned int>(g.integer("llama.embedding_length"));
+    c.heads   = static_cast<unsigned int>(g.integer("llama.attention.head_count"));
+    c.d_ff    = static_cast<unsigned int>(g.integer("llama.feed_forward_length"));
+    c.layers  = static_cast<unsigned int>(g.integer("llama.block_count"));
+    c.context = static_cast<unsigned int>(g.integer("llama.context_length"));
+
+    c.kv_heads = g.has("llama.attention.head_count_kv")
+        ? static_cast<unsigned int>(g.integer("llama.attention.head_count_kv"))
+        : c.heads;
+
+    if(g.has("llama.rope.freq_base"))
+        c.rope_theta = static_cast<float>(g.real("llama.rope.freq_base"));
+
+    if(g.has("llama.attention.layer_norm_rms_epsilon"))
+        c.rms_eps = static_cast<float>(
+            g.real("llama.attention.layer_norm_rms_epsilon"));
+
+    // The vocabulary is not a llama.* key.  It is the length of the token
+    // array, and the head's width has to agree with it -- which load() checks.
+    c.vocab = static_cast<unsigned int>(
+        g.get("tokenizer.ggml.tokens").strings.size());
+
+    return c;
+}
+
+template<typename T>
+model<T>::model(backend<T>& b, const config& c)
+    : m_b(b),
+      m_conf(c)
+{
+    if(!c.d_model || !c.heads || !c.kv_heads || !c.d_ff || !c.layers || !c.vocab)
+        throw backend_error("model: a config with a zero in it");
+
+    for(unsigned int i = 0; i < c.layers; i++) {
+        std::shared_ptr<block<T> > l(
+            new block<T>(b, c.d_model, c.heads, c.kv_heads, c.d_ff));
+
+        l->set_eps(c.rms_eps);
+        l->set_rope(true, c.rope_theta, c.layout);
+
+        m_layers.push_back(l);
+    }
+
+    m_embed = b.make(c.d_model, c.vocab);
+    m_final_norm = b.make(c.d_model, 1);
+    m_head = b.make(c.d_model, c.vocab);
+}
+
+template<typename T>
+math::matrix<T> model<T>::col_slice_t(const math::matrix<float>& w,
+                                      unsigned int c0, unsigned int n)
+{
+    math::matrix<T> out(n, w.M);
+
+    for(unsigned int a = 0; a < n; a++)
+        for(unsigned int b = 0; b < w.M; b++)
+            out(a, b) = T(w(b, c0 + a));
+
+    return out;
+}
+
+template<typename T>
+math::matrix<T> model<T>::row_slice_t(const math::matrix<float>& w,
+                                      unsigned int r0, unsigned int n)
+{
+    math::matrix<T> out(w.N, n);
+
+    for(unsigned int a = 0; a < w.N; a++)
+        for(unsigned int b = 0; b < n; b++)
+            out(a, b) = T(w(r0 + b, a));
+
+    return out;
+}
+
+template<typename T>
+math::matrix<T> model<T>::narrowed(const math::matrix<float>& w) {
+    math::matrix<T> out(w.M, w.N);
+
+    for(unsigned int r = 0; r < w.M; r++)
+        for(unsigned int c = 0; c < w.N; c++)
+            out(r, c) = T(w(r, c));
+
+    return out;
+}
+
+template<typename T>
+void model<T>::expect(const gguf& g, const std::string& name,
+                      unsigned int d0, unsigned int d1) const
+{
+    const gguf::tensor_info& t = g.tensor(name);
+
+    const unsigned int got0 = t.shape.size() > 0
+        ? static_cast<unsigned int>(t.shape[0]) : 0;
+    const unsigned int got1 = t.shape.size() > 1
+        ? static_cast<unsigned int>(t.shape[1]) : 1;
+
+    if(got0 != d0 || got1 != d1) {
+        std::ostringstream e;
+
+        e << "model: " << name << " is " << got0 << "x" << got1
+          << " where the metadata implies " << d0 << "x" << d1;
+
+        throw backend_error(e.str());
+    }
+}
+
+template<typename T>
+void model<T>::load(const gguf& g) {
+    const unsigned int d = m_conf.d_model;
+    const unsigned int dh = d / m_conf.heads;
+
+    // No transposition for either of these.  The embedding is a table of
+    // columns and gather reads columns; the head is used through multiply_tn,
+    // which wants exactly the file's orientation.
+    expect(g, "token_embd.weight", d, m_conf.vocab);
+    m_embed->write(narrowed(g.read("token_embd.weight")));
+
+    expect(g, "output.weight", d, m_conf.vocab);
+    m_head->write(narrowed(g.read("output.weight")));
+
+    expect(g, "output_norm.weight", d, 1);
+    m_final_norm->write(narrowed(g.read("output_norm.weight")));
+
+    for(unsigned int i = 0; i < m_conf.layers; i++) {
+        const std::string p = "blk." + std::to_string(i) + ".";
+
+        block<T>& l = *m_layers[i];
+
+        expect(g, p + "attn_norm.weight", d, 1);
+        l.attn_norm()->write(narrowed(g.read(p + "attn_norm.weight")));
+
+        expect(g, p + "ffn_norm.weight", d, 1);
+        l.ffn_norm()->write(narrowed(g.read(p + "ffn_norm.weight")));
+
+        // A column range per head, transposed.
+        expect(g, p + "attn_q.weight", d, m_conf.heads * dh);
+
+        const math::matrix<float> wq = g.read(p + "attn_q.weight");
+
+        for(unsigned int h = 0; h < m_conf.heads; h++)
+            l.wq(h)->write(col_slice_t(wq, h * dh, dh));
+
+        expect(g, p + "attn_k.weight", d, m_conf.kv_heads * dh);
+        expect(g, p + "attn_v.weight", d, m_conf.kv_heads * dh);
+
+        const math::matrix<float> wk = g.read(p + "attn_k.weight");
+        const math::matrix<float> wv = g.read(p + "attn_v.weight");
+
+        for(unsigned int h = 0; h < m_conf.kv_heads; h++) {
+            l.wk(h)->write(col_slice_t(wk, h * dh, dh));
+            l.wv(h)->write(col_slice_t(wv, h * dh, dh));
+        }
+
+        // A *row* range per head for the output projection, because the heads
+        // are concatenated on its input side rather than its output side.
+        expect(g, p + "attn_output.weight", d, d);
+
+        const math::matrix<float> wo = g.read(p + "attn_output.weight");
+
+        for(unsigned int h = 0; h < m_conf.heads; h++)
+            l.wo(h)->write(row_slice_t(wo, h * dh, dh));
+
+        expect(g, p + "ffn_gate.weight", d, m_conf.d_ff);
+        expect(g, p + "ffn_up.weight", d, m_conf.d_ff);
+        expect(g, p + "ffn_down.weight", m_conf.d_ff, d);
+
+        l.w_gate()->write(col_slice_t(g.read(p + "ffn_gate.weight"), 0, m_conf.d_ff));
+        l.w_up()->write(col_slice_t(g.read(p + "ffn_up.weight"), 0, m_conf.d_ff));
+        l.w_down()->write(col_slice_t(g.read(p + "ffn_down.weight"), 0, d));
+    }
+}
+
+template<typename T>
+void model<T>::reserve(unsigned int seq) {
+    if(seq == 0)
+        throw backend_error("model: a sequence of no positions");
+
+    m_seq = seq;
+
+    m_x = m_b.make(m_conf.d_model, seq);
+    m_y = m_b.make(m_conf.d_model, seq);
+
+    for(std::size_t i = 0; i < m_layers.size(); i++)
+        m_layers[i]->reserve(seq);
+}
+
+template<typename T>
+void model<T>::forward(const std::vector<int>& ids, tensor_ptr& logits,
+                       unsigned int base_pos)
+{
+    if(m_seq == 0)
+        throw backend_error("model: forward before reserve");
+
+    if(ids.size() != m_seq)
+        throw backend_error("model: as many ids as the reserved length");
+
+    if(logits->rows() != m_conf.vocab || logits->cols() != m_seq)
+        throw backend_error("model: logits must be vocab by the reserved length");
+
+    m_b.gather(m_embed, ids, m_x);
+
+    // Ping-pong rather than in place: block::forward writes its output while
+    // still reading its input.
+    for(std::size_t i = 0; i < m_layers.size(); i++) {
+        m_layers[i]->forward(m_x, m_y, true, base_pos);
+
+        m_x.swap(m_y);
+    }
+
+    m_b.rms_norm(m_x, m_final_norm, m_y, m_conf.rms_eps);
+    m_b.multiply_tn(m_head, m_y, logits);
+}
+
+}
+}
+
+#endif // JLIB_AI_MODEL_HH

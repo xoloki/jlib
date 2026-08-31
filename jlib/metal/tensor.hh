@@ -194,6 +194,10 @@ public:
     /** Rotary position embedding, in place; see ai::backend::rope. */
     void rope(tensor<T>& x, unsigned int base_pos, float theta, bool split);
 
+    /** Column gather: out[:,i] = table[:,ids[i]]. */
+    void gather(const tensor<T>& table, const std::vector<int>& ids,
+                tensor<T>& out);
+
     /** RMS normalisation down each column, scaled by a per-row weight. */
     void rms_norm(const tensor<T>& in, const tensor<T>& weight, tensor<T>& out,
                   float eps = 1e-5f);

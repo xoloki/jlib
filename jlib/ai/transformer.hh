@@ -160,6 +160,17 @@ public:
     void set_rope(bool on, float theta = 10000.0f,
                   rope_layout layout = rope_layout::interleaved);
 
+    /**
+     * The epsilon both RMS norms are computed with.
+     *
+     * A model states its own -- llama.attention.layer_norm_rms_epsilon -- and
+     * while every Llama so far has said 1e-5, taking it from the file costs
+     * nothing and a model that said otherwise would otherwise be quietly
+     * normalised wrong.
+     */
+    void set_eps(float eps) { m_eps = eps; }
+    float eps() const { return m_eps; }
+
     /** Size every intermediate for a sequence of this length. */
     void reserve(unsigned int seq);
 
@@ -183,6 +194,7 @@ private:
     unsigned int m_d_ff;
     unsigned int m_seq = 0;
 
+    float m_eps = 1e-5f;
     bool m_rope = false;
     float m_theta = 10000.0f;
     rope_layout m_layout = rope_layout::interleaved;
@@ -298,7 +310,7 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
 
     // --- attention, around a residual ---
 
-    m_b.rms_norm(x, m_attn_norm, m_norm);
+    m_b.rms_norm(x, m_attn_norm, m_norm, m_eps);
 
     // Every key and value first, once each.  Computing them inside the query
     // loop instead would give the same answer and do the work heads/kv_heads
@@ -333,7 +345,7 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
 
     // --- gated feed-forward, around a second residual ---
 
-    m_b.rms_norm(out, m_ffn_norm, m_norm);
+    m_b.rms_norm(out, m_ffn_norm, m_norm, m_eps);
 
     m_b.multiply(m_gate, m_norm, m_h1);
     m_b.multiply(m_up, m_norm, m_h3);

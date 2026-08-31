@@ -277,6 +277,31 @@ kernel void k_rope(device T* x [[buffer(0)]],
     col[b] = T(xa * si + xb * co);
 }
 
+/**
+ * Column gather: out[:,i] = table[:,ids[i]].
+ *
+ * One thread per output element rather than per column, because the columns
+ * are d_model long and there are only as many of them as there are tokens.
+ * Bounds on the ids are checked on the host before this runs -- a kernel has no
+ * way to refuse, and an out-of-range column here would read whatever else is in
+ * the buffer.
+ */
+template<typename T>
+kernel void k_gather(device const T* table [[buffer(0)]],
+                     device T* out [[buffer(1)]],
+                     device const int* ids [[buffer(2)]],
+                     constant uint& rows [[buffer(3)]],
+                     constant uint& n [[buffer(4)]],
+                     uint i [[thread_position_in_grid]])
+{
+    if(i >= rows * n) return;
+
+    const uint c = i / rows;
+    const uint r = i % rows;
+
+    out[(ulong)c * rows + r] = table[(ulong)ids[c] * rows + r];
+}
+
 #define INSTANTIATE(NAME, T, SUFFIX)                                        \
     template [[host_name(#NAME SUFFIX)]] kernel void NAME<T>
 
@@ -308,6 +333,12 @@ INSTANTIATE(k_causal_mask, float, "_f32")(device float*, constant uint&,
                                           constant uint&, uint);
 INSTANTIATE(k_causal_mask, half, "_f16")(device half*, constant uint&,
                                          constant uint&, uint);
+INSTANTIATE(k_gather, float, "_f32")(device const float*, device float*,
+                                     device const int*, constant uint&,
+                                     constant uint&, uint);
+INSTANTIATE(k_gather, half, "_f16")(device const half*, device half*,
+                                    device const int*, constant uint&,
+                                    constant uint&, uint);
 INSTANTIATE(k_rope, float, "_f32")(device float*, constant uint&, constant uint&,
                                    constant uint&, constant float&,
                                    constant uint&, uint);
@@ -426,7 +457,15 @@ struct stream<T>::impl {
     id<MTLComputePipelineState> softmax = nil;
     id<MTLComputePipelineState> causal_mask = nil;
     id<MTLComputePipelineState> rope = nil;
+    id<MTLComputePipelineState> gather = nil;
     id<MTLComputePipelineState> rms_norm = nil;
+
+    // Buffers made for one encoded operation and needed until the command
+    // buffer has run.  Metal does retain what an encoder binds, so this is
+    // belt and braces -- but the failure it guards against is a use-after-free
+    // that would show up as an occasional wrong answer, which is the worst
+    // kind to go looking for later.
+    NSMutableArray* held = nil;
 
     unsigned int pending = 0;
 };
@@ -442,6 +481,7 @@ struct pipelines {
     id<MTLComputePipelineState> softmax = nil;
     id<MTLComputePipelineState> causal_mask = nil;
     id<MTLComputePipelineState> rope = nil;
+    id<MTLComputePipelineState> gather = nil;
     id<MTLComputePipelineState> rms_norm = nil;
 };
 
@@ -495,6 +535,7 @@ pipelines& compiled(id<MTLDevice> gpu) {
         { "k_softmax",    &p.softmax },
         { "k_causal_mask", &p.causal_mask },
         { "k_rope",       &p.rope },
+        { "k_gather",     &p.gather },
         { "k_rms_norm",   &p.rms_norm },
     };
 
@@ -560,6 +601,8 @@ stream<T>::stream(std::shared_ptr<device> d)
     m_impl->softmax = p.softmax;
     m_impl->causal_mask = p.causal_mask;
     m_impl->rope = p.rope;
+    m_impl->gather = p.gather;
+    m_impl->held = [NSMutableArray array];
     m_impl->rms_norm = p.rms_norm;
 }
 
@@ -768,6 +811,52 @@ void stream<T>::rope(tensor<T>& x, unsigned int base_pos, float theta,
 }
 
 template<typename T>
+void stream<T>::gather(const tensor<T>& table, const std::vector<int>& ids,
+                       tensor<T>& out)
+{
+    const unsigned int rows = table.rows();
+    const unsigned int n = static_cast<unsigned int>(ids.size());
+
+    if(out.rows() != rows || out.cols() != n)
+        throw typename tensor<T>::exception("gather: out must be the table's "
+                                            "height by the number of ids");
+
+    // Here, where there is somewhere to throw from.
+    for(std::size_t i = 0; i < ids.size(); i++) {
+        if(ids[i] < 0 || static_cast<unsigned int>(ids[i]) >= table.cols()) {
+            std::ostringstream e;
+
+            e << "gather: token id " << ids[i] << " is outside a table of "
+              << table.cols();
+
+            throw typename tensor<T>::exception(e.str());
+        }
+    }
+
+    if(n == 0) return;
+
+    open();
+
+    id<MTLBuffer> idbuf =
+        [m_device->m_impl->gpu newBufferWithBytes:ids.data()
+                                           length:ids.size() * sizeof(int)
+                                          options:MTLResourceStorageModeShared];
+
+    [m_impl->held addObject:idbuf];
+
+    [m_impl->enc setComputePipelineState:m_impl->gather];
+    [m_impl->enc setBuffer:table.m_impl->buf offset:0 atIndex:0];
+    [m_impl->enc setBuffer:out.m_impl->buf offset:0 atIndex:1];
+    [m_impl->enc setBuffer:idbuf offset:0 atIndex:2];
+    [m_impl->enc setBytes:&rows length:sizeof(rows) atIndex:3];
+    [m_impl->enc setBytes:&n length:sizeof(n) atIndex:4];
+
+    dispatch(m_impl->enc, m_impl->gather, rows * n);
+
+    m_impl->pending++;
+}
+
+template<typename T>
 void stream<T>::rms_norm(const tensor<T>& in, const tensor<T>& weight,
                          tensor<T>& out, float eps)
 {
@@ -919,6 +1008,8 @@ void stream<T>::wait() {
 
     m_impl->cmd = nil;
     m_impl->pending = 0;
+
+    [m_impl->held removeAllObjects];
 
     if(failed)
         throw exception("the command buffer failed");
