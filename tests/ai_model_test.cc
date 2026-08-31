@@ -18,6 +18,7 @@
  *
  */
 
+#include <jlib/ai/chat.hh>
 #include <jlib/ai/generate.hh>
 #include <jlib/ai/model.hh>
 #include <jlib/ai/tokenizer.hh>
@@ -267,6 +268,69 @@ static void it_continues_the_pattern(const char* name, ai::backend<T>& b,
     ok("  greedy generation repeats exactly", twice == out);
 }
 
+/**
+ * It answers a question, rather than continuing it.
+ *
+ * The difference is the chat layout and nothing else -- same model, same
+ * weights, same greedy sampler, same question. Asked bare, TinyLlama has
+ * nothing to continue and stops immediately. Asked as a conversation, it
+ * replies.
+ *
+ * The bare case is the control, and it is a strong one: it is not that the
+ * formatting improves the answer, it is that without it there is no answer at
+ * all.
+ */
+template<typename T>
+static void it_answers_a_question(const char* name, ai::backend<T>& b,
+                                  const ai::gguf& g)
+{
+    std::cout << "\nit answers a question, " << name << ":\n";
+
+    const ai::tokenizer tok(g);
+    const ai::chat ch(g, tok.token(tok.eos()));
+
+    typename ai::model<T>::config c = ai::model<T>::config::from(g);
+
+    ai::model<T> m(b, c);
+
+    m.load(g);
+
+    const std::string question = "What is the capital of Italy?";
+
+    ai::sampler::config sc;
+    sc.temperature = 0.0f;
+
+    // Laid out as a conversation.
+    {
+        ai::sampler s(sc);
+
+        const std::vector<int> ids = tok.encode(ch.format({ { "user", question } }));
+        const std::vector<int> out = ai::generate<T>(m, b, ids, 24, s, tok.eos());
+
+        const std::string said =
+            tok.decode(std::vector<int>(out.begin() + long(ids.size()), out.end()));
+
+        ok("  it replies", !said.empty(), "\"" + said + "\"");
+
+        ok("  and the reply says Rome",
+           said.find("Rome") != std::string::npos, "\"" + said + "\"");
+    }
+
+    // The same question with no markers at all.
+    {
+        ai::sampler s(sc);
+
+        const std::vector<int> ids = tok.encode(question);
+        const std::vector<int> out = ai::generate<T>(m, b, ids, 24, s, tok.eos());
+
+        const std::string said =
+            tok.decode(std::vector<int>(out.begin() + long(ids.size()), out.end()));
+
+        ok("  while asked bare it says nothing at all", said.empty(),
+           "\"" + said + "\"");
+    }
+}
+
 int main(int argc, char** argv) {
     std::cout << std::unitbuf;
 
@@ -304,6 +368,7 @@ int main(int argc, char** argv) {
         if(gpu) {
             it_knows_the_capital_of_italy<_Float16>("fp16 on the GPU", *gpu, g);
             it_continues_the_pattern<_Float16>("fp16 on the GPU", *gpu, g);
+            it_answers_a_question<_Float16>("fp16 on the GPU", *gpu, g);
         }
 #else
         std::cout << "\n  (no Metal: the forward pass needs a backend whose "
