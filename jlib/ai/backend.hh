@@ -42,7 +42,24 @@ namespace ai {
  *   relu         s > 0 ? 1 : 0
  *   leaky_relu   s > 0 ? 1 : LEAK
  */
-enum class activation { sigmoid, tanh, relu, leaky_relu };
+enum class activation { sigmoid, tanh, relu, leaky_relu, silu };
+
+/**
+ * Whether f'(x) can be recovered from f(x), which is what slope() is given.
+ *
+ * False for silu alone, and not as an oversight: silu(x) = x * sigmoid(x) has
+ * a minimum of about -0.278 near x = -1.278 and rises on both sides of it, so
+ * it is not injective.  An output in (-0.278, 0) came from one of two inputs
+ * with two different slopes, and nothing in the output says which.  Every other
+ * activation here is monotonic, which is the property slope() quietly rests on.
+ *
+ * So silu is a forward-only activation until slope() is given the layer's input
+ * instead of its output.  That is a change to every caller, and inference does
+ * not need it -- see #TODO in the branch notes.
+ */
+inline bool slope_from_output(activation a) {
+    return a != activation::silu;
+}
 
 /**
  * What a backend throws.
@@ -294,6 +311,9 @@ math::matrix<T> activate_matrix(activation a, const math::matrix<T>& in) {
             case activation::tanh:       out(r,c) = T(std::tanh(x));                 break;
             case activation::relu:       out(r,c) = T((x > 0) ? x : C(0));           break;
             case activation::leaky_relu: out(r,c) = T((x > 0) ? x : C(LEAK) * x);    break;
+            // x * sigmoid(x).  Smooth, non-monotonic, and what a modern
+            // feed-forward gates with -- see swiglu in transformer.hh.
+            case activation::silu:       out(r,c) = T(x / (C(1) + std::exp(-x))); break;
             }
         }
     }
@@ -304,6 +324,12 @@ math::matrix<T> activate_matrix(activation a, const math::matrix<T>& in) {
 template<typename T>
 math::matrix<T> slope_matrix(activation a, const math::matrix<T>& out) {
     typedef typename compute_in<T>::type C;
+
+    // Before the loop, not inside it: there is no per-element answer to give.
+    if(!slope_from_output(a))
+        throw backend_error("slope: this activation is not invertible from its "
+                            "output, so its derivative cannot be recovered from "
+                            "one -- it is forward-only");
 
     math::matrix<T> d(out.M, out.N);
 
@@ -316,6 +342,7 @@ math::matrix<T> slope_matrix(activation a, const math::matrix<T>& out) {
             case activation::tanh:       d(r,c) = T(C(1) - s * s);        break;
             case activation::relu:       d(r,c) = T((s > 0) ? C(1) : C(0)); break;
             case activation::leaky_relu: d(r,c) = T((s > 0) ? C(1) : C(LEAK)); break;
+            case activation::silu:       break;   // refused above
             }
         }
     }

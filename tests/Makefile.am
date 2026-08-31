@@ -61,6 +61,7 @@ TESTS = \
 	math_dump_test \
 	ai_neural_test \
 	ai_backend_test \
+	ai_transformer_test \
 	math_object_test \
 	tensor_test \
 \
@@ -308,6 +309,10 @@ metal_gemm_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(METAL_LIBS)
 
 metal_tensor_test_SOURCES = metal_tensor_test.cc
 metal_tensor_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(JUTIL_LA) $(JSYS_LA) $(METAL_LIBS)
+
+ai_transformer_test_SOURCES  = ai_transformer_test.cc
+ai_transformer_test_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)
+ai_transformer_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA) $(METAL_LA)
 
 ai_backend_test_SOURCES  = ai_backend_test.cc
 ai_backend_test_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)

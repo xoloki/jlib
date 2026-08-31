@@ -59,7 +59,10 @@ inline float apply(uint kind, float x) {
     case 0: return 1.0f / (1.0f + exp(-x));
     case 1: return tanh(x);
     case 2: return (x > 0.0f) ? x : 0.0f;
-    default: return (x > 0.0f) ? x : LEAK * x;
+    case 3: return (x > 0.0f) ? x : LEAK * x;
+    // silu.  Kept off default so that adding another kind cannot silently
+    // arrive here as a leaky relu.
+    default: return x / (1.0f + exp(-x));
     }
 }
 

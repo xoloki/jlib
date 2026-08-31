@@ -41,7 +41,9 @@ namespace metal {
  * networks.  Four enumerators is a cheap duplication and the values are
  * asserted equal in the test.
  */
-enum class activation { sigmoid, tanh, relu, leaky_relu };
+// Order matters: metal::backend casts ai::activation straight across, so these
+// two enumerations have to stay in the same order as well as agree by name.
+enum class activation { sigmoid, tanh, relu, leaky_relu, silu };
 
 /** The slope a leaky ReLU keeps below zero.  Matches ai::LEAK. */
 inline constexpr float LEAK = 0.01f;

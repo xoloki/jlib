@@ -1,0 +1,244 @@
+/* -*- mode: C++ c-basic-offset: 4  -*-
+ *
+ * Copyright (c) 2026 Joey Yandle <xoloki@gmail.com>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
+#ifndef JLIB_AI_TRANSFORMER_HH
+#define JLIB_AI_TRANSFORMER_HH
+
+#include <jlib/ai/attention.hh>
+#include <jlib/ai/backend.hh>
+
+#include <vector>
+
+namespace jlib {
+namespace ai {
+
+/**
+ * One pre-norm transformer block: attention, then a gated feed-forward, each
+ * around a residual.
+ *
+ *   h = x + attention(rms_norm(x))
+ *   y = h + swiglu(rms_norm(h))
+ *
+ * Pre-norm -- normalise the branch input, not the sum -- because it is what
+ * lets a deep stack train at all: the residual path from input to output stays
+ * an unmodified sum, so a gradient reaches the bottom without passing through
+ * any normalisation. Post-norm was the original and needs a warmup schedule to
+ * survive depth.
+ *
+ * ### Heads are weights, not slices
+ *
+ * The usual formulation projects to a full (d_model x T) Q, then slices it into
+ * heads. Here each head owns its own (d_head x d_model) projection, so
+ * `wq(h) * x` produces that head's Q directly and nothing is ever sliced. The
+ * two are the same arithmetic -- a slice of (W x) is (a slice of W) x -- and
+ * this way needs no sub-tensor views, which no backend here has.
+ *
+ * The output projection is split the same way: `wo(h)` is (d_model x d_head),
+ * and the heads are summed by accumulating into one output with the GEMM's
+ * beta, rather than concatenated and multiplied once. Again the same
+ * arithmetic, and again no concatenation op is needed.
+ *
+ * The cost is one GEMM dispatch per head instead of one batched call. That is
+ * a performance question; see the notes on the branch.
+ *
+ * ### Scratch and aliasing
+ *
+ * reserve() sizes every intermediate for one sequence length, and forward()
+ * requires exactly that length. Two of the feed-forward steps run in place --
+ * activate and hadamard both write element i from element i and nothing else,
+ * so aliasing input and output is safe for them and only for them.
+ *
+ * The per-head scratch is reused across heads. That is safe because a compute
+ * encoder dispatches serially, which is what the whole stream design already
+ * rests on; it is not safe to make the dispatch concurrent without giving each
+ * head its own.
+ */
+template<typename T>
+class block {
+public:
+    typedef typename backend<T>::tensor_ptr tensor_ptr;
+
+    /**
+     * @param heads must divide d_model
+     * @param d_ff  the feed-forward width, conventionally a few times d_model
+     */
+    block(backend<T>& b, unsigned int d_model, unsigned int heads,
+          unsigned int d_ff);
+
+    unsigned int d_model() const { return m_d_model; }
+    unsigned int heads() const { return m_heads; }
+    unsigned int d_head() const { return m_d_head; }
+    unsigned int d_ff() const { return m_d_ff; }
+
+    /** (d_head x d_model), one per head. */
+    tensor_ptr& wq(unsigned int h) { return m_wq[h]; }
+    tensor_ptr& wk(unsigned int h) { return m_wk[h]; }
+    tensor_ptr& wv(unsigned int h) { return m_wv[h]; }
+
+    /** (d_model x d_head), one per head; the heads are summed through these. */
+    tensor_ptr& wo(unsigned int h) { return m_wo[h]; }
+
+    /**
+     * The feed-forward's three matrices, named for their roles.
+     *
+     * Gate and up are both (d_ff x d_model) and down is (d_model x d_ff), and
+     * the only thing that distinguishes gate from up is that **silu is applied
+     * to the gate**. That is a convention, not a property: swap them and the
+     * result is a different but equally self-consistent network, which no test
+     * here can tell from this one -- verified by mutation. It is only pinned by
+     * a real model's weights, where the tensors arrive named ffn_gate, ffn_up
+     * and ffn_down.
+     *
+     * So they are named rather than numbered. A loader that has to map
+     * "ffn_gate" onto w1() can get it wrong silently; onto w_gate() it cannot.
+     */
+    tensor_ptr& w_gate() { return m_gate; }
+    tensor_ptr& w_up() { return m_up; }
+    tensor_ptr& w_down() { return m_down; }
+
+    /** (d_model x 1) each: the learned RMS norm scales. */
+    tensor_ptr& attn_norm() { return m_attn_norm; }
+    tensor_ptr& ffn_norm() { return m_ffn_norm; }
+
+    /** Size every intermediate for a sequence of this length. */
+    void reserve(unsigned int seq);
+
+    /** out = block(x), with x and out both (d_model x seq). */
+    void forward(const tensor_ptr& x, tensor_ptr& out, bool causal = true);
+
+private:
+    backend<T>& m_b;
+
+    unsigned int m_d_model;
+    unsigned int m_heads;
+    unsigned int m_d_head;
+    unsigned int m_d_ff;
+    unsigned int m_seq = 0;
+
+    std::vector<tensor_ptr> m_wq, m_wk, m_wv, m_wo;
+    tensor_ptr m_gate, m_down, m_up;
+    tensor_ptr m_attn_norm, m_ffn_norm;
+
+    tensor_ptr m_norm, m_q, m_k, m_v, m_scores, m_probs, m_head, m_attn;
+    tensor_ptr m_h1, m_h3, m_ffn;
+};
+
+template<typename T>
+block<T>::block(backend<T>& b, unsigned int d_model, unsigned int heads,
+                unsigned int d_ff)
+    : m_b(b),
+      m_d_model(d_model),
+      m_heads(heads),
+      m_d_head(heads ? d_model / heads : 0),
+      m_d_ff(d_ff)
+{
+    if(heads == 0 || d_model == 0 || d_ff == 0)
+        throw backend_error("block: every dimension must be non-zero");
+
+    if(d_model % heads)
+        throw backend_error("block: heads must divide d_model");
+
+    for(unsigned int h = 0; h < heads; h++) {
+        m_wq.push_back(b.make(m_d_head, d_model));
+        m_wk.push_back(b.make(m_d_head, d_model));
+        m_wv.push_back(b.make(m_d_head, d_model));
+        m_wo.push_back(b.make(d_model, m_d_head));
+    }
+
+    m_gate = b.make(d_ff, d_model);
+    m_up = b.make(d_ff, d_model);
+    m_down = b.make(d_model, d_ff);
+
+    m_attn_norm = b.make(d_model, 1);
+    m_ffn_norm = b.make(d_model, 1);
+}
+
+template<typename T>
+void block<T>::reserve(unsigned int seq) {
+    if(seq == 0)
+        throw backend_error("block: a sequence of no positions");
+
+    m_seq = seq;
+
+    m_norm   = m_b.make(m_d_model, seq);
+    m_q      = m_b.make(m_d_head, seq);
+    m_k      = m_b.make(m_d_head, seq);
+    m_v      = m_b.make(m_d_head, seq);
+    m_scores = m_b.make(seq, seq);
+    m_probs  = m_b.make(seq, seq);
+    m_head   = m_b.make(m_d_head, seq);
+    m_attn   = m_b.make(m_d_model, seq);
+    m_h1     = m_b.make(m_d_ff, seq);
+    m_h3     = m_b.make(m_d_ff, seq);
+    m_ffn    = m_b.make(m_d_model, seq);
+}
+
+template<typename T>
+void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal) {
+    if(m_seq == 0)
+        throw backend_error("block: forward before reserve");
+
+    if(x->rows() != m_d_model || x->cols() != m_seq)
+        throw backend_error("block: input is not d_model x the reserved length");
+
+    if(out->rows() != m_d_model || out->cols() != m_seq)
+        throw backend_error("block: output is not d_model x the reserved length");
+
+    // --- attention, around a residual ---
+
+    m_b.rms_norm(x, m_attn_norm, m_norm);
+
+    for(unsigned int h = 0; h < m_heads; h++) {
+        m_b.multiply(m_wq[h], m_norm, m_q);
+        m_b.multiply(m_wk[h], m_norm, m_k);
+        m_b.multiply(m_wv[h], m_norm, m_v);
+
+        attention(m_b, m_q, m_k, m_v, m_scores, m_probs, m_head, causal);
+
+        // beta 0 for the first head and 1 for the rest, which sums the heads
+        // in place of concatenating them and projecting once.
+        m_b.multiply(m_wo[h], m_head, m_attn, T(1), h ? T(1) : T(0));
+    }
+
+    m_b.assign(x, out);
+    m_b.add_scaled(T(1), m_attn, out);
+
+    // --- gated feed-forward, around a second residual ---
+
+    m_b.rms_norm(out, m_ffn_norm, m_norm);
+
+    m_b.multiply(m_gate, m_norm, m_h1);
+    m_b.multiply(m_up, m_norm, m_h3);
+
+    // Both in place; see the note on aliasing above.  silu on the gate and not
+    // on the up projection, which is the whole of what makes this SwiGLU --
+    // and is a convention rather than something the arithmetic forces.
+    m_b.activate(activation::silu, m_h1, m_h1);
+    m_b.hadamard(m_h1, m_h3, m_h1);
+
+    m_b.multiply(m_down, m_h1, m_ffn);
+
+    m_b.add_scaled(T(1), m_ffn, out);
+}
+
+}
+}
+
+#endif // JLIB_AI_TRANSFORMER_HH
