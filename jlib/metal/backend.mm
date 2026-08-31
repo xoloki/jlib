@@ -166,6 +166,13 @@ void backend<T>::causal_mask(tensor_ptr& s) {
 }
 
 template<typename T>
+void backend<T>::rope(tensor_ptr& x, unsigned int base_pos, float theta,
+                      ai::rope_layout layout)
+{
+    m_stream->rope(at<T>(x), base_pos, theta, layout == ai::rope_layout::split);
+}
+
+template<typename T>
 void backend<T>::rms_norm(const tensor_ptr& in, const tensor_ptr& weight,
                           tensor_ptr& out, float eps)
 {

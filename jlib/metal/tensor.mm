@@ -232,6 +232,51 @@ kernel void k_causal_mask(device T* s [[buffer(0)]],
         x[r] = T(-INFINITY);
 }
 
+/**
+ * Rotary position embedding, in place.  One thread per (column, plane).
+ *
+ * The angle is computed in float where the host uses double.  For the sequence
+ * lengths anything here runs at the two agree to well under fp16's resolution;
+ * at tens of thousands of positions the float angle would start to drift, and
+ * the fix then is a precomputed table rather than more precision here.
+ */
+template<typename T>
+kernel void k_rope(device T* x [[buffer(0)]],
+                   constant uint& rows [[buffer(1)]],
+                   constant uint& cols [[buffer(2)]],
+                   constant uint& base_pos [[buffer(3)]],
+                   constant float& theta [[buffer(4)]],
+                   constant uint& split [[buffer(5)]],
+                   uint i [[thread_position_in_grid]])
+{
+    // Not `half`: that is the fp16 type in MSL, and naming a variable after it
+    // fails to compile in a way whose message points at the declaration rather
+    // than at the name.
+    const uint planes = rows / 2;
+
+    if(i >= cols * planes) return;
+
+    const uint c = i / planes;
+    const uint j = i % planes;
+
+    const uint a = split ? j : 2 * j;
+    const uint b = split ? j + planes : 2 * j + 1;
+
+    const float freq = pow(theta, -2.0f * float(j) / float(rows));
+    const float angle = float(base_pos + c) * freq;
+
+    const float co = cos(angle);
+    const float si = sin(angle);
+
+    device T* col = x + (ulong)c * rows;
+
+    const float xa = float(col[a]);
+    const float xb = float(col[b]);
+
+    col[a] = T(xa * co - xb * si);
+    col[b] = T(xa * si + xb * co);
+}
+
 #define INSTANTIATE(NAME, T, SUFFIX)                                        \
     template [[host_name(#NAME SUFFIX)]] kernel void NAME<T>
 
@@ -263,6 +308,12 @@ INSTANTIATE(k_causal_mask, float, "_f32")(device float*, constant uint&,
                                           constant uint&, uint);
 INSTANTIATE(k_causal_mask, half, "_f16")(device half*, constant uint&,
                                          constant uint&, uint);
+INSTANTIATE(k_rope, float, "_f32")(device float*, constant uint&, constant uint&,
+                                   constant uint&, constant float&,
+                                   constant uint&, uint);
+INSTANTIATE(k_rope, half, "_f16")(device half*, constant uint&, constant uint&,
+                                  constant uint&, constant float&,
+                                  constant uint&, uint);
 INSTANTIATE(k_rms_norm, float, "_f32")(device const float*, device const float*,
                                        device float*, constant uint&,
                                        constant uint&, constant float&, uint);
@@ -374,6 +425,7 @@ struct stream<T>::impl {
     id<MTLComputePipelineState> add_scaled = nil;
     id<MTLComputePipelineState> softmax = nil;
     id<MTLComputePipelineState> causal_mask = nil;
+    id<MTLComputePipelineState> rope = nil;
     id<MTLComputePipelineState> rms_norm = nil;
 
     unsigned int pending = 0;
@@ -389,6 +441,7 @@ struct pipelines {
     id<MTLComputePipelineState> add_scaled = nil;
     id<MTLComputePipelineState> softmax = nil;
     id<MTLComputePipelineState> causal_mask = nil;
+    id<MTLComputePipelineState> rope = nil;
     id<MTLComputePipelineState> rms_norm = nil;
 };
 
@@ -441,6 +494,7 @@ pipelines& compiled(id<MTLDevice> gpu) {
         { "k_add_scaled", &p.add_scaled },
         { "k_softmax",    &p.softmax },
         { "k_causal_mask", &p.causal_mask },
+        { "k_rope",       &p.rope },
         { "k_rms_norm",   &p.rms_norm },
     };
 
@@ -505,6 +559,7 @@ stream<T>::stream(std::shared_ptr<device> d)
     m_impl->add_scaled = p.add_scaled;
     m_impl->softmax = p.softmax;
     m_impl->causal_mask = p.causal_mask;
+    m_impl->rope = p.rope;
     m_impl->rms_norm = p.rms_norm;
 }
 
@@ -679,6 +734,35 @@ void stream<T>::causal_mask(tensor<T>& s) {
     [m_impl->enc setBytes:&cols length:sizeof(cols) atIndex:2];
 
     dispatch(m_impl->enc, m_impl->causal_mask, cols);
+
+    m_impl->pending++;
+}
+
+template<typename T>
+void stream<T>::rope(tensor<T>& x, unsigned int base_pos, float theta,
+                     bool split)
+{
+    if(x.rows() % 2)
+        throw typename tensor<T>::exception("rope: rotates in planes, so it "
+                                            "needs an even number of rows");
+
+    open();
+
+    const unsigned int rows = x.rows();
+    const unsigned int cols = x.cols();
+    const unsigned int is_split = split ? 1u : 0u;
+
+    [m_impl->enc setComputePipelineState:m_impl->rope];
+    [m_impl->enc setBuffer:x.m_impl->buf offset:0 atIndex:0];
+    [m_impl->enc setBytes:&rows length:sizeof(rows) atIndex:1];
+    [m_impl->enc setBytes:&cols length:sizeof(cols) atIndex:2];
+    [m_impl->enc setBytes:&base_pos length:sizeof(base_pos) atIndex:3];
+    [m_impl->enc setBytes:&theta length:sizeof(theta) atIndex:4];
+    [m_impl->enc setBytes:&is_split length:sizeof(is_split) atIndex:5];
+
+    // One thread per rotation plane per column, not per column: d_head is
+    // small and the sequence can be long, so this is where the parallelism is.
+    dispatch(m_impl->enc, m_impl->rope, cols * (rows / 2));
 
     m_impl->pending++;
 }

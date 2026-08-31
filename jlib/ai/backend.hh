@@ -62,6 +62,27 @@ inline bool slope_from_output(activation a) {
 }
 
 /**
+ * Which dimensions RoPE pairs up before rotating them.
+ *
+ * Both are in use and they are not compatible: a model trained under one and
+ * run under the other produces fluent nonsense rather than an error.
+ *
+ * - `interleaved` pairs (0,1), (2,3), (4,5)... -- the original RoFormer paper,
+ *   and what ggml calls the normal rope type.
+ * - `split` pairs (j, j + d/2) -- what GPT-NeoX introduced and what the
+ *   HuggingFace Llama implementation uses, with the checkpoint's weights
+ *   permuted at conversion time to match.
+ *
+ * **No test here can tell them apart**, and that is not a gap in the tests:
+ * every property RoPE has -- that it preserves the norm, that it is the
+ * identity at position 0, that the inner product depends only on the relative
+ * position -- holds for both, because both are block-diagonal rotations and
+ * differ only in which coordinates share a block.  It is settled by the model,
+ * so it is a parameter with a name rather than a choice buried in a kernel.
+ */
+enum class rope_layout { interleaved, split };
+
+/**
  * What a backend throws.
  *
  * At namespace scope rather than nested in backend<T>: a nested class of a
@@ -208,6 +229,32 @@ public:
     virtual void causal_mask(tensor_ptr& s) = 0;
 
     /**
+     * Rotary position embedding, in place.
+     *
+     * Rotates each column by an angle that grows with its position, in
+     * `rows/2` independent two-dimensional planes, each turning at its own
+     * rate.  Applied to the queries and the keys after their projections and
+     * before the scores -- never to the values, which carry content rather
+     * than position.
+     *
+     * What it buys is that the *score* between a query and a key comes to
+     * depend on the distance between them rather than on where the pair sits:
+     * rotating by m and by n leaves an inner product that is a function of
+     * n - m alone.  That is the whole idea, and it is what the tests check.
+     *
+     * A column is a position, so column c is at `base_pos + c`.  base_pos is
+     * for decoding one token at a time against a cache, where the single
+     * column being processed is at position n rather than 0.
+     *
+     * @param theta  the frequency base, 10000 by convention
+     * @param layout which dimensions get paired; see rope_layout, and note
+     *               that no test can check this one for you
+     */
+    virtual void rope(tensor_ptr& x, unsigned int base_pos = 0,
+                      float theta = 10000.0f,
+                      rope_layout layout = rope_layout::interleaved) = 0;
+
+    /**
      * Root-mean-square normalisation down each column, scaled per feature.
      *
      * out[r,c] = in[r,c] / sqrt(mean(in[:,c]^2) + eps) * weight[r]
@@ -257,6 +304,8 @@ public:
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
     void causal_mask(tensor_ptr& s);
+    void rope(tensor_ptr& x, unsigned int base_pos = 0, float theta = 10000.0f,
+              rope_layout layout = rope_layout::interleaved);
     void rms_norm(const tensor_ptr& in, const tensor_ptr& weight,
                   tensor_ptr& out, float eps = 1e-5f);
 
@@ -525,6 +574,46 @@ void host_backend<T>::causal_mask(tensor_ptr& s) {
     for(uint c = 0; c < x.N; c++)
         for(uint r = c + 1; r < x.M; r++)
             x(r,c) = neg_inf;
+}
+
+template<typename T>
+void host_backend<T>::rope(tensor_ptr& x, unsigned int base_pos, float theta,
+                           rope_layout layout)
+{
+    math::matrix<T>& m = at(x);
+
+    if(m.M % 2)
+        throw backend_error("rope: rotates in planes, so it needs an even "
+                            "number of rows");
+
+    const uint half = m.M / 2;
+
+    // In double, like softmax and for the same reason: this is the reference
+    // the GPU is checked against.  It matters more here than elsewhere -- the
+    // angle is position * frequency and grows without bound, so cos and sin of
+    // it lose precision at long sequence lengths, and the host should be the
+    // one that loses less.
+    for(uint c = 0; c < m.N; c++) {
+        const double pos = double(base_pos + c);
+
+        for(uint j = 0; j < half; j++) {
+            const uint a = (layout == rope_layout::split) ? j : 2 * j;
+            const uint b = (layout == rope_layout::split) ? j + half : 2 * j + 1;
+
+            const double freq = std::pow(double(theta),
+                                         -2.0 * double(j) / double(m.M));
+            const double angle = pos * freq;
+
+            const double co = std::cos(angle);
+            const double si = std::sin(angle);
+
+            const double xa = double(m(a,c));
+            const double xb = double(m(b,c));
+
+            m(a,c) = T(xa * co - xb * si);
+            m(b,c) = T(xa * si + xb * co);
+        }
+    }
 }
 
 template<typename T>

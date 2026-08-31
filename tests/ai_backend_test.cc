@@ -533,6 +533,190 @@ static void the_scale_is_applied(const char* name,
     }
 }
 
+/** The inner product of two columns, in double. */
+template<typename T>
+static double dot(const matrix<T>& a, uint ca, const matrix<T>& b, uint cb) {
+    double d = 0;
+
+    for(uint r = 0; r < a.M; r++)
+        d += double(float(a(r,ca))) * double(float(b(r,cb)));
+
+    return d;
+}
+
+/**
+ * RoPE is a rotation, so it preserves length and is the identity at zero.
+ *
+ * Both are exact statements about what the operation *is*, and neither needs a
+ * second implementation to check.
+ */
+template<typename T>
+static void rope_is_a_rotation(const char* name, std::vector<ai::backend<T>*>& backends) {
+    std::cout << "\nrope is a rotation, " << name << ":\n";
+
+    const uint d = 8;
+    const uint n = 4;
+
+    std::mt19937 gen(53);
+
+    const matrix<T> x = random_matrix<T>(d, n, gen);
+
+    for(ai::backend<T>* b : backends) {
+        typename ai::backend<T>::tensor_ptr t = b->make(x);
+
+        b->rope(t, 5);
+        b->wait();
+
+        const matrix<T> got = t->read();
+
+        double furthest = 0;
+
+        for(uint c = 0; c < n; c++)
+            furthest = std::max(furthest,
+                                std::fabs(std::sqrt(dot(got,c,got,c)) -
+                                          std::sqrt(dot(x,c,x,c))));
+
+        ok(std::string("  ") + b->name() + ": every column keeps its length",
+           furthest < ((sizeof(T) == 2) ? 5e-3 : 1e-5), std::to_string(furthest));
+
+        // Position 0 turns through zero radians, so it is exactly the input --
+        // and base_pos 0 means column c is at position c, so only the first
+        // column is untouched.
+        typename ai::backend<T>::tensor_ptr z = b->make(x);
+
+        b->rope(z, 0);
+        b->wait();
+
+        const matrix<T> zero = z->read();
+
+        bool identical = true;
+
+        for(uint r = 0; r < d; r++)
+            if(float(zero(r,0)) != float(x(r,0))) identical = false;
+
+        ok(std::string("  ") + b->name() + ": and position zero is untouched",
+           identical);
+
+        bool moved = false;
+
+        for(uint r = 0; r < d; r++)
+            if(float(zero(r,3)) != float(x(r,3))) moved = true;
+
+        ok(std::string("  ") + b->name() + ": while a later position is not",
+           moved);
+    }
+}
+
+/**
+ * The property RoPE exists for: the score depends only on the distance.
+ *
+ * <RoPE(q, m), RoPE(k, n)> is a function of n - m alone, so shifting both
+ * positions by the same amount must leave every inner product where it was.
+ * This is the one assertion that would fail for almost any other way of mixing
+ * position into a vector, and it is why RoPE is used instead of adding a
+ * positional vector to the input.
+ */
+template<typename T>
+static void rope_makes_the_score_relative(const char* name,
+                                          std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nrope makes the score relative, " << name << ":\n";
+
+    const uint d = 8;
+    const uint n = 3;
+
+    std::mt19937 gen(59);
+
+    const matrix<T> q = random_matrix<T>(d, n, gen);
+    const matrix<T> k = random_matrix<T>(d, n, gen);
+
+    for(ai::backend<T>* b : backends) {
+        std::vector<double> base;
+        double furthest = 0;
+
+        // The same pair of columns, rotated from four different starting
+        // positions.  Every relative offset is the same in each, so every dot
+        // product between them should be too.
+        for(unsigned int shift : { 0u, 1u, 7u, 40u }) {
+            typename ai::backend<T>::tensor_ptr tq = b->make(q);
+            typename ai::backend<T>::tensor_ptr tk = b->make(k);
+
+            b->rope(tq, shift);
+            b->rope(tk, shift);
+            b->wait();
+
+            const matrix<T> rq = tq->read();
+            const matrix<T> rk = tk->read();
+
+            std::vector<double> now;
+
+            for(uint i = 0; i < n; i++)
+                for(uint j = 0; j < n; j++)
+                    now.push_back(dot(rq, i, rk, j));
+
+            if(shift == 0) {
+                base = now;
+                continue;
+            }
+
+            for(std::size_t at = 0; at < now.size(); at++)
+                furthest = std::max(furthest, std::fabs(base[at] - now[at]));
+        }
+
+        ok(std::string("  ") + b->name() +
+           ": shifting both positions leaves every score alone",
+           furthest < ((sizeof(T) == 2) ? 5e-2 : 1e-4), std::to_string(furthest));
+    }
+}
+
+template<typename T>
+static void the_two_rope_layouts_differ(const char* name,
+                                        std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nthe two rope layouts differ, " << name << ":\n";
+
+    std::mt19937 gen(61);
+
+    const matrix<T> x = random_matrix<T>(8, 3, gen);
+
+    for(ai::backend<T>* b : backends) {
+        typename ai::backend<T>::tensor_ptr a = b->make(x);
+        typename ai::backend<T>::tensor_ptr c = b->make(x);
+
+        b->rope(a, 2, 10000.0f, ai::rope_layout::interleaved);
+        b->rope(c, 2, 10000.0f, ai::rope_layout::split);
+        b->wait();
+
+        const matrix<T> ia = a->read();
+        const matrix<T> sp = c->read();
+
+        ok(std::string("  ") + b->name() + ": interleaved is not split",
+           worst(ia, sp) > 1e-3, std::to_string(worst(ia, sp)));
+
+        // And both are rotations, which is what makes them indistinguishable
+        // by any property test.
+        double la = 0, ls = 0;
+
+        for(uint r = 0; r < 8; r++) {
+            la += double(float(ia(r,1))) * double(float(ia(r,1)));
+            ls += double(float(sp(r,1))) * double(float(sp(r,1)));
+        }
+
+        ok(std::string("  ") + b->name() + ": and both preserve the length",
+           std::fabs(std::sqrt(la) - std::sqrt(ls)) < ((sizeof(T) == 2) ? 5e-3 : 1e-5),
+           std::to_string(std::fabs(std::sqrt(la) - std::sqrt(ls))));
+
+        typename ai::backend<T>::tensor_ptr odd = b->make(7, 2);
+
+        bool threw = false;
+        try { b->rope(odd); b->wait(); }
+        catch(std::exception&) { threw = true; }
+
+        ok(std::string("  ") + b->name() + ": an odd number of rows is refused",
+           threw);
+    }
+}
+
 static void a_tensor_from_the_wrong_backend_is_refused() {
     std::cout << "\na tensor from the wrong backend is refused:\n";
 
@@ -577,7 +761,14 @@ int main() {
 #ifdef HAVE_METAL
         std::shared_ptr<jlib::metal::backend<float> > g;
         try { g.reset(new jlib::metal::backend<float>); b.push_back(g.get()); }
-        catch(std::exception& e) { std::cout << "  (no Metal device: " << e.what() << ")\n"; }
+        catch(std::exception& e) {
+            // A failure, not a note.  HAVE_METAL means Metal was found when
+            // this was configured, so the backend not coming up is a bug here
+            // -- most likely a kernel that no longer compiles.  Reported as a
+            // note, this test went on to pass with only the host backend and
+            // exit 0, which is how a broken kernel reaches a green run.
+            ok("  the Metal backend comes up", false, e.what());
+        }
         one_type<float>("float", b);
         the_reductions<float>("float", b);
         softmax_survives_a_large_score<float>("float", b);
@@ -585,6 +776,9 @@ int main() {
         attention_looks_only_backwards<float>("float", b);
         flat_scores_average_the_values<float>("float", b);
         the_scale_is_applied<float>("float", b);
+        rope_is_a_rotation<float>("float", b);
+        rope_makes_the_score_relative<float>("float", b);
+        the_two_rope_layouts_differ<float>("float", b);
 #else
         one_type<float>("float", b);
         the_reductions<float>("float", b);
@@ -593,6 +787,9 @@ int main() {
         attention_looks_only_backwards<float>("float", b);
         flat_scores_average_the_values<float>("float", b);
         the_scale_is_applied<float>("float", b);
+        rope_is_a_rotation<float>("float", b);
+        rope_makes_the_score_relative<float>("float", b);
+        the_two_rope_layouts_differ<float>("float", b);
 #endif
     }
 
@@ -603,7 +800,7 @@ int main() {
 #ifdef HAVE_METAL
         std::shared_ptr<jlib::metal::backend<_Float16> > g;
         try { g.reset(new jlib::metal::backend<_Float16>); b.push_back(g.get()); }
-        catch(std::exception&) {}
+        catch(std::exception& e) { ok("  the Metal backend comes up", false, e.what()); }
 #endif
         one_type<_Float16>("_Float16", b);
         the_reductions<_Float16>("_Float16", b);
@@ -612,6 +809,9 @@ int main() {
         attention_looks_only_backwards<_Float16>("_Float16", b);
         flat_scores_average_the_values<_Float16>("_Float16", b);
         the_scale_is_applied<_Float16>("_Float16", b);
+        rope_is_a_rotation<_Float16>("_Float16", b);
+        rope_makes_the_score_relative<_Float16>("_Float16", b);
+        the_two_rope_layouts_differ<_Float16>("_Float16", b);
     }
 
     a_tensor_from_the_wrong_backend_is_refused();
