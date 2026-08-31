@@ -173,6 +173,24 @@ public:
     virtual void softmax(const tensor_ptr& in, tensor_ptr& out) = 0;
 
     /**
+     * Set everything strictly below the diagonal to -infinity, in place.
+     *
+     * For causal attention, where a query may not see a key that comes after
+     * it.  Strictly *below* the diagonal, which is the transpose of how this
+     * is usually drawn: softmax here reduces down a column, so a column has to
+     * be one query's distribution over keys, which puts the key index on the
+     * rows.  A query at i must not see a key at j > i, and j > i is row >
+     * column.  See attention.hh, which is the only caller and says the same
+     * thing from the other end.
+     *
+     * -infinity rather than a large negative number, because softmax subtracts
+     * the column maximum and exp(-inf - m) is exactly zero for finite m.  A
+     * fully masked column would give nan; this mask cannot produce one, since
+     * element (c,c) is always kept.
+     */
+    virtual void causal_mask(tensor_ptr& s) = 0;
+
+    /**
      * Root-mean-square normalisation down each column, scaled per feature.
      *
      * out[r,c] = in[r,c] / sqrt(mean(in[:,c]^2) + eps) * weight[r]
@@ -221,6 +239,7 @@ public:
     void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y);
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
+    void causal_mask(tensor_ptr& s);
     void rms_norm(const tensor_ptr& in, const tensor_ptr& weight,
                   tensor_ptr& out, float eps = 1e-5f);
 
@@ -465,6 +484,20 @@ void host_backend<T>::softmax(const tensor_ptr& in, tensor_ptr& out) {
         for(uint r = 0; r < x.M; r++)
             y(r,c) = T(double(y(r,c)) / sum);
     }
+}
+
+template<typename T>
+void host_backend<T>::causal_mask(tensor_ptr& s) {
+    math::matrix<T>& x = at(s);
+
+    // Through float, not std::numeric_limits<T>: _Float16 is a compiler
+    // extension and numeric_limits is not specialised for it.  Converting a
+    // float infinity to half gives a half infinity.
+    const T neg_inf = T(-std::numeric_limits<float>::infinity());
+
+    for(uint c = 0; c < x.N; c++)
+        for(uint r = c + 1; r < x.M; r++)
+            x(r,c) = neg_inf;
 }
 
 template<typename T>

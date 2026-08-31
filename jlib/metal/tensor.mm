@@ -200,6 +200,35 @@ kernel void k_rms_norm(device const T* in [[buffer(0)]],
         y[r] = T(float(x[r]) * inv * float(w[r]));
 }
 
+/**
+ * Causal masking, in place.
+ *
+ * Row is the key position and column the query position -- the transpose of
+ * how attention is usually drawn -- because softmax here reduces down a column,
+ * so a column has to be one query's distribution over keys.  A query at i may
+ * not see a key at j > i, and j > i is row > column, so what goes is everything
+ * strictly *below* the diagonal.  The usual presentation masks above it; this
+ * is the same mask seen from the other side.
+ *
+ * -infinity rather than a large negative number: softmax subtracts the column
+ * maximum, so exp(-inf - m) is exactly 0 for any finite m.  A column with no
+ * unmasked entry would give -inf - -inf = nan, which causal masking cannot
+ * produce -- element (c,c) is always kept, so every column has at least one.
+ */
+template<typename T>
+kernel void k_causal_mask(device T* s [[buffer(0)]],
+                          constant uint& rows [[buffer(1)]],
+                          constant uint& cols [[buffer(2)]],
+                          uint c [[thread_position_in_grid]])
+{
+    if(c >= cols) return;
+
+    device T* x = s + (ulong)c * rows;
+
+    for(uint r = c + 1; r < rows; r++)
+        x[r] = T(-INFINITY);
+}
+
 #define INSTANTIATE(NAME, T, SUFFIX)                                        \
     template [[host_name(#NAME SUFFIX)]] kernel void NAME<T>
 
@@ -227,6 +256,10 @@ INSTANTIATE(k_softmax, float, "_f32")(device const float*, device float*,
                                       constant uint&, constant uint&, uint);
 INSTANTIATE(k_softmax, half, "_f16")(device const half*, device half*,
                                      constant uint&, constant uint&, uint);
+INSTANTIATE(k_causal_mask, float, "_f32")(device float*, constant uint&,
+                                          constant uint&, uint);
+INSTANTIATE(k_causal_mask, half, "_f16")(device half*, constant uint&,
+                                         constant uint&, uint);
 INSTANTIATE(k_rms_norm, float, "_f32")(device const float*, device const float*,
                                        device float*, constant uint&,
                                        constant uint&, constant float&, uint);
@@ -337,6 +370,7 @@ struct stream<T>::impl {
     id<MTLComputePipelineState> subtract = nil;
     id<MTLComputePipelineState> add_scaled = nil;
     id<MTLComputePipelineState> softmax = nil;
+    id<MTLComputePipelineState> causal_mask = nil;
     id<MTLComputePipelineState> rms_norm = nil;
 
     unsigned int pending = 0;
@@ -351,6 +385,7 @@ struct pipelines {
     id<MTLComputePipelineState> subtract = nil;
     id<MTLComputePipelineState> add_scaled = nil;
     id<MTLComputePipelineState> softmax = nil;
+    id<MTLComputePipelineState> causal_mask = nil;
     id<MTLComputePipelineState> rms_norm = nil;
 };
 
@@ -402,6 +437,7 @@ pipelines& compiled(id<MTLDevice> gpu) {
         { "k_subtract",   &p.subtract },
         { "k_add_scaled", &p.add_scaled },
         { "k_softmax",    &p.softmax },
+        { "k_causal_mask", &p.causal_mask },
         { "k_rms_norm",   &p.rms_norm },
     };
 
@@ -465,6 +501,7 @@ stream<T>::stream(std::shared_ptr<device> d)
     m_impl->subtract = p.subtract;
     m_impl->add_scaled = p.add_scaled;
     m_impl->softmax = p.softmax;
+    m_impl->causal_mask = p.causal_mask;
     m_impl->rms_norm = p.rms_norm;
 }
 
@@ -622,6 +659,23 @@ void stream<T>::softmax(const tensor<T>& in, tensor<T>& out) {
 
     // One thread per column, not per element.
     dispatch(m_impl->enc, m_impl->softmax, cols);
+
+    m_impl->pending++;
+}
+
+template<typename T>
+void stream<T>::causal_mask(tensor<T>& s) {
+    open();
+
+    const unsigned int rows = s.rows();
+    const unsigned int cols = s.cols();
+
+    [m_impl->enc setComputePipelineState:m_impl->causal_mask];
+    [m_impl->enc setBuffer:s.m_impl->buf offset:0 atIndex:0];
+    [m_impl->enc setBytes:&rows length:sizeof(rows) atIndex:1];
+    [m_impl->enc setBytes:&cols length:sizeof(cols) atIndex:2];
+
+    dispatch(m_impl->enc, m_impl->causal_mask, cols);
 
     m_impl->pending++;
 }

@@ -186,6 +186,9 @@ public:
     /** Softmax down each column, with the column's maximum subtracted. */
     void softmax(const tensor<T>& in, tensor<T>& out);
 
+    /** Set everything strictly below the diagonal to -infinity, in place. */
+    void causal_mask(tensor<T>& s);
+
     /** RMS normalisation down each column, scaled by a per-row weight. */
     void rms_norm(const tensor<T>& in, const tensor<T>& weight, tensor<T>& out,
                   float eps = 1e-5f);

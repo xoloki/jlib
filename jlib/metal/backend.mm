@@ -153,6 +153,11 @@ void backend<T>::softmax(const tensor_ptr& in, tensor_ptr& out) {
 }
 
 template<typename T>
+void backend<T>::causal_mask(tensor_ptr& s) {
+    m_stream->causal_mask(at<T>(s));
+}
+
+template<typename T>
 void backend<T>::rms_norm(const tensor_ptr& in, const tensor_ptr& weight,
                           tensor_ptr& out, float eps)
 {
