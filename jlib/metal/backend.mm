@@ -161,8 +161,15 @@ void backend<T>::softmax(const tensor_ptr& in, tensor_ptr& out) {
 }
 
 template<typename T>
-void backend<T>::causal_mask(tensor_ptr& s) {
-    m_stream->causal_mask(at<T>(s));
+void backend<T>::causal_mask(tensor_ptr& s, unsigned int key_offset) {
+    m_stream->causal_mask(at<T>(s), key_offset);
+}
+
+template<typename T>
+void backend<T>::copy_columns(const tensor_ptr& src, tensor_ptr& dst,
+                              unsigned int dst_first)
+{
+    m_stream->copy_columns(at<T>(src), at<T>(dst), dst_first);
 }
 
 template<typename T>

@@ -117,26 +117,39 @@ std::vector<int> generate(model<T>& m, backend<T>& b,
 
     std::vector<int> ids = prompt;
 
-    for(unsigned int step = 0; step < max_new; step++) {
-        const unsigned int n = static_cast<unsigned int>(ids.size());
+    // With a cache the first pass takes the whole prompt and every later one a
+    // single token; without, each pass takes everything so far.  The rest of
+    // the loop is the same either way, which is the point -- a cache is an
+    // optimisation and not a second way of generating.
+    if(m.caching()) m.reset_cache();
 
-        if(m.conf().context && n > m.conf().context)
+    std::vector<int> feed = ids;
+
+    for(unsigned int step = 0; step < max_new; step++) {
+        const unsigned int n = static_cast<unsigned int>(feed.size());
+
+        if(m.conf().context && ids.size() > m.conf().context)
             break;
 
-        // Re-reserved every step because the sequence grew.  This reallocates
-        // every intermediate in every block, which sounds worse than it is --
-        // it is a few hundred allocations against a forward pass over a
-        // billion parameters.  The cache branch removes the growth, not this.
+        // Re-reserved every step because what is fed changes size -- from the
+        // whole prompt to one token with a cache, and by one more each time
+        // without.  A few hundred small allocations against a forward pass
+        // over a billion parameters.
         m.reserve(n);
 
         typename backend<T>::tensor_ptr logits = b.make(m.conf().vocab, n);
 
-        m.forward(ids, logits);
+        m.forward(feed, logits);
         b.wait();
 
         const int next = s.pick(last_logits(logits->read()));
 
         ids.push_back(next);
+
+        // The cache already holds everything up to here, so the next pass owes
+        // it only the token just chosen.
+        if(m.caching()) feed.assign(1, next);
+        else feed = ids;
 
         if(on_token && !on_token(next)) break;
 

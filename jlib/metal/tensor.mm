@@ -222,14 +222,32 @@ template<typename T>
 kernel void k_causal_mask(device T* s [[buffer(0)]],
                           constant uint& rows [[buffer(1)]],
                           constant uint& cols [[buffer(2)]],
+                          constant uint& key_offset [[buffer(3)]],
                           uint c [[thread_position_in_grid]])
 {
     if(c >= cols) return;
 
     device T* x = s + (ulong)c * rows;
 
-    for(uint r = c + 1; r < rows; r++)
+    for(uint r = c + key_offset + 1; r < rows; r++)
         x[r] = T(-INFINITY);
+}
+
+/** Copy src's columns into dst starting at a column; see ai::backend. */
+template<typename T>
+kernel void k_copy_columns(device const T* src [[buffer(0)]],
+                           device T* dst [[buffer(1)]],
+                           constant uint& rows [[buffer(2)]],
+                           constant uint& n [[buffer(3)]],
+                           constant uint& first [[buffer(4)]],
+                           uint i [[thread_position_in_grid]])
+{
+    if(i >= rows * n) return;
+
+    const uint c = i / rows;
+    const uint r = i % rows;
+
+    dst[(ulong)(first + c) * rows + r] = src[(ulong)c * rows + r];
 }
 
 /**
@@ -330,9 +348,15 @@ INSTANTIATE(k_softmax, float, "_f32")(device const float*, device float*,
 INSTANTIATE(k_softmax, half, "_f16")(device const half*, device half*,
                                      constant uint&, constant uint&, uint);
 INSTANTIATE(k_causal_mask, float, "_f32")(device float*, constant uint&,
-                                          constant uint&, uint);
+                                          constant uint&, constant uint&, uint);
 INSTANTIATE(k_causal_mask, half, "_f16")(device half*, constant uint&,
-                                         constant uint&, uint);
+                                         constant uint&, constant uint&, uint);
+INSTANTIATE(k_copy_columns, float, "_f32")(device const float*, device float*,
+                                           constant uint&, constant uint&,
+                                           constant uint&, uint);
+INSTANTIATE(k_copy_columns, half, "_f16")(device const half*, device half*,
+                                          constant uint&, constant uint&,
+                                          constant uint&, uint);
 INSTANTIATE(k_gather, float, "_f32")(device const float*, device float*,
                                      device const int*, constant uint&,
                                      constant uint&, uint);
@@ -456,6 +480,7 @@ struct stream<T>::impl {
     id<MTLComputePipelineState> add_scaled = nil;
     id<MTLComputePipelineState> softmax = nil;
     id<MTLComputePipelineState> causal_mask = nil;
+    id<MTLComputePipelineState> copy_columns = nil;
     id<MTLComputePipelineState> rope = nil;
     id<MTLComputePipelineState> gather = nil;
     id<MTLComputePipelineState> rms_norm = nil;
@@ -480,6 +505,7 @@ struct pipelines {
     id<MTLComputePipelineState> add_scaled = nil;
     id<MTLComputePipelineState> softmax = nil;
     id<MTLComputePipelineState> causal_mask = nil;
+    id<MTLComputePipelineState> copy_columns = nil;
     id<MTLComputePipelineState> rope = nil;
     id<MTLComputePipelineState> gather = nil;
     id<MTLComputePipelineState> rms_norm = nil;
@@ -534,6 +560,7 @@ pipelines& compiled(id<MTLDevice> gpu) {
         { "k_add_scaled", &p.add_scaled },
         { "k_softmax",    &p.softmax },
         { "k_causal_mask", &p.causal_mask },
+        { "k_copy_columns", &p.copy_columns },
         { "k_rope",       &p.rope },
         { "k_gather",     &p.gather },
         { "k_rms_norm",   &p.rms_norm },
@@ -600,6 +627,7 @@ stream<T>::stream(std::shared_ptr<device> d)
     m_impl->add_scaled = p.add_scaled;
     m_impl->softmax = p.softmax;
     m_impl->causal_mask = p.causal_mask;
+    m_impl->copy_columns = p.copy_columns;
     m_impl->rope = p.rope;
     m_impl->gather = p.gather;
     m_impl->held = [NSMutableArray array];
@@ -765,7 +793,7 @@ void stream<T>::softmax(const tensor<T>& in, tensor<T>& out) {
 }
 
 template<typename T>
-void stream<T>::causal_mask(tensor<T>& s) {
+void stream<T>::causal_mask(tensor<T>& s, unsigned int key_offset) {
     open();
 
     const unsigned int rows = s.rows();
@@ -775,8 +803,40 @@ void stream<T>::causal_mask(tensor<T>& s) {
     [m_impl->enc setBuffer:s.m_impl->buf offset:0 atIndex:0];
     [m_impl->enc setBytes:&rows length:sizeof(rows) atIndex:1];
     [m_impl->enc setBytes:&cols length:sizeof(cols) atIndex:2];
+    [m_impl->enc setBytes:&key_offset length:sizeof(key_offset) atIndex:3];
 
     dispatch(m_impl->enc, m_impl->causal_mask, cols);
+
+    m_impl->pending++;
+}
+
+template<typename T>
+void stream<T>::copy_columns(const tensor<T>& src, tensor<T>& dst,
+                             unsigned int dst_first)
+{
+    if(src.rows() != dst.rows())
+        throw typename tensor<T>::exception("copy_columns: the two must be the "
+                                            "same height");
+
+    if(dst_first + src.cols() > dst.cols())
+        throw typename tensor<T>::exception("copy_columns: the columns would "
+                                            "not fit");
+
+    if(src.cols() == 0) return;
+
+    open();
+
+    const unsigned int rows = src.rows();
+    const unsigned int n = src.cols();
+
+    [m_impl->enc setComputePipelineState:m_impl->copy_columns];
+    [m_impl->enc setBuffer:src.m_impl->buf offset:0 atIndex:0];
+    [m_impl->enc setBuffer:dst.m_impl->buf offset:0 atIndex:1];
+    [m_impl->enc setBytes:&rows length:sizeof(rows) atIndex:2];
+    [m_impl->enc setBytes:&n length:sizeof(n) atIndex:3];
+    [m_impl->enc setBytes:&dst_first length:sizeof(dst_first) atIndex:4];
+
+    dispatch(m_impl->enc, m_impl->copy_columns, rows * n);
 
     m_impl->pending++;
 }

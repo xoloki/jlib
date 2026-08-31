@@ -290,6 +290,13 @@ int run(ai::backend<T>& b, const ai::gguf& g, const options& o) {
 
     std::cerr << "[loaded in " << (now() - t0) << "s]\n";
 
+    // Keys and values kept between tokens, so a reply costs one pass per token
+    // rather than one over everything so far.  generate() refills it from the
+    // prompt each time, which is a single pass and correct however the
+    // conversation grew; reusing it across turns would be a further step and
+    // needs the new prompt to really be an extension of the old one.
+    m.enable_cache();
+
     catch_interrupts();
 
     ai::sampler s(o.sampling);

@@ -171,6 +171,49 @@ public:
     void set_eps(float eps) { m_eps = eps; }
     float eps() const { return m_eps; }
 
+    /**
+     * Keep the keys and values, so a later call need only supply what is new.
+     *
+     * Without this every call recomputes the whole sequence, which is what
+     * generation did and is the reference this has to reproduce: with a cache,
+     * greedy generation must produce the identical tokens.
+     *
+     * The cache is allocated for the whole context at once and filled as it
+     * goes. What is past its length holds zeros, and is masked by the same
+     * offset test that enforces causality -- see backend::causal_mask, which
+     * is why nothing here has to tell attention how full the cache is.
+     *
+     * ### It grows rather than starting full
+     *
+     * The obvious thing is to allocate the whole context up front, and it is
+     * measurably wrong. Attention reads the *allocated* cache, not the part of
+     * it that holds keys, so a 2048-column cache holding ninety tokens still
+     * reads 2048 columns -- for every query head, in every layer. Measured on
+     * TinyLlama, forty tokens of output: 0.125s per token with a 128-column
+     * cache and 0.330s with a 2048-column one, against 0.146s for no cache at
+     * all. Allocating the context up front made the cache **2.3x slower than
+     * not having one**.
+     *
+     * So the capacity starts at what the first call needs and doubles when it
+     * fills, copying what is there across. That bounds the waste at 2x rather
+     * than at the ratio of the context to the conversation.
+     *
+     * Attending over exactly the valid prefix would be better still, and needs
+     * a tensor that can be a column range of another. This is the version that
+     * does not need one.
+     *
+     * @param context the most it will ever hold -- a ceiling, not an allocation
+     */
+    void enable_cache(unsigned int context);
+
+    /** Forget it, for a conversation that starts again. */
+    void reset_cache() { m_cache_len = 0; }
+
+    bool caching() const { return m_context != 0; }
+
+    /** How many positions are in the cache. */
+    unsigned int cached() const { return m_cache_len; }
+
     /** Size every intermediate for a sequence of this length. */
     void reserve(unsigned int seq);
 
@@ -179,7 +222,10 @@ public:
      *
      * @param base_pos the position of the first column, for decoding against a
      *                 cache where the columns being processed are not at the
-     *                 start of the sequence
+     *                 start of the sequence.  **Ignored when the cache is on**,
+     *                 which knows the position better than a caller does: it
+     *                 is however many tokens it already holds, and taking it
+     *                 from anywhere else is a way for the two to disagree.
      */
     void forward(const tensor_ptr& x, tensor_ptr& out, bool causal = true,
                  unsigned int base_pos = 0);
@@ -195,6 +241,11 @@ private:
     unsigned int m_seq = 0;
 
     float m_eps = 1e-5f;
+
+    /** Non-zero once the cache is on, and then its length. */
+    unsigned int m_context = 0;
+    unsigned int m_cache_len = 0;
+
     bool m_rope = false;
     float m_theta = 10000.0f;
     rope_layout m_layout = rope_layout::interleaved;
@@ -209,6 +260,14 @@ private:
     // grouping is that a group's key and value are computed once and read by
     // every query head in it.
     std::vector<tensor_ptr> m_k, m_v;
+
+    /** (d_head x capacity) each, one pair per key-value head. */
+    std::vector<tensor_ptr> m_kc, m_vc;
+
+    /** What is allocated now, against m_context which is the ceiling. */
+    unsigned int m_capacity = 0;
+
+    void grow_cache(unsigned int need);
     tensor_ptr m_h1, m_h3, m_ffn;
 };
 
@@ -269,15 +328,83 @@ void block<T>::set_rope(bool on, float theta, rope_layout layout) {
 }
 
 template<typename T>
+void block<T>::enable_cache(unsigned int context) {
+    if(context == 0)
+        throw backend_error("block: a cache with no room in it");
+
+    m_context = context;
+    m_cache_len = 0;
+    m_capacity = 0;
+
+    m_kc.clear();
+    m_vc.clear();
+
+    // Nothing allocated yet: the first forward() sizes it to what it needs.
+}
+
+template<typename T>
+void block<T>::grow_cache(unsigned int need) {
+    if(need <= m_capacity) return;
+
+    if(need > m_context)
+        throw backend_error("block: the cache is full");
+
+    // Double, or jump straight to what is asked for when that is more -- a
+    // prompt arrives all at once and there is no reason to reach its length in
+    // steps.
+    unsigned int want = m_capacity ? m_capacity * 2 : need;
+
+    if(want < need) want = need;
+    if(want > m_context) want = m_context;
+
+    std::vector<tensor_ptr> k, v;
+
+    for(unsigned int h = 0; h < m_kv_heads; h++) {
+        k.push_back(m_b.make(m_d_head, want));
+        v.push_back(m_b.make(m_d_head, want));
+
+        if(m_cache_len) {
+            m_b.copy_columns(m_kc[h], k[h], 0);
+            m_b.copy_columns(m_vc[h], v[h], 0);
+        }
+    }
+
+    // Waited for: the old tensors go out of scope at the swap, and on a GPU an
+    // encoded copy has not run yet when the call returns.
+    if(m_cache_len) m_b.wait();
+
+    m_kc.swap(k);
+    m_vc.swap(v);
+
+    m_capacity = want;
+
+    // The scores are as tall as the cache, so they move with it.
+    m_scores = m_b.make(m_capacity, m_seq);
+    m_probs = m_b.make(m_capacity, m_seq);
+}
+
+template<typename T>
 void block<T>::reserve(unsigned int seq) {
     if(seq == 0)
         throw backend_error("block: a sequence of no positions");
+
+    if(m_context && seq > m_context)
+        throw backend_error("block: more positions at once than the cache holds");
+
+    // Nothing to do if the shape has not changed.  Decoding against a cache
+    // asks for one column every time, and rebuilding a dozen identical tensors
+    // per block per token is pure waste -- measured at a third of the step.
+    if(seq == m_seq) return;
 
     m_seq = seq;
 
     m_norm   = m_b.make(m_d_model, seq);
     m_q      = m_b.make(m_d_head, seq);
-    m_scores = m_b.make(seq, seq);
+
+    // As tall as the cache when there is one: the queries are matched against
+    // every key it holds, not only against this batch's.  grow_cache() remakes
+    // these when the capacity changes.
+    m_scores = m_b.make(m_capacity ? m_capacity : seq, seq);
 
     m_k.clear();
     m_v.clear();
@@ -287,7 +414,7 @@ void block<T>::reserve(unsigned int seq) {
         m_v.push_back(m_b.make(m_d_head, seq));
     }
 
-    m_probs  = m_b.make(seq, seq);
+    m_probs  = m_b.make(m_capacity ? m_capacity : seq, seq);
     m_head   = m_b.make(m_d_head, seq);
     m_attn   = m_b.make(m_d_model, seq);
     m_h1     = m_b.make(m_d_ff, seq);
@@ -312,6 +439,12 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
 
     m_b.rms_norm(x, m_attn_norm, m_norm, m_eps);
 
+    // Where in the sequence these columns sit.  The cache knows; a caller
+    // only knows when there is no cache to disagree with.
+    const unsigned int at = m_context ? m_cache_len : base_pos;
+
+    if(m_context) grow_cache(at + m_seq);
+
     // Every key and value first, once each.  Computing them inside the query
     // loop instead would give the same answer and do the work heads/kv_heads
     // times over -- which is exactly the cost grouping exists to avoid.
@@ -322,18 +455,29 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
         // Keys are rotated here, once, for the same reason.  Values are not
         // rotated at all -- see set_rope.
         if(m_rope)
-            m_b.rope(m_k[g], base_pos, m_theta, m_layout);
+            m_b.rope(m_k[g], at, m_theta, m_layout);
+
+        // Rotated before they are stored, so a key is rotated once however
+        // many times it is later read.
+        if(m_context) {
+            m_b.copy_columns(m_k[g], m_kc[g], at);
+            m_b.copy_columns(m_v[g], m_vc[g], at);
+        }
     }
 
     for(unsigned int h = 0; h < m_heads; h++) {
         m_b.multiply(m_wq[h], m_norm, m_q);
 
         if(m_rope)
-            m_b.rope(m_q, base_pos, m_theta, m_layout);
+            m_b.rope(m_q, at, m_theta, m_layout);
 
         const unsigned int g = kv_head_for(h);
 
-        attention(m_b, m_q, m_k[g], m_v[g], m_scores, m_probs, m_head, causal);
+        if(m_context)
+            attention(m_b, m_q, m_kc[g], m_vc[g], m_scores, m_probs, m_head,
+                      causal, at);
+        else
+            attention(m_b, m_q, m_k[g], m_v[g], m_scores, m_probs, m_head, causal);
 
         // beta 0 for the first head and 1 for the rest, which sums the heads
         // in place of concatenating them and projecting once.
@@ -359,6 +503,10 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
     m_b.multiply(m_down, m_h1, m_ffn);
 
     m_b.add_scaled(T(1), m_ffn, out);
+
+    // Advanced after everything has read it, since `at` is the position these
+    // columns occupy rather than the position after them.
+    if(m_context) m_cache_len += m_seq;
 }
 
 }
