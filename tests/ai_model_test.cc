@@ -19,6 +19,7 @@
  */
 
 #include <jlib/ai/model.hh>
+#include <jlib/ai/tokenizer.hh>
 
 #ifdef HAVE_METAL
 #include <jlib/metal/backend.hh>
@@ -124,32 +125,26 @@ static void it_knows_the_capital_of_italy(const char* name, ai::backend<T>& b,
     const std::vector<std::string>& toks =
         g.get("tokenizer.ggml.tokens").strings;
 
-    const char* pieces[] = {
-        "<s>",
-        SP "The", SP "capital", SP "of", SP "France", SP "is", SP "Paris", ".",
-        SP "The", SP "capital", SP "of", SP "Germany", SP "is", SP "Berlin", ".",
-        SP "The", SP "capital", SP "of", SP "Italy", SP "is"
-    };
+    // Real tokenization now, rather than the prompt spelled out piece by piece
+    // and looked up by exact string.  That is what this test did before there
+    // was a tokenizer, and the ids it produced by hand are the ones
+    // ai_tokenizer_test still asserts encode() reproduces -- so this is the
+    // same twenty tokens arrived at from the other direction.
+    const ai::tokenizer tok(g);
 
-    std::vector<int> ids;
+    const std::string prompt =
+        "The capital of France is Paris. The capital of Germany is Berlin. "
+        "The capital of Italy is";
 
-    for(const char* piece : pieces) {
-        int found = -1;
+    const std::vector<int> ids = tok.encode(prompt);
 
-        for(std::size_t i = 0; i < toks.size(); i++)
-            if(toks[i] == piece) { found = int(i); break; }
+    ok("  the prompt tokenizes to twenty tokens", ids.size() == 20,
+       std::to_string(ids.size()));
 
-        if(found < 0) {
-            ok(std::string("  the vocabulary has ") + piece, false);
-
-            return;
-        }
-
-        ids.push_back(found);
-    }
-
-    ok("  every piece of the prompt is in the vocabulary", true,
-       std::to_string(ids.size()) + " tokens");
+    // And it says what it meant to say.  A tokenizer that produced twenty of
+    // the wrong tokens would still be twenty.
+    ok("  which say what the prompt said", tok.decode(ids) == prompt,
+       tok.decode(ids));
 
     typename ai::model<T>::config c = ai::model<T>::config::from(g);
 
@@ -265,9 +260,8 @@ int main(int argc, char** argv) {
     // untested.
     //
     // And nothing about generation: this is one forward pass over a prompt.
-    // There is no sampling, no cache, and no tokenizer -- the prompt above is
-    // spelled out piece by piece and looked up by exact string, which is not
-    // tokenization and does not pretend to be.
+    // There is no sampling and no cache, so nothing here produces a second
+    // token, let alone a sentence.
     std::cout << "\n" << (failures ? "FAILED" : "PASSED") << ": " << failures
               << " failure(s)\n";
 
