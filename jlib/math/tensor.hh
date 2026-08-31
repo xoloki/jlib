@@ -23,6 +23,7 @@
 
 
 #include <jlib/math/buffer.hh>
+#include <array>
 #include <cstdarg>
 
 
@@ -66,10 +67,36 @@ public:
     tensor(buffer<unsigned int> m);
     tensor(buffer<unsigned int> m, buffer<T> d);
 
+    /**
+     * Slice the first axis: a view, sharing storage with this tensor.
+     *
+     * The const overload returns a const tensor, so `t[i][j] = x` on a const
+     * tensor does not compile.  The constness is shallow, as it is for any
+     * handle type -- copying the result into a non-const tensor shares the same
+     * storage and can write through it.  Blocking that needs a distinct const
+     * view type; see #143.
+     */
     tensor<T> operator[](unsigned int i);
+    const tensor<T> operator[](unsigned int i) const;
 
-    // take ith slice.  in a rank 2 tensor, a slice is a column vector
-    tensor<T> operator()(unsigned int i);
+    /**
+     * Element access by a full index: t(i, j, k) on a rank 3 tensor.
+     *
+     * The same meaning operator() has on matrix, which is m(r, c) -- and no
+     * longer the meaning it had here, where it was a byte-for-byte copy of
+     * operator[] under a comment claiming it returned a column.  Nothing called
+     * it, so nothing changes behaviour; what changes is that the two classes in
+     * this directory now agree about what the operator is for.
+     *
+     * Throws mismatch if the number of indices is not the rank.  Individual
+     * indices are not bounds-checked, matching matrix, which keeps the branch
+     * out of element access.
+     */
+    template<typename... Args>
+    T& operator()(Args... args);
+
+    template<typename... Args>
+    const T& operator()(Args... args) const;
 
     operator T&();
     operator const T&() const;
@@ -81,6 +108,9 @@ public:
     
 private:
     unsigned int mmult(unsigned int o);
+
+    template<typename... Args>
+    unsigned int flat(Args... args) const;
 
     buffer<unsigned int> meta;
     buffer<T> data;
@@ -164,7 +194,7 @@ tensor<T> tensor<T>::operator[](unsigned int i) {
 
 template<typename T>
 inline
-tensor<T> tensor<T>::operator()(unsigned int i) {
+const tensor<T> tensor<T>::operator[](unsigned int i) const {
     if(!meta.size()) {
         if(i)
             throw mismatch();
@@ -179,6 +209,44 @@ tensor<T> tensor<T>::operator()(unsigned int i) {
     buffer<T> subdata(data, i * p, p);
 
     return tensor<T>(submeta, subdata);
+}
+
+template<typename T>
+template<typename... Args>
+inline
+unsigned int tensor<T>::flat(Args... args) const {
+    // std::array rather than a C array because sizeof...(Args) is 0 for a rank
+    // 0 tensor, and a zero-length C array is not a thing.  t() is how you reach
+    // the single element of a scalar.
+    const std::array<unsigned int, sizeof...(Args)> idx =
+        { static_cast<unsigned int>(args)... };
+
+    if(sizeof...(Args) != rank())
+        throw mismatch();
+
+    // Row-major, so the last index is the fastest and each axis multiplies in
+    // as it is passed: ((i0 * d1 + i1) * d2 + i2) ...  Same layout operator[]
+    // slices with, which is what makes the two agree.
+    unsigned int f = 0;
+
+    for(unsigned int i = 0; i < sizeof...(Args); i++)
+        f = f * meta[i] + idx[i];
+
+    return f;
+}
+
+template<typename T>
+template<typename... Args>
+inline
+T& tensor<T>::operator()(Args... args) {
+    return data[flat(args...)];
+}
+
+template<typename T>
+template<typename... Args>
+inline
+const T& tensor<T>::operator()(Args... args) const {
+    return data[flat(args...)];
 }
 
 template<typename T>

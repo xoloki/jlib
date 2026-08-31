@@ -73,6 +73,54 @@ static double at2(tensor<T>& t, unsigned int i, unsigned int j) {
     return t[i][j];
 }
 
+/**
+ * Writing through a const tensor must not compile.
+ *
+ * Asserted in both directions: a concept that is false because of a typo rather
+ * than because of constness would pass the half that matters and prove nothing.
+ */
+template<typename U>
+concept assignable_through = requires(U& t) { t[0][0] = 1.0; };
+
+static_assert(assignable_through<tensor<T> >,
+              "a non-const tensor should be writable through operator[]");
+static_assert(!assignable_through<const tensor<T> >,
+              "a const tensor should not be");
+
+static void the_accessors_agree(tensor<T>& t) {
+    std::cout << "\nthe accessors agree:\n";
+
+    const tensor<T>& ct = t;
+
+    double furthest = 0;
+
+    for(unsigned int i = 0; i < t.size(0); i++)
+        for(unsigned int j = 0; j < t.size(1); j++) {
+            // t(i,j) walks strides; t[i][j] builds two views and slices.  They
+            // share no code, so agreeing is worth something.
+            furthest = std::max(furthest, std::fabs(t(i, j) - at2(t, i, j)));
+
+            // And the const overloads reach the same elements, which is the
+            // whole point of adding them: this line did not compile before.
+            furthest = std::max(furthest, std::fabs(ct(i, j) - double(ct[i][j])));
+        }
+
+    ok("operator(i,j), operator[i][j] and their const forms all agree",
+       furthest == 0, std::to_string(furthest));
+
+    tensor<T> scalar(0);
+    scalar = 7.0;
+
+    ok("and operator() with no indices reaches a rank 0 element",
+       scalar() == 7.0, std::to_string(scalar()));
+
+    bool threw = false;
+    try { t(0u); }
+    catch(tensor<T>::mismatch&) { threw = true; }
+
+    ok("while the wrong number of indices is a mismatch", threw);
+}
+
 static void a_scalar_is_rank_zero() {
     std::cout << "\na scalar is rank zero:\n";
 
@@ -361,6 +409,12 @@ int main() {
     a_bad_contraction_is_refused();
     equality_compares_shape_and_elements();
 
+    {
+        tensor<T> t(2, 3u, 4u);
+        fill(t);
+        the_accessors_agree(t);
+    }
+
     // What a green run does not establish.
     //
     // That these are tensors in the physics sense.  There is no metric, no dual
@@ -382,6 +436,12 @@ int main() {
     // -fsanitize=address the unguarded version faults instead, which is the
     // only way seen so far to tell the two apart.  The guard is load-bearing;
     // this test is not what establishes it.
+    //
+    // That a const tensor is deeply const.  operator[] const returns a const
+    // tensor, which blocks `ct[i][j] = x` -- the static_assert above is what
+    // checks that -- but the result still shares storage, so copying it into a
+    // non-const tensor writes through.  The constness is shallow, as it is for
+    // any handle type.  See #143.
     //
     // And only one contraction convention: a's last axis against b's first.
     // Contracting an arbitrary pair of axes, which is what einsum does and what
