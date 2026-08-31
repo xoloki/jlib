@@ -61,21 +61,34 @@ std::vector<float> last_logits(const math::matrix<T>& logits) {
  * produces exactly this, token for token, and it cannot be checked against
  * something that does not exist yet.
  *
- * What that costs, measured rather than assumed, is less than the paragraph
- * above suggests. TinyLlama in fp16 on an M5, generating 49 tokens from a
- * 20-token prompt, takes 11.7s -- between 0.15 and 0.30s per token, **with no
- * growth visible** as the prefix runs from 20 to 69.
+ * What that costs was measured rather than assumed, and then measured again
+ * because the first reading was too short to see anything. TinyLlama in fp16
+ * on an M5, timing one forward pass at a fixed context:
  *
- * The reason is that a pass at these lengths is not spent on the prefix. It is
- * spent streaming 2.2GB of weights through the GPU, which happens once per
- * pass whatever the sequence length is, and against which the attention work
- * for a few dozen positions does not register. So the quadratic term is real
- * and is simply not the term that matters yet; it would be at a context of
- * thousands.
+ *      ctx     16     64    128    256    512   1024
+ *      pass  0.132  0.145  0.177  0.208  0.301  0.463  seconds
  *
- * Worth saying because it bounds what a cache is worth here: it removes work
- * that currently is not the bottleneck, and the honest claim for it is about
- * long contexts rather than about this.
+ * which is **linear in the context**, not quadratic: `t = 0.127 + 0.00033n`
+ * fits every point within a few percent. The constant is the cost of streaming
+ * 2.2GB of weights through the GPU, which happens once per pass whatever the
+ * length; the small slope is the activations growing with it.
+ *
+ * So generating n tokens from a prompt of p costs about
+ * `n*0.127 + 0.00033*(n*p + n*n/2)` -- quadratic in n, but with a coefficient
+ * three hundred times smaller than the constant it sits beside. Measured
+ * against a real 230-token run: predicted 39s, observed 45s.
+ *
+ * ### What a cache is worth, in numbers
+ *
+ * A key-value cache removes the growing term and leaves the constant exactly
+ * where it is, because the weights still stream once per token either way. So
+ * it is worth about **1.35x at 230 tokens and 2.3x at a thousand**, and
+ * approaches nothing as the generation gets short.
+ *
+ * Worth writing down because the larger lever is elsewhere: that 0.127s floor
+ * is weight bandwidth, so holding the weights quantised and dequantising
+ * inside the kernel would roughly halve it at every length, and compounds with
+ * the cache rather than competing with it.
  *
  * @param on_token called with each new token as it is produced, for a caller
  *                 that wants to stream rather than wait
