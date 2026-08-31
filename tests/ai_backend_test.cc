@@ -29,6 +29,7 @@
 // math::matrix, so there is nothing clever in it to be wrong about twice.
 
 #include <jlib/ai/backend.hh>
+#include <jlib/ai/attention.hh>
 
 #ifdef HAVE_METAL
 #include <jlib/metal/backend.hh>
@@ -289,6 +290,249 @@ static void softmax_survives_a_large_score(const char* name,
     }
 }
 
+/** Run one head of attention and bring the result back. */
+template<typename T>
+static matrix<T> run_attention(ai::backend<T>& b, const matrix<T>& q,
+                               const matrix<T>& k, const matrix<T>& v, bool causal)
+{
+    typename ai::backend<T>::tensor_ptr tq = b.make(q);
+    typename ai::backend<T>::tensor_ptr tk = b.make(k);
+    typename ai::backend<T>::tensor_ptr tv = b.make(v);
+
+    typename ai::backend<T>::tensor_ptr sc = b.make(k.N, q.N);
+    typename ai::backend<T>::tensor_ptr pr = b.make(k.N, q.N);
+    typename ai::backend<T>::tensor_ptr out = b.make(v.M, q.N);
+
+    ai::attention(b, tq, tk, tv, sc, pr, out, causal);
+    b.wait();
+
+    return out->read();
+}
+
+/** Attention: the first composite, built from primitives rather than a virtual. */
+template<typename T>
+static void the_attention(const char* name, std::vector<ai::backend<T>*>& backends) {
+    std::cout << "\nattention, " << name << ":\n";
+
+    const unsigned int d = 6;
+    const unsigned int n = 5;
+
+    std::mt19937 gen(101);
+
+    const matrix<T> q = random_matrix<T>(d, n, gen);
+    const matrix<T> k = random_matrix<T>(d, n, gen);
+    const matrix<T> v = random_matrix<T>(d, n, gen);
+
+    std::vector<matrix<T> > got;
+
+    for(ai::backend<T>* b : backends) {
+        typename ai::backend<T>::tensor_ptr tq = b->make(q);
+        typename ai::backend<T>::tensor_ptr tk = b->make(k);
+        typename ai::backend<T>::tensor_ptr tv = b->make(v);
+
+        typename ai::backend<T>::tensor_ptr sc = b->make(n, n);
+        typename ai::backend<T>::tensor_ptr pr = b->make(n, n);
+        typename ai::backend<T>::tensor_ptr out = b->make(d, n);
+
+        ai::attention(*b, tq, tk, tv, sc, pr, out, true);
+        b->wait();
+
+        const matrix<T> p = pr->read();
+
+        double furthest = 0;
+
+        for(unsigned int c = 0; c < n; c++) {
+            double sum = 0;
+
+            for(unsigned int r = 0; r < n; r++) sum += double(float(p(r,c)));
+
+            furthest = std::max(furthest, std::fabs(sum - 1.0));
+        }
+
+        ok(std::string("  ") + b->name() + ": every masked column still sums to one",
+           furthest < ((sizeof(T) == 2) ? 5e-3 : 1e-6), std::to_string(furthest));
+
+        // Strictly below the diagonal, which is where a key later than the
+        // query lives in this layout.  Exactly zero, not merely small:
+        // exp(-inf - m) is 0 for finite m.
+        bool clean = true;
+
+        for(unsigned int c = 0; c < n; c++)
+            for(unsigned int r = c + 1; r < n; r++)
+                if(float(p(r,c)) != 0.0f) clean = false;
+
+        ok(std::string("  ") + b->name() + ": with exactly zero weight on later keys",
+           clean);
+
+        got.push_back(out->read());
+    }
+
+    for(std::size_t i = 1; i < backends.size(); i++)
+        ok(std::string("  ") + backends[i]->name() + " agrees on the output",
+           worst(got[0], got[i]) < ((sizeof(T) == 2) ? 2e-2 : 1e-5),
+           std::to_string(worst(got[0], got[i])));
+}
+
+/**
+ * The property the mask exists for, and the one that catches it upside down.
+ *
+ * A shape check and a sums-to-one check both pass with the triangle inverted.
+ * This does not: change a key and a value at the last position, and every
+ * *earlier* output has to be untouched.
+ */
+template<typename T>
+static void attention_looks_only_backwards(const char* name,
+                                           std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nattention looks only backwards, " << name << ":\n";
+
+    const unsigned int d = 4;
+    const unsigned int n = 6;
+
+    std::mt19937 gen(7);
+
+    const matrix<T> q = random_matrix<T>(d, n, gen);
+    const matrix<T> k = random_matrix<T>(d, n, gen);
+    const matrix<T> v = random_matrix<T>(d, n, gen);
+
+    matrix<T> k2 = k;
+    matrix<T> v2 = v;
+
+    for(unsigned int r = 0; r < d; r++) {
+        k2(r, n - 1) = T(float(k2(r, n - 1)) + 3.0f);
+        v2(r, n - 1) = T(float(v2(r, n - 1)) - 2.5f);
+    }
+
+    for(ai::backend<T>* b : backends) {
+        const matrix<T> base = run_attention(*b, q, k,  v,  true);
+        const matrix<T> pert = run_attention(*b, q, k2, v2, true);
+
+        // Bit-identical, not merely close.  The masked score contributes
+        // exp(-inf) = 0 to the sum and never wins the max, so the arithmetic
+        // for an earlier column is the same arithmetic on the same values.
+        bool same = true;
+
+        for(unsigned int c = 0; c + 1 < n; c++)
+            for(unsigned int r = 0; r < d; r++)
+                if(float(base(r,c)) != float(pert(r,c))) same = false;
+
+        ok(std::string("  ") + b->name() +
+           ": changing the last key and value leaves every earlier output alone",
+           same);
+
+        // The control.  Without the mask the same change must reach backwards,
+        // or the assertion above is passing for some reason of its own.
+        const matrix<T> open_base = run_attention(*b, q, k,  v,  false);
+        const matrix<T> open_pert = run_attention(*b, q, k2, v2, false);
+
+        bool moved = false;
+
+        for(unsigned int c = 0; c + 1 < n; c++)
+            for(unsigned int r = 0; r < d; r++)
+                if(float(open_base(r,c)) != float(open_pert(r,c))) moved = true;
+
+        ok(std::string("  ") + b->name() + ": and without the mask it does not",
+           moved);
+    }
+}
+
+/**
+ * Zero queries make every score zero, so softmax is uniform and the output is
+ * a plain mean -- of the keys a query can see, which under the mask is a
+ * running prefix mean.  An exact expected value that owes nothing to a second
+ * implementation.
+ */
+template<typename T>
+static void flat_scores_average_the_values(const char* name,
+                                           std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nflat scores average the values, " << name << ":\n";
+
+    const unsigned int d = 3;
+    const unsigned int n = 4;
+
+    std::mt19937 gen(19);
+
+    const matrix<T> q(d, n);            // zeros
+    const matrix<T> k = random_matrix<T>(d, n, gen);
+    const matrix<T> v = random_matrix<T>(d, n, gen);
+
+    for(ai::backend<T>* b : backends) {
+        const matrix<T> got = run_attention(*b, q, k, v, true);
+
+        double furthest = 0;
+
+        for(unsigned int c = 0; c < n; c++) {
+            for(unsigned int r = 0; r < d; r++) {
+                double mean = 0;
+
+                for(unsigned int j = 0; j <= c; j++) mean += double(float(v(r,j)));
+
+                mean /= double(c + 1);
+
+                furthest = std::max(furthest, std::fabs(mean - double(float(got(r,c)))));
+            }
+        }
+
+        ok(std::string("  ") + b->name() +
+           ": each output is the mean of the values up to it",
+           furthest < ((sizeof(T) == 2) ? 2e-2 : 1e-5), std::to_string(furthest));
+    }
+}
+
+/**
+ * The 1/sqrt(d) scale, which nothing else here pins down.
+ *
+ * Every other attention assertion survives its removal: the prefix-mean test
+ * uses zero queries, so the scores are zero at any scale, and the host/GPU
+ * comparison drops it on both sides at once.  This is an exact expected value
+ * that the scale changes.
+ *
+ * One query and two keys, chosen so the arithmetic is short.  k_0 is the zero
+ * vector and k_1 is all ones against a query of all ones, so the dot products
+ * are 0 and d.  Scaled by 1/sqrt(d) with d = 4 the scores are 0 and 2, and the
+ * weight on the second key is e^2 / (1 + e^2).  Unscaled they would be 0 and 4,
+ * giving 0.982 instead of 0.881.
+ *
+ * Not causal: with one query at position 0 the mask would hide key 1, which is
+ * the whole experiment.
+ */
+template<typename T>
+static void the_scale_is_applied(const char* name,
+                                 std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nthe scale is applied, " << name << ":\n";
+
+    const unsigned int d = 4;
+
+    matrix<T> q(d, 1);
+    matrix<T> k(d, 2);
+    matrix<T> v(1, 2);
+
+    for(unsigned int r = 0; r < d; r++) {
+        q(r,0) = T(1.0f);
+        k(r,0) = T(0.0f);
+        k(r,1) = T(1.0f);
+    }
+
+    v(0,0) = T(0.0f);
+    v(0,1) = T(1.0f);
+
+    // exp(2) / (1 + exp(2)), which is the weight the scaled score puts on k_1,
+    // and v picks it out because v_0 is 0 and v_1 is 1.
+    const double want = std::exp(2.0) / (1.0 + std::exp(2.0));
+
+    for(ai::backend<T>* b : backends) {
+        const matrix<T> got = run_attention(*b, q, k, v, false);
+
+        const double diff = std::fabs(double(float(got(0,0))) - want);
+
+        ok(std::string("  ") + b->name() + ": the score is divided by sqrt(d)",
+           diff < ((sizeof(T) == 2) ? 5e-3 : 1e-5),
+           std::to_string(double(float(got(0,0)))) + " vs " + std::to_string(want));
+    }
+}
+
 static void a_tensor_from_the_wrong_backend_is_refused() {
     std::cout << "\na tensor from the wrong backend is refused:\n";
 
@@ -337,10 +581,18 @@ int main() {
         one_type<float>("float", b);
         the_reductions<float>("float", b);
         softmax_survives_a_large_score<float>("float", b);
+        the_attention<float>("float", b);
+        attention_looks_only_backwards<float>("float", b);
+        flat_scores_average_the_values<float>("float", b);
+        the_scale_is_applied<float>("float", b);
 #else
         one_type<float>("float", b);
         the_reductions<float>("float", b);
         softmax_survives_a_large_score<float>("float", b);
+        the_attention<float>("float", b);
+        attention_looks_only_backwards<float>("float", b);
+        flat_scores_average_the_values<float>("float", b);
+        the_scale_is_applied<float>("float", b);
 #endif
     }
 
@@ -356,6 +608,10 @@ int main() {
         one_type<_Float16>("_Float16", b);
         the_reductions<_Float16>("_Float16", b);
         softmax_survives_a_large_score<_Float16>("_Float16", b);
+        the_attention<_Float16>("_Float16", b);
+        attention_looks_only_backwards<_Float16>("_Float16", b);
+        flat_scores_average_the_values<_Float16>("_Float16", b);
+        the_scale_is_applied<_Float16>("_Float16", b);
     }
 
     a_tensor_from_the_wrong_backend_is_refused();
@@ -374,6 +630,13 @@ int main() {
     // which exists.  fp16 is for inference.
     //
     // Not double, which Metal has no type for and cannot be given one.
+    //
+    // For attention specifically: that a fused kernel would agree.  This is a
+    // composite of primitives, and the checks below are against the properties
+    // of the operation rather than against a reference implementation, so a
+    // FlashAttention-style kernel would have to be re-verified rather than
+    // assumed.  Nor multi-head anything -- heads here are separate tensors and
+    // separate calls, and nothing tests that a caller splits them correctly.
     //
     // The agreement assertions above would not, on their own, have caught a
     // missing max-subtraction: at the magnitudes random_matrix produces, both

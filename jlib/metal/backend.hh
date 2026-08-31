@@ -69,6 +69,7 @@ public:
     void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y);
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
+    void causal_mask(tensor_ptr& s);
     void rms_norm(const tensor_ptr& in, const tensor_ptr& weight,
                   tensor_ptr& out, float eps = 1e-5f);
 
