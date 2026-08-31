@@ -65,6 +65,7 @@ TESTS = \
 	ai_gguf_test \
 	ai_model_test \
 	ai_tokenizer_test \
+	ai_sampler_test \
 	math_object_test \
 	tensor_test \
 \
@@ -312,6 +313,9 @@ metal_gemm_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(METAL_LIBS)
 
 metal_tensor_test_SOURCES = metal_tensor_test.cc
 metal_tensor_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(JUTIL_LA) $(JSYS_LA) $(METAL_LIBS)
+
+ai_sampler_test_SOURCES  = ai_sampler_test.cc
+ai_sampler_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 
 ai_tokenizer_test_SOURCES  = ai_tokenizer_test.cc
 ai_tokenizer_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)

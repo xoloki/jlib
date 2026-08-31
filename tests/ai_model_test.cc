@@ -18,6 +18,7 @@
  *
  */
 
+#include <jlib/ai/generate.hh>
 #include <jlib/ai/model.hh>
 #include <jlib/ai/tokenizer.hh>
 
@@ -202,6 +203,70 @@ static void it_knows_the_capital_of_italy(const char* name, ai::backend<T>& b,
        (second >= 0 ? toks[std::size_t(second)] : "nothing"));
 }
 
+/**
+ * It writes the next sentences, not just the next token.
+ *
+ * Greedy, so there is nothing random to reproduce and no seed to record: the
+ * output is a function of the weights alone. That is what makes an exact string
+ * a fair assertion here rather than a hostage to an RNG.
+ *
+ * The prompt sets a pattern of three, and continuing it means both finishing
+ * the third clause correctly and inventing a fourth of the same shape. Getting
+ * "Rome" is one token; getting "The capital of Spain is Madrid" after it is the
+ * loop, the sampler, the tokenizer and the model all agreeing over twelve
+ * steps, each fed the output of the last.
+ */
+template<typename T>
+static void it_continues_the_pattern(const char* name, ai::backend<T>& b,
+                                     const ai::gguf& g)
+{
+    std::cout << "\nit continues the pattern, " << name << ":\n";
+
+    const ai::tokenizer tok(g);
+
+    typename ai::model<T>::config c = ai::model<T>::config::from(g);
+
+    ai::model<T> m(b, c);
+
+    m.load(g);
+
+    const std::string prompt =
+        "The capital of France is Paris. The capital of Germany is Berlin. "
+        "The capital of Italy is";
+
+    ai::sampler::config sc;
+    sc.temperature = 0.0f;
+
+    ai::sampler s(sc);
+
+    const std::vector<int> ids = tok.encode(prompt);
+
+    const std::vector<int> out =
+        ai::generate<T>(m, b, ids, 12, s, tok.eos());
+
+    ok("  twelve more tokens came out", out.size() == ids.size() + 12,
+       std::to_string(out.size() - ids.size()));
+
+    // Only what was generated, which is where the prompt stops.
+    const std::vector<int> tail(out.begin() + long(ids.size()), out.end());
+
+    const std::string wrote = tok.decode(tail);
+
+    // Twelve tokens, counted from the run rather than guessed: the first
+    // version of this expected the ten-token continuation and was two short.
+    ok("  and they say what they should",
+       wrote == "Rome. The capital of Spain is Madrid. The capital of",
+       "\"" + wrote + "\"");
+
+    // Nothing random went into that, so a second run is the same run.
+    ai::sampler again(sc);
+
+    const std::vector<int> twice =
+        ai::generate<T>(m, b, ids, 12, again, tok.eos());
+
+    ok("  greedy generation repeats exactly", twice == out);
+}
+
 int main(int argc, char** argv) {
     std::cout << std::unitbuf;
 
@@ -236,7 +301,10 @@ int main(int argc, char** argv) {
             ok("  the Metal backend comes up", false, e.what());
         }
 
-        if(gpu) it_knows_the_capital_of_italy<_Float16>("fp16 on the GPU", *gpu, g);
+        if(gpu) {
+            it_knows_the_capital_of_italy<_Float16>("fp16 on the GPU", *gpu, g);
+            it_continues_the_pattern<_Float16>("fp16 on the GPU", *gpu, g);
+        }
 #else
         std::cout << "\n  (no Metal: the forward pass needs a backend whose "
                   << "GEMM accumulates wider than fp16)\n";
@@ -259,9 +327,11 @@ int main(int argc, char** argv) {
     // where the rope angle grows and fp16 accumulation has more to lose, are
     // untested.
     //
-    // And nothing about generation: this is one forward pass over a prompt.
-    // There is no sampling and no cache, so nothing here produces a second
-    // token, let alone a sentence.
+    // That generation is efficient.  Every token re-runs the whole sequence,
+    // because there is no key-value cache -- measured at 0.15 to 0.30s per
+    // token here, dominated by streaming the weights rather than by the
+    // prefix, so the quadratic term does not bite at these lengths and would
+    // at a context of thousands.  See generate.hh.
     std::cout << "\n" << (failures ? "FAILED" : "PASSED") << ": " << failures
               << " failure(s)\n";
 

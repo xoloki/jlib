@@ -1,0 +1,127 @@
+/* -*- mode: C++ c-basic-offset: 4  -*-
+ *
+ * Copyright (c) 2026 Joey Yandle <xoloki@gmail.com>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+
+#ifndef JLIB_AI_SAMPLER_HH
+#define JLIB_AI_SAMPLER_HH
+
+#include <cstdint>
+#include <exception>
+#include <random>
+#include <string>
+#include <vector>
+
+namespace jlib {
+namespace ai {
+
+/**
+ * How a sampler chooses, hoisted out of the class that uses it.
+ *
+ * At namespace scope rather than nested, for the same reason sys::server_policy
+ * is: a default argument is a complete-class context, so `sampler(const config&
+ * c = config())` cannot see a nested aggregate's member initializers while
+ * sampler is still incomplete. Defining it first removes the problem instead of
+ * routing around it, and `sampler::config` still spells.
+ */
+struct sampler_config {
+    /** 0 is greedy; the draw is skipped entirely. */
+    float temperature = 0.8f;
+
+    /** How many of the highest to keep before normalising; 0 keeps all. */
+    unsigned int top_k = 40;
+
+    /** Keep the smallest set summing to this; 1 keeps all. */
+    float top_p = 0.95f;
+
+    std::uint64_t seed = 0;
+};
+
+/**
+ * Turning a column of logits into one token.
+ *
+ * The steps are the usual ones and the order matters: temperature, then top-k,
+ * then softmax over what is left, then top-p, then a draw.
+ *
+ * - **temperature** divides the logits. Below one it sharpens the distribution
+ *   and above one it flattens it. Zero means greedy -- take the largest and
+ *   draw nothing -- which is a different code path rather than a division by
+ *   zero, and is what makes a run reproducible without reference to a seed.
+ * - **top-k** keeps the k highest and discards the rest before anything is
+ *   normalised, so the discarded mass is redistributed rather than merely
+ *   unlikely.
+ * - **top-p** (nucleus) keeps the smallest set whose probabilities already sum
+ *   to p. It adapts where top-k cannot: a confident position keeps one or two
+ *   tokens and an uncertain one keeps many.
+ *
+ * top-p is applied *after* the softmax because it is defined on probabilities,
+ * and top-k *before* it because it is defined on order -- which is why they are
+ * not interchangeable and why both exist.
+ *
+ * The RNG is the sampler's own, seeded explicitly. Two samplers with the same
+ * seed and the same logits give the same tokens, which is what lets a test of
+ * anything downstream be a test rather than an observation.
+ */
+class sampler {
+public:
+    class exception : public std::exception {
+    public:
+        exception(const std::string& msg)
+            : m_msg("jlib::ai::sampler::exception: " + msg) {}
+
+        const char* what() const throw() { return m_msg.c_str(); }
+
+    private:
+        std::string m_msg;
+    };
+
+    typedef sampler_config config;
+
+    explicit sampler(const config& c = config());
+
+    const config& conf() const { return m_conf; }
+
+    /** Start the sequence again from the configured seed. */
+    void reseed(std::uint64_t seed);
+
+    /** One token from one column of logits. */
+    int pick(const std::vector<float>& logits);
+
+    /** The largest, with no randomness anywhere. */
+    static int argmax(const std::vector<float>& logits);
+
+    /**
+     * The probabilities pick() would draw from, for a caller that wants to see
+     * them -- and for a test that wants to check the shape of the
+     * distribution rather than which token came out of it.
+     *
+     * Returns pairs of (token, probability), ordered most likely first and
+     * summing to one. Empty only if the logits are.
+     */
+    std::vector<std::pair<int, float> > distribution(
+        const std::vector<float>& logits) const;
+
+private:
+    config m_conf;
+    std::mt19937_64 m_gen;
+};
+
+}
+}
+
+#endif // JLIB_AI_SAMPLER_HH
