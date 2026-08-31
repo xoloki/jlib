@@ -9,6 +9,10 @@ AM_CPPFLAGS = -I$(top_srcdir) \
 # libraries themselves are conditional, so an ungated program would fail at
 # link rather than being skipped cleanly.
 
+if HAVE_CURSES
+alpaca_programs = jalpaca
+endif
+
 if HAVE_SODIUM
 curve_programs = jcurve
 endif
@@ -49,6 +53,7 @@ glfw_programs = jglfwhyper jgltorus jhardhyper
 endif
 
 bin_PROGRAMS = jlib-mail jcrypt jm3u jchat \
+	$(alpaca_programs) \
 	$(curve_programs) \
 	$(neural_programs) \
 	$(cuda_programs) \
@@ -85,6 +90,10 @@ jcrypt_LDADD   = $(JCRYPT_LA) $(JSYS_LA)
 
 jm3u_SOURCES = jm3u.cc
 jm3u_LDADD   = $(JSYS_LA) $(JUTIL_LA)
+
+jalpaca_SOURCES  = jalpaca.cc
+jalpaca_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS) $(CURSES_CFLAGS)
+jalpaca_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA) $(METAL_LA) $(CURSES_LIBS)
 
 jchat_SOURCES  = jchat.cc
 jchat_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)

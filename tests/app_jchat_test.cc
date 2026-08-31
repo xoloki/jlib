@@ -108,6 +108,48 @@ static void it_explains_itself(const std::string& jchat) {
        none != 0 && err.find("usage:") != std::string::npos, std::to_string(none));
 }
 
+/**
+ * jalpaca's argument handling, which is all of it that can be tested here.
+ *
+ * The program wants a terminal and refuses to start without one, so nothing
+ * below the option parsing is reachable down a pipe -- which is the reason it
+ * is a second program rather than a flag on jchat, and the reason jchat is the
+ * one with the answers tested. What this does catch is the case that has bitten
+ * twice already: a program that links on one platform and not the other.
+ */
+static void the_alpaca_explains_itself() {
+    std::cout << "\nthe alpaca explains itself:\n";
+
+    const char* names[] = {
+        "../jlib/apps/jalpaca", "./jlib/apps/jalpaca", "../../build/jlib/apps/jalpaca"
+    };
+
+    std::string jalpaca = find_one(names, sizeof(names) / sizeof(names[0]));
+
+    if(jalpaca.empty()) {
+        std::cout << "  (no jalpaca built -- ncurses was not found at configure "
+                  << "time)\n";
+
+        return;
+    }
+
+    std::string out, err;
+
+    const int rc = jlib::sys::run({ jalpaca, "--help" }, out, err);
+
+    ok("  --help succeeds without a terminal", rc == 0, std::to_string(rc));
+
+    ok("  and describes what it is",
+       out.find("transcript") != std::string::npos &&
+       out.find("Escape") != std::string::npos, out.substr(0, 60));
+
+    out.clear(); err.clear();
+
+    const int bad = jlib::sys::run({ jalpaca, "--nonesuch", "x" }, out, err);
+
+    ok("  an option it does not have is refused", bad != 0, std::to_string(bad));
+}
+
 static void it_answers_from_the_command_line(const std::string& jchat,
                                              const std::string& model)
 {
@@ -202,6 +244,7 @@ int main(int argc, char** argv) {
 
     try {
         it_explains_itself(jchat);
+        the_alpaca_explains_itself();
 
         const std::string model = find_model();
 
