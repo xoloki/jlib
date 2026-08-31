@@ -115,11 +115,14 @@ static void load(ai::block<T>& blk, const weights<T>& w) {
 
 template<typename T>
 static matrix<T> run(ai::backend<T>& b, const weights<T>& w, const matrix<T>& x,
-                     bool causal = true)
+                     bool causal = true, bool rope = false)
 {
     ai::block<T> blk(b, D, H, F);
 
     load(blk, w);
+
+    if(rope) blk.set_rope(true);
+
     blk.reserve(N);
 
     typename ai::backend<T>::tensor_ptr tx = b.make(x);
@@ -425,6 +428,83 @@ static void the_branch_input_is_normalised(const char* name,
     }
 }
 
+/**
+ * Position, which the block did not have until now.
+ *
+ * Without a positional encoding and without the mask, a block is
+ * permutation-equivariant: it treats its input columns as a set, so reordering
+ * them just reorders the outputs.  That is not a defect to be worked around --
+ * it is what attention *is*, and it is exactly why a position has to be mixed
+ * in somewhere.
+ *
+ * So this asserts the property both ways round.  Without rope the block
+ * commutes with a permutation; with rope it does not, which is the whole
+ * reason rope exists.  The uncausal run is the one to test on, since the mask
+ * already breaks the symmetry by itself.
+ */
+template<typename T>
+static void rope_gives_the_block_a_sense_of_position(
+    const char* name, std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nrope gives the block a sense of position, " << name << ":\n";
+
+    std::mt19937 gen(43);
+
+    const weights<T> w(gen);
+
+    const matrix<T> x = random_matrix<T>(D, N, gen);
+
+    // One swap is enough to be a permutation, and keeping it simple keeps the
+    // inverse obvious.
+    const unsigned int i = 1;
+    const unsigned int j = 3;
+
+    matrix<T> swapped = x;
+
+    for(unsigned int r = 0; r < D; r++) {
+        swapped(r,i) = x(r,j);
+        swapped(r,j) = x(r,i);
+    }
+
+    for(ai::backend<T>* b : backends) {
+        const matrix<T> plain = run(*b, w, x,       false, false);
+        const matrix<T> perm  = run(*b, w, swapped, false, false);
+
+        // block(swap(x)) should be swap(block(x)).
+        double furthest = 0;
+
+        for(unsigned int c = 0; c < N; c++) {
+            const unsigned int from = (c == i) ? j : (c == j) ? i : c;
+
+            for(unsigned int r = 0; r < D; r++)
+                furthest = std::max(furthest,
+                                    std::fabs(double(float(perm(r,c))) -
+                                              double(float(plain(r,from)))));
+        }
+
+        ok(std::string("  ") + b->name() +
+           ": without rope the block treats its input as a set",
+           furthest < ((sizeof(T) == 2) ? 5e-3 : 1e-5), std::to_string(furthest));
+
+        const matrix<T> rplain = run(*b, w, x,       false, true);
+        const matrix<T> rperm  = run(*b, w, swapped, false, true);
+
+        double moved = 0;
+
+        for(unsigned int c = 0; c < N; c++) {
+            const unsigned int from = (c == i) ? j : (c == j) ? i : c;
+
+            for(unsigned int r = 0; r < D; r++)
+                moved = std::max(moved,
+                                 std::fabs(double(float(rperm(r,c))) -
+                                           double(float(rplain(r,from)))));
+        }
+
+        ok(std::string("  ") + b->name() + ": and with rope it does not",
+           moved > 1e-3, std::to_string(moved));
+    }
+}
+
 template<typename T>
 static void the_backends_agree(const char* name,
                                std::vector<ai::backend<T>*>& backends)
@@ -485,6 +565,7 @@ static void everything(const char* name, std::vector<ai::backend<T>*>& b) {
     heads_are_routed_separately<T>(name, b);
     the_heads_are_summed<T>(name, b);
     the_branch_input_is_normalised<T>(name, b);
+    rope_gives_the_block_a_sense_of_position<T>(name, b);
     silu_is_x_times_sigmoid<T>(name, b);
     the_backends_agree<T>(name, b);
     the_shapes_are_checked<T>(name, *b[0]);
@@ -500,7 +581,14 @@ int main() {
 #ifdef HAVE_METAL
         std::shared_ptr<jlib::metal::backend<float> > g;
         try { g.reset(new jlib::metal::backend<float>); b.push_back(g.get()); }
-        catch(std::exception& e) { std::cout << "  (no Metal device: " << e.what() << ")\n"; }
+        catch(std::exception& e) {
+            // A failure, not a note.  HAVE_METAL means Metal was found when
+            // this was configured, so the backend not coming up is a bug here
+            // -- most likely a kernel that no longer compiles.  Reported as a
+            // note, this test went on to pass with only the host backend and
+            // exit 0, which is how a broken kernel reaches a green run.
+            ok("  the Metal backend comes up", false, e.what());
+        }
 #endif
         everything<float>("float", b);
     }
@@ -512,7 +600,7 @@ int main() {
 #ifdef HAVE_METAL
         std::shared_ptr<jlib::metal::backend<_Float16> > g;
         try { g.reset(new jlib::metal::backend<_Float16>); b.push_back(g.get()); }
-        catch(std::exception&) {}
+        catch(std::exception& e) { ok("  the Metal backend comes up", false, e.what()); }
 #endif
         everything<_Float16>("_Float16", b);
     }
@@ -530,9 +618,17 @@ int main() {
     // they are called w_gate() and w_up() rather than w1() and w3() -- the
     // interface states it because the tests cannot check it.
     //
-    // Not position.  There is no positional encoding at all, so this block is
-    // permutation-equivariant apart from the causal mask -- reorder the input
-    // columns and the outputs reorder with them.  RoPE is its own branch.
+    // Which of the two rope layouts a model wants.  Both are rotations, both
+    // satisfy every property checked above, and they are not compatible with
+    // each other -- so what is exercised here is the wiring, never the choice.
+    // See ai::rope_layout.
+    //
+    // Nor that rope belongs on the queries and keys and not on the values.
+    // Measured: rotating the values as well fails nothing here.  The reason it
+    // is wrong is that a value carries what a position said rather than which
+    // position said it, so rotating it would make the content attended *to*
+    // depend on where it sat -- an argument about meaning, which no property
+    // test reaches.
     //
     // Not a stack.  One block is tested; nothing checks that N of them compose,
     // and pre-norm exists precisely for what happens at depth.

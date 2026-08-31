@@ -117,11 +117,34 @@ public:
     tensor_ptr& attn_norm() { return m_attn_norm; }
     tensor_ptr& ffn_norm() { return m_ffn_norm; }
 
+    /**
+     * Turn on rotary position embedding for this block's queries and keys.
+     *
+     * Not for the values: they carry what a position says, not which position
+     * said it, and rotating them would make the thing attended *to* depend on
+     * where it sat.
+     *
+     * Off by default, which leaves the block permutation-equivariant apart
+     * from the causal mask -- reorder the input columns and the outputs
+     * reorder with them.  Any real model wants this on.
+     *
+     * @param layout no test can check this for you; see ai::rope_layout
+     */
+    void set_rope(bool on, float theta = 10000.0f,
+                  rope_layout layout = rope_layout::interleaved);
+
     /** Size every intermediate for a sequence of this length. */
     void reserve(unsigned int seq);
 
-    /** out = block(x), with x and out both (d_model x seq). */
-    void forward(const tensor_ptr& x, tensor_ptr& out, bool causal = true);
+    /**
+     * out = block(x), with x and out both (d_model x seq).
+     *
+     * @param base_pos the position of the first column, for decoding against a
+     *                 cache where the columns being processed are not at the
+     *                 start of the sequence
+     */
+    void forward(const tensor_ptr& x, tensor_ptr& out, bool causal = true,
+                 unsigned int base_pos = 0);
 
 private:
     backend<T>& m_b;
@@ -131,6 +154,10 @@ private:
     unsigned int m_d_head;
     unsigned int m_d_ff;
     unsigned int m_seq = 0;
+
+    bool m_rope = false;
+    float m_theta = 10000.0f;
+    rope_layout m_layout = rope_layout::interleaved;
 
     std::vector<tensor_ptr> m_wq, m_wk, m_wv, m_wo;
     tensor_ptr m_gate, m_down, m_up;
@@ -171,6 +198,20 @@ block<T>::block(backend<T>& b, unsigned int d_model, unsigned int heads,
 }
 
 template<typename T>
+void block<T>::set_rope(bool on, float theta, rope_layout layout) {
+    // Here rather than at the first forward(): d_head is fixed at construction,
+    // so this is knowable now, and a shape error is worth having at the point
+    // the caller made the choice.
+    if(on && (m_d_head % 2))
+        throw backend_error("block: rope rotates in planes, so d_model / heads "
+                            "must be even");
+
+    m_rope = on;
+    m_theta = theta;
+    m_layout = layout;
+}
+
+template<typename T>
 void block<T>::reserve(unsigned int seq) {
     if(seq == 0)
         throw backend_error("block: a sequence of no positions");
@@ -191,7 +232,9 @@ void block<T>::reserve(unsigned int seq) {
 }
 
 template<typename T>
-void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal) {
+void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
+                       unsigned int base_pos)
+{
     if(m_seq == 0)
         throw backend_error("block: forward before reserve");
 
@@ -209,6 +252,12 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal) {
         m_b.multiply(m_wq[h], m_norm, m_q);
         m_b.multiply(m_wk[h], m_norm, m_k);
         m_b.multiply(m_wv[h], m_norm, m_v);
+
+        // Queries and keys only.  See set_rope.
+        if(m_rope) {
+            m_b.rope(m_q, base_pos, m_theta, m_layout);
+            m_b.rope(m_k, base_pos, m_theta, m_layout);
+        }
 
         attention(m_b, m_q, m_k, m_v, m_scores, m_probs, m_head, causal);
 

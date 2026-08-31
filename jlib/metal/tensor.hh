@@ -191,6 +191,9 @@ public:
     /** Set everything strictly below the diagonal to -infinity, in place. */
     void causal_mask(tensor<T>& s);
 
+    /** Rotary position embedding, in place; see ai::backend::rope. */
+    void rope(tensor<T>& x, unsigned int base_pos, float theta, bool split);
+
     /** RMS normalisation down each column, scaled by a per-row weight. */
     void rms_norm(const tensor<T>& in, const tensor<T>& weight, tensor<T>& out,
                   float eps = 1e-5f);
