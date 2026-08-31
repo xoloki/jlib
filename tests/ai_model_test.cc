@@ -331,19 +331,110 @@ static void it_answers_a_question(const char* name, ai::backend<T>& b,
     }
 }
 
+/**
+ * Generation stops when the callback says to, and not before.
+ *
+ * On a model of zeros rather than a real one: eight wide, one layer, and every
+ * weight left at its initial zero, so the logits are zero, greedy always picks
+ * token 0, and what comes out depends on the loop alone. No file, so this runs
+ * wherever the tests do -- which matters, because it is the mechanism an
+ * interrupt reaches the generation through, and a signal is not something the
+ * piped tests can send.
+ */
+static void generation_stops_when_asked() {
+    std::cout << "\ngeneration stops when asked:\n";
+
+    typename ai::model<float>::config c;
+
+    c.d_model = 8;
+    c.heads = 2;
+    c.kv_heads = 1;
+    c.d_ff = 16;
+    c.layers = 1;
+    c.vocab = 32;
+    c.context = 64;
+
+    ai::host_backend<float> b;
+    ai::model<float> m(b, c);
+
+    ai::sampler::config sc;
+    sc.temperature = 0.0f;
+
+    const std::vector<int> prompt{ 1, 2, 3 };
+
+    {
+        ai::sampler s(sc);
+
+        const std::vector<int> out = ai::generate<float>(m, b, prompt, 10, s);
+
+        ok("  with no callback it runs to the limit",
+           out.size() == prompt.size() + 10,
+           std::to_string(out.size() - prompt.size()));
+    }
+
+    {
+        ai::sampler s(sc);
+        int seen = 0;
+
+        const std::vector<int> out = ai::generate<float>(
+            m, b, prompt, 10, s, -1, [&](int) { seen++; return true; });
+
+        ok("  and a callback that keeps saying yes changes nothing",
+           out.size() == prompt.size() + 10 && seen == 10,
+           std::to_string(seen));
+    }
+
+    {
+        ai::sampler s(sc);
+        int seen = 0;
+
+        const std::vector<int> out = ai::generate<float>(
+            m, b, prompt, 10, s, -1, [&](int) { return ++seen < 3; });
+
+        // Three, not two: the token that prompted the stop is already made and
+        // already streamed, so it belongs to the result.  A partial reply is a
+        // real reply rather than something to be taken back.
+        ok("  saying no ends it after that token, not before",
+           out.size() == prompt.size() + 3,
+           std::to_string(out.size() - prompt.size()));
+
+        ok("  and the callback saw exactly the tokens produced", seen == 3,
+           std::to_string(seen));
+    }
+
+    {
+        ai::sampler s(sc);
+
+        // Stopping at once is a whole token, not none: there is no way to
+        // refuse the first, only to decline the second.
+        const std::vector<int> out = ai::generate<float>(
+            m, b, prompt, 10, s, -1, [&](int) { return false; });
+
+        ok("  refusing immediately still yields one", out.size() == prompt.size() + 1,
+           std::to_string(out.size() - prompt.size()));
+    }
+}
+
 int main(int argc, char** argv) {
     std::cout << std::unitbuf;
 
     const std::string path = find_model(argc, argv);
 
+    // Runs with or without a model, so the generation loop is covered on a
+    // machine that has neither the file nor a GPU.
+    generation_stops_when_asked();
+
     if(path.empty()) {
-        std::cout << "ai_model_test: no model file; pass one as an argument or "
-                  << "set JLIB_GGUF.\n"
+        std::cout << "\n  (no model file, so only the generation loop is "
+                  << "exercised)\n"
                   << "  curl -LO https://huggingface.co/TheBloke/"
                   << "TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/"
                   << "tinyllama-1.1b-chat-v1.0.Q8_0.gguf\n";
 
-        return 77;
+        std::cout << "\n" << (failures ? "FAILED" : "PASSED") << ": "
+                  << failures << " failure(s)\n";
+
+        return failures ? 1 : 0;
     }
 
     std::cout << "ai_model_test: " << path << "\n";
