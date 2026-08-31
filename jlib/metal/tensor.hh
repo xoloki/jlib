@@ -229,14 +229,26 @@ public:
     void softmax(const tensor<T>& in, tensor<T>& out);
 
     /** Mask below the diagonal, offset by how many keys precede the queries. */
-    void causal_mask(tensor<T>& s, unsigned int key_offset);
+    void causal_mask(tensor<T>& s, unsigned int key_offset,
+                     unsigned int queries);
+
+    /** Every head's scores in one dispatch; see ai::backend. */
+    void attention_scores(const tensor<T>& q, const tensor<T>& k, tensor<T>& s,
+                          unsigned int heads, unsigned int kv_heads,
+                          unsigned int d_head, float scale);
+
+    /** Every head's weighted sum over values, in one dispatch. */
+    void attention_weighted(const tensor<T>& v, const tensor<T>& p,
+                            tensor<T>& out, unsigned int heads,
+                            unsigned int kv_heads, unsigned int d_head);
 
     /** Copy src's columns into dst starting at a column. */
     void copy_columns(const tensor<T>& src, tensor<T>& dst,
                       unsigned int dst_first);
 
     /** Rotary position embedding, in place; see ai::backend::rope. */
-    void rope(tensor<T>& x, unsigned int base_pos, float theta, bool split);
+    void rope(tensor<T>& x, unsigned int base_pos, float theta, bool split,
+              unsigned int d_head);
 
     /** Column gather: out[:,i] = table[:,ids[i]]. */
     void gather(const tensor<T>& table, const std::vector<int>& ids,

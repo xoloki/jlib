@@ -78,13 +78,21 @@ public:
     void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y);
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
-    void causal_mask(tensor_ptr& s, unsigned int key_offset = 0);
+    void causal_mask(tensor_ptr& s, unsigned int key_offset = 0,
+                     unsigned int queries = 0);
+    void attention_scores(const tensor_ptr& q, const tensor_ptr& k,
+                          tensor_ptr& scores, unsigned int heads,
+                          unsigned int kv_heads, unsigned int d_head, T scale);
+    void attention_weighted(const tensor_ptr& v, const tensor_ptr& probs,
+                            tensor_ptr& out, unsigned int heads,
+                            unsigned int kv_heads, unsigned int d_head);
     void copy_columns(const tensor_ptr& src, tensor_ptr& dst,
                       unsigned int dst_first);
     void gather(const tensor_ptr& table, const std::vector<int>& ids,
                 tensor_ptr& out);
     void rope(tensor_ptr& x, unsigned int base_pos = 0, float theta = 10000.0f,
-              ai::rope_layout layout = ai::rope_layout::interleaved);
+              ai::rope_layout layout = ai::rope_layout::interleaved,
+              unsigned int d_head = 0);
     void rms_norm(const tensor_ptr& in, const tensor_ptr& weight,
                   tensor_ptr& out, float eps = 1e-5f);
 

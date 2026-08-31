@@ -1137,6 +1137,146 @@ static void a_quantised_weight_multiplies(const char* name,
     }
 }
 
+/**
+ * Every head at once gives what one head at a time gave.
+ *
+ * The per-head loop it replaces was 77% of the time to produce a token -- 4928
+ * small multiplies each costing about 16us to ask for and almost nothing to do.
+ * This is the same arithmetic with the head index moved inside the kernel, and
+ * the reference here is that arithmetic written out per head by hand.
+ */
+template<typename T>
+static void every_head_at_once(const char* name,
+                               std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nevery head at once, " << name << ":\n";
+
+    const uint heads = 4;
+    const uint kv_heads = 2;
+    const uint dh = 6;
+    const uint queries = 3;
+    const uint keys = 5;
+
+    std::mt19937 gen(131);
+
+    const matrix<T> q = random_matrix<T>(heads * dh, queries, gen);
+    const matrix<T> k = random_matrix<T>(kv_heads * dh, keys, gen);
+    const matrix<T> v = random_matrix<T>(kv_heads * dh, keys, gen);
+
+    const float scale = 0.5f;
+
+    // Written out by hand, head by head, which is what the block used to do.
+    matrix<T> want_s(keys, queries * heads);
+    matrix<T> want_o(heads * dh, queries);
+
+    const uint group = heads / kv_heads;
+
+    for(uint h = 0; h < heads; h++) {
+        const uint g = h / group;
+
+        for(uint i = 0; i < queries; i++)
+            for(uint j = 0; j < keys; j++) {
+                double sum = 0;
+
+                for(uint d = 0; d < dh; d++)
+                    sum += double(float(q(h * dh + d, i))) *
+                           double(float(k(g * dh + d, j)));
+
+                want_s(j, h * queries + i) = T(float(sum) * scale);
+            }
+    }
+
+    // The weighted sum uses the scores as its probabilities, which is not what
+    // attention does but is what makes this a test of the multiply alone.
+    for(uint h = 0; h < heads; h++) {
+        const uint g = h / group;
+
+        for(uint i = 0; i < queries; i++)
+            for(uint d = 0; d < dh; d++) {
+                double sum = 0;
+
+                for(uint j = 0; j < keys; j++)
+                    sum += double(float(v(g * dh + d, j))) *
+                           double(float(want_s(j, h * queries + i)));
+
+                want_o(h * dh + d, i) = T(sum);
+            }
+    }
+
+    for(ai::backend<T>* b : backends) {
+        typename ai::backend<T>::tensor_ptr tq = b->make(q);
+        typename ai::backend<T>::tensor_ptr tk = b->make(k);
+        typename ai::backend<T>::tensor_ptr tv = b->make(v);
+
+        typename ai::backend<T>::tensor_ptr ts = b->make(keys, queries * heads);
+        typename ai::backend<T>::tensor_ptr to = b->make(heads * dh, queries);
+
+        b->attention_scores(tq, tk, ts, heads, kv_heads, dh, T(scale));
+        b->attention_weighted(tv, ts, to, heads, kv_heads, dh);
+        b->wait();
+
+        const double ds = worst(ts->read(), want_s);
+        const double dobj = worst(to->read(), want_o);
+
+        ok(std::string("  ") + b->name() + ": the scores match head by head",
+           ds < ((sizeof(T) == 2) ? 2e-2 : 1e-4), std::to_string(ds));
+
+        ok(std::string("  ") + b->name() + ": and so does the weighted sum",
+           dobj < ((sizeof(T) == 2) ? 1e-1 : 1e-3), std::to_string(dobj));
+    }
+}
+
+/** The mask, when every head's scores sit side by side. */
+template<typename T>
+static void the_mask_knows_where_a_head_ends(const char* name,
+                                             std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nthe mask knows where a head ends, " << name << ":\n";
+
+    const uint keys = 6;
+    const uint queries = 3;
+    const uint heads = 2;
+    const uint offset = 2;
+
+    for(ai::backend<T>* b : backends) {
+        matrix<T> ones(keys, queries * heads);
+
+        for(uint r = 0; r < keys; r++)
+            for(uint c = 0; c < queries * heads; c++)
+                ones(r,c) = T(1.0f);
+
+        typename ai::backend<T>::tensor_ptr t = b->make(ones);
+
+        b->causal_mask(t, offset, queries);
+        b->wait();
+
+        const matrix<T> got = t->read();
+
+        bool right = true;
+
+        for(uint c = 0; c < queries * heads; c++) {
+            const uint i = c % queries;      // which query, within its head
+
+            for(uint r = 0; r < keys; r++)
+                if((!std::isfinite(float(got(r,c)))) != (r > i + offset))
+                    right = false;
+        }
+
+        ok(std::string("  ") + b->name() + ": each head is masked from its own "
+           "first query", right);
+
+        // Without the width it would treat the whole row of columns as one
+        // head, and the second head would be masked as though it came later.
+        typename ai::backend<T>::tensor_ptr u = b->make(ones);
+
+        b->causal_mask(u, offset);
+        b->wait();
+
+        ok(std::string("  ") + b->name() + ": which is not what it does without "
+           "being told the width", worst(got, u->read()) > 0.0);
+    }
+}
+
 static void a_tensor_from_the_wrong_backend_is_refused() {
     std::cout << "\na tensor from the wrong backend is refused:\n";
 
@@ -1204,6 +1344,8 @@ int main() {
         the_offset_mask<float>("float", b);
         beta_zero_does_not_read_the_output<float>("float", b);
         a_quantised_weight_multiplies<float>("float", b);
+        every_head_at_once<float>("float", b);
+        the_mask_knows_where_a_head_ends<float>("float", b);
 #else
         one_type<float>("float", b);
         the_reductions<float>("float", b);
@@ -1220,6 +1362,8 @@ int main() {
         the_offset_mask<float>("float", b);
         beta_zero_does_not_read_the_output<float>("float", b);
         a_quantised_weight_multiplies<float>("float", b);
+        every_head_at_once<float>("float", b);
+        the_mask_knows_where_a_head_ends<float>("float", b);
 #endif
     }
 
@@ -1247,6 +1391,8 @@ int main() {
         the_offset_mask<_Float16>("_Float16", b);
         beta_zero_does_not_read_the_output<_Float16>("_Float16", b);
         a_quantised_weight_multiplies<_Float16>("_Float16", b);
+        every_head_at_once<_Float16>("_Float16", b);
+        the_mask_knows_where_a_head_ends<_Float16>("_Float16", b);
     }
 
     a_tensor_from_the_wrong_backend_is_refused();

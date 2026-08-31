@@ -24,6 +24,7 @@
 #include <jlib/ai/attention.hh>
 #include <jlib/ai/backend.hh>
 
+#include <cmath>
 #include <vector>
 
 namespace jlib {
@@ -113,15 +114,33 @@ public:
     unsigned int d_head() const { return m_d_head; }
     unsigned int d_ff() const { return m_d_ff; }
 
-    /** (d_head x d_model), one per *query* head. */
-    tensor_ptr& wq(unsigned int h) { return m_wq[h]; }
+    /**
+     * One matrix each, in the file's orientation, read with multiply_tn.
+     *
+     * Not one per head, which is what these were until the per-head loop was
+     * measured at 77% of the time to produce a token. A projection for every
+     * head is a single (d_model x d_model) multiply; asking for it thirty-two
+     * times costs thirty-two times the asking and the same amount of doing.
+     *
+     *   wq  d_model x (heads * d_head)
+     *   wk  d_model x (kv_heads * d_head)
+     *   wv  d_model x (kv_heads * d_head)
+     *   wo  (heads * d_head) x d_model, the heads concatenated on its input
+     *
+     * Which is also exactly how a GGUF stores them, so loading is a copy and
+     * they can stay in the quantisation they arrived in -- the row slicing
+     * that stopped wo joining the others is gone with the loop that needed it.
+     */
+    tensor_ptr& wq() { return m_wq; }
+    tensor_ptr& wk() { return m_wk; }
+    tensor_ptr& wv() { return m_wv; }
+    tensor_ptr& wo() { return m_wo; }
 
-    /** (d_head x d_model), one per *key-value* head -- there are fewer. */
-    tensor_ptr& wk(unsigned int h) { return m_wk[h]; }
-    tensor_ptr& wv(unsigned int h) { return m_wv[h]; }
-
-    /** (d_model x d_head), one per head; the heads are summed through these. */
-    tensor_ptr& wo(unsigned int h) { return m_wo[h]; }
+    /** The same four kept in the encoding a file used. */
+    void set_wq(const quantised_ptr& q) { m_wq_q = q; m_wq.reset(); }
+    void set_wk(const quantised_ptr& q) { m_wk_q = q; m_wk.reset(); }
+    void set_wv(const quantised_ptr& q) { m_wv_q = q; m_wv.reset(); }
+    void set_wo(const quantised_ptr& q) { m_wo_q = q; m_wo.reset(); }
 
     /**
      * The feed-forward's three matrices, named for their roles.
@@ -273,20 +292,19 @@ private:
     float m_theta = 10000.0f;
     rope_layout m_layout = rope_layout::interleaved;
 
-    std::vector<tensor_ptr> m_wq, m_wk, m_wv, m_wo;
+    tensor_ptr m_wq, m_wk, m_wv, m_wo;
+    quantised_ptr m_wq_q, m_wk_q, m_wv_q, m_wo_q;
     tensor_ptr m_gate, m_down, m_up;
     quantised_ptr m_gate_q, m_up_q, m_down_q;
     tensor_ptr m_attn_norm, m_ffn_norm;
 
-    tensor_ptr m_norm, m_q, m_scores, m_probs, m_head, m_attn;
+    tensor_ptr m_norm, m_scores, m_probs, m_attn;
 
-    // One per key-value head, not one per query head: the whole point of
-    // grouping is that a group's key and value are computed once and read by
-    // every query head in it.
-    std::vector<tensor_ptr> m_k, m_v;
+    /** Every head side by side: q is d_model tall, k and v narrower. */
+    tensor_ptr m_qs, m_ks, m_vs, m_heads_out;
 
-    /** (d_head x capacity) each, one pair per key-value head. */
-    std::vector<tensor_ptr> m_kc, m_vc;
+    /** ((kv_heads * d_head) x capacity), one tensor rather than one per head. */
+    tensor_ptr m_kc, m_vc;
 
     /** What is allocated now, against m_context which is the ceiling. */
     unsigned int m_capacity = 0;
@@ -316,18 +334,13 @@ block<T>::block(backend<T>& b, unsigned int d_model, unsigned int heads,
                             "key-value head serves a whole group of query "
                             "heads");
 
-    for(unsigned int h = 0; h < heads; h++) {
-        m_wq.push_back(b.make(m_d_head, d_model));
-        m_wo.push_back(b.make(d_model, m_d_head));
-    }
-
-    // Fewer of these, which is the entire saving: TinyLlama has 32 query heads
-    // and 4 key-value heads, so its attn_k is [2048, 256] where attn_q is
-    // [2048, 2048].
-    for(unsigned int h = 0; h < kv_heads; h++) {
-        m_wk.push_back(b.make(m_d_head, d_model));
-        m_wv.push_back(b.make(m_d_head, d_model));
-    }
+    // One matrix each, in the file's orientation.  attn_k is narrower than
+    // attn_q by the ratio of key-value heads to query heads -- [2048, 256]
+    // against [2048, 2048] for TinyLlama, which is grouping visible in a shape.
+    m_wq = b.make(d_model, heads * m_d_head);
+    m_wk = b.make(d_model, kv_heads * m_d_head);
+    m_wv = b.make(d_model, kv_heads * m_d_head);
+    m_wo = b.make(heads * m_d_head, d_model);
 
     // The file's orientation; see w_gate().
     m_gate = b.make(d_model, d_ff);
@@ -361,8 +374,8 @@ void block<T>::enable_cache(unsigned int context) {
     m_cache_len = 0;
     m_capacity = 0;
 
-    m_kc.clear();
-    m_vc.clear();
+    m_kc.reset();
+    m_vc.reset();
 
     // Nothing allocated yet: the first forward() sizes it to what it needs.
 }
@@ -382,21 +395,17 @@ void block<T>::grow_cache(unsigned int need) {
     if(want < need) want = need;
     if(want > m_context) want = m_context;
 
-    std::vector<tensor_ptr> k, v;
+    tensor_ptr k = m_b.make(m_kv_heads * m_d_head, want);
+    tensor_ptr v = m_b.make(m_kv_heads * m_d_head, want);
 
-    for(unsigned int h = 0; h < m_kv_heads; h++) {
-        k.push_back(m_b.make(m_d_head, want));
-        v.push_back(m_b.make(m_d_head, want));
+    if(m_cache_len) {
+        m_b.copy_columns(m_kc, k, 0);
+        m_b.copy_columns(m_vc, v, 0);
 
-        if(m_cache_len) {
-            m_b.copy_columns(m_kc[h], k[h], 0);
-            m_b.copy_columns(m_vc[h], v[h], 0);
-        }
+        // Waited for: the old tensors go out of scope at the swap, and on a
+        // GPU an encoded copy has not run yet when the call returns.
+        m_b.wait();
     }
-
-    // Waited for: the old tensors go out of scope at the swap, and on a GPU an
-    // encoded copy has not run yet when the call returns.
-    if(m_cache_len) m_b.wait();
 
     m_kc.swap(k);
     m_vc.swap(v);
@@ -404,8 +413,8 @@ void block<T>::grow_cache(unsigned int need) {
     m_capacity = want;
 
     // The scores are as tall as the cache, so they move with it.
-    m_scores = m_b.make(m_capacity, m_seq);
-    m_probs = m_b.make(m_capacity, m_seq);
+    m_scores = m_b.make(m_capacity, m_seq * m_heads);
+    m_probs = m_b.make(m_capacity, m_seq * m_heads);
 }
 
 template<typename T>
@@ -423,24 +432,19 @@ void block<T>::reserve(unsigned int seq) {
 
     m_seq = seq;
 
-    m_norm   = m_b.make(m_d_model, seq);
-    m_q      = m_b.make(m_d_head, seq);
+    m_norm       = m_b.make(m_d_model, seq);
+    m_qs         = m_b.make(m_heads * m_d_head, seq);
+    m_ks         = m_b.make(m_kv_heads * m_d_head, seq);
+    m_vs         = m_b.make(m_kv_heads * m_d_head, seq);
+    m_heads_out  = m_b.make(m_heads * m_d_head, seq);
 
-    // As tall as the cache when there is one: the queries are matched against
-    // every key it holds, not only against this batch's.  grow_cache() remakes
-    // these when the capacity changes.
-    m_scores = m_b.make(m_capacity ? m_capacity : seq, seq);
+    // As tall as the cache when there is one, and as wide as every head's
+    // queries side by side.  grow_cache() remakes these when the capacity
+    // changes.
+    m_scores = m_b.make(m_capacity ? m_capacity : seq, seq * m_heads);
 
-    m_k.clear();
-    m_v.clear();
 
-    for(unsigned int h = 0; h < m_kv_heads; h++) {
-        m_k.push_back(m_b.make(m_d_head, seq));
-        m_v.push_back(m_b.make(m_d_head, seq));
-    }
-
-    m_probs  = m_b.make(m_capacity ? m_capacity : seq, seq);
-    m_head   = m_b.make(m_d_head, seq);
+    m_probs  = m_b.make(m_capacity ? m_capacity : seq, seq * m_heads);
     m_attn   = m_b.make(m_d_model, seq);
     m_h1     = m_b.make(m_d_ff, seq);
     m_h3     = m_b.make(m_d_ff, seq);
@@ -470,44 +474,58 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
 
     if(m_context) grow_cache(at + m_seq);
 
-    // Every key and value first, once each.  Computing them inside the query
-    // loop instead would give the same answer and do the work heads/kv_heads
-    // times over -- which is exactly the cost grouping exists to avoid.
-    for(unsigned int g = 0; g < m_kv_heads; g++) {
-        m_b.multiply(m_wk[g], m_norm, m_k[g]);
-        m_b.multiply(m_wv[g], m_norm, m_v[g]);
+    // One call for every head's queries, and one each for the keys and values.
+    // These were thirty-two and four calls; the arithmetic is identical and the
+    // asking is not.
+    if(m_wq_q) m_b.multiply_tn(m_wq_q, m_norm, m_qs);
+    else m_b.multiply_tn(m_wq, m_norm, m_qs);
 
-        // Keys are rotated here, once, for the same reason.  Values are not
-        // rotated at all -- see set_rope.
-        if(m_rope)
-            m_b.rope(m_k[g], at, m_theta, m_layout);
+    if(m_wk_q) m_b.multiply_tn(m_wk_q, m_norm, m_ks);
+    else m_b.multiply_tn(m_wk, m_norm, m_ks);
 
-        // Rotated before they are stored, so a key is rotated once however
-        // many times it is later read.
-        if(m_context) {
-            m_b.copy_columns(m_k[g], m_kc[g], at);
-            m_b.copy_columns(m_v[g], m_vc[g], at);
-        }
+    if(m_wv_q) m_b.multiply_tn(m_wv_q, m_norm, m_vs);
+    else m_b.multiply_tn(m_wv, m_norm, m_vs);
+
+    // Rotated inside each head, never across the boundary between two.  Values
+    // are not rotated at all -- see set_rope.
+    if(m_rope) {
+        m_b.rope(m_qs, at, m_theta, m_layout, m_d_head);
+        m_b.rope(m_ks, at, m_theta, m_layout, m_d_head);
     }
 
-    for(unsigned int h = 0; h < m_heads; h++) {
-        m_b.multiply(m_wq[h], m_norm, m_q);
-
-        if(m_rope)
-            m_b.rope(m_q, at, m_theta, m_layout);
-
-        const unsigned int g = kv_head_for(h);
-
-        if(m_context)
-            attention(m_b, m_q, m_kc[g], m_vc[g], m_scores, m_probs, m_head,
-                      causal, at);
-        else
-            attention(m_b, m_q, m_k[g], m_v[g], m_scores, m_probs, m_head, causal);
-
-        // beta 0 for the first head and 1 for the rest, which sums the heads
-        // in place of concatenating them and projecting once.
-        m_b.multiply(m_wo[h], m_head, m_attn, T(1), h ? T(1) : T(0));
+    // Rotated before they are stored, so a key is rotated once however many
+    // times it is later read.
+    if(m_context) {
+        m_b.copy_columns(m_ks, m_kc, at);
+        m_b.copy_columns(m_vs, m_vc, at);
     }
+
+    const tensor_ptr& keys = m_context ? m_kc : m_ks;
+    const tensor_ptr& values = m_context ? m_vc : m_vs;
+
+    // And the attention itself, four calls for every head rather than four per
+    // head.  The scale rides here rather than in a pass of its own.
+    m_b.attention_scores(m_qs, keys, m_scores, m_heads, m_kv_heads, m_d_head,
+                         T(1.0f / std::sqrt(float(m_d_head))));
+
+    // The offset is how many keys precede the queries, which is not the same
+    // as where the queries are in the sequence. With a cache they differ only
+    // because the cache holds the earlier keys; without one every key belongs
+    // to this batch and the offset is zero however far along base_pos says the
+    // batch sits. Passing `at` here regardless made base_pos shift the mask,
+    // which the uncached rope test caught immediately -- including its control,
+    // where base_pos should not have mattered at all.
+    if(causal) m_b.causal_mask(m_scores, m_context ? at : 0, m_seq);
+
+    m_b.softmax(m_scores, m_probs);
+
+    m_b.attention_weighted(values, m_probs, m_heads_out, m_heads, m_kv_heads,
+                           m_d_head);
+
+    // The heads arrive concatenated, so summing them is one multiply against
+    // the whole output projection rather than an accumulation per head.
+    if(m_wo_q) m_b.multiply_tn(m_wo_q, m_heads_out, m_attn);
+    else m_b.multiply_tn(m_wo, m_heads_out, m_attn);
 
     m_b.assign(x, out);
     m_b.add_scaled(T(1), m_attn, out);

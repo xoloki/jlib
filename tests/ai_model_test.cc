@@ -449,15 +449,11 @@ static void fill_randomly(ai::model<float>& m, std::mt19937& gen) {
         l.attn_norm()->write(ones);
         l.ffn_norm()->write(ones);
 
-        for(unsigned int h = 0; h < c.heads; h++) {
-            l.wq(h)->write(rnd(dh, c.d_model));
-            l.wo(h)->write(rnd(c.d_model, dh));
-        }
-
-        for(unsigned int h = 0; h < c.kv_heads; h++) {
-            l.wk(h)->write(rnd(dh, c.d_model));
-            l.wv(h)->write(rnd(dh, c.d_model));
-        }
+        // One matrix each, in the file's orientation.
+        l.wq()->write(rnd(c.d_model, c.heads * dh));
+        l.wk()->write(rnd(c.d_model, c.kv_heads * dh));
+        l.wv()->write(rnd(c.d_model, c.kv_heads * dh));
+        l.wo()->write(rnd(c.heads * dh, c.d_model));
 
         // The file's orientation: gate and up are (d_model x d_ff), down the
         // other way, each read with multiply_tn.

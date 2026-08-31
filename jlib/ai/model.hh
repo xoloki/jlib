@@ -102,27 +102,18 @@ public:
     /**
      * Place every weight in the file.
      *
-     * ### Orientation, which is where the work is
+     * ### Orientation
      *
-     * gguf.hh explains that a GGUF weight arrives as `[n_in, n_out]` and that
-     * the product a layer wants is therefore `W^T x`. Two of the tensors are
-     * used exactly that way and need no rearrangement at all: the embedding is
-     * a table of columns, and the head is multiplied with multiply_tn.
+     * There is nothing to do. A GGUF weight arrives as `[n_in, n_out]` and the
+     * product a layer wants is `W^T x`, so every weight is used in the
+     * orientation it came in and this function is a copy.
      *
-     * The block's weights are the other case. It holds `wq(h)` as
-     * (d_head x d_model) and multiplies straight, so each head's slice has to
-     * be transposed as it is placed -- and the slice differs by role:
-     *
-     *   attn_q, attn_k, attn_v   a *column* range, transposed
-     *   attn_output              a *row* range, transposed
-     *   ffn_gate, ffn_up, down   the whole matrix, transposed
-     *
-     * The alternative is to store the block's weights in the file's
-     * orientation and reach for multiply_tn there too, which would make this
-     * function a memcpy. That is very likely the better design and it is not
-     * this branch's to make: it changes block's public shapes and every test
-     * that fills them. Written down here so the choice is visible rather than
-     * inherited.
+     * It was not always. The block used to hold each attention weight sliced
+     * per head and transposed, and this function did that work -- which cost a
+     * transpose of a gigabyte at load and, worse, meant a weight could not stay
+     * in the quantisation it arrived in, since q8_0 blocks run along the
+     * contiguous dimension and do not survive being turned. Both went when the
+     * per-head loop did.
      *
      * @throws gguf::exception or backend_error if a tensor is missing or the
      *         wrong shape for what the config said
@@ -162,14 +153,6 @@ public:
                  unsigned int base_pos = 0);
 
 private:
-    /** Columns [c0, c0+n) of W, transposed: result(a,b) = W(b, c0+a). */
-    static math::matrix<T> col_slice_t(const math::matrix<float>& w,
-                                       unsigned int c0, unsigned int n);
-
-    /** Rows [r0, r0+n) of W, transposed: result(a,b) = W(r0+b, a). */
-    static math::matrix<T> row_slice_t(const math::matrix<float>& w,
-                                       unsigned int r0, unsigned int n);
-
     /** Straight across, narrowing to T. */
     static math::matrix<T> narrowed(const math::matrix<float>& w);
 
@@ -247,32 +230,6 @@ model<T>::model(backend<T>& b, const config& c)
 }
 
 template<typename T>
-math::matrix<T> model<T>::col_slice_t(const math::matrix<float>& w,
-                                      unsigned int c0, unsigned int n)
-{
-    math::matrix<T> out(n, w.M);
-
-    for(unsigned int a = 0; a < n; a++)
-        for(unsigned int b = 0; b < w.M; b++)
-            out(a, b) = T(w(b, c0 + a));
-
-    return out;
-}
-
-template<typename T>
-math::matrix<T> model<T>::row_slice_t(const math::matrix<float>& w,
-                                      unsigned int r0, unsigned int n)
-{
-    math::matrix<T> out(w.N, n);
-
-    for(unsigned int a = 0; a < w.N; a++)
-        for(unsigned int b = 0; b < n; b++)
-            out(a, b) = T(w(r0 + b, a));
-
-    return out;
-}
-
-template<typename T>
 math::matrix<T> model<T>::narrowed(const math::matrix<float>& w) {
     math::matrix<T> out(w.M, w.N);
 
@@ -342,33 +299,30 @@ void model<T>::load(const gguf& g) {
         expect(g, p + "ffn_norm.weight", d, 1);
         l.ffn_norm()->write(narrowed(g.read(p + "ffn_norm.weight")));
 
-        // A column range per head, transposed.
-        expect(g, p + "attn_q.weight", d, m_conf.heads * dh);
+        // Every one of these is a whole matrix in the file's orientation now
+        // -- no slice, no transpose, so all four can stay in the quantisation
+        // they arrived in. The row slicing that kept attn_output out of that
+        // went with the per-head loop that needed it.
+        struct { const char* name; unsigned int rows; unsigned int cols;
+                 void (block<T>::*set)(const quantised_ptr&);
+                 tensor_ptr& (block<T>::*get)(); } attn[] = {
+            { "attn_q.weight",      d, m_conf.heads * dh,    &block<T>::set_wq, &block<T>::wq },
+            { "attn_k.weight",      d, m_conf.kv_heads * dh, &block<T>::set_wk, &block<T>::wk },
+            { "attn_v.weight",      d, m_conf.kv_heads * dh, &block<T>::set_wv, &block<T>::wv },
+            { "attn_output.weight", m_conf.heads * dh, d,    &block<T>::set_wo, &block<T>::wo }
+        };
 
-        const math::matrix<float> wq = g.read(p + "attn_q.weight");
+        for(const auto& e : attn) {
+            expect(g, p + e.name, e.rows, e.cols);
 
-        for(unsigned int h = 0; h < m_conf.heads; h++)
-            l.wq(h)->write(col_slice_t(wq, h * dh, dh));
+            if(g.tensor(p + e.name).type == gguf::tensor_type::q8_0) {
+                const std::vector<char> raw = g.read_raw(p + e.name);
 
-        expect(g, p + "attn_k.weight", d, m_conf.kv_heads * dh);
-        expect(g, p + "attn_v.weight", d, m_conf.kv_heads * dh);
-
-        const math::matrix<float> wk = g.read(p + "attn_k.weight");
-        const math::matrix<float> wv = g.read(p + "attn_v.weight");
-
-        for(unsigned int h = 0; h < m_conf.kv_heads; h++) {
-            l.wk(h)->write(col_slice_t(wk, h * dh, dh));
-            l.wv(h)->write(col_slice_t(wv, h * dh, dh));
+                (l.*e.set)(m_b.make_q8_0(e.rows, e.cols, raw.data(), raw.size()));
+            }
+            else
+                (l.*e.get)()->write(narrowed(g.read(p + e.name)));
         }
-
-        // A *row* range per head for the output projection, because the heads
-        // are concatenated on its input side rather than its output side.
-        expect(g, p + "attn_output.weight", d, d);
-
-        const math::matrix<float> wo = g.read(p + "attn_output.weight");
-
-        for(unsigned int h = 0; h < m_conf.heads; h++)
-            l.wo(h)->write(row_slice_t(wo, h * dh, dh));
 
         expect(g, p + "ffn_gate.weight", d, m_conf.d_ff);
         expect(g, p + "ffn_up.weight", d, m_conf.d_ff);
