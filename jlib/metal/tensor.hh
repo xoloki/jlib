@@ -82,6 +82,46 @@ template<> struct supported<_Float16> { static constexpr bool value = true; };
  * Column-major, matching math::matrix -- see stream::multiply for why that
  * costs nothing.
  */
+/**
+ * A q8_0 weight living on the device, holding the file's bytes unchanged.
+ *
+ * Separate from tensor<T> because it is not one: there is no element type to
+ * template on, the storage is blocks rather than values, and the only thing
+ * that can be done with it is to be the left operand of a multiply_tn. Keeping
+ * it a different type means nothing can pass it where a tensor is wanted and
+ * get silently wrong arithmetic.
+ */
+class qweight {
+public:
+    /**
+     * @param rows the contiguous dimension, which for a GGUF weight is its
+     *        input width
+     * @param blocks 34 bytes per 32 values, exactly as a file holds them
+     */
+    qweight(std::shared_ptr<device> d, unsigned int rows, unsigned int cols,
+            const void* blocks, std::size_t bytes);
+
+    ~qweight();
+
+    unsigned int rows() const { return m_rows; }
+    unsigned int cols() const { return m_cols; }
+
+    /** How many bytes it occupies on the device. */
+    std::size_t bytes() const { return m_bytes; }
+
+private:
+    struct impl;
+
+    std::shared_ptr<device> m_device;
+    std::shared_ptr<impl> m_impl;
+
+    unsigned int m_rows = 0;
+    unsigned int m_cols = 0;
+    std::size_t m_bytes = 0;
+
+    template<typename U> friend class stream;
+};
+
 template<typename T>
 class tensor {
     static_assert(supported<T>::value,
@@ -201,6 +241,10 @@ public:
     /** Column gather: out[:,i] = table[:,ids[i]]. */
     void gather(const tensor<T>& table, const std::vector<int>& ids,
                 tensor<T>& out);
+
+    /** y = alpha * W^T x + beta * y, with W held quantised. */
+    void multiply_tn(const qweight& w, const tensor<T>& x, tensor<T>& y,
+                     float alpha, float beta);
 
     /** RMS normalisation down each column, scaled by a per-row weight. */
     void rms_norm(const tensor<T>& in, const tensor<T>& weight, tensor<T>& out,

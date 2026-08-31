@@ -459,9 +459,11 @@ static void fill_randomly(ai::model<float>& m, std::mt19937& gen) {
             l.wv(h)->write(rnd(dh, c.d_model));
         }
 
-        l.w_gate()->write(rnd(c.d_ff, c.d_model));
-        l.w_up()->write(rnd(c.d_ff, c.d_model));
-        l.w_down()->write(rnd(c.d_model, c.d_ff));
+        // The file's orientation: gate and up are (d_model x d_ff), down the
+        // other way, each read with multiply_tn.
+        l.w_gate()->write(rnd(c.d_model, c.d_ff));
+        l.w_up()->write(rnd(c.d_model, c.d_ff));
+        l.w_down()->write(rnd(c.d_ff, c.d_model));
     }
 }
 

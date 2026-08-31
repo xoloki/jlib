@@ -410,5 +410,43 @@ math::matrix<float> gguf::read(const std::string& name) const {
     return read(tensor(name));
 }
 
+std::uint64_t gguf::stored_bytes(tensor_type t, std::uint64_t n) {
+    switch(t) {
+    case tensor_type::f32:  return n * 4;
+    case tensor_type::f16:  return n * 2;
+    case tensor_type::q8_0: return (n / Q8_0_BLOCK) * Q8_0_BYTES;
+    default: break;
+    }
+
+    throw exception("stored_bytes: " + type_name(t) + " has no size here");
+}
+
+std::vector<char> gguf::read_raw(const tensor_info& t) const {
+    const std::uint64_t n = t.elements();
+
+    if(t.type == tensor_type::q8_0 && (n % Q8_0_BLOCK))
+        throw exception("tensor '" + t.name + "' is q8_0 but its element count "
+                        "is not a multiple of the block size");
+
+    std::vector<char> raw(static_cast<std::size_t>(stored_bytes(t.type, n)));
+
+    m_file.clear();
+    m_file.seekg(static_cast<std::streamoff>(m_data_offset + t.offset));
+
+    if(!m_file)
+        throw exception("could not seek to tensor '" + t.name + "'");
+
+    m_file.read(raw.data(), static_cast<std::streamsize>(raw.size()));
+
+    if(!m_file)
+        throw exception("the file ended while reading tensor '" + t.name + "'");
+
+    return raw;
+}
+
+std::vector<char> gguf::read_raw(const std::string& name) const {
+    return read_raw(tensor(name));
+}
+
 }
 }

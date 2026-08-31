@@ -165,6 +165,45 @@ void backend<T>::causal_mask(tensor_ptr& s, unsigned int key_offset) {
     m_stream->causal_mask(at<T>(s), key_offset);
 }
 
+/** What make_q8_0 hands back: a device-side weight, and nothing else. */
+template<typename T>
+class metal_quantised : public ai::backend<T>::quantised {
+public:
+    metal_quantised(std::shared_ptr<device> d, unsigned int rows,
+                    unsigned int cols, const void* blocks, std::size_t bytes)
+        : w(d, rows, cols, blocks, bytes) {}
+
+    unsigned int rows() const { return w.rows(); }
+    unsigned int cols() const { return w.cols(); }
+
+    qweight w;
+};
+
+template<typename T>
+typename ai::backend<T>::quantised_ptr
+backend<T>::make_q8_0(unsigned int rows, unsigned int cols, const void* blocks,
+                      std::size_t bytes)
+{
+    return typename ai::backend<T>::quantised_ptr(
+        new metal_quantised<T>(m_device, rows, cols, blocks, bytes));
+}
+
+template<typename T>
+void backend<T>::multiply_tn(const typename ai::backend<T>::quantised_ptr& a,
+                             const tensor_ptr& b, tensor_ptr& c,
+                             T alpha, T beta)
+{
+    // dynamic_cast, as everywhere here: a weight made by another backend would
+    // otherwise be reinterpreted rather than refused.
+    metal_quantised<T>* q = dynamic_cast<metal_quantised<T>*>(a.get());
+
+    if(!q)
+        throw ai::backend_error("multiply_tn: that quantised weight belongs to "
+                                "another backend");
+
+    m_stream->multiply_tn(q->w, at<T>(b), at<T>(c), float(alpha), float(beta));
+}
+
 template<typename T>
 void backend<T>::copy_columns(const tensor_ptr& src, tensor_ptr& dst,
                               unsigned int dst_first)

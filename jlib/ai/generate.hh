@@ -69,9 +69,19 @@ std::vector<float> last_logits(const math::matrix<T>& logits) {
  *      pass  0.132  0.145  0.177  0.208  0.301  0.463  seconds
  *
  * which is **linear in the context**, not quadratic: `t = 0.127 + 0.00033n`
- * fits every point within a few percent. The constant is the cost of streaming
- * 2.2GB of weights through the GPU, which happens once per pass whatever the
- * length; the small slope is the activations growing with it.
+ * fits every point within a few percent. The slope is the activations growing.
+ *
+ * **The constant is not what this said until it was measured.** It claimed the
+ * cost of streaming 2.2GB of weights, and that is wrong by about seven times:
+ * 2.2GB at the ~120GB/s the device reaches is 18ms, not 127. The constant is
+ * **dispatch overhead**, nearly all of it the per-head attention loop -- 22
+ * layers times 32 heads times about seven operations is some 4900 dispatches
+ * per token at roughly 25us each.
+ *
+ * Measured directly: a (2048 x 64) matrix-vector product, which is what one
+ * head's projection is, runs at 12.3GB/s, while the same arithmetic for all 32
+ * heads in one (2048 x 2048) call runs at 118.8GB/s -- thirty-two times the
+ * work for 3.3 times the time. See #163.
  *
  * So generating n tokens from a prompt of p costs about
  * `n*0.127 + 0.00033*(n*p + n*n/2)` -- quadratic in n, but with a coefficient
@@ -81,14 +91,16 @@ std::vector<float> last_logits(const math::matrix<T>& logits) {
  * ### What a cache is worth, in numbers
  *
  * A key-value cache removes the growing term and leaves the constant exactly
- * where it is, because the weights still stream once per token either way. So
- * it is worth about **1.35x at 230 tokens and 2.3x at a thousand**, and
- * approaches nothing as the generation gets short.
+ * where it is, since a pass is dispatched the same number of times either way.
+ * So it is worth about **1.35x at 230 tokens and 2.3x at a thousand**, and
+ * approaches nothing as the generation gets short. Observed: 1.48x on a real
+ * 230-token run.
  *
- * Worth writing down because the larger lever is elsewhere: that 0.127s floor
- * is weight bandwidth, so holding the weights quantised and dequantising
- * inside the kernel would roughly halve it at every length, and compounds with
- * the cache rather than competing with it.
+ * The larger lever is therefore batching the heads, not moving fewer bytes.
+ * Keeping the weights quantised was tried on the mistaken premise and is worth
+ * 1.12x end to end -- real, and a tenth of what the reasoning predicted,
+ * because it shrinks a nine percent slice of the cost rather than the ninety
+ * percent one. It does buy 4.5x on load and 1.5x on memory.
  *
  * @param on_token called with each new token as it is produced, for a caller
  *                 that wants to stream rather than wait.  **Return false to

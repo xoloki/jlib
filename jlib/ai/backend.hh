@@ -23,6 +23,7 @@
 #include <jlib/math/matrix.hh>
 
 #include <cmath>
+#include <cstring>
 #include <vector>
 #include <memory>
 #include <limits>
@@ -167,8 +168,48 @@ public:
     /** What this is, for a caller that wants to say where it ran. */
     virtual std::string name() const = 0;
 
+    /**
+     * A weight kept in the encoding the file used, rather than dequantised.
+     *
+     * The point is bandwidth. A forward pass streams every weight through the
+     * GPU once, and at these sizes that is what it spends its time on -- so a
+     * weight that arrives as q8_0 and stays that way moves 1.06 bytes per
+     * parameter instead of 2, and the kernel that reads it dequantises as it
+     * goes. Measured on a 2048x2048 matrix-vector product: 39us against MPS's
+     * 68us in fp16, both at about 120GB/s, which is the whole story -- the same
+     * bandwidth, moving half as much.
+     *
+     * Rows is the *contiguous* dimension, which for a GGUF weight is its
+     * input width. See gguf.hh on why that is the orientation to keep.
+     */
+    class quantised {
+    public:
+        virtual ~quantised() {}
+
+        virtual unsigned int rows() const = 0;
+        virtual unsigned int cols() const = 0;
+    };
+
+    typedef std::shared_ptr<quantised> quantised_ptr;
+
     virtual tensor_ptr make(unsigned int rows, unsigned int cols) = 0;
     virtual tensor_ptr make(const math::matrix<T>& m) = 0;
+
+    /**
+     * Take a q8_0 tensor's bytes exactly as a file holds them.
+     *
+     * Blocks of 32: a two-byte scale then thirty-two signed quants, 34 bytes
+     * for 32 values. Nothing is rearranged, so this is a copy to the device
+     * and not a conversion.
+     *
+     * @throws backend_error if the bytes do not match the shape
+     */
+    virtual quantised_ptr make_q8_0(unsigned int rows, unsigned int cols,
+                                    const void* blocks, std::size_t bytes) = 0;
+
+    /** c = alpha * a^T * b + beta * c, with a held quantised. */
+    virtual void multiply_tn(const quantised_ptr& a, const tensor_ptr& b,
+                             tensor_ptr& c, T alpha = T(1), T beta = T(0)) = 0;
 
     /** c = alpha * a * b + beta * c */
     virtual void multiply(const tensor_ptr& a, const tensor_ptr& b,
@@ -335,6 +376,15 @@ public:
     tensor_ptr make(unsigned int rows, unsigned int cols);
     tensor_ptr make(const math::matrix<T>& m);
 
+    typename backend<T>::quantised_ptr make_q8_0(unsigned int rows,
+                                                 unsigned int cols,
+                                                 const void* blocks,
+                                                 std::size_t bytes);
+
+    void multiply_tn(const typename backend<T>::quantised_ptr& a,
+                     const tensor_ptr& b, tensor_ptr& c,
+                     T alpha = T(1), T beta = T(0));
+
     void multiply(const tensor_ptr& a, const tensor_ptr& b, tensor_ptr& c,
                   T alpha = T(1), T beta = T(0));
     void multiply_tn(const tensor_ptr& a, const tensor_ptr& b, tensor_ptr& c,
@@ -448,6 +498,59 @@ math::matrix<T> slope_matrix(activation a, const math::matrix<T>& out) {
 
     return d;
 }
+
+/**
+ * The host's quantised weight, which is not quantised at all.
+ *
+ * It dequantises once at construction and keeps a plain matrix. That saves no
+ * memory and no bandwidth, and is not meant to: this is the reference the GPU
+ * kernel is checked against, so it should be the obvious thing rather than a
+ * second implementation of the same cleverness. What it does establish is that
+ * the *interface* is usable without a GPU, and that dequantising early and
+ * dequantising late agree.
+ */
+template<typename T>
+class host_quantised : public backend<T>::quantised {
+public:
+    host_quantised(unsigned int rows, unsigned int cols, const void* blocks,
+                   std::size_t bytes)
+        : m(rows, cols)
+    {
+        const std::size_t n = std::size_t(rows) * cols;
+
+        if(n % 32)
+            throw backend_error("make_q8_0: the element count is not a multiple "
+                                "of the block size");
+
+        if(bytes != (n / 32) * 34)
+            throw backend_error("make_q8_0: the bytes do not match the shape");
+
+        const char* raw = static_cast<const char*>(blocks);
+
+        // Rows is the contiguous dimension and a block runs along it, so a
+        // block never straddles two columns.
+        for(std::size_t b = 0; b < n / 32; b++) {
+            const char* p = raw + b * 34;
+
+            _Float16 d;
+
+            std::memcpy(&d, p, sizeof(d));
+
+            const signed char* q = reinterpret_cast<const signed char*>(p + 2);
+
+            for(std::size_t i = 0; i < 32; i++) {
+                const std::size_t at = b * 32 + i;
+
+                m(uint(at % rows), uint(at / rows)) = T(float(d) * float(q[i]));
+            }
+        }
+    }
+
+    unsigned int rows() const { return m.M; }
+    unsigned int cols() const { return m.N; }
+
+    math::matrix<T> m;
+};
 
 /** A tensor that is just a matrix. */
 template<typename T>
@@ -646,6 +749,29 @@ void host_backend<T>::copy_columns(const tensor_ptr& src, tensor_ptr& dst,
     for(uint c = 0; c < a.N; c++)
         for(uint r = 0; r < a.M; r++)
             b(r, dst_first + c) = a(r, c);
+}
+
+template<typename T>
+typename backend<T>::quantised_ptr
+host_backend<T>::make_q8_0(unsigned int rows, unsigned int cols,
+                           const void* blocks, std::size_t bytes)
+{
+    return typename backend<T>::quantised_ptr(
+        new host_quantised<T>(rows, cols, blocks, bytes));
+}
+
+template<typename T>
+void host_backend<T>::multiply_tn(const typename backend<T>::quantised_ptr& a,
+                                  const tensor_ptr& b, tensor_ptr& c,
+                                  T alpha, T beta)
+{
+    host_quantised<T>* q = dynamic_cast<host_quantised<T>*>(a.get());
+
+    if(!q)
+        throw backend_error("multiply_tn: that quantised weight belongs to "
+                            "another backend");
+
+    detail::blend(q->m.transpose() * at(b), at(c), alpha, beta);
 }
 
 template<typename T>
