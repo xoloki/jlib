@@ -102,6 +102,9 @@ private:
     // definition then collides with it.
     template<typename> friend class tensor;
     template<typename> friend class stream;
+
+    // Not a template: a quantised weight has no element type to be one over.
+    friend class qweight;
 };
 
 }

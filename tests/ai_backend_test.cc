@@ -36,6 +36,7 @@
 #endif
 
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <random>
@@ -984,6 +985,158 @@ static void beta_zero_does_not_read_the_output(const char* name,
     }
 }
 
+/**
+ * Encode a matrix the way a GGUF file would: blocks of 32 down the columns.
+ *
+ * Rows must be a multiple of 32 so a block never straddles two columns, which
+ * is true of every weight in a real file and is checked when one is made.
+ */
+template<typename T>
+static std::vector<char> as_q8_0(const matrix<T>& m) {
+    const std::size_t n = std::size_t(m.M) * m.N;
+
+    std::vector<char> out((n / 32) * 34);
+
+    for(std::size_t b = 0; b < n / 32; b++) {
+        float amax = 0;
+
+        for(std::size_t i = 0; i < 32; i++) {
+            const std::size_t at = b * 32 + i;
+
+            amax = std::max(amax, std::fabs(float(m(uint(at % m.M), uint(at / m.M)))));
+        }
+
+        const float scale = amax / 127.0f;
+        const _Float16 d = _Float16(scale);
+
+        char* p = out.data() + b * 34;
+
+        std::memcpy(p, &d, sizeof(d));
+
+        for(std::size_t i = 0; i < 32; i++) {
+            const std::size_t at = b * 32 + i;
+            const float v = float(m(uint(at % m.M), uint(at / m.M)));
+            const int q = scale > 0 ? int(std::lround(double(v / scale))) : 0;
+
+            p[2 + i] = char(q < -127 ? -127 : (q > 127 ? 127 : q));
+        }
+    }
+
+    return out;
+}
+
+/** And decode it again, which is what a weight kept quantised has to match. */
+template<typename T>
+static matrix<T> from_q8_0(const std::vector<char>& raw, uint rows, uint cols) {
+    matrix<T> m(rows, cols);
+
+    for(std::size_t b = 0; b < raw.size() / 34; b++) {
+        const char* p = raw.data() + b * 34;
+
+        _Float16 d;
+
+        std::memcpy(&d, p, sizeof(d));
+
+        for(std::size_t i = 0; i < 32; i++) {
+            const std::size_t at = b * 32 + i;
+
+            m(uint(at % rows), uint(at / rows)) =
+                T(float(d) * float(reinterpret_cast<const signed char*>(p + 2)[i]));
+        }
+    }
+
+    return m;
+}
+
+/**
+ * A weight kept quantised multiplies like the same weight dequantised.
+ *
+ * That is the whole contract: the kernel dequantises as it reads, so what
+ * comes out has to be what would have come out if the dequantising had
+ * happened first. Not approximately -- the same numbers, to whatever the
+ * element type can hold.
+ *
+ * It is checked against a *dequantised* reference rather than against the
+ * original matrix, deliberately. Quantising loses precision and there is no
+ * point measuring that here; what is being tested is that the two orders of
+ * doing the same arithmetic agree.
+ */
+template<typename T>
+static void a_quantised_weight_multiplies(const char* name,
+                                          std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\na quantised weight multiplies, " << name << ":\n";
+
+    const uint K = 64;
+    const uint N = 8;
+
+    std::mt19937 gen(97);
+
+    const matrix<T> w = random_matrix<T>(K, N, gen);
+
+    const std::vector<char> raw = as_q8_0(w);
+    const matrix<T> dequantised = from_q8_0<T>(raw, K, N);
+
+    for(uint ncols : { 1u, 5u }) {
+        const matrix<T> x = random_matrix<T>(K, ncols, gen);
+
+        for(ai::backend<T>* b : backends) {
+            typename ai::backend<T>::quantised_ptr q =
+                b->make_q8_0(K, N, raw.data(), raw.size());
+
+            ok(std::string("  ") + b->name() + ": it knows its own shape",
+               q->rows() == K && q->cols() == N);
+
+            typename ai::backend<T>::tensor_ptr tx = b->make(x);
+            typename ai::backend<T>::tensor_ptr got = b->make(N, ncols);
+
+            b->multiply_tn(q, tx, got);
+
+            // The reference: dequantise first, then the ordinary multiply.
+            typename ai::backend<T>::tensor_ptr td = b->make(dequantised);
+            typename ai::backend<T>::tensor_ptr want = b->make(N, ncols);
+
+            b->multiply_tn(td, tx, want);
+            b->wait();
+
+            const double d = worst(got->read(), want->read());
+
+            ok(std::string("  ") + b->name() + ": " + std::to_string(ncols) +
+               " column(s) match dequantising first",
+               d < ((sizeof(T) == 2) ? 5e-2 : 1e-3), std::to_string(d));
+        }
+    }
+
+    for(ai::backend<T>* b : backends) {
+        bool threw = false;
+
+        try { b->make_q8_0(K, N, raw.data(), raw.size() - 34); }
+        catch(std::exception&) { threw = true; }
+
+        ok(std::string("  ") + b->name() + ": bytes that do not match the shape "
+           "are refused", threw);
+
+        // And a weight from the other backend is refused rather than read.
+        if(backends.size() > 1) {
+            ai::backend<T>* other = (b == backends[0]) ? backends[1] : backends[0];
+
+            typename ai::backend<T>::quantised_ptr foreign =
+                other->make_q8_0(K, N, raw.data(), raw.size());
+
+            typename ai::backend<T>::tensor_ptr tx = b->make(K, 1);
+            typename ai::backend<T>::tensor_ptr out = b->make(N, 1);
+
+            threw = false;
+
+            try { b->multiply_tn(foreign, tx, out); b->wait(); }
+            catch(std::exception&) { threw = true; }
+
+            ok(std::string("  ") + b->name() + ": and one from another backend is too",
+               threw);
+        }
+    }
+}
+
 static void a_tensor_from_the_wrong_backend_is_refused() {
     std::cout << "\na tensor from the wrong backend is refused:\n";
 
@@ -1050,6 +1203,7 @@ int main() {
         the_column_copy<float>("float", b);
         the_offset_mask<float>("float", b);
         beta_zero_does_not_read_the_output<float>("float", b);
+        a_quantised_weight_multiplies<float>("float", b);
 #else
         one_type<float>("float", b);
         the_reductions<float>("float", b);
@@ -1065,6 +1219,7 @@ int main() {
         the_column_copy<float>("float", b);
         the_offset_mask<float>("float", b);
         beta_zero_does_not_read_the_output<float>("float", b);
+        a_quantised_weight_multiplies<float>("float", b);
 #endif
     }
 
@@ -1091,6 +1246,7 @@ int main() {
         the_column_copy<_Float16>("_Float16", b);
         the_offset_mask<_Float16>("_Float16", b);
         beta_zero_does_not_read_the_output<_Float16>("_Float16", b);
+        a_quantised_weight_multiplies<_Float16>("_Float16", b);
     }
 
     a_tensor_from_the_wrong_backend_is_refused();

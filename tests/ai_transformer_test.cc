@@ -88,7 +88,7 @@ struct weights {
 
     weights(std::mt19937& gen, unsigned int nh = H, unsigned int nkv = H)
         : heads(nh), kv(nkv),
-          w1(F, D), w3(F, D), w2(D, F), an(D, 1), fn(D, 1)
+          w1(D, F), w3(D, F), w2(F, D), an(D, 1), fn(D, 1)
     {
         for(unsigned int h = 0; h < heads; h++) {
             wq.push_back(random_matrix<T>(D / heads, D, gen, 0.5f));
@@ -100,9 +100,9 @@ struct weights {
             wv.push_back(random_matrix<T>(D / heads, D, gen, 0.5f));
         }
 
-        w1 = random_matrix<T>(F, D, gen, 0.5f);
-        w3 = random_matrix<T>(F, D, gen, 0.5f);
-        w2 = random_matrix<T>(D, F, gen, 0.5f);
+        w1 = random_matrix<T>(D, F, gen, 0.5f);
+        w3 = random_matrix<T>(D, F, gen, 0.5f);
+        w2 = random_matrix<T>(F, D, gen, 0.5f);
 
         for(unsigned int r = 0; r < D; r++) { an(r,0) = T(1.0f); fn(r,0) = T(1.0f); }
     }
@@ -172,8 +172,8 @@ static void a_zeroed_block_is_the_identity(const char* name,
             for(unsigned int c = 0; c < D / H; c++)
                 w.wo[h](r,c) = T(0.0f);
 
-    for(unsigned int r = 0; r < D; r++)
-        for(unsigned int c = 0; c < F; c++)
+    for(unsigned int r = 0; r < F; r++)
+        for(unsigned int c = 0; c < D; c++)
             w.w2(r,c) = T(0.0f);
 
     const matrix<T> x = random_matrix<T>(D, N, gen);
@@ -411,8 +411,8 @@ static void the_branch_input_is_normalised(const char* name,
 
     weights<T> w(gen);
 
-    for(unsigned int r = 0; r < D; r++)
-        for(unsigned int c = 0; c < F; c++)
+    for(unsigned int r = 0; r < F; r++)
+        for(unsigned int c = 0; c < D; c++)
             w.w2(r,c) = T(0.0f);
 
     const matrix<T> x = random_matrix<T>(D, N, gen);

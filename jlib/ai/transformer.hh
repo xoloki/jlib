@@ -74,6 +74,7 @@ template<typename T>
 class block {
 public:
     typedef typename backend<T>::tensor_ptr tensor_ptr;
+    typedef typename backend<T>::quantised_ptr quantised_ptr;
 
     /**
      * @param heads    must divide d_model
@@ -125,8 +126,14 @@ public:
     /**
      * The feed-forward's three matrices, named for their roles.
      *
-     * Gate and up are both (d_ff x d_model) and down is (d_model x d_ff), and
-     * the only thing that distinguishes gate from up is that **silu is applied
+     * **In the file's orientation**, which is the transpose of the obvious one:
+     * gate and up are (d_model x d_ff) and down is (d_ff x d_model), each
+     * multiplied with multiply_tn. That is what a GGUF holds -- see gguf.hh --
+     * and holding it the same way means a weight can stay in the quantisation
+     * it arrived in, whose blocks run along the contiguous dimension and would
+     * not survive being transposed.
+     *
+     * The only thing that distinguishes gate from up is that **silu is applied
      * to the gate**. That is a convention, not a property: swap them and the
      * result is a different but equally self-consistent network, which no test
      * here can tell from this one -- verified by mutation. It is only pinned by
@@ -139,6 +146,22 @@ public:
     tensor_ptr& w_gate() { return m_gate; }
     tensor_ptr& w_up() { return m_up; }
     tensor_ptr& w_down() { return m_down; }
+
+    /**
+     * The same three weights, kept in the encoding a file used.
+     *
+     * Setting one **releases** the tensor above for that weight, which is the
+     * point: holding both costs more than holding neither saves. The shape and
+     * the arithmetic are identical, only the storage differs. These three are 69%
+     * of a Llama's parameters and none of them is sliced, which is why they are
+     * the ones that can be kept quantised -- see the notes on the branch for
+     * what stops the attention weights joining them.
+     */
+    void set_gate(const quantised_ptr& q) { m_gate_q = q; m_gate.reset(); }
+    void set_up(const quantised_ptr& q) { m_up_q = q; m_up.reset(); }
+    void set_down(const quantised_ptr& q) { m_down_q = q; m_down.reset(); }
+
+    bool ffn_quantised() const { return bool(m_gate_q); }
 
     /** (d_model x 1) each: the learned RMS norm scales. */
     tensor_ptr& attn_norm() { return m_attn_norm; }
@@ -252,6 +275,7 @@ private:
 
     std::vector<tensor_ptr> m_wq, m_wk, m_wv, m_wo;
     tensor_ptr m_gate, m_down, m_up;
+    quantised_ptr m_gate_q, m_up_q, m_down_q;
     tensor_ptr m_attn_norm, m_ffn_norm;
 
     tensor_ptr m_norm, m_q, m_scores, m_probs, m_head, m_attn;
@@ -305,9 +329,10 @@ block<T>::block(backend<T>& b, unsigned int d_model, unsigned int heads,
         m_wv.push_back(b.make(m_d_head, d_model));
     }
 
-    m_gate = b.make(d_ff, d_model);
-    m_up = b.make(d_ff, d_model);
-    m_down = b.make(d_model, d_ff);
+    // The file's orientation; see w_gate().
+    m_gate = b.make(d_model, d_ff);
+    m_up = b.make(d_model, d_ff);
+    m_down = b.make(d_ff, d_model);
 
     m_attn_norm = b.make(d_model, 1);
     m_ffn_norm = b.make(d_model, 1);
@@ -491,8 +516,11 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
 
     m_b.rms_norm(out, m_ffn_norm, m_norm, m_eps);
 
-    m_b.multiply(m_gate, m_norm, m_h1);
-    m_b.multiply(m_up, m_norm, m_h3);
+    if(m_gate_q) m_b.multiply_tn(m_gate_q, m_norm, m_h1);
+    else m_b.multiply_tn(m_gate, m_norm, m_h1);
+
+    if(m_up_q) m_b.multiply_tn(m_up_q, m_norm, m_h3);
+    else m_b.multiply_tn(m_up, m_norm, m_h3);
 
     // Both in place; see the note on aliasing above.  silu on the gate and not
     // on the up projection, which is the whole of what makes this SwiGLU --
@@ -500,7 +528,8 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
     m_b.activate(activation::silu, m_h1, m_h1);
     m_b.hadamard(m_h1, m_h3, m_h1);
 
-    m_b.multiply(m_down, m_h1, m_ffn);
+    if(m_down_q) m_b.multiply_tn(m_down_q, m_h1, m_ffn);
+    else m_b.multiply_tn(m_down, m_h1, m_ffn);
 
     m_b.add_scaled(T(1), m_ffn, out);
 

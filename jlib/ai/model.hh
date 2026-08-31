@@ -49,6 +49,7 @@ template<typename T>
 class model {
 public:
     typedef typename backend<T>::tensor_ptr tensor_ptr;
+    typedef typename backend<T>::quantised_ptr quantised_ptr;
 
     /** What a file says about its own shape. */
     struct config {
@@ -89,6 +90,14 @@ public:
 
     /** (d_model x vocab), read through multiply_tn -- see the note on load(). */
     tensor_ptr& head() { return m_head; }
+
+    /**
+     * The head kept in the encoding the file used.
+     *
+     * Free to quantise: it is already in the file's orientation and already
+     * read with multiply_tn, so nothing about its shape or its use changes.
+     */
+    void set_head(const quantised_ptr& q) { m_head_q = q; m_head.reset(); }
 
     /**
      * Place every weight in the file.
@@ -173,6 +182,7 @@ private:
     std::vector<std::shared_ptr<block<T> > > m_layers;
 
     tensor_ptr m_embed, m_final_norm, m_head;
+    quantised_ptr m_head_q;
     tensor_ptr m_x, m_y;
 
     unsigned int m_seq = 0;
@@ -306,7 +316,17 @@ void model<T>::load(const gguf& g) {
     m_embed->write(narrowed(g.read("token_embd.weight")));
 
     expect(g, "output.weight", d, m_conf.vocab);
-    m_head->write(narrowed(g.read("output.weight")));
+
+    // Kept quantised where the file quantised it.  These are the tensors whose
+    // blocks run along the dimension they are used on, so nothing has to be
+    // rearranged and the file's bytes go to the device unchanged.
+    if(g.tensor("output.weight").type == gguf::tensor_type::q8_0) {
+        const std::vector<char> raw = g.read_raw("output.weight");
+
+        set_head(m_b.make_q8_0(d, m_conf.vocab, raw.data(), raw.size()));
+    }
+    else
+        m_head->write(narrowed(g.read("output.weight")));
 
     expect(g, "output_norm.weight", d, 1);
     m_final_norm->write(narrowed(g.read("output_norm.weight")));
@@ -354,9 +374,26 @@ void model<T>::load(const gguf& g) {
         expect(g, p + "ffn_up.weight", d, m_conf.d_ff);
         expect(g, p + "ffn_down.weight", m_conf.d_ff, d);
 
-        l.w_gate()->write(col_slice_t(g.read(p + "ffn_gate.weight"), 0, m_conf.d_ff));
-        l.w_up()->write(col_slice_t(g.read(p + "ffn_up.weight"), 0, m_conf.d_ff));
-        l.w_down()->write(col_slice_t(g.read(p + "ffn_down.weight"), 0, d));
+        // Straight across in the file's orientation -- no transpose, so the
+        // quantisation blocks still run along the dimension they were built
+        // for, and the bytes can go to the device as they are.
+        struct { const char* name; unsigned int rows; unsigned int cols;
+                 void (block<T>::*set)(const quantised_ptr&);
+                 tensor_ptr& (block<T>::*get)(); } ffn[] = {
+            { "ffn_gate.weight", d, m_conf.d_ff, &block<T>::set_gate, &block<T>::w_gate },
+            { "ffn_up.weight",   d, m_conf.d_ff, &block<T>::set_up,   &block<T>::w_up },
+            { "ffn_down.weight", m_conf.d_ff, d, &block<T>::set_down, &block<T>::w_down }
+        };
+
+        for(const auto& e : ffn) {
+            if(g.tensor(p + e.name).type == gguf::tensor_type::q8_0) {
+                const std::vector<char> raw = g.read_raw(p + e.name);
+
+                (l.*e.set)(m_b.make_q8_0(e.rows, e.cols, raw.data(), raw.size()));
+            }
+            else
+                (l.*e.get)()->write(narrowed(g.read(p + e.name)));
+        }
     }
 }
 
@@ -414,7 +451,8 @@ void model<T>::forward(const std::vector<int>& ids, tensor_ptr& logits,
     }
 
     m_b.rms_norm(m_x, m_final_norm, m_y, m_conf.rms_eps);
-    m_b.multiply_tn(m_head, m_y, logits);
+    if(m_head_q) m_b.multiply_tn(m_head_q, m_y, logits);
+    else m_b.multiply_tn(m_head, m_y, logits);
 }
 
 }

@@ -164,6 +164,21 @@ public:
     math::matrix<float> read(const tensor_info& t) const;
     math::matrix<float> read(const std::string& name) const;
 
+    /**
+     * The tensor's bytes exactly as the file holds them, undecoded.
+     *
+     * For a weight that is going to stay in the encoding it arrived in: a
+     * q8_0 tensor dequantised at load costs twice the memory and twice the
+     * bandwidth of one dequantised inside the kernel that reads it.
+     *
+     * The caller has to know what the bytes mean, which is what `type` is for.
+     */
+    std::vector<char> read_raw(const tensor_info& t) const;
+    std::vector<char> read_raw(const std::string& name) const;
+
+    /** How many bytes a tensor of this type and size occupies. */
+    static std::uint64_t stored_bytes(tensor_type t, std::uint64_t elements);
+
     /** The name of a ggml type, for an error message worth reading. */
     static std::string type_name(tensor_type t);
 
