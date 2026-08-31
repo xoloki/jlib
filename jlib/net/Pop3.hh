@@ -54,6 +54,29 @@ namespace jlib {
             Pop3(jlib::util::URL url, bool remove=true);
 
             /**
+             * How long a read or write may block, in seconds; 0 waits forever.
+             *
+             * **Forever is the default, and it is the wrong thing to leave it
+             * at.** A server that accepts the connection and then says nothing
+             * -- because it is wedged, or because it is waiting for a TLS
+             * handshake this end is not going to send -- leaves the client
+             * blocked with no way out. Nothing here notices; the connection is
+             * open and the read simply never returns.
+             *
+             * That is not hypothetical. Pointing a STARTTLS session at an
+             * implicit-TLS port is exactly the case, and it cost the test suite
+             * three minutes per occurrence: each side waited for the other
+             * until *dovecot's* own login timeout closed the socket. Against a
+             * server with no such timeout it would have waited indefinitely.
+             *
+             * The default is unchanged rather than fixed because changing it
+             * changes behaviour for every existing caller; see the issue.
+             */
+            void set_timeout(double seconds) { m_timeout = seconds; }
+            double get_timeout() const { return m_timeout; }
+
+
+            /**
              * Does this URL's scheme mean TLS?
              *
              * "pop3s" and "spop", compared whole.  It used to be
@@ -137,6 +160,9 @@ namespace jlib {
             std::string handshake(jlib::sys::socketstream& sock, const std::string& data, const std::string& ok);
             
             jlib::util::URL m_url;
+
+            /** Seconds a read or write may block; 0 is forever. */
+            double m_timeout = 0;
             bool m_remove;
         };
         

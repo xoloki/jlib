@@ -453,8 +453,15 @@ int main() {
 
         bool threw = false;
 
+        // Bounded, for the same reason as its POP3 twin: this connection is
+        // expected to fail and the failure is a silence, so without a deadline
+        // it waits for the *server* to give up. Three minutes, each time.
         try {
             jlib::net::Imap4 imap(nope);
+
+            imap.set_timeout(2);
+
+            // connect() reads the greeting itself, so this is where it fails.
             std::unique_ptr<jlib::sys::socketstream> sock(imap.connect());
         }
         catch(std::exception&) { threw = true; }

@@ -416,12 +416,27 @@ namespace jlib {
                 : basic_socketstream<charT,traitT>()
             {}
 
-            basic_tlsstream(const std::string& host, unsigned int port, bool delay = false) 
+            /**
+             * @param timeout    seconds to allow the connect
+             * @param io_timeout seconds a read or write may block, 0 forever.
+             *
+             * Taken here rather than set afterwards because with delay false
+             * the handshake happens **inside this constructor** -- pointed at a
+             * port that does not speak TLS, it blocks in the call, and there is
+             * no later moment at which set_timeout() could help. The adopting
+             * constructor in socketstream.hh takes one for the same reason on
+             * the server side, and says so.
+             */
+            basic_tlsstream(const std::string& host, unsigned int port,
+                            bool delay = false, double timeout = -1,
+                            double io_timeout = 0)
                 : basic_socketstream<charT,traitT>()
             {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
                     std::cerr << "basic_tlsstream::basic_tlsstream(" << host << ", " << port << ", " << std::boolalpha << delay << ")"<<std::endl;
-                this->m_buf = new basic_sslbuf<charT,traitT>(host, delay, host, port);
+                this->m_buf = new basic_sslbuf<charT,traitT>(host, delay, host,
+                                                             port, timeout,
+                                                             io_timeout);
                 this->init(this->m_buf);
             }
             

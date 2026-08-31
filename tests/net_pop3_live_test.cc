@@ -24,6 +24,7 @@
 // POP3 and choosing port 110 -- was asserted by reading the code and by
 // nothing else.  This is the test that was missing.
 
+#include <chrono>
 #include "mailserver.hh"
 
 #include <jlib/net/Pop3.hh>
@@ -214,10 +215,60 @@ int main() {
 
         bool threw = false;
 
-        try { jlib::net::Pop3(nope, false).retrieve(); }
+        // Bounded, because this connection is *expected* to fail and the
+        // failure is a silence: a plaintext session on the implicit-TLS port
+        // waits for a greeting while the server waits for a handshake. Left
+        // unbounded it took three minutes -- dovecot's own login timeout, not
+        // ours -- and was 180 of this test's 181 seconds.
+        try {
+            jlib::net::Pop3 p(nope, false);
+
+            p.set_timeout(2);
+            p.retrieve();
+        }
         catch(std::exception&) { threw = true; }
 
         ok("asking for STLS where it is not offered fails", threw);
+    }
+
+    {
+        // And the mirror image, which is the case a timeout set *after*
+        // construction cannot reach: implicit TLS pointed at the plaintext
+        // port. The handshake happens inside the stream's constructor, so a
+        // client blocks in there waiting for a ServerHello that is never
+        // coming -- and until the deadline was passed in rather than applied
+        // afterwards, nothing bounded it.
+        jlib::util::URL nope = account("pop3s", s.pop_port);
+
+        nope.set_pass(PASSWORD);
+
+        bool threw = false;
+
+        const auto began = std::chrono::steady_clock::now();
+
+        try {
+            jlib::net::Pop3 p(nope, false);
+
+            p.set_timeout(2);
+            p.retrieve();
+        }
+        catch(std::exception&) { threw = true; }
+
+        const double took = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - began).count();
+
+        ok("implicit TLS on the plaintext port fails", threw);
+
+        // Promptly, but **not** because of the deadline -- measured at about
+        // ten milliseconds. Dovecot's plaintext port greets the moment it
+        // accepts, so the handshake reads "+OK ..." where a ServerHello should
+        // be and errors out at once. Nothing here waits, so nothing here
+        // exercises the timeout.
+        //
+        // The case that does is a server which accepts and then says nothing,
+        // and no real server obliges. sys_socket_test builds one.
+        ok("and quickly, because the greeting is not a ServerHello",
+           took < 1.0, std::to_string(took) + "s");
     }
 
     // The control, as on the IMAP side: read the same message the way the old

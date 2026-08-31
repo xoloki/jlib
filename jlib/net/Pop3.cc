@@ -240,7 +240,13 @@ namespace jlib {
                                                          phost, pport);
                 }
                 else {
-                    sock = new jlib::sys::sslstream(m_url.get_host(), m_url.get_port_val());
+                    // The deadline goes in the constructor because the
+                    // handshake happens there: pointed at a port that does not
+                    // speak TLS, this blocks inside the call and there is no
+                    // later moment at which to bound it.
+                    sock = new jlib::sys::sslstream(m_url.get_host(),
+                                                    m_url.get_port_val(), false,
+                                                    -1, m_timeout);
                 }
             }
             else if(use_starttls(m_url)) {
@@ -254,7 +260,8 @@ namespace jlib {
                 }
                 else {
                     sock = new jlib::sys::tlsstream(m_url.get_host(),
-                                                    m_url.get_port_val(), true);
+                                                    m_url.get_port_val(), true,
+                                                    -1, m_timeout);
                 }
             }
             else {
@@ -268,6 +275,12 @@ namespace jlib {
                 }
             }
 
+
+            // The proxying paths above do not take it in their constructors
+            // yet, so they get it here -- which covers the greeting below but
+            // not a handshake inside the constructor. The two direct paths
+            // pass it in and do not need this.
+            if(m_timeout > 0) sock->set_timeout(m_timeout);
 
             std::string buf;
             jlib::sys::getline(*sock, buf);
