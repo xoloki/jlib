@@ -19,8 +19,10 @@
  */
 
 #include <jlib/ai/tokenizer.hh>
+#include <jlib/ai/pretokenizer.hh>
 
 #include "llama3_tokens.hh"
+#include "llama3_splits.hh"
 
 #include <chrono>
 #include <cstdlib>
@@ -358,7 +360,7 @@ static void a_byte_level_vocabulary_matches_the_reference(const std::string& pat
     ok("  and there is no unknown token, because nothing is unencodable",
        t.unk() < 0, std::to_string(t.unk()));
 
-    std::size_t matched = 0, pending = 0;
+    std::size_t matched = 0;
 
     for(std::size_t i = 0; i < LLAMA3_COUNT; i++) {
         const tokenization& c = LLAMA3[i];
@@ -369,26 +371,107 @@ static void a_byte_level_vocabulary_matches_the_reference(const std::string& pat
         for(int j = 0; same && j < c.count; j++)
             same = got[std::size_t(j)] == c.ids[j];
 
-        if(c.pretok) {
-            // Known difference: the answer depends on the pre-tokenization
-            // regex, which is not implemented.  Asserted as *still wrong*, so
-            // that implementing it makes this test fail and say so rather than
-            // passing quietly with the fixture unexamined.
-            ok(std::string("  pre-tokenizer still needed for '") + c.text + "'",
-               !same);
-
-            pending++;
-
-            continue;
-        }
-
         ok(std::string("  '") + c.text + "'", same, spell(t, got));
 
         if(same) matched++;
     }
 
-    std::cout << "    " << matched << " match, " << pending
-              << " await the pre-tokenizer\n";
+    std::cout << "    " << matched << " of " << LLAMA3_COUNT
+              << " match the reference tokenizer\n";
+}
+
+/**
+ * The pre-tokenizer, against the pattern's own answers.
+ *
+ * This needs no model: the split is a property of the pattern, not of a
+ * vocabulary, and the oracle is Python's `regex` module running the pattern
+ * copied out of Llama 3.2's tokenizer.json.  It runs first for that reason --
+ * a machine with no gguf file to hand still checks this much.
+ *
+ * It is separate from the tokenization fixtures because those cannot localise
+ * a failure.  A wrong id list means something between the split and the last
+ * merge is wrong; a wrong split says which.
+ */
+static void the_pre_tokenizer_splits_as_the_pattern_does() {
+    std::cout << "\nit splits as the pattern does:\n";
+
+    std::size_t matched = 0;
+
+    for(const pre_split& c : LLAMA3_SPLITS) {
+        std::vector<std::string> got;
+
+        try { got = ai::pretokenizer::split(c.text); }
+        catch(std::exception& e) {
+            ok(std::string("  '") + c.text + "'", false, e.what());
+
+            continue;
+        }
+
+        bool same = got.size() == std::size_t(c.count);
+
+        for(int j = 0; same && j < c.count; j++)
+            same = got[std::size_t(j)] == c.parts[j];
+
+        std::string spelled;
+
+        for(const std::string& g : got) spelled += "[" + g + "]";
+
+        ok(std::string("  '") + c.text + "'", same, spelled);
+
+        if(same) matched++;
+
+        // Whatever the split is, it must not lose a byte: every chunk is fed
+        // to the merges and their output is the prompt.  A splitter that drops
+        // a character silently shortens what the model is asked.
+        std::string joined;
+
+        for(const std::string& g : got) joined += g;
+
+        if(joined != std::string(c.text))
+            ok("    and loses nothing", false, joined);
+    }
+
+    std::cout << "    " << matched << " of "
+              << sizeof(LLAMA3_SPLITS) / sizeof(LLAMA3_SPLITS[0])
+              << " match the pattern\n";
+}
+
+/**
+ * A byte that is not part of a character still splits.
+ *
+ * No oracle here, because there cannot be one: the reference pre-tokenizer
+ * runs on text Python has already decoded, so it can never be handed these.
+ * What is asserted is the property the tokenizer already promises everywhere
+ * else -- anything encodes -- which the grammar would otherwise have taken
+ * away from byte-level vocabularies only.
+ */
+static void a_byte_that_is_not_a_character_still_splits() {
+    std::cout << "\na byte that is not a character still splits:\n";
+
+    const std::string cases[] = {
+        std::string("a\xff" "b"),        // a lone 0xFF in the middle
+        std::string("\xff"),             // and on its own
+        std::string("a\xc3"),            // a sequence cut off by the end
+        std::string("\xe2\x96")          // two bytes of a three-byte one
+    };
+
+    for(const std::string& c : cases) {
+        std::vector<std::string> got;
+
+        try { got = ai::pretokenizer::split(c); }
+        catch(std::exception& e) {
+            ok("  a stray byte does not throw", false, e.what());
+
+            continue;
+        }
+
+        std::string joined;
+
+        for(const std::string& g : got) joined += g;
+
+        ok("  it splits and gives every byte back", joined == c,
+           std::to_string(got.size()) + " chunk(s)");
+    }
 }
 
 /** SentencePiece is untouched by any of it. */
@@ -399,14 +482,41 @@ static void the_sentencepiece_path_is_unchanged(const ai::tokenizer& t) {
        t.convention() == ai::tokenizer::flavour::sentencepiece);
 
     // The dummy prefix is the whole difference between the two conventions,
-    // and it must still be there: "Hello" and " Hello" tokenize alike.
+    // and it must still be there.  Not that "Hello" and " Hello" come out
+    // alike -- they do not, and asserting that would fail: the second is a
+    // marker token and then the word.  What the prefix buys is that a *leading*
+    // word gets the marked form anyway, so it is the same token as the one in
+    // the middle of a sentence.
     ok("  and the dummy prefix is still applied",
-       t.encode("Hello", false, false) == t.encode("Hello", false, false) &&
-       !t.encode("Hello", false, false).empty());
+       t.encode("Hello", false, false) ==
+       std::vector<int>({ t.id_of("\xe2\x96\x81" "Hello") }),
+       spell(t, t.encode("Hello", false, false)));
+
+    // Which is the assertion with teeth: the unmarked form exists too, and a
+    // byte-level encoder -- one that added no prefix -- would return that.
+    ok("  rather than the unmarked form a byte-level encoder would give",
+       t.id_of("Hello") >= 0 &&
+       t.encode("Hello", false, false) != std::vector<int>({ t.id_of("Hello") }),
+       std::to_string(t.id_of("Hello")));
+
+    // The previous assertion here compared encode("Hello") with itself, and
+    // so passed no matter what the byte-level work did to this path.  The
+    // comment above it described the test that was meant, which is what made
+    // it read as covering something.
 }
 
 int main(int argc, char** argv) {
     std::cout << std::unitbuf;
+
+    try {
+        the_pre_tokenizer_splits_as_the_pattern_does();
+        a_byte_that_is_not_a_character_still_splits();
+    }
+    catch(std::exception& e) {
+        std::cerr << "ai_tokenizer_test: " << e.what() << "\n";
+
+        return 1;
+    }
 
     const std::string path = find_model(argc, argv);
 
@@ -414,7 +524,9 @@ int main(int argc, char** argv) {
         std::cout << "ai_tokenizer_test: no model file; pass one as an argument "
                   << "or set JLIB_GGUF.\n";
 
-        return 77;
+        // A failure is a failure even when the rest is skipped: the splitter
+        // section above ran, and SKIP would hide it.
+        return failures ? 1 : 77;
     }
 
     std::cout << "ai_tokenizer_test: " << path << "\n";
@@ -429,8 +541,8 @@ int main(int argc, char** argv) {
         the_sentencepiece_path_is_unchanged(t);
         anything_encodes(t);
         a_control_token_in_the_text_is_that_token(t);
-    pieces_concatenate_to_the_whole(t);
-    it_round_trips(t);
+        pieces_concatenate_to_the_whole(t);
+        it_round_trips(t);
         it_is_quick_enough(t);
         const std::string bpe = find_byte_level_model();
 
@@ -464,6 +576,11 @@ int main(int argc, char** argv) {
     // has all-zero scores, so merges are the only usable signal in it; a
     // vocabulary with real scores would want SentencePiece's algorithm, and
     // this would tokenize it differently and never say so.
+    //
+    // That the splitter is right on text unlike these.  Thirty-four cases came
+    // from the reference regex, chosen for the boundaries this grammar has to
+    // get right, and that is not the same as agreeing with it everywhere --
+    // there is no property here that a fixture list can establish.
     //
     // And no chat template.  The file carries tokenizer.chat_template, which
     // is how an instruct model expects a conversation to be laid out, and

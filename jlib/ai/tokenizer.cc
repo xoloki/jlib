@@ -19,6 +19,7 @@
  */
 
 #include <jlib/ai/tokenizer.hh>
+#include <jlib/ai/pretokenizer.hh>
 
 #include <sstream>
 
@@ -301,25 +302,44 @@ void tokenizer::encode_run(const std::string& text, bool add_prefix,
 {
     if(text.empty()) return;
 
-    std::string prepared;
-
     if(m_flavour == flavour::byte_level) {
-        // Every byte becomes a character the vocabulary holds, so nothing can
-        // fail to encode and there is no dummy prefix: a leading space is a
-        // character like any other, and adding one would change the word.
-        for(std::size_t i = 0; i < text.size(); i++)
-            prepared += m_byte_char[static_cast<unsigned char>(text[i])];
-    }
-    else {
-        // The marker for every space, and one in front: see the header.
-        prepared = add_prefix ? MARKER : "";
+        // The merges may not run across a chunk boundary -- that is the whole
+        // point of the pre-tokenizer, and why "1234567890" is four tokens
+        // rather than three.  Each chunk is mapped and merged on its own.
+        const std::vector<std::string> chunks = pretokenizer::split(text);
 
-        for(std::size_t i = 0; i < text.size(); i++) {
-            if(text[i] == ' ') prepared += MARKER;
-            else prepared += text[i];
+        for(std::size_t c = 0; c < chunks.size(); c++) {
+            std::string prepared;
+
+            // Byte-mapped *after* the split, which is the order the reference
+            // tokenizer uses: its pre_tokenizer is Split then ByteLevel, and
+            // the ByteLevel step has use_regex false because the splitting is
+            // already done.
+            for(std::size_t i = 0; i < chunks[c].size(); i++)
+                prepared += m_byte_char[
+                    static_cast<unsigned char>(chunks[c][i])];
+
+            merge_run(prepared, out);
         }
+
+        return;
     }
 
+    // The marker for every space, and one in front: see the header.
+    std::string prepared = add_prefix ? MARKER : "";
+
+    for(std::size_t i = 0; i < text.size(); i++) {
+        if(text[i] == ' ') prepared += MARKER;
+        else prepared += text[i];
+    }
+
+    merge_run(prepared, out);
+}
+
+/** The merge table, run over one prepared run of text. */
+void tokenizer::merge_run(const std::string& prepared,
+                          std::vector<int>& out) const
+{
     // One symbol per character to begin with, which is what the merge table
     // was built over.
     std::vector<std::string> syms;

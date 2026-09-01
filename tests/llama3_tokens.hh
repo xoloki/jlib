@@ -29,43 +29,43 @@
  * "looks like" the id for Hello is not evidence, and this file exists because
  * that is the sort of claim that turns out wrong.
  *
- * `pretok` marks a case whose answer depends on pre-tokenization -- the regex
- * that splits text into chunks before the merges run, which this tokenizer
- * does not implement yet.  They are listed rather than omitted: a known
- * difference that is written down is a task, and one that is quietly excluded
- * from the fixtures is a bug nobody will find.
+ * Three of these once carried a `pretok` flag, marking answers that depended
+ * on pre-tokenization -- the regex that splits text into chunks before the
+ * merges run.  The test asserted they were *still wrong*, so that implementing
+ * the pre-tokenizer would make it fail and say so rather than passing quietly
+ * with a fixture nobody re-read.  It did exactly that, and the flag is gone
+ * because nothing is pending any more.
  */
 struct tokenization {
     const char* text;
     int count;
     int ids[16];
-    bool pretok;
 };
 
 static const tokenization LLAMA3[] = {
-    { "Hello", 1, { 9906 }, false },
-    { " Hello", 1, { 22691 }, false },
-    { "Hello world", 2, { 9906, 1917 }, false },
-    { "a", 1, { 64 }, false },
-    { " ", 1, { 220 }, false },
-    { "\n", 1, { 198 }, false },
-    { "capital", 1, { 66163 }, false },
-    { " capital", 1, { 6864 }, false },
-    { "France?", 2, { 50100, 30 }, false },
-    { "  double", 2, { 220, 2033 }, true },
-    { "\t tab", 2, { 197, 5769 }, false },
-    { "na\303\257ve caf\303\251", 4, { 3458, 38672, 588, 53050 }, false },
-    { "\346\227\245\346\234\254\350\252\236", 2, { 102433, 102158 }, false },
-    { "\360\237\216\211 emoji", 4, { 9468, 236, 231, 43465 }, false },
-    { "The capital of France is Paris.", 7, { 791, 6864, 315, 9822, 374, 12366, 13 }, false },
-    { "line1\nline2", 5, { 1074, 16, 198, 1074, 17 }, false },
-    { "trailing ", 3, { 376, 14612, 220 }, false },
-    { "<|eot_id|>", 1, { 128009 }, false },
-    { "a<|eot_id|>b", 3, { 64, 128009, 65 }, false },
-    { "!@#$%^&*()", 7, { 0, 31, 49177, 46999, 5, 9, 368 }, false },
-    { "1234567890", 4, { 4513, 10961, 16474, 15 }, true },
-    { "  ", 1, { 256 }, false },
-    { "   x", 2, { 256, 865 }, true },
+    { "Hello", 1, { 9906 } },
+    { " Hello", 1, { 22691 } },
+    { "Hello world", 2, { 9906, 1917 } },
+    { "a", 1, { 64 } },
+    { " ", 1, { 220 } },
+    { "\n", 1, { 198 } },
+    { "capital", 1, { 66163 } },
+    { " capital", 1, { 6864 } },
+    { "France?", 2, { 50100, 30 } },
+    { "  double", 2, { 220, 2033 } },
+    { "\t tab", 2, { 197, 5769 } },
+    { "na\303\257ve caf\303\251", 4, { 3458, 38672, 588, 53050 } },
+    { "\346\227\245\346\234\254\350\252\236", 2, { 102433, 102158 } },
+    { "\360\237\216\211 emoji", 4, { 9468, 236, 231, 43465 } },
+    { "The capital of France is Paris.", 7, { 791, 6864, 315, 9822, 374, 12366, 13 } },
+    { "line1\nline2", 5, { 1074, 16, 198, 1074, 17 } },
+    { "trailing ", 3, { 376, 14612, 220 } },
+    { "<|eot_id|>", 1, { 128009 } },
+    { "a<|eot_id|>b", 3, { 64, 128009, 65 } },
+    { "!@#$%^&*()", 7, { 0, 31, 49177, 46999, 5, 9, 368 } },
+    { "1234567890", 4, { 4513, 10961, 16474, 15 } },
+    { "  ", 1, { 256 } },
+    { "   x", 2, { 256, 865 } },
 };
 
 static const std::size_t LLAMA3_COUNT = sizeof(LLAMA3) / sizeof(LLAMA3[0]);

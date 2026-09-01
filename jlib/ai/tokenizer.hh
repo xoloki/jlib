@@ -122,9 +122,16 @@ public:
     /**
      * Text to token ids.
      *
-     * A character with no token of its own becomes its UTF-8 bytes, each as a
-     * `<0xXX>` token -- so any input encodes, and nothing silently becomes
-     * `<unk>`.
+     * Under a **sentencepiece** vocabulary, a character with no token of its
+     * own becomes its UTF-8 bytes, each as a `<0xXX>` token -- so any input
+     * encodes, and nothing silently becomes `<unk>`.
+     *
+     * Under a **byte_level** one there is nothing to fall back to and nothing
+     * to fall back for: every byte is mapped to a character the vocabulary
+     * holds before the merges run, so no input is unencodable.  A symbol with
+     * no id there means the merges produced something the vocabulary does not
+     * contain, which is a broken file rather than a rare input, and it throws
+     * rather than quietly encoding as something else.
      *
      * ### Special tokens
      *
@@ -213,11 +220,18 @@ private:
     /** The 256 byte tokens, by byte value, so fallback is a lookup. */
     std::vector<int> m_byte_token;
 
-    // GPT-2's byte-to-character map and its inverse, empty unless this is a
-    // byte_level vocabulary.
+    /** Which convention the file said, read from tokenizer.ggml.model. */
     flavour m_flavour = flavour::sentencepiece;
+
     std::string unmap(const std::string& t) const;
 
+    // The merge table run over one prepared run of text -- the half of
+    // encode_run that is the same either way, once each convention has done
+    // what it does to the bytes first.
+    void merge_run(const std::string& prepared, std::vector<int>& out) const;
+
+    // GPT-2's byte-to-character map and its inverse, empty unless this is a
+    // byte_level vocabulary.
     std::vector<std::string> m_byte_char;
     std::map<std::string, unsigned char> m_char_byte;
 
