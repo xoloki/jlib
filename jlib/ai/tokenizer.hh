@@ -80,6 +80,25 @@ public:
     };
 
     /** The token types GGUF gives, of which only BYTE and CONTROL matter here. */
+    /**
+     * Which convention the vocabulary was built under.
+     *
+     * Not the architecture: these are independent axes, and assuming
+     * otherwise is wrong in both directions.  Llama 3.2 is a llama-
+     * architecture file with a gpt2 vocabulary; Gemma 2 is a gemma2 file with
+     * a llama one.  `tokenizer.ggml.model` is what says which.
+     *
+     * **sentencepiece** marks a space with U+2581 and puts one in front of
+     * the whole input -- the dummy prefix -- so "Hello" and " Hello" tokenize
+     * alike.  A byte with no token of its own is spelled `<0xNN>`.
+     *
+     * **byte_level** is GPT-2's: every input byte is first mapped to a
+     * printable character, so there is no byte without a token and no dummy
+     * prefix at all.  A space is U+0120, and the vocabulary holds the mapped
+     * characters rather than the bytes.
+     */
+    enum class flavour { sentencepiece, byte_level };
+
     enum type { undefined = 0, normal = 1, unknown = 2, control = 3,
                 user_defined = 4, unused = 5, byte = 6 };
 
@@ -97,12 +116,30 @@ public:
     int eos() const { return m_eos; }
     int unk() const { return m_unk; }
 
+    /** Which convention this vocabulary was built under. */
+    flavour convention() const { return m_flavour; }
+
+    /**
+     * Which cut the file named, from `tokenizer.ggml.pre`.
+     *
+     * Empty for a sentencepiece vocabulary, which does not have one, and for
+     * byte-level files old enough to predate anyone writing it down.
+     */
+    const std::string& pre() const { return m_pre; }
+
     /**
      * Text to token ids.
      *
-     * A character with no token of its own becomes its UTF-8 bytes, each as a
-     * `<0xXX>` token -- so any input encodes, and nothing silently becomes
-     * `<unk>`.
+     * Under a **sentencepiece** vocabulary, a character with no token of its
+     * own becomes its UTF-8 bytes, each as a `<0xXX>` token -- so any input
+     * encodes, and nothing silently becomes `<unk>`.
+     *
+     * Under a **byte_level** one there is nothing to fall back to and nothing
+     * to fall back for: every byte is mapped to a character the vocabulary
+     * holds before the merges run, so no input is unencodable.  A symbol with
+     * no id there means the merges produced something the vocabulary does not
+     * contain, which is a broken file rather than a rare input, and it throws
+     * rather than quietly encoding as something else.
      *
      * ### Special tokens
      *
@@ -120,9 +157,10 @@ public:
      *
      * **Turn it off for anything a stranger wrote.** Text containing `</s>`
      * from a user would otherwise end the turn early and let the rest be read
-     * as though the model had said it. jchat does not do this yet -- it
-     * tokenizes a whole formatted prompt in one call -- and doing it properly
-     * means tokenizing the markers and the content separately.
+     * as though the model had said it. `chat::encode` does exactly that: it
+     * tokenizes the template's own text and the user's separately, passing
+     * this flag per span, so a marker a user types is spelled out rather than
+     * obeyed. A caller assembling a prompt by hand still has to.
      *
      * Cost is quadratic in the number of symbols: each merge rescans for the
      * best remaining pair. A priority queue over the pairs would make it
@@ -190,6 +228,24 @@ private:
 
     /** The 256 byte tokens, by byte value, so fallback is a lookup. */
     std::vector<int> m_byte_token;
+
+    /** Which convention the file said, read from tokenizer.ggml.model. */
+    flavour m_flavour = flavour::sentencepiece;
+
+    /** tokenizer.ggml.pre, empty when the file does not say. */
+    std::string m_pre;
+
+    std::string unmap(const std::string& t) const;
+
+    // The merge table run over one prepared run of text -- the half of
+    // encode_run that is the same either way, once each convention has done
+    // what it does to the bytes first.
+    void merge_run(const std::string& prepared, std::vector<int>& out) const;
+
+    // GPT-2's byte-to-character map and its inverse, empty unless this is a
+    // byte_level vocabulary.
+    std::vector<std::string> m_byte_char;
+    std::map<std::string, unsigned char> m_char_byte;
 
     int m_bos = -1;
     int m_eos = -1;

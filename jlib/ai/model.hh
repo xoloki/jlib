@@ -272,18 +272,26 @@ void model<T>::load(const gguf& g) {
     expect(g, "token_embd.weight", d, m_conf.vocab);
     m_embed->write(narrowed(g.read("token_embd.weight")));
 
-    expect(g, "output.weight", d, m_conf.vocab);
+    // Tied embeddings.  Llama 3.2 and others ship no output.weight at all:
+    // the projection back to the vocabulary *is* the embedding table, reused.
+    // Both are [d_model, vocab] as the file has them, and the head is used
+    // through multiply_tn which wants that orientation, so the same bytes
+    // serve both ends with nothing rearranged.
+    const std::string head = g.has_tensor("output.weight") ? "output.weight"
+                                                           : "token_embd.weight";
+
+    expect(g, head, d, m_conf.vocab);
 
     // Kept quantised where the file quantised it.  These are the tensors whose
     // blocks run along the dimension they are used on, so nothing has to be
     // rearranged and the file's bytes go to the device unchanged.
-    if(g.tensor("output.weight").type == gguf::tensor_type::q8_0) {
-        const std::vector<char> raw = g.read_raw("output.weight");
+    if(g.tensor(head).type == gguf::tensor_type::q8_0) {
+        const std::vector<char> raw = g.read_raw(head);
 
         set_head(m_b.make_q8_0(d, m_conf.vocab, raw.data(), raw.size()));
     }
     else
-        m_head->write(narrowed(g.read("output.weight")));
+        m_head->write(narrowed(g.read(head)));
 
     expect(g, "output_norm.weight", d, 1);
     m_final_norm->write(narrowed(g.read("output_norm.weight")));

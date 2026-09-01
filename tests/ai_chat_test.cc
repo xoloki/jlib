@@ -66,44 +66,160 @@ static const char* ZEPHYR =
     "{% endif %}\n"
     "{% endfor %}";
 
-static void it_reads_the_markers_out_of_the_template() {
-    std::cout << "\nit reads the markers out of the template:\n";
+static void it_renders_the_template_it_is_given() {
+    std::cout << "\nit renders the template it is given:\n";
 
     const ai::chat c(ZEPHYR, "</s>");
 
-    ok("  three roles, in the order the template names them",
-       c.roles() == std::vector<std::string>({ "user", "system", "assistant" }),
-       std::to_string(c.roles().size()));
+    ok("  a user turn",
+       c.format({ { "user", "Hi" } }) == "<|user|>\nHi</s>\n<|assistant|>\n");
 
-    ok("  each with its own marker",
-       c.marker("user") == "<|user|>" && c.marker("system") == "<|system|>" &&
-       c.marker("assistant") == "<|assistant|>");
+    ok("  a system turn ahead of it",
+       c.format({ { "system", "Be brief." }, { "user", "Hi" } }) ==
+       "<|system|>\nBe brief.</s>\n<|user|>\nHi</s>\n<|assistant|>\n");
 
-    ok("  and a role it does not name has none", c.marker("tool").empty());
+    ok("  and without the generation prompt",
+       c.format({ { "user", "Hi" } }, false) == "<|user|>\nHi</s>\n");
 }
 
 /**
- * A marker that is not a turn is carried along rather than filtered out.
+ * The families the scanner could not read.
  *
- * Documented behaviour rather than an accident: what decides whether a
- * template can be read is that it names user and assistant, and everything
- * else it mentions is simply available. Filtering candidates by how they look
- * was tried and removed -- see chat.cc -- because it rejected nothing the
- * user/assistant check did not already catch.
+ * These are why the template is rendered rather than scanned.  ChatML names
+ * its roles *outside* the markers, so a reader looking for <|role|> found
+ * "im_start" and no "user" and refused the file.  Llama 2 has no pipes at all
+ * and was invisible.  Both are ordinary templates; nothing about them is
+ * exotic except that the old code could not read them.
  */
-static void a_stray_marker_is_harmless() {
-    std::cout << "\na stray marker is harmless:\n";
+static void it_reads_the_families_the_scanner_refused() {
+    std::cout << "\nit reads the families the scanner refused:\n";
 
-    const ai::chat c(
-        "{% for m in messages %}{{ '<|user|>\n' + m['content'] + '<|endoftext|>' }}"
-        "{{ '<|assistant|>\n' }}{% endfor %}", "</s>");
+    const ai::chat chatml(
+        "{% for message in messages %}{{ '<|im_start|>' + message['role'] +"
+        " '\n' + message['content'] + '<|im_end|>' + '\n' }}{% endfor %}"
+        "{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}"
+        "{% endif %}", "</s>");
 
-    ok("  it is offered as a role", c.marker("endoftext") == "<|endoftext|>");
+    ok("  ChatML lays a turn out",
+       chatml.format({ { "user", "Hi" } }) ==
+       "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n");
 
-    // And changes nothing about laying out the turns that matter.
-    ok("  and the conversation is laid out as usual",
-       c.format({ { "user", "Hi" } }) == "<|user|>\nHi</s>\n<|assistant|>\n",
-       shown(c.format({ { "user", "Hi" } })));
+    const ai::chat inst(
+        "{% for message in messages %}{% if message['role'] == 'user' %}"
+        "{{ '[INST] ' + message['content'] + ' [/INST]' }}{% endif %}"
+        "{% endfor %}", "</s>");
+
+    ok("  and so does Llama 2's [INST]",
+       inst.format({ { "user", "Hi" } }) == "[INST] Hi [/INST]");
+
+    // Llama 3 puts the role between header tokens and trims the content, so
+    // it exercises set, a filter, and a marker whose text is not the role.
+    const ai::chat llama3(
+        "{% set loop_messages = messages %}{% for message in loop_messages %}"
+        "{% set content = '<|start_header_id|>' + message['role'] +"
+        " '<|end_header_id|>\n\n' + message['content'] | trim + '<|eot_id|>' %}"
+        "{{ content }}{% endfor %}{% if add_generation_prompt %}"
+        "{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}",
+        "</s>");
+
+    ok("  Llama 3's headers",
+       llama3.format({ { "user", "Hi" } }) ==
+       "<|start_header_id|>user<|end_header_id|>\n\nHi<|eot_id|>"
+       "<|start_header_id|>assistant<|end_header_id|>\n\n");
+
+    ok("    and it trims the content, as its template asks",
+       llama3.format({ { "user", "  Hi  " } }) ==
+       "<|start_header_id|>user<|end_header_id|>\n\nHi<|eot_id|>"
+       "<|start_header_id|>assistant<|end_header_id|>\n\n");
+
+    // Gemma's delimiters have no pipes at all, and it renames the assistant.
+    const ai::chat gemma(
+        "{% for message in messages %}{% if message['role'] == 'user' %}"
+        "{{ '<start_of_turn>user\n' + message['content'] | trim +"
+        " '<end_of_turn>\n' }}{% elif message['role'] == 'assistant' %}"
+        "{{ '<start_of_turn>model\n' + message['content'] | trim +"
+        " '<end_of_turn>\n' }}{% endif %}{% endfor %}"
+        "{% if add_generation_prompt %}{{ '<start_of_turn>model\n' }}"
+        "{% endif %}", "</s>");
+
+    ok("  Gemma's turns",
+       gemma.format({ { "user", "Hi" } }) ==
+       "<start_of_turn>user\nHi<end_of_turn>\n<start_of_turn>model\n");
+
+    ok("    including an exchange",
+       gemma.format({ { "user", "A" }, { "assistant", "B" } }) ==
+       "<start_of_turn>user\nA<end_of_turn>\n"
+       "<start_of_turn>model\nB<end_of_turn>\n<start_of_turn>model\n");
+
+    // Gemma's template names no branch for a system turn, so one must not
+    // pass silently -- the same guarantee as the Zephyr+tool case.
+    bool threw = false;
+
+    try { gemma.format({ { "system", "S" }, { "user", "Hi" } }); }
+    catch(std::exception&) { threw = true; }
+
+    ok("    and a role it does not name still throws", threw);
+}
+
+/**
+ * Two turns whose text overlaps are checked apart from each other.
+ *
+ * The vanished-turn check used to concatenate every value span and search the
+ * result, which answered yes for the wrong reasons: "Hi" is inside "Hi there",
+ * so a template rendering only the *last* message passed as long as the
+ * earlier text happened to occur somewhere in the output.  Walking the spans
+ * in order, and consuming each one, is what distinguishes them.
+ */
+static void turns_that_share_text_are_still_told_apart() {
+    std::cout << "\nturns that share text are still told apart:\n";
+
+    const ai::chat last_only(
+        "{% for m in messages %}{% if loop.last %}"
+        "{{ '<|user|>\n' + m['content'] }}{% endif %}{% endfor %}", "</s>");
+
+    bool threw = false;
+
+    try { last_only.format({ { "user", "Hi" }, { "user", "Hi there" } }); }
+    catch(std::exception&) { threw = true; }
+
+    ok("  a dropped turn whose text recurs later is still caught", threw);
+
+    // And the same template with one turn is fine: nothing was dropped.
+    bool fine = true;
+
+    try { last_only.format({ { "user", "Hi there" } }); }
+    catch(std::exception&) { fine = false; }
+
+    ok("  while a single turn it does render is not", fine);
+}
+
+/**
+ * A turn the template has no branch for does not vanish quietly.
+ *
+ * The scanner threw because it had no marker for the role.  A renderer has no
+ * markers to be missing -- the {% if %} chain simply matches nothing and the
+ * turn is gone, with a perfectly good prompt produced around the hole.  That
+ * is the one guarantee the rewrite had to put back by hand.
+ */
+static void a_turn_the_template_ignores_is_an_error() {
+    std::cout << "\na turn the template ignores is an error:\n";
+
+    const ai::chat c(ZEPHYR, "</s>");
+    bool threw = false;
+
+    try { c.format({ { "user", "Hi" }, { "tool", "some output" } }); }
+    catch(std::exception&) { threw = true; }
+
+    ok("  a role the template names no branch for throws", threw);
+
+    // And the roles it does name are unaffected.
+    bool fine = true;
+
+    try { c.format({ { "system", "S" }, { "user", "U" },
+                     { "assistant", "A" } }); }
+    catch(std::exception&) { fine = false; }
+
+    ok("  while the roles it does name are laid out as usual", fine);
 }
 
 static void it_lays_a_turn_out() {
@@ -154,17 +270,22 @@ static void it_lays_a_turn_out() {
 static void a_template_it_cannot_read_is_refused() {
     std::cout << "\na template it cannot read is refused:\n";
 
+    // These used to be ChatML and Llama 2 -- the families the scanner could
+    // not read.  They render now, and their assertions moved to
+    // it_reads_the_families_the_scanner_refused().  What is left is what a
+    // renderer genuinely cannot do: constructs outside the implemented subset.
+    // The refusal has to happen at construction, because a template that
+    // renders approximately produces a prompt the model was never tuned on
+    // and no error at all.
     struct { const char* what; const char* tmpl; } cases[] = {
-        { "ChatML, whose markers are not role names",
-          "{% for m in messages %}{{ '<|im_start|>' + m['role'] + '\n' + "
-          "m['content'] + '<|im_end|>' }}{% endfor %}" },
-        { "Llama 2, which brackets instead",
-          "{% for m in messages %}{{ '[INST] ' + m['content'] + ' [/INST]' }}"
-          "{% endfor %}" },
-        { "a template naming only a system prompt",
-          "{{ '<|system|>\n' + system }}" },
-        { "and one with no markers at all",
-          "{% for m in messages %}{{ m['content'] }}{% endfor %}" }
+        { "a macro",
+          "{% macro row(m) %}{{ m }}{% endmacro %}{{ row('x') }}" },
+        { "an include",
+          "{% include 'other.j2' %}" },
+        { "an unclosed block",
+          "{% for m in messages %}{{ m['content'] }}" },
+        { "and text that is not a template at all",
+          "{% this is not jinja" }
     };
 
     for(const auto& e : cases) {
@@ -176,12 +297,11 @@ static void a_template_it_cannot_read_is_refused() {
 
         ok(std::string("  ") + e.what, threw);
 
-        // And the message says what it looked for, since somebody hitting this
-        // needs to know whether to write a template reader or a different one.
+        // And it says so as a chat::exception, so a caller holding a model
+        // file does not have to know which parser underneath refused it.
         if(threw)
-            ok("    saying what it wanted",
-               why.find("<|user|>") != std::string::npos &&
-               why.find("chat.hh") != std::string::npos);
+            ok("    as a chat::exception",
+               why.find("jlib::ai::chat::exception") != std::string::npos, why);
     }
 }
 
@@ -318,9 +438,6 @@ static void the_file_says_the_same(int argc, char** argv) {
 
     std::cout << "\nthe file says the same:\n";
 
-    ok("  the same three roles come out of the real template",
-       c.roles() == std::vector<std::string>({ "user", "system", "assistant" }));
-
     ok("  and the layout matches the one built from the copy",
        c.format({ { "user", "Hi" } }) ==
        ai::chat(ZEPHYR, "</s>").format({ { "user", "Hi" } }));
@@ -329,22 +446,39 @@ static void the_file_says_the_same(int argc, char** argv) {
 int main(int argc, char** argv) {
     std::cout << std::unitbuf;
 
-    it_reads_the_markers_out_of_the_template();
+    it_renders_the_template_it_is_given();
+    it_reads_the_families_the_scanner_refused();
+    a_turn_the_template_ignores_is_an_error();
+    turns_that_share_text_are_still_told_apart();
     it_lays_a_turn_out();
-    a_stray_marker_is_harmless();
     a_template_it_cannot_read_is_refused();
     the_file_says_the_same(argc, argv);
 
     // What a green run does not establish.
     //
-    // That the layout is byte-for-byte what Jinja would produce.  It was read
-    // off the template by hand -- marker, newline, content, eos, newline --
-    // and checked the only way that matters here, by asking the model a
-    // question and getting an answer rather than a continuation.  A stray
-    // newline would probably still answer, and nothing here would notice.
+    // That the layout is what Jinja would produce.  It is what *this*
+    // evaluator produces, and the expectations here were written from reading
+    // the templates.  For TinyLlama's there is a stronger claim available and
+    // made elsewhere -- the rendered output is byte-identical to the scanner
+    // this replaced, across six recorded cases -- but for ChatML, Llama 3,
+    // Gemma and Llama 2 the expected strings are hand-derived.  Running the
+    // same template through Jinja proper and diffing is the check nobody has
+    // run.
     //
-    // That any template outside the Zephyr family works.  Four are checked to
-    // be *refused*, which is the claim being made; none is checked to work.
+    // That the four other families are the real ones.  They are written from
+    // their published shape, not read out of a model file, because only
+    // TinyLlama's is on this machine.  A real Qwen or Gemma template may use a
+    // construct its family's shape does not show.  That gap closes with a
+    // second GGUF and not before.
+    //
+    // That a turn cannot vanish.  check_nothing_vanished walks the value
+    // spans in order and looks for each message's content, which catches a
+    // role the template names no branch for, and catches a dropped turn whose
+    // text recurs later.  It cannot catch a dropped *empty* message -- an
+    // empty content leaves no span to look for -- and it would fire wrongly
+    // on a template that deliberately renders only some turns.  No such
+    // template is known here; if one turns up, that check is what needs
+    // revisiting.
     //
     // And nothing about the roles beyond their names.  A template that used
     // <|user|> to mean something else would pass every assertion here.

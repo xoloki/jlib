@@ -113,6 +113,7 @@ TESTS = \
 	util_json_test \
 	util_http_test \
 	util_abnf_test \
+	util_jinja_test \
 	util_abnf_compile_test \
  \
 	$(X_TESTS) \
@@ -271,6 +272,9 @@ util_headers_fold_test_SOURCES = util_headers_fold_test.cc
 util_headers_fold_test_LDADD   = $(JUTIL_LA)
 util_headers_angie_test_SOURCES = util_headers_angie_test.cc
 util_headers_angie_test_LDADD   = $(JUTIL_LA)
+util_jinja_test_SOURCES = util_jinja_test.cc jinja_templates.hh
+util_jinja_test_LDADD   = $(JUTIL_LA) $(JSYS_LA)
+
 util_abnf_test_SOURCES = util_abnf_test.cc
 util_abnf_test_LDADD   = $(JUTIL_LA)
 
@@ -328,7 +332,7 @@ ai_chat_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 ai_sampler_test_SOURCES  = ai_sampler_test.cc
 ai_sampler_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 
-ai_tokenizer_test_SOURCES  = ai_tokenizer_test.cc
+ai_tokenizer_test_SOURCES  = ai_tokenizer_test.cc llama3_tokens.hh llama3_splits.hh
 ai_tokenizer_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 
 ai_model_test_SOURCES  = ai_model_test.cc

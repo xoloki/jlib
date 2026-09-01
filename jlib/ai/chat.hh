@@ -22,10 +22,10 @@
 #define JLIB_AI_CHAT_HH
 
 #include <jlib/ai/gguf.hh>
+#include <jlib/util/jinja.hh>
 #include <jlib/ai/tokenizer.hh>
 
 #include <exception>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -50,26 +50,41 @@ struct message {
  *     {content}</s>
  *     <|assistant|>
  *
- * ### This is not a Jinja interpreter, and refuses rather than guesses
+ * ### It renders the template rather than guessing at it
  *
- * The template is a Jinja2 program. Running it properly means implementing
- * Jinja, which is a project rather than a function, so this does something
- * narrower and says so: it reads the `<|...|>` markers out of the template
- * text and lays the turns out in the shape those markers imply -- marker,
- * newline, content, end-of-sequence, newline, and a bare marker at the end to
- * hand the turn to the model.
+ * The template is a Jinja2 program, and this runs it -- see
+ * jlib/util/jinja.hh for the subset and the grammar it is read with.  An
+ * earlier version scanned the text for `<|...|>` and laid the turns out in
+ * the shape those markers implied, which worked for the Zephyr family and no
+ * other: ChatML names its roles outside the markers, Llama 3 uses header
+ * tokens, Gemma and Llama 2 have no pipes at all.
  *
- * That covers the Zephyr family, which is what TinyLlama and a good many other
- * small chat models use. It does **not** cover ChatML
- * (`<|im_start|>user ... <|im_end|>`), Llama-2's `[INST]`, or anything with
- * conditional logic that matters. A template it cannot recognise makes the
- * constructor throw, because a mis-laid conversation does not fail visibly --
- * the model simply answers a question nobody asked, and that is far worse to
- * debug than a refusal at the point of construction.
+ * A template using a construct outside the subset throws here, at
+ * construction, rather than rendering approximately.  A prompt that is nearly
+ * right does not fail visibly -- the model answers a question nobody asked,
+ * which is far worse to debug than a refusal.
  *
- * The markers are read from the file rather than hardcoded, so a model of the
- * same shape with different names works, and a model of a different shape is
- * caught.
+ * ### What the renderer must not flatten
+ *
+ * A template writes the end-of-sequence marker itself and means the *token*.
+ * A user may type the same characters into a message and means *characters*.
+ * render() therefore returns spans that say which is which, and encode()
+ * tokenizes the template's own text with special tokens parsed and a
+ * message's content without.  Flatten the two and a stranger's message can
+ * end the model's turn.
+ *
+ * ### One check that came back
+ *
+ * The scanner threw when a message named a role the template had no marker
+ * for.  A renderer has no such notion: a template whose `{% if %}` chain does
+ * not name a role simply emits nothing for it, and the turn vanishes in
+ * silence.  So encode() and format() check afterwards that every message's
+ * content reached the output, and throw if one did not.
+ *
+ * That check can also fire on a template which deliberately omits turns --
+ * one rendering only the last message, say.  If such a template turns up the
+ * check is what needs revisiting; a silently dropped question is the worse
+ * failure of the two, and is the one this refuses to have.
  */
 class chat {
 public:
@@ -94,20 +109,14 @@ public:
     /**
      * From the template text directly.
      *
-     * Which is how the refusals are tested: a template this cannot read has to
-     * be constructible from somewhere, and requiring a second model file to
-     * show that ChatML is rejected would mean the check never ran.
+     * Which is how the families are tested.  Only one model file is on hand,
+     * and requiring a second before ChatML or Gemma could be shown to render
+     * would mean those checks never ran at all.
      */
     chat(const std::string& tmpl, const std::string& eos);
 
     /** The template as the file gave it, for a caller that wants to look. */
-    const std::string& tmpl() const { return m_template; }
-
-    /** The marker for a role, e.g. "<|user|>", or empty if it has none. */
-    std::string marker(const std::string& role) const;
-
-    /** Every role the template mentions, in the order it mentioned them. */
-    const std::vector<std::string>& roles() const { return m_roles; }
+    const std::string& tmpl() const { return m_tmpl.source(); }
 
     /**
      * The prompt text for a conversation.
@@ -152,11 +161,13 @@ public:
                             bool add_generation_prompt = true) const;
 
 private:
-    std::string m_template;
     std::string m_eos;
 
-    std::map<std::string, std::string> m_marker;
-    std::vector<std::string> m_roles;
+    // Parsed at construction: a template that cannot be read, or that uses a
+    // construct outside the subset, fails here rather than at the first
+    // prompt.
+    util::jinja::tmpl m_tmpl;
+
 };
 
 }
