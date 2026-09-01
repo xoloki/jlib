@@ -20,7 +20,6 @@
 
 #include <jlib/ai/pretokenizer.hh>
 #include <jlib/ai/unicode.hh>
-#include <jlib/ai/backend.hh>
 
 #include <functional>
 
@@ -36,6 +35,12 @@ namespace {
  * Strict about continuation bytes: a truncated or malformed sequence is not a
  * codepoint, so a rule asking for a letter will not accidentally accept half
  * of one and leave the parse mid-character.
+ *
+ * Strict about overlong forms and surrogates too, which matters more than it
+ * looks: C1 81 is a structurally valid two-byte sequence decoding to 'A', so
+ * without the check it would be one `letters` chunk rather than two bytes
+ * that are not a character.  Rejecting here is what sends them to
+ * `stray-byte`, where the byte map encodes them and nothing is lost.
  */
 std::size_t decode(std::string_view in, std::size_t at, unsigned int& cp)
 {
@@ -61,6 +66,15 @@ std::size_t decode(std::string_view in, std::size_t at, unsigned int& cp)
         cp = (cp << 6) | (k & 0x3F);
     }
 
+    // The shortest form is the only form: a codepoint that would have fitted
+    // in fewer bytes was not encoded, it was smuggled.
+    static const unsigned int least[] = { 0, 0, 0x80, 0x800, 0x10000 };
+
+    if(cp < least[n]) return 0;
+
+    // Surrogates are not characters, and nothing above the last plane is one.
+    if((cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) return 0;
+
     return n;
 }
 
@@ -83,6 +97,14 @@ util::abnf::rule codepoint(std::string what, std::function<bool(unsigned int)> p
 
 bool eol(unsigned int cp) { return cp == '\r' || cp == '\n'; }
 
+}
+
+bool supported(const std::string& pre)
+{
+    // An empty key is the older files, which predate anyone writing it down
+    // and are all llama-bpe.  Anything else named is a different pattern and
+    // this is not it.
+    return pre.empty() || pre == "llama-bpe";
 }
 
 const util::abnf::grammar& grammar()
@@ -204,7 +226,7 @@ const util::abnf::grammar& grammar()
                         return true;
                     });
 
-            throw backend_error("pretokenizer: no implementation for the "
+            throw exception("pretokenizer: no implementation for the "
                                 "prose rule <" + s + ">");
         };
 
@@ -227,7 +249,7 @@ std::vector<std::string> split(const std::string& text)
     const util::abnf::parse_result r = grammar().at("chunks").try_parse(text);
 
     if(!r)
-        throw backend_error(std::string("pretokenizer: this text does not "
+        throw exception(std::string("pretokenizer: this text does not "
                                         "split: ") + r.why().what());
 
     const util::abnf::match root =

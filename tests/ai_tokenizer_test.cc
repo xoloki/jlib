@@ -48,6 +48,16 @@ static bool exists(const std::string& p) {
     return bool(f);
 }
 
+/** A named file, wherever the build happens to be run from. */
+static std::string find_named(const std::string& name) {
+    const std::string where[] = { "", "../", "../../", "../../../" };
+
+    for(const std::string& w : where)
+        if(exists(w + name)) return w + name;
+
+    return "";
+}
+
 /**
  * A byte-level model, if one is to hand.
  *
@@ -63,12 +73,12 @@ static std::string find_byte_level_model() {
         "Llama-3.2-1B-Instruct-Q8_0.gguf",
         "../Llama-3.2-1B-Instruct-Q8_0.gguf",
         "../../Llama-3.2-1B-Instruct-Q8_0.gguf",
-        "../../../Llama-3.2-1B-Instruct-Q8_0.gguf",
-        "qwen2.5-0.5b-instruct-q8_0.gguf",
-        "../qwen2.5-0.5b-instruct-q8_0.gguf",
-        "../../qwen2.5-0.5b-instruct-q8_0.gguf",
-        "../../../qwen2.5-0.5b-instruct-q8_0.gguf"
+        "../../../Llama-3.2-1B-Instruct-Q8_0.gguf"
     };
+
+    // Qwen 2.5 was in this list and should not have been: LLAMA3 holds
+    // *Llama's* answers, so running them against another vocabulary tests
+    // nothing.  It names a different pre-tokenizer as well, and is refused.
 
     for(const char* n : names)
         if(exists(n)) return n;
@@ -474,6 +484,79 @@ static void a_byte_that_is_not_a_character_still_splits() {
     }
 }
 
+/**
+ * A file that names a pre-tokenizer this does not have is refused.
+ *
+ * The vocabulary and the cut are two halves of one convention.  Qwen 2.5 has
+ * a gpt2 vocabulary that reads perfectly well and names `qwen2`, a different
+ * pattern -- and running llama-bpe over it would produce ids that are
+ * plausible, off-distribution and silent, which is the worst of the three.
+ */
+static void a_file_naming_another_pre_tokenizer_is_refused() {
+    std::cout << "\na file naming another pre-tokenizer is refused:\n";
+
+    ok("  llama-bpe is what this implements",
+       ai::pretokenizer::supported("llama-bpe"));
+
+    // Older byte-level files predate anyone writing the key down, and are all
+    // this pattern.  Absent is not the same as different.
+    ok("  and a file that does not say is taken as that",
+       ai::pretokenizer::supported(""));
+
+    ok("  but qwen2 is a different pattern and says so",
+       !ai::pretokenizer::supported("qwen2"));
+
+    const std::string qwen = find_named("qwen2.5-0.5b-instruct-q8_0.gguf");
+
+    if(qwen.empty()) {
+        std::cout << "  (no Qwen file to hand; the refusal is untested "
+                  << "against a real one)\n";
+
+        return;
+    }
+
+    bool threw = false;
+    std::string why;
+
+    try { const ai::gguf g(qwen); const ai::tokenizer t(g); }
+    catch(ai::tokenizer::exception& e) { threw = true; why = e.what(); }
+
+    ok("  and a real Qwen file is refused rather than mistokenized", threw,
+       why);
+}
+
+/**
+ * A structurally valid sequence is not necessarily a character.
+ *
+ * C1 81 is two bytes that decode to 'A' by the arithmetic, and it is not an
+ * 'A': the shortest form is the only form.  Without the check it would be a
+ * `letters` chunk, which is the one way a stray byte could change how the
+ * text around it is cut rather than merely encoding as itself.
+ */
+static void an_overlong_form_is_not_the_character_it_spells() {
+    std::cout << "\nan overlong form is not the character it spells:\n";
+
+    struct { const char* what; const char* bytes; } cases[] = {
+        { "  an overlong 'A' (C1 81)",        "\xc1\x81" },
+        { "  an overlong '/' (C0 AF)",        "\xc0\xaf" },
+        { "  a surrogate (ED A0 80)",         "\xed\xa0\x80" }
+    };
+
+    for(const auto& c : cases) {
+        const std::string in = c.bytes;
+        const std::vector<std::string> got = ai::pretokenizer::split(in);
+
+        // Each byte on its own, because none of them is part of a character.
+        std::string joined;
+
+        for(const std::string& g : got) joined += g;
+
+        ok(std::string(c.what) + " is bytes, not a character",
+           got.size() == in.size() && joined == in,
+           std::to_string(got.size()) + " chunk(s)");
+    }
+}
+
 /** SentencePiece is untouched by any of it. */
 static void the_sentencepiece_path_is_unchanged(const ai::tokenizer& t) {
     std::cout << "\nthe sentencepiece path is unchanged:\n";
@@ -511,6 +594,8 @@ int main(int argc, char** argv) {
     try {
         the_pre_tokenizer_splits_as_the_pattern_does();
         a_byte_that_is_not_a_character_still_splits();
+        an_overlong_form_is_not_the_character_it_spells();
+        a_file_naming_another_pre_tokenizer_is_refused();
     }
     catch(std::exception& e) {
         std::cerr << "ai_tokenizer_test: " << e.what() << "\n";

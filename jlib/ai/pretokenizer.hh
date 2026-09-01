@@ -23,6 +23,7 @@
 
 #include <jlib/util/abnf.hh>
 
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -40,14 +41,20 @@ namespace ai {
  * crash, just a prompt slightly off the distribution, which is the failure
  * this file exists to remove.
  *
- * The cut is specified as a regex, and `tokenizer.ggml.pre` names which one.
- * This is `llama-bpe`, taken verbatim from Llama 3.2's own tokenizer.json --
+ * The cut is specified as a regex, and `tokenizer.ggml.pre` names which one;
+ * `supported()` answers whether this is it, and `tokenizer` refuses a file
+ * that names another rather than running this pattern on it and calling the
+ * ids right.  This is `llama-bpe`, from Llama 3.2's own tokenizer.json --
  * the `Split` step of its pre_tokenizer, `behavior: Isolated`:
  *
  *     (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}
  *     | ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
  *
- * Qwen 2.5 names a different one (`qwen2`) and is not implemented here.
+ * Qwen 2.5 names a different one (`qwen2`) and is not implemented here -- so
+ * a Qwen file is refused, which is the point of reading the key.  The second
+ * pattern is worth writing when there is a Qwen oracle to check it against,
+ * on the same rule the Jinja subset grew by: widen the language when a real
+ * file refuses, not before.
  *
  * ## Why a grammar and not a regex
  *
@@ -88,6 +95,26 @@ namespace ai {
  * contractions and ABNF gives for free on every char-val.
  */
 namespace pretokenizer {
+
+/**
+ * Thrown by split() and by grammar().
+ *
+ * Its own type rather than backend_error: a caller here is holding a prompt,
+ * not a device, and the two want telling apart.  backend.hh was included for
+ * nothing else.
+ */
+class exception : public std::exception {
+public:
+    exception(const std::string& msg) : m_msg("jlib::ai::pretokenizer: " + msg) {}
+
+    const char* what() const throw() { return m_msg.c_str(); }
+
+private:
+    std::string m_msg;
+};
+
+/** Which pattern this file names, from `tokenizer.ggml.pre`. */
+bool supported(const std::string& pre);
 
 inline const char* const LLAMA_BPE = R"ABNF(
 ; The whole input, as the chunks the merges may run inside.

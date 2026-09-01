@@ -120,6 +120,14 @@ public:
     flavour convention() const { return m_flavour; }
 
     /**
+     * Which cut the file named, from `tokenizer.ggml.pre`.
+     *
+     * Empty for a sentencepiece vocabulary, which does not have one, and for
+     * byte-level files old enough to predate anyone writing it down.
+     */
+    const std::string& pre() const { return m_pre; }
+
+    /**
      * Text to token ids.
      *
      * Under a **sentencepiece** vocabulary, a character with no token of its
@@ -149,9 +157,10 @@ public:
      *
      * **Turn it off for anything a stranger wrote.** Text containing `</s>`
      * from a user would otherwise end the turn early and let the rest be read
-     * as though the model had said it. jchat does not do this yet -- it
-     * tokenizes a whole formatted prompt in one call -- and doing it properly
-     * means tokenizing the markers and the content separately.
+     * as though the model had said it. `chat::encode` does exactly that: it
+     * tokenizes the template's own text and the user's separately, passing
+     * this flag per span, so a marker a user types is spelled out rather than
+     * obeyed. A caller assembling a prompt by hand still has to.
      *
      * Cost is quadratic in the number of symbols: each merge rescans for the
      * best remaining pair. A priority queue over the pairs would make it
@@ -222,6 +231,9 @@ private:
 
     /** Which convention the file said, read from tokenizer.ggml.model. */
     flavour m_flavour = flavour::sentencepiece;
+
+    /** tokenizer.ggml.pre, empty when the file does not say. */
+    std::string m_pre;
 
     std::string unmap(const std::string& t) const;
 

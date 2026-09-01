@@ -140,6 +140,18 @@ tokenizer::tokenizer(const gguf& g)
 
         for(std::size_t b = 0; b < m_byte_char.size(); b++)
             m_char_byte[m_byte_char[b]] = static_cast<unsigned char>(b);
+
+        // Which cut, from the file as well.  A byte-level vocabulary is only
+        // half the convention: the merges run inside chunks, and a file that
+        // names a different pattern would be tokenized by the wrong one --
+        // producing ids that are plausible, off-distribution and silent.
+        // Refusing is the only honest answer until that pattern is written.
+        m_pre = g.has("tokenizer.ggml.pre") ? g.str("tokenizer.ggml.pre") : "";
+
+        if(!pretokenizer::supported(m_pre))
+            throw exception("this file's pre-tokenizer is '" + m_pre +
+                            "', and the only one implemented is 'llama-bpe' "
+                            "-- see pretokenizer.hh");
     }
 
     if(!g.has("tokenizer.ggml.merges"))
