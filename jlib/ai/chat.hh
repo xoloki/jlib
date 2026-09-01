@@ -26,7 +26,6 @@
 #include <jlib/ai/tokenizer.hh>
 
 #include <exception>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -110,14 +109,14 @@ public:
     /**
      * From the template text directly.
      *
-     * Which is how the refusals are tested: a template this cannot read has to
-     * be constructible from somewhere, and requiring a second model file to
-     * show that ChatML is rejected would mean the check never ran.
+     * Which is how the families are tested.  Only one model file is on hand,
+     * and requiring a second before ChatML or Gemma could be shown to render
+     * would mean those checks never ran at all.
      */
     chat(const std::string& tmpl, const std::string& eos);
 
     /** The template as the file gave it, for a caller that wants to look. */
-    const std::string& tmpl() const { return m_template; }
+    const std::string& tmpl() const { return m_tmpl.source(); }
 
     /**
      * The prompt text for a conversation.
@@ -162,7 +161,6 @@ public:
                             bool add_generation_prompt = true) const;
 
 private:
-    std::string m_template;
     std::string m_eos;
 
     // Parsed at construction: a template that cannot be read, or that uses a

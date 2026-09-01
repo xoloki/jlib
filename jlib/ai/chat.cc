@@ -92,17 +92,35 @@ util::jinja::value context(const std::vector<message>& turns,
 void check_nothing_vanished(const std::vector<message>& turns,
                             const util::jinja::text& out)
 {
-    std::string from_values;
-
-    for(std::size_t i = 0; i < out.size(); i++)
-        if(!out[i].literal) from_values += out[i].text;
+    // Walked in order, consuming spans, rather than searched for in one
+    // concatenated blob.  Concatenating loses two things: that a turn's text
+    // must appear *after* the previous turn's, and that each turn needs a span
+    // of its own.  Without them, "Hi" is satisfied by the "Hi" inside a later
+    // turn's "Hi there", and a template rendering only the last message passes
+    // as long as the text happened to occur somewhere.
+    std::size_t at = 0;
 
     for(std::size_t i = 0; i < turns.size(); i++) {
         const std::string want = squeeze(turns[i].content);
 
+        // An empty message contributes no span at all -- there is nothing for
+        // it to have left behind, so nothing to look for.  A template that
+        // drops an empty turn is therefore invisible here, which is a real
+        // gap and not a large one: an empty turn carries nothing the model
+        // needed.
         if(want.empty()) continue;
 
-        if(from_values.find(want) != std::string::npos) continue;
+        bool found = false;
+
+        while(at < out.size() && !found) {
+            if(!out[at].literal &&
+               out[at].text.find(want) != std::string::npos)
+                found = true;
+
+            at++;
+        }
+
+        if(found) continue;
 
         std::ostringstream e;
 
@@ -126,8 +144,7 @@ chat::chat(const gguf& g, const std::string& eos)
 {}
 
 chat::chat(const std::string& tmpl, const std::string& eos)
-    : m_template(tmpl),
-      m_eos(eos),
+    : m_eos(eos),
       m_tmpl([&tmpl] {
           // Rethrown as a chat::exception so that a caller holding a model
           // file does not have to know which parser refused it.

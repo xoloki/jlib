@@ -555,22 +555,28 @@ int main() {
 
     // What a green run does not establish.
     //
-    // Not that any of these render correctly -- nothing here evaluates
-    // anything.  it_parses_tags_as_tags() checks the shape of the tree, which
-    // is a stronger question than "did it parse" and still a weaker one than
-    // "does it mean the right thing".  This is a parser test: it says the grammar accepts the shapes
-    // and rejects what it does not implement, and says nothing at all about
-    // what a template means.  The evaluator, and the assertion that jlib::ai
-    // produces byte-identical prompts to the scanner it replaces, are separate.
-    //
-    // Not that the accepted templates are the real ones.  Five of the six
-    // families here are written from the published shape rather than read out
-    // of a model file, because only TinyLlama's is on this machine.  A real
-    // Qwen or Gemma template may use a construct its family's shape does not
-    // show, and this would not know.
+    // Not that the templates here are the real ones.  Five of the six
+    // families are written from the published shape rather than read out of a
+    // model file, because only TinyLlama's is on this machine -- and its is
+    // the one embedded above and rendered byte for byte.  A real Qwen or
+    // Gemma template may use a construct its family's shape does not show,
+    // and this would not know.  A second model file is the thing that would
+    // settle it.
     //
     // Not the whole of Jinja.  The subset is deliberate and listed in
-    // jinja.hh; the refusals above are a sample of what is outside it and not
-    // a proof that everything outside it is refused.
+    // jinja.hh; the refusals here are a sample of what is outside it, not a
+    // proof that everything outside it is refused.  `| tojson` is the next
+    // filter a real template is likely to want, and it throws.
+    //
+    // Not the render for any template but TinyLlama's.  The other five are
+    // parsed and their trees inspected; only TinyLlama's output is compared
+    // against a recorded expectation.  ai_chat_test carries the rendered
+    // cases for ChatML, Llama 3, Gemma and Llama 2.
+    //
+    // Not that a parse is a correct parse.  it_parses_tags_as_tags() asks
+    // what is in the tree rather than whether there is one, which is what an
+    // earlier raw-text rule got past -- it swallowed whole tags as literal
+    // text and every family still "parsed".  That section is a floor, not a
+    // guarantee: a tree can hold the right node names in the wrong shape.
     return failures ? 1 : 0;
 }

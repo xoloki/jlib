@@ -111,6 +111,86 @@ static void it_reads_the_families_the_scanner_refused() {
 
     ok("  and so does Llama 2's [INST]",
        inst.format({ { "user", "Hi" } }) == "[INST] Hi [/INST]");
+
+    // Llama 3 puts the role between header tokens and trims the content, so
+    // it exercises set, a filter, and a marker whose text is not the role.
+    const ai::chat llama3(
+        "{% set loop_messages = messages %}{% for message in loop_messages %}"
+        "{% set content = '<|start_header_id|>' + message['role'] +"
+        " '<|end_header_id|>\n\n' + message['content'] | trim + '<|eot_id|>' %}"
+        "{{ content }}{% endfor %}{% if add_generation_prompt %}"
+        "{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}",
+        "</s>");
+
+    ok("  Llama 3's headers",
+       llama3.format({ { "user", "Hi" } }) ==
+       "<|start_header_id|>user<|end_header_id|>\n\nHi<|eot_id|>"
+       "<|start_header_id|>assistant<|end_header_id|>\n\n");
+
+    ok("    and it trims the content, as its template asks",
+       llama3.format({ { "user", "  Hi  " } }) ==
+       "<|start_header_id|>user<|end_header_id|>\n\nHi<|eot_id|>"
+       "<|start_header_id|>assistant<|end_header_id|>\n\n");
+
+    // Gemma's delimiters have no pipes at all, and it renames the assistant.
+    const ai::chat gemma(
+        "{% for message in messages %}{% if message['role'] == 'user' %}"
+        "{{ '<start_of_turn>user\n' + message['content'] | trim +"
+        " '<end_of_turn>\n' }}{% elif message['role'] == 'assistant' %}"
+        "{{ '<start_of_turn>model\n' + message['content'] | trim +"
+        " '<end_of_turn>\n' }}{% endif %}{% endfor %}"
+        "{% if add_generation_prompt %}{{ '<start_of_turn>model\n' }}"
+        "{% endif %}", "</s>");
+
+    ok("  Gemma's turns",
+       gemma.format({ { "user", "Hi" } }) ==
+       "<start_of_turn>user\nHi<end_of_turn>\n<start_of_turn>model\n");
+
+    ok("    including an exchange",
+       gemma.format({ { "user", "A" }, { "assistant", "B" } }) ==
+       "<start_of_turn>user\nA<end_of_turn>\n"
+       "<start_of_turn>model\nB<end_of_turn>\n<start_of_turn>model\n");
+
+    // Gemma's template names no branch for a system turn, so one must not
+    // pass silently -- the same guarantee as the Zephyr+tool case.
+    bool threw = false;
+
+    try { gemma.format({ { "system", "S" }, { "user", "Hi" } }); }
+    catch(std::exception&) { threw = true; }
+
+    ok("    and a role it does not name still throws", threw);
+}
+
+/**
+ * Two turns whose text overlaps are checked apart from each other.
+ *
+ * The vanished-turn check used to concatenate every value span and search the
+ * result, which answered yes for the wrong reasons: "Hi" is inside "Hi there",
+ * so a template rendering only the *last* message passed as long as the
+ * earlier text happened to occur somewhere in the output.  Walking the spans
+ * in order, and consuming each one, is what distinguishes them.
+ */
+static void turns_that_share_text_are_still_told_apart() {
+    std::cout << "\nturns that share text are still told apart:\n";
+
+    const ai::chat last_only(
+        "{% for m in messages %}{% if loop.last %}"
+        "{{ '<|user|>\n' + m['content'] }}{% endif %}{% endfor %}", "</s>");
+
+    bool threw = false;
+
+    try { last_only.format({ { "user", "Hi" }, { "user", "Hi there" } }); }
+    catch(std::exception&) { threw = true; }
+
+    ok("  a dropped turn whose text recurs later is still caught", threw);
+
+    // And the same template with one turn is fine: nothing was dropped.
+    bool fine = true;
+
+    try { last_only.format({ { "user", "Hi there" } }); }
+    catch(std::exception&) { fine = false; }
+
+    ok("  while a single turn it does render is not", fine);
 }
 
 /**
@@ -369,20 +449,36 @@ int main(int argc, char** argv) {
     it_renders_the_template_it_is_given();
     it_reads_the_families_the_scanner_refused();
     a_turn_the_template_ignores_is_an_error();
+    turns_that_share_text_are_still_told_apart();
     it_lays_a_turn_out();
-        a_template_it_cannot_read_is_refused();
+    a_template_it_cannot_read_is_refused();
     the_file_says_the_same(argc, argv);
 
     // What a green run does not establish.
     //
-    // That the layout is byte-for-byte what Jinja would produce.  It was read
-    // off the template by hand -- marker, newline, content, eos, newline --
-    // and checked the only way that matters here, by asking the model a
-    // question and getting an answer rather than a continuation.  A stray
-    // newline would probably still answer, and nothing here would notice.
+    // That the layout is what Jinja would produce.  It is what *this*
+    // evaluator produces, and the expectations here were written from reading
+    // the templates.  For TinyLlama's there is a stronger claim available and
+    // made elsewhere -- the rendered output is byte-identical to the scanner
+    // this replaced, across six recorded cases -- but for ChatML, Llama 3,
+    // Gemma and Llama 2 the expected strings are hand-derived.  Running the
+    // same template through Jinja proper and diffing is the check nobody has
+    // run.
     //
-    // That any template outside the Zephyr family works.  Four are checked to
-    // be *refused*, which is the claim being made; none is checked to work.
+    // That the four other families are the real ones.  They are written from
+    // their published shape, not read out of a model file, because only
+    // TinyLlama's is on this machine.  A real Qwen or Gemma template may use a
+    // construct its family's shape does not show.  That gap closes with a
+    // second GGUF and not before.
+    //
+    // That a turn cannot vanish.  check_nothing_vanished walks the value
+    // spans in order and looks for each message's content, which catches a
+    // role the template names no branch for, and catches a dropped turn whose
+    // text recurs later.  It cannot catch a dropped *empty* message -- an
+    // empty content leaves no span to look for -- and it would fire wrongly
+    // on a template that deliberately renders only some turns.  No such
+    // template is known here; if one turns up, that check is what needs
+    // revisiting.
     //
     // And nothing about the roles beyond their names.  A template that used
     // <|user|> to mean something else would pass every assertion here.
