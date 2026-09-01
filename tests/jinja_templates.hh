@@ -327,6 +327,63 @@ B<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
 static const std::size_t FAMILY_COUNT = sizeof(FAMILIES) / sizeof(FAMILIES[0]);
 
+/**
+ * Single expressions, and what Jinja renders for each.
+ *
+ * Same oracle as the templates above, aimed at the constructs rather than at
+ * whole files -- a review pointed out that the slice code conflated "omitted"
+ * with "negative", so "[:-1]" kept the last element instead of dropping it,
+ * and that unary minus did not parse at all.  Neither was reachable from the
+ * four vendor templates, which is exactly why they needed asking directly.
+ *
+ * Rendered against: items = ["x","y","z"], s = "abcdef", n = 7, zero = 0,
+ * bound = "B", d = {"b": 2, "a": 1}, nothing = None.
+ */
+struct expression {
+    const char* expr;
+    const char* expected;
+};
+
+static const expression EXPRESSIONS[] = {
+    { "{{ s[1:] }}", "bcdef" },
+    { "{{ s[:2] }}", "ab" },
+    { "{{ s[:-1] }}", "abcde" },
+    { "{{ s[1:-1] }}", "bcde" },
+    { "{{ s[-2:] }}", "ef" },
+    { "{{ s[:] }}", "abcdef" },
+    { "{{ s[4:2] }}", "" },
+    { "{{ s[10:] }}", "" },
+    { "{{ items[1:] | length }}", "2" },
+    { "{{ items[:-1] | length }}", "2" },
+    { "{{ items[-1:] | length }}", "1" },
+    { "{{ bound is defined }}", "True" },
+    { "{{ nope is defined }}", "False" },
+    { "{{ nope is not defined }}", "True" },
+    { "{{ bound is not defined }}", "False" },
+    { "{{ n is number }}", "True" },
+    { "{{ s is string }}", "True" },
+    { "{{ d is mapping }}", "True" },
+    { "{{ nothing is none }}", "True" },
+    { "{{ 7 % 3 }}", "1" },
+    { "{{ 7 // 2 }}", "3" },
+    { "{{ 2 - 5 }}", "-3" },
+    { "{{ 3 * 4 }}", "12" },
+    { "{{ -1 }}", "-1" },
+    { "{{ 10 - -2 }}", "12" },
+    { "{{ nope or 'fb' }}", "fb" },
+    { "{{ bound or 'fb' }}", "B" },
+    { "{{ zero or 'fb' }}", "fb" },
+    { "{{ bound and 'last' }}", "last" },
+    { "{{ '' and 'never' }}", "" },
+    { "{{ s | length }}", "6" },
+    { "{{ items | length }}", "3" },
+    { "{{ d | tojson }}", "{\"a\": 1, \"b\": 2}" },
+};
+
+static const std::size_t EXPRESSION_COUNT =
+    sizeof(EXPRESSIONS) / sizeof(EXPRESSIONS[0]);
+
+
 }
 
 #endif // JLIB_TESTS_JINJA_TEMPLATES_HH

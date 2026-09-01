@@ -382,6 +382,35 @@ const value& look_up(const std::string& name, const scope& s)
     return i == s.end() ? nothing : i->second;
 }
 
+/**
+ * The name, if this expression is nothing but one.
+ *
+ * "x is defined" asks whether the caller bound x, which the evaluated value
+ * cannot answer: an unbound name and a name bound to none both read as none.
+ * Walking down to the atom is how the question stays about the name.
+ */
+std::string bare_name(const abnf::match& m)
+{
+    abnf::match at = m;
+
+    // Down the precedence chain, refusing as soon as a level has more than
+    // one child -- an operator, a filter or a subscript means this is an
+    // expression rather than a name.
+    const char* chain[] = { "term", "filtered", "postfix", "atom" };
+
+    for(std::size_t i = 0; i < sizeof(chain)/sizeof(chain[0]); i++) {
+        const abnf::match::list kids = at.children();
+
+        if(kids.size() != 1 || kids[0].name() != chain[i]) return std::string();
+
+        at = kids[0];
+    }
+
+    const abnf::match n = at.child("name");
+
+    return n ? std::string(n.text()) : std::string();
+}
+
 value eval_atom(const abnf::match& m, const scope& s)
 {
     if(const abnf::match str = m.child("string"))
@@ -427,48 +456,40 @@ value eval_postfix(const abnf::match& m, const scope& s)
         }
         else if(what == "subscript" && kids[i].child("slice")) {
             const abnf::match sl = kids[i].child("slice");
-            const abnf::match::list bounds = direct(sl, "expr");
+            const abnf::match lo_e = sl.child("slice-lo");
+            const abnf::match hi_e = sl.child("slice-hi");
 
-            // "[1:]", "[:2]" and "[1:2]" differ only in which bounds are
-            // there, and the grammar keeps them in order, so a leading colon
-            // is the way to tell "[:2]" from "[1:]".
-            const bool has_lo =
-                std::string(sl.text()).find_first_not_of("[ \t\r\n") !=
-                std::string(sl.text()).find(':');
+            // Omitted and negative are separate questions.  Reading them
+            // positionally conflated them, so "[:-1]" -- drop the last -- came
+            // out as "[:]" and kept it.
+            const bool has_lo = static_cast<bool>(lo_e);
+            const bool has_hi = static_cast<bool>(hi_e);
+            const long lo_v = has_lo ? eval(lo_e.child("expr"), s).number() : 0;
+            const long hi_v = has_hi ? eval(hi_e.child("expr"), s).number() : 0;
 
-            long lo = 0, hi = -1;
+            const std::size_t n = v.type() == value::kind::list
+                ? v.items().size() : v.flat().size();
 
-            if(bounds.size() == 2) {
-                lo = eval(bounds[0], s).number();
-                hi = eval(bounds[1], s).number();
-            }
-            else if(bounds.size() == 1) {
-                if(has_lo) lo = eval(bounds[0], s).number();
-                else hi = eval(bounds[0], s).number();
-            }
+            // Python's rule: a negative bound counts from the end, and either
+            // end clamps rather than throwing.
+            long b = has_lo ? (lo_v < 0 ? long(n) + lo_v : lo_v) : 0;
+            long e = has_hi ? (hi_v < 0 ? long(n) + hi_v : hi_v) : long(n);
+
+            if(b < 0) b = 0;
+            if(e < 0) e = 0;
+            if(b > long(n)) b = long(n);
+            if(e > long(n)) e = long(n);
+            if(e < b) e = b;
 
             if(v.type() == value::kind::list) {
                 const std::vector<value>& all = v.items();
-                const std::size_t n = all.size();
-                std::size_t b = lo < 0 ? 0 : std::size_t(lo);
-                std::size_t e = hi < 0 ? n : std::size_t(hi);
 
-                if(b > n) b = n;
-                if(e > n) e = n;
-
-                v = value::of(std::vector<value>(all.begin() + long(b),
-                                                 all.begin() + long(e < b ? b : e)));
+                v = value::of(std::vector<value>(all.begin() + b, all.begin() + e));
             }
             else {
                 const std::string all = v.flat();
-                const std::size_t n = all.size();
-                std::size_t b = lo < 0 ? 0 : std::size_t(lo);
-                std::size_t e = hi < 0 ? n : std::size_t(hi);
 
-                if(b > n) b = n;
-                if(e > n) e = n;
-
-                v = value(e > b ? all.substr(b, e - b) : std::string(), true);
+                v = value(all.substr(std::size_t(b), std::size_t(e - b)), true);
             }
 
             called.clear();
@@ -602,7 +623,7 @@ std::string to_json(const value& v, long indent = 0, long depth = 0)
     return "null";
 }
 
-value apply_filter(const value& v, const abnf::match& f)
+value apply_filter(const value& v, const abnf::match& f, const scope& s)
 {
     const std::string name = std::string(f.child("name").text());
 
@@ -662,7 +683,7 @@ value apply_filter(const value& v, const abnf::match& f)
                 for(std::size_t i = 0; i < all.size(); i++)
                     if(const abnf::match kw = all[i].child("kwarg"))
                         if(std::string(kw.child("name").text()) == "indent")
-                            indent = eval(kw.child("expr"), scope()).number();
+                            indent = eval(kw.child("expr"), s).number();
             }
 
         // The result is the template's own text, not the value's: it is a
@@ -734,14 +755,26 @@ value eval(const abnf::match& m, const scope& s)
         if(const abnf::match t = m.child("is-test")) {
             const value v = eval(parts[0], s);
             const std::string test = std::string(t.child("name").text());
-            const bool negated =
-                std::string(t.text()).find(" not ") != std::string::npos;
+
+            // From the tree, not from searching the text: a test whose own
+            // name contained "not" would otherwise invert the answer.
+            const bool negated = static_cast<bool>(t.child("is-not"));
             bool held = false;
 
             // "defined" is the one that matters: a name that was never bound
             // reads as none, so this is the question of whether the caller
             // supplied it at all.
-            if(test == "defined")       held = v.type() != value::kind::none;
+            // "defined" is a question about the *name*, not the value, so a
+            // bare name is looked up in the scope.  Anything else falls back
+            // to "is not none", which differs from Jinja only for a caller who
+            // deliberately binds a name to none -- Jinja calls that defined
+            // and this does not.
+            if(test == "defined") {
+                const std::string bare = bare_name(parts[0]);
+
+                held = bare.empty() ? v.type() != value::kind::none
+                                    : s.find(bare) != s.end();
+            }
             else if(test == "none")     held = v.type() == value::kind::none;
             else if(test == "string")   held = v.type() == value::kind::string;
             else if(test == "number")   held = v.type() == value::kind::number;
@@ -899,7 +932,7 @@ value eval(const abnf::match& m, const scope& s)
         value v = eval_postfix(m.child("postfix"), s);
         const abnf::match::list filters = direct(m, "filter");
 
-        for(std::size_t i = 0; i < filters.size(); i++) v = apply_filter(v, filters[i]);
+        for(std::size_t i = 0; i < filters.size(); i++) v = apply_filter(v, filters[i], s);
 
         return v;
     }

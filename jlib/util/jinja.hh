@@ -279,7 +279,8 @@ not-expr       =  ( "not" 1*ws not-expr ) / comparison
 ; on it -- Qwen and Llama 3 both branch on whether tools were supplied.  It
 ; sits at this level because that is where Jinja binds it.
 comparison     =  concat [ ( compare-op concat ) / is-test ]
-is-test        =  1*ws "is" 1*ws [ "not" 1*ws ] name
+is-test        =  1*ws "is" 1*ws [ is-not ] name
+is-not         =  "not" 1*ws
 
 ; jlib: the word operators carry their own whitespace, so that a name
 ; beginning "in" -- "index" -- is not read as the operator plus "dex".
@@ -304,7 +305,12 @@ attribute      =  "." name
 ; the first branch that matches and "[1]" fails the slice on its missing colon,
 ; while "[1:]" would match the index rule's expr and then choke on the colon.
 subscript      =  slice / index
-slice          =  "[" ows [ expr ] ows ":" ows [ expr ] ows "]"
+; jlib: the bounds are named so that "omitted" is a different question from
+; "negative".  Reading them positionally conflated "[:-1]" with "[:]", because
+; both ended up with a high bound of -1.
+slice          =  "[" ows [ slice-lo ] ows ":" ows [ slice-hi ] ows "]"
+slice-lo       =  expr
+slice-hi       =  expr
 index          =  "[" ows expr ows "]"
 call-args      =  "(" ows [ arg-list ] ows ")"
 ; jlib: a keyword argument.  Llama 3 writes "tojson(indent=4)", and the indent
@@ -334,7 +340,10 @@ dq-char        =  escape / HTAB / CR / LF / %x20-21 / %x23-5B / %x5D-7E / %x80-F
 sq-char        =  escape / HTAB / CR / LF / %x20-26 / %x28-5B / %x5D-7E / %x80-FF
 escape         =  "\" ( DQUOTE / "'" / "\" / "n" / "t" / "r" )
 
-number         =  1*DIGIT
+; jlib: a leading "-" is part of the literal.  Without it "messages[:-1]" does
+; not parse, because a slice bound is an expression and an expression has to
+; start with something.
+number         =  [ "-" ] 1*DIGIT
 boolean        =  "true" / "false" / "True" / "False"
 none           =  "none" / "None"
 

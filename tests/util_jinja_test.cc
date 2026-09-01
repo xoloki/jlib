@@ -587,6 +587,45 @@ static void it_matches_real_jinja_on_real_templates() {
     }
 }
 
+/**
+ * Single expressions against the same oracle.
+ *
+ * The templates check whole files; these check the constructs those files do
+ * not reach.  Slices with negative bounds are the case in point -- no vendor
+ * template here writes one, and the implementation was wrong for them.
+ */
+static void it_matches_real_jinja_on_expressions() {
+    std::cout << "\nit matches real Jinja on expressions:\n";
+
+    std::map<std::string, value> f;
+    std::vector<value> items;
+
+    items.push_back(value(std::string("x"), true));
+    items.push_back(value(std::string("y"), true));
+    items.push_back(value(std::string("z"), true));
+
+    f["items"] = value::of(items);
+    f["s"] = value(std::string("abcdef"), true);
+    f["n"] = value(7L);
+    f["zero"] = value(0L);
+    f["bound"] = value(std::string("B"), true);
+    f["nothing"] = value();
+
+    std::map<std::string, value> d;
+
+    d["b"] = value(2L);
+    d["a"] = value(1L);
+    f["d"] = value::of(d);
+
+    const value c = value::of(f);
+
+    for(std::size_t i = 0; i < jinja_fixtures::EXPRESSION_COUNT; i++) {
+        const jinja_fixtures::expression& e = jinja_fixtures::EXPRESSIONS[i];
+
+        renders(std::string("  ") + e.expr, e.expr, c, e.expected);
+    }
+}
+
 int main() {
     the_grammar_is_whole();
     it_reads_the_template_families();
@@ -600,10 +639,16 @@ int main() {
     it_refuses_early();
     it_yields_operands_and_not_just_truth();
     it_matches_real_jinja_on_real_templates();
+    it_matches_real_jinja_on_expressions();
 
     std::cout << "\n" << failures << " failure(s)\n";
 
     // What a green run does not establish.
+    //
+    // Not that "x is defined" means what Jinja means.  It asks the scope for
+    // a bare name, which is right, but for any other expression it falls back
+    // to "is not none" -- so a caller who deliberately binds a name to none
+    // gets False here and True from Jinja.  No template here does that.
     //
     // Not that four families is the language.  Four real templates are
     // checked against real Jinja; a fifth vendor may use a construct none of
