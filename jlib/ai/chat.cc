@@ -18,12 +18,103 @@
  *
  */
 
+
 #include <jlib/ai/chat.hh>
 
+#include <cctype>
 #include <sstream>
 
 namespace jlib {
 namespace ai {
+
+namespace {
+
+/** Whitespace-trimmed, for the did-this-turn-survive check. */
+std::string squeeze(const std::string& s)
+{
+    std::size_t b = 0, e = s.size();
+
+    while(b < e && std::isspace(static_cast<unsigned char>(s[b]))) b++;
+    while(e > b && std::isspace(static_cast<unsigned char>(s[e-1]))) e--;
+
+    return s.substr(b, e - b);
+}
+
+/**
+ * The context a chat template expects to be rendered against.
+ *
+ * The names are the ones the ecosystem settled on -- `messages`, `eos_token`,
+ * `add_generation_prompt` -- because templates are written against
+ * transformers and use them without asking.
+ *
+ * The provenance flags are the load-bearing part.  A role name and the
+ * end-of-sequence marker are the template's own text; a message's content is
+ * a stranger's, and is the one thing here marked as not the template's.
+ */
+util::jinja::value context(const std::vector<message>& turns,
+                           const std::string& eos,
+                           bool add_generation_prompt)
+{
+    std::vector<util::jinja::value> msgs;
+
+    for(std::size_t i = 0; i < turns.size(); i++) {
+        std::map<std::string, util::jinja::value> m;
+
+        m["role"] = util::jinja::value(turns[i].role, true);
+        m["content"] = util::jinja::value(turns[i].content, false);
+
+        msgs.push_back(util::jinja::value::of(m));
+    }
+
+    std::map<std::string, util::jinja::value> c;
+
+    c["messages"] = util::jinja::value::of(msgs);
+    c["eos_token"] = util::jinja::value(eos, true);
+
+    // Empty, deliberately.  encode() puts the beginning-of-sequence token in
+    // by id, so a template that also writes bos_token would give the model
+    // two of them.  A template that writes it gets nothing here and the id
+    // still arrives, which is the behaviour the scanner had.
+    c["bos_token"] = util::jinja::value(std::string(), true);
+
+    c["add_generation_prompt"] = util::jinja::value(add_generation_prompt);
+
+    return util::jinja::value::of(c);
+}
+
+/**
+ * Did every turn reach the output?
+ *
+ * See the note in chat.hh.  A renderer drops a turn whose role the template
+ * does not name, in silence, and this is what the scanner's "no marker for
+ * that role" check becomes.
+ */
+void check_nothing_vanished(const std::vector<message>& turns,
+                            const util::jinja::text& out)
+{
+    std::string from_values;
+
+    for(std::size_t i = 0; i < out.size(); i++)
+        if(!out[i].literal) from_values += out[i].text;
+
+    for(std::size_t i = 0; i < turns.size(); i++) {
+        const std::string want = squeeze(turns[i].content);
+
+        if(want.empty()) continue;
+
+        if(from_values.find(want) != std::string::npos) continue;
+
+        std::ostringstream e;
+
+        e << "the template rendered nothing for the message with role '"
+          << turns[i].role << "' -- it names no branch for that role, so the "
+          << "turn would have been dropped in silence";
+
+        throw chat::exception(e.str());
+    }
+}
+
+}
 
 chat::chat(const gguf& g, const std::string& eos)
     : chat(g.has("tokenizer.chat_template")
@@ -32,156 +123,59 @@ chat::chat(const gguf& g, const std::string& eos)
                                  "is no way to know how it wants a "
                                  "conversation laid out"),
            eos)
-{
-}
+{}
 
 chat::chat(const std::string& tmpl, const std::string& eos)
     : m_template(tmpl),
-      m_eos(eos)
+      m_eos(eos),
+      m_tmpl([&tmpl] {
+          // Rethrown as a chat::exception so that a caller holding a model
+          // file does not have to know which parser refused it.
+          try { return util::jinja::tmpl(tmpl); }
+          catch(std::exception& e) { throw exception(e.what()); }
+      }())
+{}
+
+std::string chat::format(const std::vector<message>& turns,
+                         bool add_generation_prompt) const
 {
+    const util::jinja::text out =
+        m_tmpl.render(context(turns, m_eos, add_generation_prompt));
 
-    // Every <|...|> in the template, in order, with the inner text taken as
-    // the role.  That holds for the Zephyr family, where the marker is named
-    // after the turn it opens; where it does not hold, the checks below fail
-    // and the constructor throws rather than laying turns out wrongly.
-    for(std::size_t at = 0; ; ) {
-        const std::size_t open = m_template.find("<|", at);
+    check_nothing_vanished(turns, out);
 
-        if(open == std::string::npos) break;
-
-        const std::size_t close = m_template.find("|>", open + 2);
-
-        if(close == std::string::npos) break;
-
-        const std::string role = m_template.substr(open + 2, close - open - 2);
-
-        at = close + 2;
-
-        // Every marker is a candidate role, with no filtering on what it looks
-        // like.  There was a check here rejecting anything but lowercase and
-        // underscores, on the theory that it kept ChatML's "<|im_start|>" from
-        // registering a role -- and a mutation showed it rejected nothing that
-        // mattered.  ChatML is caught below by not naming user and assistant,
-        // and "im_start" would have passed the check anyway.
-        //
-        // A stray marker such as "<|endoftext|>" therefore does appear in
-        // roles(), and is harmless: format() only ever looks up the roles a
-        // caller names, and a caller naming "endoftext" has said what it meant.
-        if(role.empty()) continue;
-
-        if(m_marker.find(role) == m_marker.end()) {
-            m_marker[role] = "<|" + role + "|>";
-            m_roles.push_back(role);
-        }
-    }
-
-    // The two a conversation cannot do without.  A template that names neither
-    // is not this shape at all, and one naming only a system prompt is some
-    // other arrangement entirely.
-    if(m_marker.find("user") == m_marker.end() ||
-       m_marker.find("assistant") == m_marker.end())
-    {
-        std::ostringstream e;
-
-        e << "this reads templates that mark turns with <|user|> and "
-          << "<|assistant|>, and that one names ";
-
-        if(m_roles.empty()) e << "no roles at all";
-        else {
-            e << "only";
-
-            for(std::size_t i = 0; i < m_roles.size(); i++)
-                e << " <|" << m_roles[i] << "|>";
-        }
-
-        e << " -- see chat.hh for what is and is not covered";
-
-        throw exception(e.str());
-    }
-}
-
-std::string chat::marker(const std::string& role) const {
-    std::map<std::string, std::string>::const_iterator i = m_marker.find(role);
-
-    return i == m_marker.end() ? std::string() : i->second;
+    return util::jinja::flatten(out);
 }
 
 std::vector<int> chat::encode(const std::vector<message>& turns,
                               const tokenizer& tok,
                               bool add_generation_prompt) const
 {
-    std::vector<int> out;
+    const util::jinja::text out =
+        m_tmpl.render(context(turns, m_eos, add_generation_prompt));
 
-    if(tok.bos() >= 0) out.push_back(tok.bos());
+    check_nothing_vanished(turns, out);
+
+    std::vector<int> ids;
+
+    if(tok.bos() >= 0) ids.push_back(tok.bos());
 
     // The dummy prefix belongs to the start of the whole prompt, so it goes to
-    // whichever run turns out to be first.
+    // whichever span turns out to be first.
     bool first = true;
 
-    for(std::size_t i = 0; i < turns.size(); i++) {
-        const std::string m = marker(turns[i].role);
-
-        if(m.empty())
-            throw exception("the template has no marker for the role '" +
-                            turns[i].role + "'");
-
-        // The marker is the template's own text and is tokenized as text --
-        // <|user|> is not in a Llama vocabulary and never was, so it becomes
-        // the same handful of ordinary tokens the model was tuned on.
-        tok.append(m + "\n", first, false, out);
+    for(std::size_t i = 0; i < out.size(); i++) {
+        // Here is the whole reason render() returns spans.  The template's own
+        // text may spell a control token and mean it -- "</s>" written by the
+        // template is the end-of-sequence token.  A message's content may
+        // spell the same four characters and must not: a user who types
+        // "</s>" has typed four characters.
+        tok.append(out[i].text, first, out[i].literal, ids);
 
         first = false;
-
-        // And the content is a stranger's.  Special parsing off, so a user who
-        // writes "</s>" has written four characters.
-        tok.append(turns[i].content, false, false, out);
-
-        // The close is the token itself.  This is the one place in a
-        // conversation where a special token is meant to appear, and it gets
-        // here by being put here rather than by being spelled.
-        if(tok.eos() >= 0) out.push_back(tok.eos());
-
-        tok.append("\n", false, false, out);
     }
 
-    if(add_generation_prompt)
-        tok.append(marker("assistant") + "\n", first, false, out);
-
-    return out;
-}
-
-std::string chat::format(const std::vector<message>& turns,
-                         bool add_generation_prompt) const
-{
-    std::string out;
-
-    for(std::size_t i = 0; i < turns.size(); i++) {
-        const std::string m = marker(turns[i].role);
-
-        if(m.empty())
-            throw exception("the template has no marker for the role '" +
-                            turns[i].role + "'");
-
-        // Marker, newline, content, end-of-sequence, newline.  The newlines
-        // come from the template's own layout rather than from taste: Jinja
-        // emits the one inside the marker literal and the one after the
-        // expression that wrote it.
-        out += m;
-        out += "\n";
-        out += turns[i].content;
-        out += m_eos;
-        out += "\n";
-    }
-
-    // And the bare marker, which is the whole point of the exercise: it puts
-    // the model at the start of the assistant's turn, so its next token begins
-    // a reply instead of continuing the user's sentence.
-    if(add_generation_prompt) {
-        out += marker("assistant");
-        out += "\n";
-    }
-
-    return out;
+    return ids;
 }
 
 }

@@ -479,6 +479,65 @@ static void it_refuses_early() {
        threw);
 }
 
+/**
+ * The cases a review caught, and the reason the tests had not.
+ *
+ * Every existing assertion for or, and and the ordered comparisons used them
+ * inside an if, where only truthiness is read.  Three bugs hid behind that:
+ * or returned a boolean rather than the operand, ordered comparison coerced
+ * anything non-numeric to zero, and a string key on a list silently gave back
+ * element zero.  Putting the same operators in an *output* position is what
+ * makes the difference visible.
+ */
+static void it_yields_operands_and_not_just_truth() {
+    std::cout << "\nit yields operands, not just truth:\n";
+
+    std::map<std::string, value> f;
+
+    f["set"] = value(std::string("S"), true);
+    f["empty"] = value(std::string(""), true);
+    f["n"] = value(3L);
+    f["zero"] = value(0L);
+
+    std::vector<value> three;
+
+    three.push_back(value(std::string("x"), true));
+    three.push_back(value(std::string("y"), true));
+    f["items"] = value::of(three);
+
+    const value c = value::of(f);
+
+    // or yields the first truthy operand, else the last -- the idiom behind
+    // "{{ system_message or 'default' }}".
+    renders("or yields the operand, not true", "{{ missing or 'fallback' }}",
+            c, "fallback");
+    renders("or short-circuits to the first truthy one", "{{ set or 'other' }}",
+            c, "S");
+    renders("or with both falsy yields the last", "{{ empty or zero }}", c, "0");
+
+    // and yields the first falsy operand, else the last.
+    renders("and yields the last when all are truthy", "{{ set and 'last' }}",
+            c, "last");
+    renders("and yields the first falsy", "{{ empty and 'never' }}", c, "");
+
+    // Ordered comparison on strings compares strings, as Python does.
+    renders("strings order as strings", "{% if 'a' < 'b' %}y{% endif %}", c, "y");
+    renders("and the other way", "{% if 'b' < 'a' %}y{% else %}n{% endif %}", c, "n");
+
+    // A non-numeric subscript on a list is nothing, not element zero.
+    renders("a string key on a list is empty", "{{ items['nope'] }}", c, "");
+    renders("an out-of-range index is empty", "{{ items[9] }}", c, "");
+    renders("a real index still works", "{{ items[1] }}", c, "y");
+
+    // Comparing across types is refused rather than coerced.
+    bool threw = false;
+
+    try { tmpl("{% if n > 'x' %}y{% endif %}").str(c); }
+    catch(std::exception&) { threw = true; }
+
+    ok("a number ordered against a string throws rather than coercing", threw);
+}
+
 int main() {
     the_grammar_is_whole();
     it_reads_the_template_families();
@@ -490,6 +549,7 @@ int main() {
     it_renders_tinyllama_exactly();
     it_keeps_the_templates_text_apart_from_the_users();
     it_refuses_early();
+    it_yields_operands_and_not_just_truth();
 
     std::cout << "\n" << failures << " failure(s)\n";
 

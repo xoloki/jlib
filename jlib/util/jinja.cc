@@ -427,10 +427,16 @@ value eval_postfix(const abnf::match& m, const scope& s)
             const value key = eval(kids[i].child("expr"), s);
 
             if(v.type() == value::kind::list) {
-                const long n = key.type() == value::kind::number ? key.number() : 0;
+                // A string key on a list is nothing, not element zero.  A
+                // missing map field already answers none; a list has to give
+                // the same answer or "items['nope']" quietly yields items[0].
+                if(key.type() != value::kind::number) v = value();
+                else {
+                    const long n = key.number();
 
-                v = n >= 0 && std::size_t(n) < v.items().size()
-                    ? v.items()[std::size_t(n)] : value();
+                    v = n >= 0 && std::size_t(n) < v.items().size()
+                        ? v.items()[std::size_t(n)] : value();
+                }
             }
             else {
                 const std::string k = key.flat();
@@ -510,15 +516,25 @@ value eval(const abnf::match& m, const scope& s)
 
     if(what == "expr") return eval(m.child("or-expr"), s);
 
+    // or and and yield an *operand*, not a boolean: "a or b" is the first
+    // truthy one, else the last, which is what makes "{{ x or 'default' }}"
+    // the idiom it is.  Returning true/false works for every use inside an
+    // if -- which is why a test suite that only ever puts them there will not
+    // notice.
     if(what == "or-expr") {
         const abnf::match::list parts = direct(m, "and-expr");
 
         if(parts.size() == 1) return eval(parts[0], s);
 
-        for(std::size_t i = 0; i < parts.size(); i++)
-            if(eval(parts[i], s).truthy()) return value(true);
+        value last;
 
-        return value(false);
+        for(std::size_t i = 0; i < parts.size(); i++) {
+            last = eval(parts[i], s);
+
+            if(last.truthy()) return last;
+        }
+
+        return last;
     }
 
     if(what == "and-expr") {
@@ -526,10 +542,15 @@ value eval(const abnf::match& m, const scope& s)
 
         if(parts.size() == 1) return eval(parts[0], s);
 
-        for(std::size_t i = 0; i < parts.size(); i++)
-            if(!eval(parts[i], s).truthy()) return value(false);
+        value last;
 
-        return value(true);
+        for(std::size_t i = 0; i < parts.size(); i++) {
+            last = eval(parts[i], s);
+
+            if(!last.truthy()) return last;
+        }
+
+        return last;
     }
 
     if(what == "not-expr") {
@@ -564,17 +585,36 @@ value eval(const abnf::match& m, const scope& s)
             return value(op == "in" ? found : !found);
         }
 
-        // The remaining four are numeric, and a template that compares
-        // anything else with them is doing something this does not model.
-        const long a = l.type() == value::kind::number ? l.number() : 0;
-        const long b = r.type() == value::kind::number ? r.number() : 0;
+        // The remaining four order their operands.  Numbers compare as
+        // numbers and strings compare as strings, which is what Python does;
+        // anything else throws.
+        //
+        // It used to coerce a non-number to zero, under a comment saying the
+        // case was not modelled -- which modelled it, as zero, in silence.
+        // Saying a thing is unsupported and then quietly supporting it wrongly
+        // is the failure this file exists to avoid.
+        if(l.type() == value::kind::number && r.type() == value::kind::number) {
+            const long a = l.number(), b = r.number();
 
-        if(op == ">")  return value(a >  b);
-        if(op == "<")  return value(a <  b);
-        if(op == ">=") return value(a >= b);
-        if(op == "<=") return value(a <= b);
+            if(op == ">")  return value(a >  b);
+            if(op == "<")  return value(a <  b);
+            if(op == ">=") return value(a >= b);
+            if(op == "<=") return value(a <= b);
+        }
 
-        throw tmpl::exception("the comparison '" + op + "' is not implemented");
+        if(l.type() == value::kind::string && r.type() == value::kind::string) {
+            const std::string a = l.flat(), b = r.flat();
+
+            if(op == ">")  return value(a >  b);
+            if(op == "<")  return value(a <  b);
+            if(op == ">=") return value(a >= b);
+            if(op == "<=") return value(a <= b);
+        }
+
+        throw tmpl::exception("'" + op + "' between a " +
+                              std::to_string(int(l.type())) + " and a " +
+                              std::to_string(int(r.type())) +
+                              " is not implemented");
     }
 
     if(what == "concat") {
