@@ -275,7 +275,11 @@ expr           =  or-expr
 or-expr        =  and-expr *( 1*ws "or" 1*ws and-expr )
 and-expr       =  not-expr *( 1*ws "and" 1*ws not-expr )
 not-expr       =  ( "not" 1*ws not-expr ) / comparison
-comparison     =  concat [ compare-op concat ]
+; jlib: "x is defined" is a *test*, not a comparison, and real templates lean
+; on it -- Qwen and Llama 3 both branch on whether tools were supplied.  It
+; sits at this level because that is where Jinja binds it.
+comparison     =  concat [ ( compare-op concat ) / is-test ]
+is-test        =  1*ws "is" 1*ws [ "not" 1*ws ] name
 
 ; jlib: the word operators carry their own whitespace, so that a name
 ; beginning "in" -- "index" -- is not read as the operator plus "dex".
@@ -284,14 +288,31 @@ compare-op     =  ( ows symbolic-op ows )
                /  ( 1*ws "in" 1*ws )
 symbolic-op    =  "==" / "!=" / ">=" / "<=" / ">" / "<"
 
-concat         =  filtered *( ows "+" ows filtered )
+; jlib: arithmetic beyond "+" is here because real templates need it --
+; Gemma alternates roles with "loop.index0 % 2 == 0".  The two levels are
+; Jinja's own precedence: * / // % bind tighter than + and -.  "//" comes
+; before "/" because ordered choice takes the first branch that matches.
+concat         =  term *( ows add-op ows term )
+add-op         =  "+" / "-"
+term           =  filtered *( ows mul-op ows filtered )
+mul-op         =  "*" / "//" / "/" / "%"
 filtered       =  postfix *filter
 
 postfix        =  atom *( attribute / subscript / call-args )
 attribute      =  "." name
-subscript      =  "[" ows expr ows "]"
+; jlib: a slice, then a plain index.  Slice first because ordered choice takes
+; the first branch that matches and "[1]" fails the slice on its missing colon,
+; while "[1:]" would match the index rule's expr and then choke on the colon.
+subscript      =  slice / index
+slice          =  "[" ows [ expr ] ows ":" ows [ expr ] ows "]"
+index          =  "[" ows expr ows "]"
 call-args      =  "(" ows [ arg-list ] ows ")"
-arg-list       =  expr *( ows "," ows expr )
+; jlib: a keyword argument.  Llama 3 writes "tojson(indent=4)", and the indent
+; is not cosmetic -- the model was tuned on the indented form, so the argument
+; has to be read and honoured rather than accepted and dropped.
+arg-list       =  arg *( ows "," ows arg )
+arg            =  kwarg / expr
+kwarg          =  name ows "=" ows expr
 
 ; jlib: a filter is postfix like the others, but "|" binds looser than a call
 ; -- "a | trim" is trim(a), not a(|trim).  Kept out of postfix for that.

@@ -272,7 +272,7 @@ util_headers_fold_test_SOURCES = util_headers_fold_test.cc
 util_headers_fold_test_LDADD   = $(JUTIL_LA)
 util_headers_angie_test_SOURCES = util_headers_angie_test.cc
 util_headers_angie_test_LDADD   = $(JUTIL_LA)
-util_jinja_test_SOURCES = util_jinja_test.cc
+util_jinja_test_SOURCES = util_jinja_test.cc jinja_templates.hh
 util_jinja_test_LDADD   = $(JUTIL_LA) $(JSYS_LA)
 
 util_abnf_test_SOURCES = util_abnf_test.cc

@@ -21,6 +21,7 @@
 #include <jlib/util/jinja.hh>
 
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 
 namespace jlib {
@@ -369,6 +370,7 @@ std::string layout(const std::string& src, std::size_t b, std::size_t e)
 // The evaluator is mutually recursive: an expression may contain a block's
 // variable and a block's body contains expressions.
 value eval(const abnf::match& m, const scope& s);
+std::string to_json(const value& v, long indent, long depth);
 void render_nodes(const std::string& src, const abnf::match& node,
                   scope& s, text& out);
 
@@ -423,8 +425,59 @@ value eval_postfix(const abnf::match& m, const scope& s)
             v = v.type() == value::kind::map && v.has(field) ? v.at(field) : value();
             called.clear();
         }
+        else if(what == "subscript" && kids[i].child("slice")) {
+            const abnf::match sl = kids[i].child("slice");
+            const abnf::match::list bounds = direct(sl, "expr");
+
+            // "[1:]", "[:2]" and "[1:2]" differ only in which bounds are
+            // there, and the grammar keeps them in order, so a leading colon
+            // is the way to tell "[:2]" from "[1:]".
+            const bool has_lo =
+                std::string(sl.text()).find_first_not_of("[ \t\r\n") !=
+                std::string(sl.text()).find(':');
+
+            long lo = 0, hi = -1;
+
+            if(bounds.size() == 2) {
+                lo = eval(bounds[0], s).number();
+                hi = eval(bounds[1], s).number();
+            }
+            else if(bounds.size() == 1) {
+                if(has_lo) lo = eval(bounds[0], s).number();
+                else hi = eval(bounds[0], s).number();
+            }
+
+            if(v.type() == value::kind::list) {
+                const std::vector<value>& all = v.items();
+                const std::size_t n = all.size();
+                std::size_t b = lo < 0 ? 0 : std::size_t(lo);
+                std::size_t e = hi < 0 ? n : std::size_t(hi);
+
+                if(b > n) b = n;
+                if(e > n) e = n;
+
+                v = value::of(std::vector<value>(all.begin() + long(b),
+                                                 all.begin() + long(e < b ? b : e)));
+            }
+            else {
+                const std::string all = v.flat();
+                const std::size_t n = all.size();
+                std::size_t b = lo < 0 ? 0 : std::size_t(lo);
+                std::size_t e = hi < 0 ? n : std::size_t(hi);
+
+                if(b > n) b = n;
+                if(e > n) e = n;
+
+                v = value(e > b ? all.substr(b, e - b) : std::string(), true);
+            }
+
+            called.clear();
+        }
         else if(what == "subscript") {
-            const value key = eval(kids[i].child("expr"), s);
+            // The expr sits under "index" now that subscript alternates
+            // between a slice and an index, so this reaches a level deeper
+            // than a strict child().
+            const value key = eval(kids[i]["expr"], s);
 
             if(v.type() == value::kind::list) {
                 // A string key on a list is nothing, not element zero.  A
@@ -466,6 +519,89 @@ value eval_postfix(const abnf::match& m, const scope& s)
     return v;
 }
 
+/**
+ * A value as JSON, for the tojson filter.
+ *
+ * indent 0 is the compact form; anything larger is Python's json.dumps
+ * layout, which is what a template asking for indent=4 was written against.
+ */
+std::string to_json(const value& v, long indent = 0, long depth = 0)
+{
+    const std::string pad(std::size_t(indent * (depth + 1)), ' ');
+    const std::string close_pad(std::size_t(indent * depth), ' ');
+    const std::string nl = indent > 0 ? "\n" : "";
+    const std::string sep = indent > 0 ? "," : ", ";
+
+    switch(v.type()) {
+    case value::kind::none:    return "null";
+    case value::kind::boolean: return v.flat() == "True" ? "true" : "false";
+    case value::kind::number:  return v.flat();
+
+    case value::kind::string: {
+        const std::string t = v.flat();
+        std::string out = "\"";
+
+        for(std::size_t i = 0; i < t.size(); i++) {
+            const unsigned char c = static_cast<unsigned char>(t[i]);
+
+            switch(c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\t': out += "\\t";  break;
+            case '\r': out += "\\r";  break;
+            default:
+                if(c < 0x20) {
+                    char b[8];
+
+                    std::snprintf(b, sizeof(b), "\\u%04x", c);
+                    out += b;
+                }
+                else out += char(c);
+            }
+        }
+
+        return out + "\"";
+    }
+
+    case value::kind::list: {
+        if(v.items().empty()) return "[]";
+
+        std::string out = "[" + nl;
+
+        for(std::size_t i = 0; i < v.items().size(); i++) {
+            if(i) out += sep + nl;
+
+            out += pad + to_json(v.items()[i], indent, depth + 1);
+        }
+
+        return out + nl + close_pad + "]";
+    }
+
+    case value::kind::map: {
+        const std::map<std::string, value>& f = v.fields();
+
+        if(f.empty()) return "{}";
+
+        std::string out = "{" + nl;
+        bool first = true;
+
+        for(std::map<std::string, value>::const_iterator i = f.begin();
+            i != f.end(); ++i) {
+            if(!first) out += sep + nl;
+
+            first = false;
+            out += pad + to_json(value(i->first, true)) + ": " +
+                   to_json(i->second, indent, depth + 1);
+        }
+
+        return out + nl + close_pad + "}";
+    }
+    }
+
+    return "null";
+}
+
 value apply_filter(const value& v, const abnf::match& f)
 {
     const std::string name = std::string(f.child("name").text());
@@ -504,6 +640,38 @@ value apply_filter(const value& v, const abnf::match& f)
         }
 
         return value(t);
+    }
+
+    if(name == "length") {
+        if(v.type() == value::kind::list)
+            return value(static_cast<long>(v.items().size()));
+
+        if(v.type() == value::kind::map)
+            return value(static_cast<long>(v.fields().size()));
+
+        return value(static_cast<long>(v.flat().size()));
+    }
+
+    if(name == "tojson") {
+        long indent = 0;
+
+        if(const abnf::match args = f.child("call-args"))
+            if(const abnf::match list = args.child("arg-list")) {
+                const abnf::match::list all = direct(list, "arg");
+
+                for(std::size_t i = 0; i < all.size(); i++)
+                    if(const abnf::match kw = all[i].child("kwarg"))
+                        if(std::string(kw.child("name").text()) == "indent")
+                            indent = eval(kw.child("expr"), scope()).number();
+            }
+
+        // The result is the template's own text, not the value's: it is a
+        // *rendering* of the value, produced here, and a model reading it
+        // reads punctuation this code wrote.  Marking it literal keeps that
+        // honest, at the cost of a caller's string losing its origin when it
+        // is serialised -- which is the right trade, because the quotes and
+        // braces around it were never theirs.
+        return value(to_json(v, indent), true);
     }
 
     throw tmpl::exception("this template uses the filter '" + name +
@@ -563,6 +731,30 @@ value eval(const abnf::match& m, const scope& s)
     if(what == "comparison") {
         const abnf::match::list parts = direct(m, "concat");
 
+        if(const abnf::match t = m.child("is-test")) {
+            const value v = eval(parts[0], s);
+            const std::string test = std::string(t.child("name").text());
+            const bool negated =
+                std::string(t.text()).find(" not ") != std::string::npos;
+            bool held = false;
+
+            // "defined" is the one that matters: a name that was never bound
+            // reads as none, so this is the question of whether the caller
+            // supplied it at all.
+            if(test == "defined")       held = v.type() != value::kind::none;
+            else if(test == "none")     held = v.type() == value::kind::none;
+            else if(test == "string")   held = v.type() == value::kind::string;
+            else if(test == "number")   held = v.type() == value::kind::number;
+            else if(test == "mapping")  held = v.type() == value::kind::map;
+            else if(test == "iterable") held = v.type() == value::kind::list ||
+                                               v.type() == value::kind::map;
+            else
+                throw tmpl::exception("the test 'is " + test +
+                                      "' is not implemented");
+
+            return value(negated ? !held : held);
+        }
+
         if(parts.size() == 1) return eval(parts[0], s);
 
         const value l = eval(parts[0], s);
@@ -617,24 +809,90 @@ value eval(const abnf::match& m, const scope& s)
                               " is not implemented");
     }
 
-    if(what == "concat") {
+    if(what == "term") {
         const abnf::match::list parts = direct(m, "filtered");
 
         if(parts.size() == 1) return eval(parts[0], s);
 
-        // Concatenation is where provenance would be lost if a string were a
-        // string: the spans of each part are kept, in order.
-        text joined;
+        const abnf::match::list ops = direct(m, "mul-op");
+        value acc = eval(parts[0], s);
+
+        for(std::size_t i = 1; i < parts.size(); i++) {
+            const value r = eval(parts[i], s);
+            const std::string op = std::string(ops[i-1].text());
+
+            if(acc.type() != value::kind::number ||
+               r.type() != value::kind::number)
+                throw tmpl::exception("'" + op + "' wants two numbers");
+
+            const long a = acc.number(), b = r.number();
+
+            if((op == "/" || op == "//" || op == "%") && b == 0)
+                throw tmpl::exception("division by zero in the template");
+
+            if(op == "*")  acc = value(a * b);
+            else if(op == "%")  acc = value(a % b);
+            else acc = value(a / b);   // "/" and "//" alike: integers only
+        }
+
+        return acc;
+    }
+
+    if(what == "concat") {
+        const abnf::match::list parts = direct(m, "term");
+
+        if(parts.size() == 1) return eval(parts[0], s);
+
+        // "-" is arithmetic; "+" is concatenation when either side is a
+        // string, and arithmetic when neither is.  That is Jinja following
+        // Python, and it is why this cannot simply join the spans.
+        const abnf::match::list ops = direct(m, "add-op");
+        bool all_plus = true;
+
+        for(std::size_t i = 0; i < ops.size(); i++)
+            if(std::string(ops[i].text()) != "+") all_plus = false;
+
+        if(all_plus) {
+            bool numeric = true;
+
+            for(std::size_t i = 0; i < parts.size() && numeric; i++)
+                if(eval(parts[i], s).type() != value::kind::number)
+                    numeric = false;
+
+            if(!numeric) {
+
+                // Concatenation is where provenance would be lost if a
+                // string were a string: the spans of each part are kept, in
+                // order.
+                text joined;
+
+                for(std::size_t i = 0; i < parts.size(); i++) {
+                    const value v = eval(parts[i], s);
+                    const text t = v.type() == value::kind::string
+                        ? v.str() : literal_text(v.flat());
+
+                    joined.insert(joined.end(), t.begin(), t.end());
+                }
+
+                return value(joined);
+            }
+        }
+
+        long acc = 0;
 
         for(std::size_t i = 0; i < parts.size(); i++) {
             const value v = eval(parts[i], s);
-            const text t = v.type() == value::kind::string ? v.str()
-                                                           : literal_text(v.flat());
 
-            joined.insert(joined.end(), t.begin(), t.end());
+            if(v.type() != value::kind::number)
+                throw tmpl::exception("arithmetic on something that is not a "
+                                      "number");
+
+            if(i == 0) acc = v.number();
+            else acc = std::string(ops[i-1].text()) == "-" ? acc - v.number()
+                                                           : acc + v.number();
         }
 
-        return value(joined);
+        return value(acc);
     }
 
     if(what == "filtered") {

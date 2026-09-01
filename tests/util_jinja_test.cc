@@ -20,6 +20,8 @@
 
 #include <jlib/util/jinja.hh>
 
+#include "jinja_templates.hh"
+
 #include <iostream>
 #include <string>
 #include <map>
@@ -284,7 +286,12 @@ static value context(const std::vector<std::pair<std::string, std::string> >& tu
 
     c["messages"] = value::of(msgs);
     c["eos_token"] = value(std::string("</s>"), true);
-    c["bos_token"] = value(std::string("<s>"), true);
+    // Empty, because that is what ai::chat passes: encode() puts the
+    // beginning-of-sequence token in by id, so a template that also writes
+    // bos_token would give the model two.  Gemma's template writes it, which
+    // is how the mismatch showed up -- the reference renderings were made with
+    // the same empty value.
+    c["bos_token"] = value(std::string(""), true);
     c["add_generation_prompt"] = value(add_generation_prompt);
 
     return value::of(c);
@@ -538,6 +545,48 @@ static void it_yields_operands_and_not_just_truth() {
     ok("a number ordered against a string throws rather than coercing", threw);
 }
 
+/**
+ * The real templates, against real Jinja's output.
+ *
+ * Everything else here is written by hand -- the family shapes, the expected
+ * strings, the constructs.  This section is not: the sources are verbatim from
+ * four GGUFs and the expectations come from python-jinja2 under transformers'
+ * settings.  It is the only part of this file that can say the evaluator is
+ * *correct* rather than merely self-consistent.
+ *
+ * It is also what showed the hand-written shapes were too easy.  All six of
+ * them parsed against a grammar that could not read a single real file.
+ */
+static void it_matches_real_jinja_on_real_templates() {
+    std::cout << "\nit matches real Jinja on real templates:\n";
+
+    typedef std::pair<std::string, std::string> turn;
+
+    for(std::size_t i = 0; i < jinja_fixtures::FAMILY_COUNT; i++) {
+        const jinja_fixtures::family& f = jinja_fixtures::FAMILIES[i];
+
+        std::vector<turn> one;
+        one.push_back(turn("user", "Hi"));
+
+        std::vector<turn> two;
+        two.push_back(turn("user", "A"));
+        two.push_back(turn("assistant", "B"));
+
+        // bos_token is empty here because that is what ai::chat passes: the
+        // beginning-of-sequence token goes in by id, so a template writing
+        // bos_token must render nothing or the model sees two.  The reference
+        // was rendered with the same value.
+        renders(std::string("  ") + f.name + ", one user turn",
+                f.source, context(one, true), f.one_user);
+
+        renders(std::string("  ") + f.name + ", without the generation prompt",
+                f.source, context(one, false), f.no_gen);
+
+        renders(std::string("  ") + f.name + ", an exchange",
+                f.source, context(two, true), f.exchange);
+    }
+}
+
 int main() {
     the_grammar_is_whole();
     it_reads_the_template_families();
@@ -550,28 +599,32 @@ int main() {
     it_keeps_the_templates_text_apart_from_the_users();
     it_refuses_early();
     it_yields_operands_and_not_just_truth();
+    it_matches_real_jinja_on_real_templates();
 
     std::cout << "\n" << failures << " failure(s)\n";
 
     // What a green run does not establish.
     //
-    // Not that the templates here are the real ones.  Five of the six
-    // families are written from the published shape rather than read out of a
-    // model file, because only TinyLlama's is on this machine -- and its is
-    // the one embedded above and rendered byte for byte.  A real Qwen or
-    // Gemma template may use a construct its family's shape does not show,
-    // and this would not know.  A second model file is the thing that would
-    // settle it.
+    // Not that four families is the language.  Four real templates are
+    // checked against real Jinja; a fifth vendor may use a construct none of
+    // them does, and nothing here would know.  What the four did establish is
+    // that the hand-written family shapes were far too easy: all six parsed
+    // against a grammar that could not read a single real file.
+    //
+    // Not the tool-calling paths.  Every real template here branches on
+    // whether tools were supplied, and all three cases render without them.
+    // The tojson, length and slicing support exists because those branches
+    // need it to parse, and is exercised directly rather than through a
+    // template that would use it.
     //
     // Not the whole of Jinja.  The subset is deliberate and listed in
     // jinja.hh; the refusals here are a sample of what is outside it, not a
-    // proof that everything outside it is refused.  `| tojson` is the next
-    // filter a real template is likely to want, and it throws.
+    // proof that everything outside it is refused.  Macros, includes and
+    // inheritance are still absent, and a template using one says so.
     //
-    // Not the render for any template but TinyLlama's.  The other five are
-    // parsed and their trees inspected; only TinyLlama's output is compared
-    // against a recorded expectation.  ai_chat_test carries the rendered
-    // cases for ChatML, Llama 3, Gemma and Llama 2.
+    // Not every rendering path.  The four real templates are compared against
+    // Jinja on three conversations each; the hand-written family shapes are
+    // parsed only.  ai_chat_test carries the ai::chat-level renderings.
     //
     // Not that a parse is a correct parse.  it_parses_tags_as_tags() asks
     // what is in the tree rather than whether there is one, which is what an
