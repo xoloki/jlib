@@ -102,6 +102,15 @@ enum tone { plain = 1, you = 2, note = 3 };
 enum { KEY_WORD_LEFT = 0x1000, KEY_WORD_RIGHT, KEY_BARE_ESC };
 
 /**
+ * Fewest tokens worth generating a reply into.
+ *
+ * Below this there is no answer to be had, only the beginning of one, and
+ * saying the prompt does not fit is more use than a truncated fragment of a
+ * sentence.
+ */
+const unsigned int MIN_REPLY = 16;
+
+/**
  * The screen: a transcript with scrollback, and a prompt that stays put.
  *
  * endwin() runs from the destructor, so a throw on the way out of main still
@@ -557,7 +566,8 @@ bool parse(int argc, char** argv, options& o) {
                       << "  Opt-Left/Right   move a word at a time\n"
                       << "\n"
                       << "  --system TEXT   a system turn before the conversation\n"
-                      << "  --tokens N      most tokens in one reply (default 512)\n"
+                      << "  --tokens N      room always kept free for a reply,\n"
+                      << "                  in tokens (default 512)\n"
                       << "  --temp F        0 is greedy (default 0.8)\n"
                       << "  --top-k N       (default 40)\n"
                       << "  --top-p F       (default 0.95)\n"
@@ -654,17 +664,34 @@ int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
 
         turns.push_back({ "user", line });
 
+        // Room to keep free for the answer -- a floor, not a ceiling.  The
+        // reply is allowed everything the context has left (below); this is
+        // only how much of that room the trimmer will give up history to
+        // guarantee.  Asking for more than the context can hold is therefore
+        // harmless: the trimmer drops what it may and stops, rather than
+        // deleting the question to satisfy a reservation nothing can meet.
+        const std::size_t want = o.tokens;
+
         // Drop the oldest turns if the conversation has outgrown the context,
         // keeping the system prompt, which is instructions rather than history.
         for(;;) {
-            if(ch.encode(turns, tok).size() + o.tokens <= c.context) break;
+            // A model file that declares no context gives nothing to fit
+            // into; without this the comparison below is against zero and the
+            // loop drops every turn it is allowed to, every time.
+            if(!c.context) break;
 
+            if(ch.encode(turns, tok).size() + want <= c.context) break;
+
+            // i + 1 < size, so the newest turn is never a candidate.  It is
+            // the question, and a question deleted to make room for its own
+            // answer leaves the model continuing a conversation that does not
+            // contain it -- which it does fluently, and about something else.
             std::size_t at = turns.size();
 
-            for(std::size_t i = 0; i < turns.size(); i++)
+            for(std::size_t i = 0; i + 1 < turns.size(); i++)
                 if(turns[i].role != "system") { at = i; break; }
 
-            if(at == turns.size()) break;
+            if(at == turns.size()) break;       // no history left to give
 
             turns.erase(turns.begin() + long(at));
         }
@@ -677,8 +704,39 @@ int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
 
         const std::vector<int> ids = ch.encode(turns, tok);
 
+        // Whatever the context has left, all of it.  There is no application
+        // cap on a reply: the model stops when it has finished, or when the
+        // context is full, and Escape stops it in between.  That interrupt is
+        // what makes a cap unnecessary rather than merely unhelpful -- it was
+        // never buying safety, only truncating answers that had room to run.
+        //
+        // The arithmetic lands exactly.  generate() breaks when ids.size()
+        // exceeds the context, checked at the top of each step, so a budget of
+        // context - prompt runs out at the step where the sequence is one
+        // short of full: the guard never fires and nothing overruns.
+        const unsigned int budget = c.context
+            ? static_cast<unsigned int>(c.context > ids.size()
+                                        ? c.context - ids.size() : 0)
+            : o.tokens;
+
+        // The trimmer is best-effort, and stops when there is no more history
+        // to give -- which is exactly when the system prompt and the question
+        // alone leave no room to answer.  Say so.  Answering with the tokens
+        // that remain produces a fragment; answering without the question,
+        // which is what this used to do, produces a fluent reply to nothing.
+        if(budget < MIN_REPLY) {
+            s.say_line("[that prompt is " + std::to_string(ids.size()) +
+                       " tokens and the context is " + std::to_string(c.context) +
+                       " -- too long to answer.  Try a shorter question.]", note);
+            s.say_line("");
+
+            turns.pop_back();
+
+            continue;
+        }
+
         const std::vector<int> out = ai::generate<T>(
-            m, b, ids, o.tokens, sampler, tok.eos(),
+            m, b, ids, budget, sampler, tok.eos(),
             [&](int id) {
                 std::string p = tok.piece(id);
 
@@ -715,9 +773,25 @@ int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
         const double rate = (now() - began) > 0
             ? double(out.size() - ids.size()) / (now() - began) : 0.0;
 
+        // How full the context is after this turn.  out holds the prompt as
+        // well as what was generated, so its size is what the conversation now
+        // occupies -- and roughly what the next turn starts from, since the
+        // reply about to be appended is history like any other.
+        //
+        // Worth showing rather than computing silently: trimming and the
+        // distance to the wall are otherwise invisible, and a reply cut short
+        // by a full context reads as the model being bad at the question
+        // rather than as the context being spent.  A model file that declares
+        // no context length leaves nothing to compare against, so the figure
+        // is omitted rather than guessed at.
+        const std::string room = c.context
+            ? ", " + std::to_string(out.size()) + "/" +
+              std::to_string(c.context) + " context"
+            : std::string();
+
         s.say_line("");
         s.say_line(std::string("[") + std::to_string(out.size() - ids.size()) +
-                   " tokens, " + std::to_string(rate).substr(0, 5) + "/s" +
+                   " tokens, " + std::to_string(rate).substr(0, 5) + "/s" + room +
                    (stopped ? ", stopped]" : "]"), note);
         s.say_line("");
 
