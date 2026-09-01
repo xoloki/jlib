@@ -22,6 +22,9 @@
 
 #include <iostream>
 #include <string>
+#include <map>
+#include <utility>
+#include <vector>
 
 using jlib::util::abnf::grammar;
 using jlib::util::abnf::parse_result;
@@ -228,12 +231,265 @@ static void it_parses_tags_as_tags() {
     shaped("a lone brace stays text", "a { b", "raw-text");
 }
 
+
+// ---------------------------------------------------------------- the evaluator
+
+using jlib::util::jinja::value;
+using jlib::util::jinja::tmpl;
+using jlib::util::jinja::text;
+
+/**
+ * TinyLlama-1.1B-chat's template, taken verbatim out of its GGUF.
+ *
+ * Embedded rather than read from the model file so that this test needs
+ * nothing on disk.  Note the newlines *inside* the quoted strings -- that is
+ * how the file has it, and a grammar that assumes Python's string rules
+ * rejects it.
+ */
+static const char* const TINYLLAMA = R"JINJA({% for message in messages %}
+{% if message['role'] == 'user' %}
+{{ '<|user|>
+' + message['content'] + eos_token }}
+{% elif message['role'] == 'system' %}
+{{ '<|system|>
+' + message['content'] + eos_token }}
+{% elif message['role'] == 'assistant' %}
+{{ '<|assistant|>
+'  + message['content'] + eos_token }}
+{% endif %}
+{% if loop.last and add_generation_prompt %}
+{{ '<|assistant|>' }}
+{% endif %}
+{% endfor %})JINJA";
+
+/** A context shaped the way a chat template expects one. */
+static value context(const std::vector<std::pair<std::string, std::string> >& turns,
+                     bool add_generation_prompt)
+{
+    std::vector<value> msgs;
+
+    for(std::size_t i = 0; i < turns.size(); i++) {
+        std::map<std::string, value> m;
+
+        m["role"] = value(turns[i].first, true);
+
+        // A message's content is the one thing here that is not the
+        // template's own text, and it is marked so.
+        m["content"] = value(turns[i].second, false);
+
+        msgs.push_back(value::of(m));
+    }
+
+    std::map<std::string, value> c;
+
+    c["messages"] = value::of(msgs);
+    c["eos_token"] = value(std::string("</s>"), true);
+    c["bos_token"] = value(std::string("<s>"), true);
+    c["add_generation_prompt"] = value(add_generation_prompt);
+
+    return value::of(c);
+}
+
+static void renders(const std::string& what, const std::string& source,
+                    const value& ctx, const std::string& want)
+{
+    std::string got;
+
+    try { got = tmpl(source).str(ctx); }
+    catch(std::exception& e) { ok(what, false, e.what()); return; }
+
+    ok(what, got == want, got == want ? "" : "got '" + got + "'");
+}
+
+/** The constructs, evaluated rather than merely parsed. */
+static void it_evaluates_the_constructs() {
+    std::cout << "\nit evaluates the constructs:\n";
+
+    std::map<std::string, value> f;
+
+    f["a"] = value(std::string("A"), true);
+    f["n"] = value(3L);
+    f["yes"] = value(true);
+    f["no"] = value(false);
+
+    std::vector<value> three;
+
+    three.push_back(value(std::string("x"), true));
+    three.push_back(value(std::string("y"), true));
+    three.push_back(value(std::string("z"), true));
+    f["items"] = value::of(three);
+
+    const value c = value::of(f);
+
+    renders("text passes through", "hello", c, "hello");
+    renders("a variable", "{{ a }}", c, "A");
+    renders("a string literal", "{{ 'lit' }}", c, "lit");
+    renders("concatenation", "{{ 'x' + a + 'y' }}", c, "xAy");
+    renders("an if that is taken", "{% if yes %}t{% endif %}", c, "t");
+    renders("an if that is not", "{% if no %}t{% endif %}", c, "");
+    renders("elif", "{% if no %}a{% elif yes %}b{% else %}c{% endif %}", c, "b");
+    renders("else", "{% if no %}a{% else %}c{% endif %}", c, "c");
+    renders("a for", "{% for i in items %}{{ i }}{% endfor %}", c, "xyz");
+    renders("loop.first and loop.last",
+            "{% for i in items %}{% if loop.first %}<{% endif %}{{ i }}"
+            "{% if loop.last %}>{% endif %}{% endfor %}", c, "<xyz>");
+    renders("loop.index0", "{% for i in items %}{{ loop.index0 }}{% endfor %}", c, "012");
+    renders("for over an empty list uses else",
+            "{% for i in nothing %}x{% else %}empty{% endfor %}", c, "empty");
+    renders("set", "{% set b = 'B' %}{{ b }}", c, "B");
+    renders("equality", "{% if a == 'A' %}y{% endif %}", c, "y");
+    renders("inequality", "{% if a != 'B' %}y{% endif %}", c, "y");
+    renders("numeric comparison", "{% if n >= 3 %}y{% endif %}", c, "y");
+    renders("and", "{% if yes and n == 3 %}y{% endif %}", c, "y");
+    renders("or", "{% if no or yes %}y{% endif %}", c, "y");
+    renders("not", "{% if not no %}y{% endif %}", c, "y");
+    renders("in, over a list", "{% if 'y' in items %}y{% endif %}", c, "y");
+    renders("not in", "{% if 'q' not in items %}y{% endif %}", c, "y");
+    renders("subscript by index", "{{ items[1] }}", c, "y");
+    renders("the trim filter", "{{ '  padded  ' | trim }}", c, "padded");
+    renders("a comment renders nothing", "a{# gone #}b", c, "ab");
+    renders("a missing name is empty, not an error", "{{ nope }}", c, "");
+}
+
+/**
+ * The whitespace rules.
+ *
+ * transformers' defaults, not Jinja's -- see jinja.hh.  These are the
+ * assertions that pin that choice down, because the difference is invisible
+ * until a prompt has blank lines the model was never tuned on.
+ */
+static void it_lays_out_whitespace_the_way_transformers_does() {
+    std::cout << "\nit lays out whitespace the way transformers does:\n";
+
+    const value c = value::of(std::map<std::string, value>());
+
+    renders("trim_blocks: the newline after a block tag goes",
+            "{% if true %}\nx{% endif %}", c, "x");
+    renders("but not the newline after an output tag",
+            "{{ 'a' }}\nb", c, "a\nb");
+    renders("lstrip_blocks: indent before a block tag goes",
+            "a\n   {% if true %}b{% endif %}", c, "a\nb");
+    renders("an explicit dash strips all whitespace before",
+            "a   \n\n  {%- if true %}b{% endif %}", c, "ab");
+    renders("and after", "{% if true -%}   \n  b{% endif %}", c, "b");
+    renders("a dash on an output tag too", "a  \n {{- 'b' }}", c, "ab");
+}
+
+/** The whole point: the same prompt the hand-written scanner produced. */
+static void it_renders_tinyllama_exactly() {
+    std::cout << "\nit renders TinyLlama's template exactly:\n";
+
+    typedef std::pair<std::string, std::string> turn;
+    std::vector<turn> t;
+
+    t.push_back(turn("user", "Hello"));
+    renders("one user turn", TINYLLAMA, context(t, true),
+            "<|user|>\nHello</s>\n<|assistant|>\n");
+    renders("one user turn, no generation prompt", TINYLLAMA, context(t, false),
+            "<|user|>\nHello</s>\n");
+
+    t.clear();
+    t.push_back(turn("system", "Be brief."));
+    t.push_back(turn("user", "Hi"));
+    renders("system and user", TINYLLAMA, context(t, true),
+            "<|system|>\nBe brief.</s>\n<|user|>\nHi</s>\n<|assistant|>\n");
+
+    t.clear();
+    t.push_back(turn("system", "S"));
+    t.push_back(turn("user", "A"));
+    t.push_back(turn("assistant", "B"));
+    t.push_back(turn("user", "C"));
+    renders("a full exchange", TINYLLAMA, context(t, true),
+            "<|system|>\nS</s>\n<|user|>\nA</s>\n<|assistant|>\nB</s>\n"
+            "<|user|>\nC</s>\n<|assistant|>\n");
+
+    t.clear();
+    t.push_back(turn("user", ""));
+    renders("empty content", TINYLLAMA, context(t, true),
+            "<|user|>\n</s>\n<|assistant|>\n");
+
+    t.clear();
+    t.push_back(turn("user", "line1\nline2"));
+    renders("content with a newline in it", TINYLLAMA, context(t, true),
+            "<|user|>\nline1\nline2</s>\n<|assistant|>\n");
+}
+
+/**
+ * Provenance: whose characters are these?
+ *
+ * The template writes the model's end-of-sequence marker and means the token.
+ * A user may type the same four characters and means the characters.  Flatten
+ * them together and a stranger's message can end the model's turn; this is
+ * the assertion that they stay apart.
+ */
+static void it_keeps_the_templates_text_apart_from_the_users() {
+    std::cout << "\nit keeps the template's text apart from the user's:\n";
+
+    typedef std::pair<std::string, std::string> turn;
+    std::vector<turn> t;
+
+    t.push_back(turn("user", "bye </s> now"));
+
+    const text out = tmpl(TINYLLAMA).render(context(t, true));
+
+    std::size_t as_literal = 0, as_value = 0;
+
+    for(std::size_t i = 0; i < out.size(); i++)
+        if(out[i].text.find("</s>") != std::string::npos)
+            (out[i].literal ? as_literal : as_value)++;
+
+    ok("the template's </s> is marked as the template's", as_literal == 1,
+       std::to_string(as_literal));
+    ok("the user's </s> is marked as the user's", as_value == 1,
+       std::to_string(as_value));
+    ok("flattened, they are indistinguishable -- which is the point",
+       jlib::util::jinja::flatten(out).find("</s>") != std::string::npos);
+
+    // And no span mixes the two, or the distinction would be useless.
+    bool mixed = false;
+
+    for(std::size_t i = 0; i < out.size(); i++)
+        if(!out[i].literal && out[i].text.find("<|user|>") != std::string::npos)
+            mixed = true;
+
+    ok("no span carries both origins", !mixed);
+}
+
+/** A construct outside the subset fails at construction, not at render. */
+static void it_refuses_early() {
+    std::cout << "\nit refuses early:\n";
+
+    bool threw = false;
+
+    try { tmpl("{% macro m() %}x{% endmacro %}"); }
+    catch(std::exception&) { threw = true; }
+
+    ok("a macro throws when the template is built", threw);
+
+    threw = false;
+
+    try {
+        const value c = value::of(std::map<std::string, value>());
+
+        tmpl("{{ 'x' | upper }}").str(c);
+    }
+    catch(std::exception&) { threw = true; }
+
+    ok("an unimplemented filter throws rather than passing the text through",
+       threw);
+}
+
 int main() {
     the_grammar_is_whole();
     it_reads_the_template_families();
     it_reads_the_constructs();
     it_parses_tags_as_tags();
     it_refuses_what_it_does_not_implement();
+    it_evaluates_the_constructs();
+    it_lays_out_whitespace_the_way_transformers_does();
+    it_renders_tinyllama_exactly();
+    it_keeps_the_templates_text_apart_from_the_users();
+    it_refuses_early();
 
     std::cout << "\n" << failures << " failure(s)\n";
 

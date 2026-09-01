@@ -23,6 +23,12 @@
 
 #include <jlib/util/abnf.hh>
 
+#include <exception>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
 namespace jlib {
 namespace util {
 
@@ -90,6 +96,139 @@ namespace jinja {
  * Compiled once, on first use.
  */
 const abnf::grammar& grammar();
+
+
+/**
+ * A piece of rendered text, and where it came from.
+ *
+ * `literal` means the characters are the template's own -- its string
+ * literals, its punctuation, the newlines in its layout.  False means they
+ * came from a value the caller supplied.
+ *
+ * The distinction is the whole reason render() does not return a string.  A
+ * chat template writes the model's end-of-sequence marker itself, and that
+ * has to become the *token*; a user who types the same characters into a
+ * message has written characters, and they have to stay characters.  Flatten
+ * the two together and there is no way to tell them apart afterwards, which
+ * is how a stranger's message comes to end the model's turn.
+ */
+struct span {
+    std::string text;
+    bool literal;
+};
+
+/**
+ * Rendered text.
+ *
+ * A list rather than a string, so that provenance survives concatenation:
+ * "a" + content + "b" is three spans, not one.  Adjacent spans of the same
+ * origin are not merged, because nothing needs them to be.
+ */
+typedef std::vector<span> text;
+
+/** The characters, with the provenance discarded. */
+std::string flatten(const text& t);
+
+/** A span list holding one literal string. */
+text literal_text(std::string s);
+
+/**
+ * A value a template can see.
+ *
+ * Strings are span lists rather than std::string for the reason above: a
+ * value carries its provenance, and concatenating two values concatenates
+ * theirs.  Everything else a chat template needs -- booleans for
+ * add_generation_prompt, integers for loop.index0, lists of messages, maps of
+ * role and content -- has no provenance to carry.
+ */
+class value {
+public:
+    class exception : public std::exception {
+    public:
+        exception(const std::string& msg)
+            : m_msg("jlib::util::jinja::value::exception: " + msg) {}
+        const char* what() const throw() { return m_msg.c_str(); }
+    private:
+        std::string m_msg;
+    };
+
+    enum class kind { none, boolean, number, string, list, map };
+
+    value();
+    explicit value(bool b);
+    explicit value(long n);
+
+    /** A string. Literal by default: most strings in flight are the template's. */
+    explicit value(std::string s, bool literal = true);
+    explicit value(text t);
+
+    static value of(std::vector<value> items);
+    static value of(std::map<std::string, value> fields);
+
+    kind type() const { return m_kind; }
+
+    /** Jinja truthiness: none and false are false, "" is false, [] and {} are false, 0 is false. */
+    bool truthy() const;
+
+    const text& str() const;
+    std::string flat() const;
+    long number() const;
+
+    const std::vector<value>& items() const;
+    const std::map<std::string, value>& fields() const;
+
+    bool has(const std::string& key) const;
+    const value& at(const std::string& key) const;
+
+    /** Equality as the template sees it; strings compare by characters. */
+    bool operator==(const value& o) const;
+    bool operator!=(const value& o) const { return !(*this == o); }
+
+private:
+    kind m_kind;
+    bool m_bool;
+    long m_number;
+    text m_text;
+    std::vector<value> m_items;
+    std::map<std::string, value> m_fields;
+};
+
+/**
+ * A parsed template.
+ *
+ * Parsed once at construction -- a template that cannot be read, or that uses
+ * a construct outside the subset, throws there rather than at the first
+ * render.  See the note in this file on why that is the behaviour worth
+ * having.
+ */
+class tmpl {
+public:
+    class exception : public std::exception {
+    public:
+        exception(const std::string& msg)
+            : m_msg("jlib::util::jinja::tmpl::exception: " + msg) {}
+        const char* what() const throw() { return m_msg.c_str(); }
+    private:
+        std::string m_msg;
+    };
+
+    explicit tmpl(std::string source);
+
+    const std::string& source() const { return *m_source; }
+
+    /** Render, keeping provenance. */
+    text render(const value& context) const;
+
+    /** Render and flatten. */
+    std::string str(const value& context) const;
+
+private:
+    // Held by shared_ptr because the match tree's text() views point into it:
+    // a copy or a move of a plain std::string member would leave them
+    // dangling, and this class is otherwise perfectly copyable.
+    std::shared_ptr<const std::string> m_source;
+    abnf::match m_root;
+};
 
 inline const char* const GRAMMAR = R"ABNF(
 template       =  *node
