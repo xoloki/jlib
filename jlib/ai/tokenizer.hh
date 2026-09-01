@@ -80,6 +80,25 @@ public:
     };
 
     /** The token types GGUF gives, of which only BYTE and CONTROL matter here. */
+    /**
+     * Which convention the vocabulary was built under.
+     *
+     * Not the architecture: these are independent axes, and assuming
+     * otherwise is wrong in both directions.  Llama 3.2 is a llama-
+     * architecture file with a gpt2 vocabulary; Gemma 2 is a gemma2 file with
+     * a llama one.  `tokenizer.ggml.model` is what says which.
+     *
+     * **sentencepiece** marks a space with U+2581 and puts one in front of
+     * the whole input -- the dummy prefix -- so "Hello" and " Hello" tokenize
+     * alike.  A byte with no token of its own is spelled `<0xNN>`.
+     *
+     * **byte_level** is GPT-2's: every input byte is first mapped to a
+     * printable character, so there is no byte without a token and no dummy
+     * prefix at all.  A space is U+0120, and the vocabulary holds the mapped
+     * characters rather than the bytes.
+     */
+    enum class flavour { sentencepiece, byte_level };
+
     enum type { undefined = 0, normal = 1, unknown = 2, control = 3,
                 user_defined = 4, unused = 5, byte = 6 };
 
@@ -96,6 +115,9 @@ public:
     int bos() const { return m_bos; }
     int eos() const { return m_eos; }
     int unk() const { return m_unk; }
+
+    /** Which convention this vocabulary was built under. */
+    flavour convention() const { return m_flavour; }
 
     /**
      * Text to token ids.
@@ -190,6 +212,14 @@ private:
 
     /** The 256 byte tokens, by byte value, so fallback is a lookup. */
     std::vector<int> m_byte_token;
+
+    // GPT-2's byte-to-character map and its inverse, empty unless this is a
+    // byte_level vocabulary.
+    flavour m_flavour = flavour::sentencepiece;
+    std::string unmap(const std::string& t) const;
+
+    std::vector<std::string> m_byte_char;
+    std::map<std::string, unsigned char> m_char_byte;
 
     int m_bos = -1;
     int m_eos = -1;

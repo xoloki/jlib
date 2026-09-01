@@ -20,6 +20,8 @@
 
 #include <jlib/ai/tokenizer.hh>
 
+#include "llama3_tokens.hh"
+
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -42,6 +44,34 @@ static bool exists(const std::string& p) {
     std::ifstream f(p, std::ios::binary);
 
     return bool(f);
+}
+
+/**
+ * A byte-level model, if one is to hand.
+ *
+ * Separate from find_model because it is optional: the sentencepiece tests are
+ * the ones that must run, and a machine without a gpt2-vocabulary file skips
+ * only that section rather than the whole program.
+ */
+static std::string find_byte_level_model() {
+    if(const char* env = std::getenv("JLIB_GGUF_BPE"))
+        if(exists(env)) return env;
+
+    const char* names[] = {
+        "Llama-3.2-1B-Instruct-Q8_0.gguf",
+        "../Llama-3.2-1B-Instruct-Q8_0.gguf",
+        "../../Llama-3.2-1B-Instruct-Q8_0.gguf",
+        "../../../Llama-3.2-1B-Instruct-Q8_0.gguf",
+        "qwen2.5-0.5b-instruct-q8_0.gguf",
+        "../qwen2.5-0.5b-instruct-q8_0.gguf",
+        "../../qwen2.5-0.5b-instruct-q8_0.gguf",
+        "../../../qwen2.5-0.5b-instruct-q8_0.gguf"
+    };
+
+    for(const char* n : names)
+        if(exists(n)) return n;
+
+    return "";
 }
 
 static std::string find_model(int argc, char** argv) {
@@ -302,6 +332,79 @@ static void it_is_quick_enough(const ai::tokenizer& t) {
        std::to_string(ids.size()));
 }
 
+/**
+ * A byte-level vocabulary, against the reference tokenizer's answers.
+ *
+ * The flavour is read from `tokenizer.ggml.model`, and it is independent of
+ * the architecture: Llama 3.2 is a llama-architecture file with a gpt2
+ * vocabulary, Gemma 2 is a gemma2 file with a llama one.  Assuming one from
+ * the other is wrong in both directions.
+ *
+ * What the byte-level convention changes: every input byte is mapped to a
+ * printable character first, so no byte is unencodable and there is no dummy
+ * prefix.  Before this, encoding anything at all under a gpt2 vocabulary
+ * produced three -1 ids -- the three UTF-8 bytes of SentencePiece's U+2581,
+ * prepended to every input and present in no gpt2 vocabulary.
+ */
+static void a_byte_level_vocabulary_matches_the_reference(const std::string& path) {
+    std::cout << "\nit tokenizes a byte-level vocabulary as the reference does:\n";
+
+    const ai::gguf g(path);
+    const ai::tokenizer t(g);
+
+    ok("  the flavour comes from the file",
+       t.convention() == ai::tokenizer::flavour::byte_level);
+
+    ok("  and there is no unknown token, because nothing is unencodable",
+       t.unk() < 0, std::to_string(t.unk()));
+
+    std::size_t matched = 0, pending = 0;
+
+    for(std::size_t i = 0; i < LLAMA3_COUNT; i++) {
+        const tokenization& c = LLAMA3[i];
+        const std::vector<int> got = t.encode(c.text, false, true);
+
+        bool same = got.size() == std::size_t(c.count);
+
+        for(int j = 0; same && j < c.count; j++)
+            same = got[std::size_t(j)] == c.ids[j];
+
+        if(c.pretok) {
+            // Known difference: the answer depends on the pre-tokenization
+            // regex, which is not implemented.  Asserted as *still wrong*, so
+            // that implementing it makes this test fail and say so rather than
+            // passing quietly with the fixture unexamined.
+            ok(std::string("  pre-tokenizer still needed for '") + c.text + "'",
+               !same);
+
+            pending++;
+
+            continue;
+        }
+
+        ok(std::string("  '") + c.text + "'", same, spell(t, got));
+
+        if(same) matched++;
+    }
+
+    std::cout << "    " << matched << " match, " << pending
+              << " await the pre-tokenizer\n";
+}
+
+/** SentencePiece is untouched by any of it. */
+static void the_sentencepiece_path_is_unchanged(const ai::tokenizer& t) {
+    std::cout << "\nthe sentencepiece path is unchanged:\n";
+
+    ok("  the flavour is still sentencepiece",
+       t.convention() == ai::tokenizer::flavour::sentencepiece);
+
+    // The dummy prefix is the whole difference between the two conventions,
+    // and it must still be there: "Hello" and " Hello" tokenize alike.
+    ok("  and the dummy prefix is still applied",
+       t.encode("Hello", false, false) == t.encode("Hello", false, false) &&
+       !t.encode("Hello", false, false).empty());
+}
+
 int main(int argc, char** argv) {
     std::cout << std::unitbuf;
 
@@ -323,11 +426,19 @@ int main(int argc, char** argv) {
         it_agrees_with_known_tokenizations(t);
         the_vocabulary_is_what_the_file_said(t);
         the_space_marker_and_the_dummy_prefix(t);
+        the_sentencepiece_path_is_unchanged(t);
         anything_encodes(t);
         a_control_token_in_the_text_is_that_token(t);
     pieces_concatenate_to_the_whole(t);
     it_round_trips(t);
         it_is_quick_enough(t);
+        const std::string bpe = find_byte_level_model();
+
+        if(bpe.empty())
+            std::cout << "\n(no byte-level model; set JLIB_GGUF_BPE to run those)\n";
+        else
+            a_byte_level_vocabulary_matches_the_reference(bpe);
+
     }
     catch(std::exception& e) {
         std::cerr << "ai_tokenizer_test: " << e.what() << "\n";

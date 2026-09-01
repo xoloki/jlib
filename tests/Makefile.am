@@ -332,7 +332,7 @@ ai_chat_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 ai_sampler_test_SOURCES  = ai_sampler_test.cc
 ai_sampler_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 
-ai_tokenizer_test_SOURCES  = ai_tokenizer_test.cc
+ai_tokenizer_test_SOURCES  = ai_tokenizer_test.cc llama3_tokens.hh
 ai_tokenizer_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 
 ai_model_test_SOURCES  = ai_model_test.cc
