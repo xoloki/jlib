@@ -81,16 +81,6 @@ public:
          */
         float embed_scale = 0;
 
-        /**
-         * Whether a norm weight means `1 + w` rather than `w`.
-         *
-         * Gemma stores its RMSNorm weights centred on zero, so a weight of 0
-         * is the identity.  Applied once at load rather than in the kernel:
-         * it is a property of the stored numbers, not of the operation, and
-         * doing it in rms_norm would put a branch in the hot path for the
-         * benefit of one architecture.
-         */
-        bool norm_weights_are_offset = false;
 
         /** SwiGLU or GeGLU; see block::set_gate_activation. */
         activation gate = activation::silu;
@@ -194,7 +184,6 @@ private:
     /** Straight across, narrowing to T. */
     static math::matrix<T> narrowed(const math::matrix<float>& w);
 
-    math::matrix<T> norm_weight(const math::matrix<float>& w) const;
 
     void expect(const gguf& g, const std::string& name,
                 unsigned int d0, unsigned int d1) const;
@@ -258,15 +247,30 @@ typename model<T>::config model<T>::config::from(const gguf& g) {
     // for both and nothing here can detect the wrong choice -- it comes out
     // as fluent nonsense, which is exactly what Qwen produced before this
     // line.  See ai::rope_layout, which says the same thing at more length.
-    if(arch == "qwen2") c.layout = rope_layout::split;
+    // qwen2 and gemma2 are both the NeoX layout; llama is the normal one.
+    // Not in any file -- ggml carries it per architecture.  See
+    // ai::rope_layout, and note that getting it wrong is silent.
+    if(arch == "qwen2" || arch == "gemma2") c.layout = rope_layout::split;
 
     // Gemma 2's two unwritten conventions.  Neither is in the file and both
     // are load-bearing: without the scale the residual stream starts 48x too
     // small, and without the offset every norm weight is near zero and scales
     // the activations to nothing.
+    // Gemma 2's conventions, none of which are in the file.
+    //
+    // **Not** the `1 + w` norm weights, and that is worth writing down
+    // because Gemma's published implementation does exactly that and copying
+    // it from there is wrong here: the GGUF conversion has already applied
+    // it. Measured on gemma-2-2b-it-Q8_0, attn_norm runs [0.000, 5.969] with
+    // mean 1.19 -- non-negative, centred near one -- where TinyLlama's raw
+    // weights run [-0.582, 0.770] with mean 0.006. Adding one again put
+    // every norm out by a factor and the model answered "1" to everything.
+    //
+    // The lesson generalises: the HF checkpoint and the GGUF are different
+    // artefacts, and a convention read out of modeling_gemma2.py describes
+    // the former.
     if(arch == "gemma2") {
         c.embed_scale = std::sqrt(float(c.d_model));
-        c.norm_weights_are_offset = true;
         c.gate = activation::gelu;
     }
 
@@ -356,26 +360,6 @@ void model<T>::expect(const gguf& g, const std::string& name,
     }
 }
 
-/**
- * A norm weight as the operation wants it.
- *
- * Gemma 2 stores its RMSNorm weights centred on zero, so the weight means
- * `1 + w`.  Done here rather than in rms_norm because it is a property of the
- * stored numbers rather than of the operation -- and a branch in the kernel
- * would cost every architecture for the benefit of one.
- */
-template<typename T>
-math::matrix<T> model<T>::norm_weight(const math::matrix<float>& w) const {
-    math::matrix<T> out = narrowed(w);
-
-    if(m_conf.norm_weights_are_offset)
-        for(uint r = 0; r < out.M; r++)
-            for(uint c = 0; c < out.N; c++)
-                out(r,c) = T(float(out(r,c)) + 1.0f);
-
-    return out;
-}
-
 template<typename T>
 void model<T>::load(const gguf& g) {
     const unsigned int d = m_conf.d_model;
@@ -413,7 +397,7 @@ void model<T>::load(const gguf& g) {
         m_head->write(narrowed(g.read(head)));
 
     expect(g, "output_norm.weight", d, 1);
-    m_final_norm->write(norm_weight(g.read("output_norm.weight")));
+    m_final_norm->write(narrowed(g.read("output_norm.weight")));
 
     for(unsigned int i = 0; i < m_conf.layers; i++) {
         const std::string p = "blk." + std::to_string(i) + ".";
@@ -421,10 +405,10 @@ void model<T>::load(const gguf& g) {
         block<T>& l = *m_layers[i];
 
         expect(g, p + "attn_norm.weight", d, 1);
-        l.attn_norm()->write(norm_weight(g.read(p + "attn_norm.weight")));
+        l.attn_norm()->write(narrowed(g.read(p + "attn_norm.weight")));
 
         expect(g, p + "ffn_norm.weight", d, 1);
-        l.ffn_norm()->write(norm_weight(g.read(p + "ffn_norm.weight")));
+        l.ffn_norm()->write(narrowed(g.read(p + "ffn_norm.weight")));
 
         // Gemma's post-sublayer norms, from the file rather than the
         // architecture's name -- absent everywhere else, and the block costs
@@ -439,7 +423,7 @@ void model<T>::load(const gguf& g) {
 
             expect(g, p + e.name, d, 1);
 
-            (l.*e.get)()->write(norm_weight(g.read(p + e.name)));
+            (l.*e.get)()->write(narrowed(g.read(p + e.name)));
         }
 
         // Every one of these is a whole matrix in the file's orientation now

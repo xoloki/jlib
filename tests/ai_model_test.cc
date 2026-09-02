@@ -152,6 +152,72 @@ static void a_qwen_file_reads_with_its_own_conventions() {
     }
 }
 
+/**
+ * A gemma2 file reads with its own conventions.
+ *
+ * Four things, of which the file states one.  The head width is in
+ * `attention.key_length` and the rest -- the embedding scale, the gate
+ * activation, the RoPE layout -- are per-architecture constants no key
+ * carries, exactly as `rope_layout` already was.
+ *
+ * And one that is *not* applied, which is the assertion worth having: Gemma's
+ * published implementation offsets its RMSNorm weights by one, and the GGUF
+ * conversion has already done it.  Doing it again put every norm out by a
+ * factor and the model answered "1" to everything.
+ */
+static void a_gemma_file_reads_with_its_own_conventions() {
+    std::cout << "\na gemma2 file reads with its own conventions:\n";
+
+    const std::string path = find_named("gemma-2-2b-it-Q8_0.gguf");
+
+    if(path.empty()) {
+        std::cout << "  (no Gemma file to hand)\n";
+
+        return;
+    }
+
+    const ai::gguf g(path);
+    const ai::model<float>::config c = ai::model<float>::config::from(g);
+
+    ok("  the config comes from gemma2.* keys",
+       c.layers == 26 && c.d_model == 2304 && c.heads == 8 && c.kv_heads == 4,
+       std::to_string(c.layers) + " layers, " + std::to_string(c.d_model) +
+       " wide");
+
+    // The one the file states, and the one llama and qwen2 let you derive by
+    // accident: 2304 over 8 heads is 288, and this is 256.
+    ok("  the head width is read, not derived",
+       c.d_head == 256 && c.d_model / c.heads == 288,
+       std::to_string(c.d_head) + " where d_model/heads is " +
+       std::to_string(c.d_model / c.heads));
+
+    ok("  the embedding is scaled by sqrt(d_model)",
+       std::fabs(c.embed_scale - 48.0f) < 1e-3f,
+       std::to_string(c.embed_scale));
+
+    ok("  the gate is GeGLU, not SwiGLU", c.gate == ai::activation::gelu);
+
+    ok("  and the layout is split, as qwen2's is",
+       c.layout == ai::rope_layout::split);
+
+    ok("  with both softcaps from the file",
+       std::fabs(c.attn_cap - 50.0f) < 1e-3f &&
+       std::fabs(c.final_cap - 30.0f) < 1e-3f,
+       std::to_string(c.attn_cap) + ", " + std::to_string(c.final_cap));
+
+    // The norm weights, as evidence rather than assertion: they are already
+    // in 1+w form in the file.  Non-negative and centred near one, where a
+    // raw llama weight runs either side of zero.
+    const jlib::math::matrix<float> w = g.read("blk.0.attn_norm.weight");
+
+    float lo = w(0,0);
+
+    for(unsigned r = 0; r < w.M; r++) if(w(r,0) < lo) lo = w(r,0);
+
+    ok("  and its norm weights already carry the +1 the conversion added",
+       lo >= 0.0f, "minimum " + std::to_string(lo));
+}
+
 /** The config a file states about itself. */
 static void the_config_comes_from_the_file(const ai::gguf& g) {
     std::cout << "\nthe config comes from the file:\n";
@@ -758,6 +824,7 @@ int main(int argc, char** argv) {
     a_reply_ends_on_any_of_several_tokens();
     the_cache_changes_nothing();
     a_qwen_file_reads_with_its_own_conventions();
+    a_gemma_file_reads_with_its_own_conventions();
 
     if(path.empty()) {
         std::cout << "\n  (no model file, so only the generation loop is "

@@ -728,6 +728,74 @@ static void the_two_rope_layouts_differ(const char* name,
  * The bias values and the matrix values are chosen so that both mistakes give
  * a different answer from the right one rather than colliding with it.
  */
+/**
+ * tanh and gelu stay finite where the argument is large.
+ *
+ * MSL's tanh looks to be (exp(2x)-1)/(exp(2x)+1): exp(2x) overflows to
+ * infinity past about x=44, and inf/inf is a NaN.  Only for *positive* x --
+ * a negative argument drives exp(2x) to zero and comes out at -1 correctly --
+ * and that asymmetry is what identified it.
+ *
+ * It cost a long hunt.  Gemma 2's GeGLU feeds tanh arguments in the hundreds,
+ * so every logit came out NaN on the GPU and finite on the CPU, and the
+ * obvious reading -- that fp16 could not hold Gemma's activations -- is
+ * wrong: metal::backend<float> failed identically.  The comparison against
+ * the host is what settled it, which is why this test is a comparison and not
+ * a range check.
+ */
+template<typename T>
+static void tanh_survives_a_large_argument(const char* name,
+                                           std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\ntanh and gelu at a large argument, " << name << ":\n";
+
+    // Past the overflow and well inside what a half holds, so this is about
+    // the function and not about the storage.
+    const float xs[] = { -1024, -128, -45, -20, -1, 0, 1, 20, 45, 128, 1024 };
+    const uint n = sizeof(xs) / sizeof(xs[0]);
+
+    matrix<T> x(n, 1);
+
+    for(uint i = 0; i < n; i++) x(i,0) = T(xs[i]);
+
+    const ai::activation kinds[] = { ai::activation::tanh, ai::activation::gelu };
+    const char* named[] = { "tanh", "gelu" };
+
+    for(int k = 0; k < 2; k++) {
+        for(ai::backend<T>* b : backends) {
+            typename ai::backend<T>::tensor_ptr in = b->make(x);
+            typename ai::backend<T>::tensor_ptr out = b->make(n, 1);
+
+            b->activate(kinds[k], in, out);
+            b->wait();
+
+            const matrix<T> got = out->read();
+
+            bool finite = true;
+
+            for(uint i = 0; i < n; i++)
+                if(std::isnan(float(got(i,0))) || std::isinf(float(got(i,0))))
+                    finite = false;
+
+            ok(std::string("  ") + named[k] + " is finite everywhere", finite);
+
+            // And right, not merely finite: tanh saturates to +/-1 and gelu
+            // to x and 0.  A clamp that was too tight would pass the finite
+            // check and fail these.
+            if(k == 0)
+                ok("    saturating to +/-1 at the ends",
+                   std::fabs(float(got(0,0)) + 1.0f) < 1e-3f &&
+                   std::fabs(float(got(n-1,0)) - 1.0f) < 1e-3f,
+                   std::to_string(float(got(n-1,0))));
+            else
+                ok("    approaching x above and 0 below",
+                   std::fabs(float(got(n-1,0)) - 1024.0f) < 1.0f &&
+                   std::fabs(float(got(0,0))) < 1e-3f,
+                   std::to_string(float(got(n-1,0))));
+        }
+    }
+}
+
 template<typename T>
 static void a_bias_reaches_every_column(const char* name,
                                         std::vector<ai::backend<T>*>& backends)
@@ -1410,6 +1478,7 @@ int main() {
         rope_is_a_rotation<float>("float", b);
         rope_makes_the_score_relative<float>("float", b);
         the_two_rope_layouts_differ<float>("float", b);
+        tanh_survives_a_large_argument<float>("float", b);
         a_bias_reaches_every_column<float>("float", b);
         the_gather<float>("float", b);
         the_column_copy<float>("float", b);
@@ -1429,6 +1498,7 @@ int main() {
         rope_is_a_rotation<float>("float", b);
         rope_makes_the_score_relative<float>("float", b);
         the_two_rope_layouts_differ<float>("float", b);
+        tanh_survives_a_large_argument<float>("float", b);
         a_bias_reaches_every_column<float>("float", b);
         the_gather<float>("float", b);
         the_column_copy<float>("float", b);
@@ -1459,6 +1529,7 @@ int main() {
         rope_is_a_rotation<_Float16>("_Float16", b);
         rope_makes_the_score_relative<_Float16>("_Float16", b);
         the_two_rope_layouts_differ<_Float16>("_Float16", b);
+        tanh_survives_a_large_argument<_Float16>("_Float16", b);
         a_bias_reaches_every_column<_Float16>("_Float16", b);
         the_gather<_Float16>("_Float16", b);
         the_column_copy<_Float16>("_Float16", b);
