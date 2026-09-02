@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 namespace jlib {
 namespace ai {
@@ -125,6 +126,49 @@ sampler::distribution(const std::vector<float>& logits) const {
     }
 
     return kept;
+}
+
+std::vector<float> sampler::penalise(const std::vector<float>& logits,
+                                     const std::vector<int>& recent) const
+{
+    if(m_conf.repetition_penalty == 1.0f || recent.empty()) return logits;
+
+    if(m_conf.repetition_penalty <= 0)
+        throw exception("repetition_penalty must be above zero");
+
+    std::vector<float> out = logits;
+
+    const std::size_t window = m_conf.penalty_window &&
+                               m_conf.penalty_window < recent.size()
+        ? m_conf.penalty_window : recent.size();
+
+    // A set, so a token occurring ten times is penalised once rather than ten
+    // deep.  That is the CTRL form and what llama.cpp does; the alternative
+    // (once per occurrence) drives a common token to nothing after a few
+    // lines and is a different knob wearing the same name.
+    std::set<int> seen;
+
+    for(std::size_t i = recent.size() - window; i < recent.size(); i++)
+        seen.insert(recent[i]);
+
+    for(std::set<int>::const_iterator i = seen.begin(); i != seen.end(); ++i) {
+        if(*i < 0 || std::size_t(*i) >= out.size()) continue;
+
+        float& l = out[std::size_t(*i)];
+
+        // Both branches move the logit down.  Dividing a negative one would
+        // move it *up*, which is why this is not one multiplication.
+        l = l > 0 ? l / m_conf.repetition_penalty
+                  : l * m_conf.repetition_penalty;
+    }
+
+    return out;
+}
+
+int sampler::pick(const std::vector<float>& logits,
+                  const std::vector<int>& recent)
+{
+    return pick(penalise(logits, recent));
 }
 
 int sampler::pick(const std::vector<float>& logits) {

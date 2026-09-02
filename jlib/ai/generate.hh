@@ -154,7 +154,11 @@ std::vector<int> generate(model<T>& m, backend<T>& b,
         m.forward(feed, logits);
         b.wait();
 
-        const int next = s.pick(last_logits(logits->read()));
+        // The whole sequence, not just what was generated: a reply that
+        // parrots the prompt back is the same failure the penalty is for.
+        // With repetition_penalty at 1 -- the default -- this is the same
+        // call it was.
+        const int next = s.pick(last_logits(logits->read()), ids);
 
         ids.push_back(next);
 

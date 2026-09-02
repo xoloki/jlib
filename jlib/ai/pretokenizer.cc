@@ -22,6 +22,8 @@
 #include <jlib/ai/unicode.hh>
 
 #include <functional>
+#include <map>
+#include <mutex>
 
 namespace jlib {
 namespace ai {
@@ -102,14 +104,46 @@ bool eol(unsigned int cp) { return cp == '\r' || cp == '\n'; }
 bool supported(const std::string& pre)
 {
     // An empty key is the older files, which predate anyone writing it down
-    // and are all llama-bpe.  Anything else named is a different pattern and
-    // this is not it.
-    return pre.empty() || pre == "llama-bpe";
+    // and are all llama-bpe.  Anything else named is a different pattern, and
+    // being named is not the same as being implemented.
+    return pre.empty() || pre == "llama-bpe" || pre == "qwen2";
 }
 
-const util::abnf::grammar& grammar()
+namespace {
+
+/** The digits rule for a named pattern, which is all that differs. */
+const char* digits_of(const std::string& pre)
 {
-    static const util::abnf::grammar g = [] {
+    if(pre == "qwen2") return QWEN2_DIGITS;
+
+    return LLAMA_BPE_DIGITS;
+}
+
+}
+
+const util::abnf::grammar& grammar(const std::string& pre)
+{
+    if(!supported(pre))
+        throw exception("no pattern named '" + pre + "' -- the implemented "
+                        "ones are 'llama-bpe' and 'qwen2'");
+
+    // One compiled grammar per flavour, built on first use.  Keyed by the
+    // rule text rather than the name so that two names sharing a pattern
+    // would share the grammar, and so the key cannot disagree with what was
+    // compiled.
+    static std::map<std::string, util::abnf::grammar> built;
+    static std::mutex lock;
+
+    const std::string digits = digits_of(pre);
+
+    std::lock_guard<std::mutex> guard(lock);
+
+    const std::map<std::string, util::abnf::grammar>::iterator i =
+        built.find(digits);
+
+    if(i != built.end()) return i->second;
+
+    const util::abnf::grammar& g = [&] () -> const util::abnf::grammar& {
         util::abnf::compile_options o;
 
         // The prose rules are supplied here rather than defined afterwards,
@@ -226,31 +260,32 @@ const util::abnf::grammar& grammar()
                         return true;
                     });
 
-            throw exception("pretokenizer: no implementation for the "
-                                "prose rule <" + s + ">");
+            throw exception("no implementation for the prose rule <" + s +
+                            ">");
         };
 
-    util::abnf::grammar h = util::abnf::compile(LLAMA_BPE, o);
+        util::abnf::grammar h = util::abnf::compile(digits + PATTERN_BODY, o);
 
         h.check();
 
-        return h;
+        return built.emplace(digits, std::move(h)).first->second;
     }();
 
     return g;
 }
 
-std::vector<std::string> split(const std::string& text)
+std::vector<std::string> split(const std::string& text, const std::string& pre)
 {
     std::vector<std::string> out;
 
     if(text.empty()) return out;
 
-    const util::abnf::parse_result r = grammar().at("chunks").try_parse(text);
+    const util::abnf::parse_result r =
+        grammar(pre).at("chunks").try_parse(text);
 
     if(!r)
-        throw exception(std::string("pretokenizer: this text does not "
-                                        "split: ") + r.why().what());
+        throw exception(std::string("this text does not split: ") +
+                        r.why().what());
 
     const util::abnf::match root =
         r.root().name() == "chunks" ? r.root() : r.root()["chunks"];

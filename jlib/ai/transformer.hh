@@ -134,6 +134,17 @@ public:
     tensor_ptr& wq() { return m_wq; }
     tensor_ptr& wk() { return m_wk; }
     tensor_ptr& wv() { return m_wv; }
+
+    /**
+     * The Q, K and V biases, made on demand and null until asked for.
+     *
+     * Null is the ordinary case -- a Llama file has no such tensors, and a
+     * block without them must cost nothing rather than add a zero vector at
+     * every position.  Qwen 2.5 has them on all three.
+     */
+    tensor_ptr& bq() { return want(m_bq, m_heads * m_d_head); }
+    tensor_ptr& bk() { return want(m_bk, m_kv_heads * m_d_head); }
+    tensor_ptr& bv() { return want(m_bv, m_kv_heads * m_d_head); }
     tensor_ptr& wo() { return m_wo; }
 
     /** The same four kept in the encoding a file used. */
@@ -292,6 +303,11 @@ private:
     float m_theta = 10000.0f;
     rope_layout m_layout = rope_layout::interleaved;
 
+    /** Made on first use, so a file without biases allocates nothing. */
+    tensor_ptr& want(tensor_ptr& t, unsigned int rows);
+
+    tensor_ptr m_bq, m_bk, m_bv;
+
     tensor_ptr m_wq, m_wk, m_wv, m_wo;
     quantised_ptr m_wq_q, m_wk_q, m_wv_q, m_wo_q;
     tensor_ptr m_gate, m_down, m_up;
@@ -312,6 +328,14 @@ private:
     void grow_cache(unsigned int need);
     tensor_ptr m_h1, m_h3, m_ffn;
 };
+
+template<typename T>
+typename block<T>::tensor_ptr& block<T>::want(tensor_ptr& t, unsigned int rows)
+{
+    if(!t) t = m_b.make(rows, 1);
+
+    return t;
+}
 
 template<typename T>
 block<T>::block(backend<T>& b, unsigned int d_model, unsigned int heads,
@@ -485,6 +509,13 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
 
     if(m_wv_q) m_b.multiply_tn(m_wv_q, m_norm, m_vs);
     else m_b.multiply_tn(m_wv, m_norm, m_vs);
+
+    // Before rope, which is where a bias goes: the rotation is applied to the
+    // projected vector, and the vector is the multiply plus the bias.  After
+    // it would rotate Wx and then add b unrotated, which is a different model.
+    if(m_bq) m_b.add_columns(m_bq, m_qs);
+    if(m_bk) m_b.add_columns(m_bk, m_ks);
+    if(m_bv) m_b.add_columns(m_bv, m_vs);
 
     // Rotated inside each head, never across the boundary between two.  Values
     // are not rotated at all -- see set_rope.

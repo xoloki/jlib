@@ -75,6 +75,83 @@ static std::string find_model(int argc, char** argv) {
     return "";
 }
 
+/** A named file, wherever the build happens to be run from. */
+static std::string find_named(const std::string& name) {
+    const std::string where[] = { "", "../", "../../", "../../../" };
+
+    for(const std::string& w : where)
+        if(exists(w + name)) return w + name;
+
+    return "";
+}
+
+/**
+ * A qwen2 file reads, and the two things it needs are load-bearing.
+ *
+ * `config::from` is where the architecture reaches the reader, and it decides
+ * two things a llama file does not: the metadata prefix (mechanical) and the
+ * **RoPE layout** (not mechanical, and not in the file at all -- ggml carries
+ * it per architecture).
+ *
+ * The layout is the one worth an assertion of its own, because getting it
+ * wrong is silent: both layouts are block-diagonal rotations with every
+ * property RoPE has, so nothing downstream can notice, and Qwen answered with
+ * fluent nonsense until this line was right.  See ai::rope_layout.
+ */
+static void a_qwen_file_reads_with_its_own_conventions() {
+    std::cout << "\na qwen2 file reads with its own conventions:\n";
+
+    const std::string path = find_named("qwen2.5-0.5b-instruct-q8_0.gguf");
+
+    if(path.empty()) {
+        std::cout << "  (no Qwen file to hand)\n";
+
+        return;
+    }
+
+    const ai::gguf g(path);
+    const ai::model<float>::config c = ai::model<float>::config::from(g);
+
+    // Read through the qwen2.* prefix, which is the mechanical half.
+    ok("  the config comes from qwen2.* keys",
+       c.layers == 24 && c.d_model == 896 && c.heads == 14 &&
+       c.kv_heads == 2 && c.d_ff == 4864,
+       std::to_string(c.layers) + " layers, " + std::to_string(c.d_model) +
+       " wide, " + std::to_string(c.heads) + " over " +
+       std::to_string(c.kv_heads));
+
+    ok("  including a rope base that is not the default",
+       c.rope_theta > 900000.0f, std::to_string(c.rope_theta));
+
+    ok("  and the layout is split, which no key in the file says",
+       c.layout == ai::rope_layout::split);
+
+    // The contrast: a llama file must still be interleaved, or this became a
+    // change to every model rather than to one architecture.
+    const std::string llama = find_named("tinyllama-1.1b-chat-v1.0.Q8_0.gguf");
+
+    if(!llama.empty()) {
+        const ai::gguf lg(llama);
+
+        ok("  where a llama file is still interleaved",
+           ai::model<float>::config::from(lg).layout ==
+           ai::rope_layout::interleaved);
+    }
+
+    // Q, K and V biases: present here, absent on llama, and the model has to
+    // pick them up from the file rather than from the architecture's name.
+    ok("  the file carries Q, K and V biases",
+       g.has_tensor("blk.0.attn_q.bias") &&
+       g.has_tensor("blk.0.attn_k.bias") &&
+       g.has_tensor("blk.0.attn_v.bias"));
+
+    if(!llama.empty()) {
+        const ai::gguf lg(llama);
+
+        ok("  which a llama file does not", !lg.has_tensor("blk.0.attn_q.bias"));
+    }
+}
+
 /** The config a file states about itself. */
 static void the_config_comes_from_the_file(const ai::gguf& g) {
     std::cout << "\nthe config comes from the file:\n";
@@ -565,6 +642,7 @@ int main(int argc, char** argv) {
     // machine that has neither the file nor a GPU.
     generation_stops_when_asked();
     the_cache_changes_nothing();
+    a_qwen_file_reads_with_its_own_conventions();
 
     if(path.empty()) {
         std::cout << "\n  (no model file, so only the generation loop is "

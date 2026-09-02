@@ -719,6 +719,77 @@ static void the_two_rope_layouts_differ(const char* name,
 }
 
 /** The embedding lookup: pick columns out of a table by index. */
+/**
+ * add_columns broadcasts down the columns rather than matching shapes.
+ *
+ * A bias belongs to a row of the projection and is the same at every
+ * position, so a wrong implementation has two obvious shapes: adding it once
+ * (to the first column only) or transposing it (bias[c] instead of bias[r]).
+ * The bias values and the matrix values are chosen so that both mistakes give
+ * a different answer from the right one rather than colliding with it.
+ */
+template<typename T>
+static void a_bias_reaches_every_column(const char* name,
+                                        std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nadd_columns, " << name << ":\n";
+
+    const uint rows = 4;
+    const uint cols = 3;
+
+    matrix<T> y(rows, cols);
+    matrix<T> bias(rows, 1);
+
+    for(uint r = 0; r < rows; r++) {
+        bias(r,0) = T(float(r) + 1.0f);              // 1, 2, 3, 4
+
+        for(uint c = 0; c < cols; c++)
+            y(r,c) = T(float(r) * 10.0f + float(c)); // all distinct
+    }
+
+    for(ai::backend<T>* b : backends) {
+        typename ai::backend<T>::tensor_ptr ty = b->make(y);
+        typename ai::backend<T>::tensor_ptr tb = b->make(bias);
+
+        b->add_columns(tb, ty);
+        b->wait();
+
+        const matrix<T> got = ty->read();
+
+        bool right = true;
+
+        for(uint r = 0; r < rows; r++)
+            for(uint c = 0; c < cols; c++)
+                if(std::abs(float(got(r,c)) -
+                            (float(y(r,c)) + float(bias(r,0)))) > 1e-3f)
+                    right = false;
+
+        ok("  every column got the bias for its row", right);
+
+        // Not the first column only: rows differ by their bias, so the last
+        // column has to have moved as much as the first.
+        ok("  including the last one",
+           std::abs(float(got(rows - 1, cols - 1)) -
+                    (float(y(rows - 1, cols - 1)) + float(bias(rows - 1, 0))))
+           < 1e-3f,
+           std::to_string(float(got(rows - 1, cols - 1))));
+    }
+
+    // A bias that is not one column of rows entries is a shape error, not
+    // something to broadcast some other way.
+    for(ai::backend<T>* b : backends) {
+        typename ai::backend<T>::tensor_ptr ty = b->make(y);
+        typename ai::backend<T>::tensor_ptr wrong = b->make(cols, 1);
+
+        bool threw = false;
+
+        try { b->add_columns(wrong, ty); b->wait(); }
+        catch(std::exception&) { threw = true; }
+
+        ok("  and the wrong shape is refused", threw);
+    }
+}
+
 template<typename T>
 static void the_gather(const char* name, std::vector<ai::backend<T>*>& backends) {
     std::cout << "\ngather, " << name << ":\n";
@@ -1339,6 +1410,7 @@ int main() {
         rope_is_a_rotation<float>("float", b);
         rope_makes_the_score_relative<float>("float", b);
         the_two_rope_layouts_differ<float>("float", b);
+        a_bias_reaches_every_column<float>("float", b);
         the_gather<float>("float", b);
         the_column_copy<float>("float", b);
         the_offset_mask<float>("float", b);
@@ -1357,6 +1429,7 @@ int main() {
         rope_is_a_rotation<float>("float", b);
         rope_makes_the_score_relative<float>("float", b);
         the_two_rope_layouts_differ<float>("float", b);
+        a_bias_reaches_every_column<float>("float", b);
         the_gather<float>("float", b);
         the_column_copy<float>("float", b);
         the_offset_mask<float>("float", b);
@@ -1386,6 +1459,7 @@ int main() {
         rope_is_a_rotation<_Float16>("_Float16", b);
         rope_makes_the_score_relative<_Float16>("_Float16", b);
         the_two_rope_layouts_differ<_Float16>("_Float16", b);
+        a_bias_reaches_every_column<_Float16>("_Float16", b);
         the_gather<_Float16>("_Float16", b);
         the_column_copy<_Float16>("_Float16", b);
         the_offset_mask<_Float16>("_Float16", b);

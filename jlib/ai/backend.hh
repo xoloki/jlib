@@ -235,6 +235,17 @@ public:
     /** y += alpha * x */
     virtual void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y) = 0;
 
+    /**
+     * y[r][c] += bias[r], for every column.
+     *
+     * A bias belongs to a *row* of the projection and is the same for every
+     * position in the sequence, so this broadcasts down the columns rather
+     * than matching shapes the way add_scaled does.  Qwen 2.5 carries these
+     * on Q, K and V; Llama files do not, which is why nothing needed it
+     * before.
+     */
+    virtual void add_columns(const tensor_ptr& bias, tensor_ptr& y) = 0;
+
     /** dst = src.  Same shape, no reallocation. */
     virtual void assign(const tensor_ptr& src, tensor_ptr& dst) = 0;
 
@@ -443,6 +454,7 @@ public:
     void hadamard(const tensor_ptr& a, const tensor_ptr& b, tensor_ptr& c);
     void subtract(const tensor_ptr& a, const tensor_ptr& b, tensor_ptr& c);
     void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y);
+    void add_columns(const tensor_ptr& bias, tensor_ptr& y);
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
     void causal_mask(tensor_ptr& s, unsigned int key_offset = 0,
@@ -992,6 +1004,22 @@ void host_backend<T>::rope(tensor_ptr& x, unsigned int base_pos, float theta,
             m(b,c) = T(xa * si + xb * co);
         }
     }
+}
+
+template<typename T>
+void host_backend<T>::add_columns(const tensor_ptr& bias, tensor_ptr& y) {
+    math::matrix<T>& out = at(y);
+    const math::matrix<T>& b = at(bias);
+
+    if(b.M != out.M || b.N != 1)
+        throw backend_error("add_columns: the bias must be one column of "
+                            "rows entries");
+
+    typedef typename compute_in<T>::type C;
+
+    for(uint r = 0; r < out.M; r++)
+        for(uint c = 0; c < out.N; c++)
+            out(r,c) = T(C(out(r,c)) + C(b(r,0)));
 }
 
 template<typename T>

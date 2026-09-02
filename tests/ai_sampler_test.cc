@@ -293,6 +293,90 @@ static void the_edges_are_refused() {
     ok("  and a top_p of zero", threw);
 }
 
+/**
+ * The repetition penalty, which is the one step that depends on history.
+ *
+ * Off by default, so the first thing asserted is that it changes nothing at
+ * 1 -- every model that does not ask for it must see the logits it saw
+ * before.
+ */
+static void the_repetition_penalty(void) {
+    std::cout << "\nthe repetition penalty:\n";
+
+    // 0.9 rather than 0.5 at index 2 on purpose: with a penalty of 4 the
+    // first logit becomes 2.0/4 = 0.5, and against a 0.5 that is an exact tie
+    // which argmax breaks towards the lower index -- so the assertion below
+    // would pass or fail on the tie-break rather than on the penalty.
+    const std::vector<float> logits{ 2.0f, -2.0f, 0.9f, -0.5f };
+    const std::vector<int> recent{ 0, 1 };
+
+    {
+        ai::sampler::config c;                     // repetition_penalty is 1
+        const ai::sampler s(c);
+
+        ok("  at 1 it is the identity", s.penalise(logits, recent) == logits);
+    }
+
+    ai::sampler::config c;
+    c.repetition_penalty = 2.0f;
+
+    const ai::sampler s(c);
+    const std::vector<float> out = s.penalise(logits, recent);
+
+    // Both directions move down.  Dividing the negative one would move it up,
+    // which is the mistake this shape exists to avoid.
+    ok("  a positive logit is divided", std::abs(out[0] - 1.0f) < 1e-6f,
+       std::to_string(out[0]));
+
+    ok("  and a negative one is multiplied, so it also moves down",
+       std::abs(out[1] - (-4.0f)) < 1e-6f, std::to_string(out[1]));
+
+    ok("  a token that did not occur is untouched",
+       out[2] == logits[2] && out[3] == logits[3]);
+
+    // Once, not once per occurrence: a token said ten times is discouraged as
+    // much as one said twice, which is what CTRL specifies and is a different
+    // knob from a count-weighted penalty.
+    const std::vector<int> often{ 0, 0, 0, 0, 0 };
+
+    ok("  and repeating it more does not deepen the penalty",
+       s.penalise(logits, often)[0] == out[0]);
+
+    // The window, which is why a penalty over a whole conversation does not
+    // end up penalising "the".
+    ai::sampler::config w = c;
+    w.penalty_window = 1;
+
+    const ai::sampler ws(w);
+    const std::vector<float> only_last = ws.penalise(logits, recent);
+
+    ok("  the window looks at the end of the sequence, not the start",
+       only_last[0] == logits[0] && only_last[1] != logits[1],
+       std::to_string(only_last[0]) + ", " + std::to_string(only_last[1]));
+
+    // And it must reach pick(), not merely exist.
+    ai::sampler::config g;
+    g.temperature = 0;                             // greedy, so no randomness
+    g.repetition_penalty = 4.0f;
+
+    ai::sampler gs(g);
+
+    ok("  and pick() applies it: the argmax moves when it is penalised",
+       gs.pick(logits, std::vector<int>{ 0 }) == 2 &&
+       gs.pick(logits, std::vector<int>()) == 0,
+       std::to_string(gs.pick(logits, std::vector<int>{ 0 })));
+
+    bool threw = false;
+
+    ai::sampler::config bad;
+    bad.repetition_penalty = 0.0f;
+
+    try { ai::sampler(bad).penalise(logits, recent); }
+    catch(ai::sampler::exception&) { threw = true; }
+
+    ok("  and a penalty of zero is refused", threw);
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -302,6 +386,7 @@ int main() {
     the_draw_follows_the_probabilities();
     temperature_moves_the_mass();
     the_edges_are_refused();
+    the_repetition_penalty();
 
     // What a green run does not establish.
     //
@@ -311,9 +396,14 @@ int main() {
     // round and be equally defensible -- and would produce different text from
     // the same seed.  Nothing here compares against another sampler.
     //
-    // Nothing about repetition penalties, frequency penalties, mirostat or any
-    // of the other knobs a full sampler carries.  What is here is temperature,
-    // top-k and top-p.
+    // That the repetition penalty is llama.cpp's.  The shape is checked here
+    // -- CTRL's two branches, once per token rather than once per occurrence,
+    // and a window that looks at the end -- and the shape is not the numbers.
+    // Nothing compares a penalised run against another implementation.
+    //
+    // Nothing about frequency or presence penalties, mirostat, or any of the
+    // other knobs a full sampler carries.  What is here is temperature, top-k,
+    // top-p and repetition.
     std::cout << "\n" << (failures ? "FAILED" : "PASSED") << ": " << failures
               << " failure(s)\n";
 
