@@ -20,6 +20,8 @@
 
 #include <jlib/ai/gguf.hh>
 
+#include "kquant_values.hh"
+
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -358,7 +360,75 @@ static void the_weights_come_back(const ai::gguf& g, const std::string& path) {
     ok("  and a tensor that is not there is refused", threw);
 }
 
+/**
+ * K-quantised tensors dequantise to what the reference says.
+ *
+ * q4_K and q6_K are two-tier: 256 weights sharing one f16 super-block scale,
+ * with *sub-block* scales quantised against it.  q4_K additionally carries
+ * quantised **mins**, so its reconstruction is affine (`d*q - m`) rather than
+ * symmetric -- the part with no analogue in q8_0.
+ *
+ * Exact equality, deliberately.  Dequantisation is integer arithmetic and two
+ * f16 multiplies; a correct implementation reproduces the reference bit for
+ * bit, and a tolerance would hide a bit-packing error that happens to land
+ * close.
+ */
+static std::string find_named(const std::string& name) {
+    const std::string where[] = { "", "../", "../../", "../../../" };
+
+    for(const std::string& w : where) {
+        std::ifstream f(w + name, std::ios::binary);
+
+        if(f) return w + name;
+    }
+
+    return "";
+}
+
+static void kquants_match_the_reference(const std::string& path) {
+    std::cout << "\nK-quantised tensors match the reference:\n";
+
+    const ai::gguf g(path);
+
+    for(const kquant_case& c : KQUANT) {
+        if(!g.has_tensor(c.tensor)) {
+            ok(std::string("  ") + c.tensor + " is present", false);
+
+            continue;
+        }
+
+        const jlib::math::matrix<float> m = g.read(c.tensor);
+
+        // Column-major, dims[0] contiguous -- so this walks the order the
+        // file stores, which is the order the reference ravels.
+        bool same = true;
+        float worst = 0;
+
+        for(int i = 0; i < c.count; i++) {
+            const float got = m(static_cast<unsigned>(i), 0);
+            const float d = std::fabs(got - c.first[i]);
+
+            if(d > worst) worst = d;
+            if(got != c.first[i]) same = false;
+        }
+
+        ok(std::string("  ") + c.tensor + " (type " + c.type + ")", same,
+           same ? "" : "max difference " + std::to_string(worst));
+    }
+}
+
 int main(int argc, char** argv) {
+    {
+        // Its own file: the K-quants are a mixture and the model the rest of
+        // this test uses is q8_0 throughout, so there is nothing to read.
+        const std::string kq = find_named("gemma-2-2b-it-Q4_K_M.gguf");
+
+        if(kq.empty())
+            std::cout << "\n(no K-quantised file; q4_K and q6_K unchecked)\n";
+        else
+            kquants_match_the_reference(kq);
+    }
+
     std::cout << std::unitbuf;
 
     const std::string path = find_model(argc, argv);
