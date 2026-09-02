@@ -143,6 +143,11 @@ void backend<T>::subtract(const tensor_ptr& a, const tensor_ptr& b, tensor_ptr& 
 }
 
 template<typename T>
+void backend<T>::softcap(tensor_ptr& x, float cap) {
+    m_stream->softcap(at<T>(x), cap);
+}
+
+template<typename T>
 void backend<T>::add_columns(const tensor_ptr& bias, tensor_ptr& y) {
     m_stream->add_columns(at<T>(bias), at<T>(y));
 }

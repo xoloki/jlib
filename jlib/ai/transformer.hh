@@ -84,8 +84,18 @@ public:
      *                 multi-head attention
      * @param d_ff     the feed-forward width, conventionally a few times d_model
      */
+    /**
+     * @param d_head the width of one head, or 0 to derive it as
+     *               d_model / heads.
+     *
+     * Derivable is not the same as derived.  Llama and qwen2 files happen to
+     * make it come out, and Gemma 2 does not: 2304 over 8 heads is 288 and
+     * the file says 256, which its tensor shapes confirm -- attn_q is
+     * 2304x2048, and 2048 is 8 x 256.  Taking the coincidence for a rule is a
+     * silent wrong answer rather than a refusal, so the caller says.
+     */
     block(backend<T>& b, unsigned int d_model, unsigned int heads,
-          unsigned int kv_heads, unsigned int d_ff);
+          unsigned int kv_heads, unsigned int d_ff, unsigned int d_head = 0);
 
     unsigned int d_model() const { return m_d_model; }
     unsigned int heads() const { return m_heads; }
@@ -142,6 +152,16 @@ public:
      * block without them must cost nothing rather than add a zero vector at
      * every position.  Qwen 2.5 has them on all three.
      */
+    /**
+     * The norms Gemma 2 applies to a sublayer's *output*, before the residual.
+     *
+     * Llama normalises going in and adds the result straight to the residual;
+     * Gemma normalises on the way out as well.  Null and costing nothing on a
+     * file that has no such tensors, made on demand by whoever loads them.
+     */
+    tensor_ptr& post_attn_norm() { return want(m_post_attn, m_d_model); }
+    tensor_ptr& post_ffn_norm() { return want(m_post_ffn, m_d_model); }
+
     tensor_ptr& bq() { return want(m_bq, m_heads * m_d_head); }
     tensor_ptr& bk() { return want(m_bk, m_kv_heads * m_d_head); }
     tensor_ptr& bv() { return want(m_bv, m_kv_heads * m_d_head); }
@@ -222,6 +242,23 @@ public:
      * normalised wrong.
      */
     void set_eps(float eps) { m_eps = eps; }
+
+    /**
+     * Which non-linearity gates the feed-forward.
+     *
+     * SwiGLU on llama and qwen2, GeGLU on gemma2.  The gating structure is
+     * identical and the function is not, and no key in the file says which --
+     * so it is set the way the RoPE layout is.
+     */
+    void set_gate_activation(activation a) { m_gate_act = a; }
+
+    /**
+     * Cap the attention logits at `cap` before the mask; 0 is no cap.
+     *
+     * Before the mask and not after: the mask writes -infinity, and capping
+     * that would turn a masked position into -cap and let it back in.
+     */
+    void set_attention_cap(float cap) { m_attn_cap = cap; }
     float eps() const { return m_eps; }
 
     /**
@@ -303,10 +340,24 @@ private:
     float m_theta = 10000.0f;
     rope_layout m_layout = rope_layout::interleaved;
 
+    /**
+     * Which non-linearity gates the feed-forward.
+     *
+     * SwiGLU on llama and qwen2, GeGLU on gemma2 -- the gating structure is
+     * the same and the function is not, and no key in the file says which.
+     */
+    activation m_gate_act = activation::silu;
+
+    /** Gemma 2 caps its attention logits at 50; 0 is no cap. */
+    float m_attn_cap = 0;
+
     /** Made on first use, so a file without biases allocates nothing. */
     tensor_ptr& want(tensor_ptr& t, unsigned int rows);
 
     tensor_ptr m_bq, m_bk, m_bv;
+
+    /** Gemma's post-sublayer norms; null unless the file carried them. */
+    tensor_ptr m_post_attn, m_post_ffn;
 
     tensor_ptr m_wq, m_wk, m_wv, m_wo;
     quantised_ptr m_wq_q, m_wk_q, m_wv_q, m_wo_q;
@@ -339,19 +390,22 @@ typename block<T>::tensor_ptr& block<T>::want(tensor_ptr& t, unsigned int rows)
 
 template<typename T>
 block<T>::block(backend<T>& b, unsigned int d_model, unsigned int heads,
-                unsigned int kv_heads, unsigned int d_ff)
+                unsigned int kv_heads, unsigned int d_ff, unsigned int d_head)
     : m_b(b),
       m_d_model(d_model),
       m_heads(heads),
       m_kv_heads(kv_heads),
-      m_d_head(heads ? d_model / heads : 0),
+      m_d_head(d_head ? d_head : (heads ? d_model / heads : 0)),
       m_d_ff(d_ff)
 {
     if(heads == 0 || kv_heads == 0 || d_model == 0 || d_ff == 0)
         throw backend_error("block: every dimension must be non-zero");
 
-    if(d_model % heads)
-        throw backend_error("block: heads must divide d_model");
+    // Only when the width is being derived.  Given one, d_model need not be a
+    // multiple of heads at all -- Gemma 2's is not.
+    if(!d_head && d_model % heads)
+        throw backend_error("block: with no head width given, heads must "
+                            "divide d_model");
 
     if(heads % kv_heads)
         throw backend_error("block: kv_heads must divide heads, since each "
@@ -546,6 +600,8 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
     // batch sits. Passing `at` here regardless made base_pos shift the mask,
     // which the uncached rope test caught immediately -- including its control,
     // where base_pos should not have mattered at all.
+    m_b.softcap(m_scores, m_attn_cap);
+
     if(causal) m_b.causal_mask(m_scores, m_context ? at : 0, m_seq);
 
     m_b.softmax(m_scores, m_probs);
@@ -557,6 +613,11 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
     // the whole output projection rather than an accumulation per head.
     if(m_wo_q) m_b.multiply_tn(m_wo_q, m_heads_out, m_attn);
     else m_b.multiply_tn(m_wo, m_heads_out, m_attn);
+
+    // Normalised on the way out, then added.  m_attn is both source and
+    // destination, which rms_norm allows -- it reads a whole column before it
+    // writes one.
+    if(m_post_attn) m_b.rms_norm(m_attn, m_post_attn, m_attn, m_eps);
 
     m_b.assign(x, out);
     m_b.add_scaled(T(1), m_attn, out);
@@ -574,11 +635,13 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
     // Both in place; see the note on aliasing above.  silu on the gate and not
     // on the up projection, which is the whole of what makes this SwiGLU --
     // and is a convention rather than something the arithmetic forces.
-    m_b.activate(activation::silu, m_h1, m_h1);
+    m_b.activate(m_gate_act, m_h1, m_h1);
     m_b.hadamard(m_h1, m_h3, m_h1);
 
     if(m_down_q) m_b.multiply_tn(m_down_q, m_h1, m_ffn);
     else m_b.multiply_tn(m_down, m_h1, m_ffn);
+
+    if(m_post_ffn) m_b.rms_norm(m_ffn, m_post_ffn, m_ffn, m_eps);
 
     m_b.add_scaled(T(1), m_ffn, out);
 
