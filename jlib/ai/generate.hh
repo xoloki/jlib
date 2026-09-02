@@ -23,6 +23,9 @@
 
 #include <jlib/ai/model.hh>
 #include <jlib/ai/sampler.hh>
+#include <jlib/ai/tokenizer.hh>
+
+#include <cstdlib>
 
 #include <functional>
 #include <vector>
@@ -102,6 +105,8 @@ std::vector<float> last_logits(const math::matrix<T>& logits) {
  * because it shrinks a nine percent slice of the cost rather than the ninety
  * percent one. It does buy 4.5x on load and 1.5x on memory.
  *
+ * @param ends the ids that end the reply; see stops.  Converts from an int,
+ *             so passing `tok.eos()` is the single id the file names.
  * @param on_token called with each new token as it is produced, for a caller
  *                 that wants to stream rather than wait.  **Return false to
  *                 stop**, which ends the generation after that token rather
@@ -116,12 +121,109 @@ std::vector<float> last_logits(const math::matrix<T>& logits) {
  *                 honest consequence of there being nothing to ask.
  * @return the prompt followed by everything generated
  */
+/**
+ * The ids that end a reply.
+ *
+ * A parameter of type `int` is a claim that there is one of them, and there
+ * is not: Qwen 2.5 names `[151645, 151643]` and Llama 3.2 names
+ * `[128001, 128008, 128009]`.  A GGUF cannot say so -- `tokenizer.ggml.
+ * eos_token_id` is a scalar -- so the file names one and the rest live in the
+ * vendor's generation_config.json, which is not in the file.
+ *
+ * **jlib therefore knows one and this type does not pretend otherwise.**  It
+ * exists so that a caller who knows more can say so, and so that the signature
+ * stops making a claim the format cannot support.  Guessing the others from
+ * the vocabulary was considered and rejected: a control token is not the same
+ * thing as an ending, and stopping on one a template legitimately writes
+ * would truncate a reply mid-turn.
+ *
+ * Converts from an int, so every existing call site reads the same and passes
+ * the one id it has.  A negative id is *no* id rather than a stop that can
+ * never match, which is what tokenizer::eos() returns for a file without one.
+ */
+class stops {
+public:
+    stops() {}
+
+    /** Implicit, so `generate(..., tok.eos())` still says what it did. */
+    stops(int id) { add(id); }
+
+    stops(std::initializer_list<int> ids) {
+        for(int id : ids) add(id);
+    }
+
+    explicit stops(const std::vector<int>& ids) {
+        for(int id : ids) add(id);
+    }
+
+    /** Ignores a negative id, and a repeat. */
+    void add(int id) {
+        if(id < 0 || contains(id)) return;
+
+        m_ids.push_back(id);
+    }
+
+    bool contains(int id) const {
+        for(std::size_t i = 0; i < m_ids.size(); i++)
+            if(m_ids[i] == id) return true;
+
+        return false;
+    }
+
+    bool empty() const { return m_ids.empty(); }
+    std::size_t size() const { return m_ids.size(); }
+
+    const std::vector<int>& ids() const { return m_ids; }
+
+private:
+    // A vector rather than a set: there are one or three of these and the
+    // lookup happens once per token, so a linear scan over three ints beats a
+    // tree, and the order stays the order a caller gave.
+    std::vector<int> m_ids;
+};
+
+/**
+ * A stop named on a command line, as an id.
+ *
+ * Takes the token's own text or a number -- `<|endoftext|>` or `151643` --
+ * because a user knows a model's markers by name and not by number, and
+ * looking one up is what the vocabulary is for.
+ *
+ * **The name wins.**  A spelling can be both: `5` is a token in every
+ * byte-level vocabulary *and* a valid id, and `--stop 5` reads as the digit
+ * rather than as whatever token happens to sit at index 5.  That is the
+ * reading a person means, and the other one is available by id for a token
+ * whose text is a number -- which is why the fallback is the number rather
+ * than the name.
+ *
+ * @throws tokenizer::exception if it is neither, which is better than
+ *         silently adding a stop that can never fire.
+ */
+inline int stop_id(const tokenizer& t, const std::string& spec) {
+    const int named = t.id_of(spec);
+
+    if(named >= 0) return named;
+
+    if(!spec.empty() &&
+       spec.find_first_not_of("0123456789") == std::string::npos) {
+        const int id = std::atoi(spec.c_str());
+
+        if(id >= 0 && std::size_t(id) < t.size()) return id;
+
+        throw tokenizer::exception("stop " + spec + " is outside a vocabulary "
+                                   "of " + std::to_string(t.size()));
+    }
+
+    throw tokenizer::exception("no token in this vocabulary is called \"" +
+                               spec + "\", and it is not an id");
+}
+
 template<typename T>
 std::vector<int> generate(model<T>& m, backend<T>& b,
                           const std::vector<int>& prompt,
                           unsigned int max_new,
                           sampler& s,
-                          int eos = -1,
+                          const stops& ends = stops(),
                           std::function<bool(int)> on_token = nullptr)
 {
     if(prompt.empty())
@@ -169,7 +271,7 @@ std::vector<int> generate(model<T>& m, backend<T>& b,
 
         if(on_token && !on_token(next)) break;
 
-        if(eos >= 0 && next == eos) break;
+        if(ends.contains(next)) break;
     }
 
     return ids;
