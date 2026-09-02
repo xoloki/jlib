@@ -253,6 +253,51 @@ public:
     void set_gate_activation(activation a) { m_gate_act = a; }
 
     /**
+     * Use another block's scratch rather than allocating a second copy.
+     *
+     * Safe because the layers run one at a time and nothing in `scratch`
+     * outlives a forward.  See the struct for what that buys and for what is
+     * deliberately not in it.
+     *
+     * Sets the sequence length too, so a later reserve() of the same length
+     * is the no-op it is for the block that allocated.
+     */
+    /**
+     * How many elements the shared scratch holds, or 0 before reserve().
+     *
+     * Exposed because sizing a context is a decision a caller has to make and
+     * could not previously inform: the cost is quadratic in the sequence
+     * (see the scratch struct) and nothing said so until it failed.
+     *
+     * Counts the scratch once however many blocks share it, which is the
+     * point -- ask the model rather than a block, and see model::scratch().
+     */
+    std::size_t scratch_elements() const {
+        if(!m_s) return 0;
+
+        std::size_t n = 0;
+
+        const tensor_ptr* all[] = { &m_s->norm, &m_s->qs, &m_s->ks, &m_s->vs,
+                                    &m_s->heads_out, &m_s->scores, &m_s->probs,
+                                    &m_s->attn, &m_s->h1, &m_s->h3, &m_s->ffn };
+
+        for(const tensor_ptr* t : all)
+            if(*t) n += std::size_t((*t)->rows()) * (*t)->cols();
+
+        return n;
+    }
+
+    /** Whether this block's scratch is the same object as another's. */
+    bool shares_scratch_with(const block& other) const {
+        return m_s && m_s == other.m_s;
+    }
+
+    void share_scratch(const block& from) {
+        m_s = from.m_s;
+        m_seq = from.m_seq;
+    }
+
+    /**
      * Cap the attention logits at `cap` before the mask; 0 is no cap.
      *
      * Before the mask and not after: the mask writes -infinity, and capping
@@ -354,6 +399,37 @@ private:
     /** Made on first use, so a file without biases allocates nothing. */
     tensor_ptr& want(tensor_ptr& t, unsigned int rows);
 
+    /**
+     * What one forward pass needs and nothing keeps.
+     *
+     * Every tensor here is dead between calls: it holds one layer's working
+     * values for the length of one forward and is overwritten by the next
+     * layer.  The layers run one at a time, so a private copy per block is
+     * N times the memory for one block's worth of use.
+     *
+     * On TinyLlama at 2048 positions that is **13.8 GB against 627 MB**, and
+     * 86% of it is `scores` and `probs`, which grow as seq^2 where everything
+     * else grows as seq.  A prefill at the model's own advertised context died
+     * with kIOGPUCommandBufferCallbackErrorOutOfMemory before this existed --
+     * see #187.
+     *
+     * A struct behind one shared_ptr rather than eleven shared tensors,
+     * because grow_cache() *replaces* scores and probs when the cache moves,
+     * and a replacement has to be visible to every block rather than to the
+     * one that made it.
+     *
+     * The key-value cache is deliberately **not** here: m_kc and m_vc are a
+     * layer's own keys and values and must survive between forwards, which is
+     * the property everything in this struct lacks.
+     */
+    struct scratch {
+        tensor_ptr norm, qs, ks, vs, heads_out;
+        tensor_ptr scores, probs;
+        tensor_ptr attn, h1, h3, ffn;
+    };
+
+    std::shared_ptr<scratch> m_s;
+
     tensor_ptr m_bq, m_bk, m_bv;
 
     /** Gemma's post-sublayer norms; null unless the file carried them. */
@@ -365,10 +441,6 @@ private:
     quantised_ptr m_gate_q, m_up_q, m_down_q;
     tensor_ptr m_attn_norm, m_ffn_norm;
 
-    tensor_ptr m_norm, m_scores, m_probs, m_attn;
-
-    /** Every head side by side: q is d_model tall, k and v narrower. */
-    tensor_ptr m_qs, m_ks, m_vs, m_heads_out;
 
     /** ((kv_heads * d_head) x capacity), one tensor rather than one per head. */
     tensor_ptr m_kc, m_vc;
@@ -377,7 +449,6 @@ private:
     unsigned int m_capacity = 0;
 
     void grow_cache(unsigned int need);
-    tensor_ptr m_h1, m_h3, m_ffn;
 };
 
 template<typename T>
@@ -490,9 +561,16 @@ void block<T>::grow_cache(unsigned int need) {
 
     m_capacity = want;
 
-    // The scores are as tall as the cache, so they move with it.
-    m_scores = m_b.make(m_capacity, m_seq * m_heads);
-    m_probs = m_b.make(m_capacity, m_seq * m_heads);
+    // The scores are as tall as the cache, so they move with it -- and the
+    // scratch is shared, so the block that grows first remakes them for
+    // everyone.  The others arrive to find the shape already right, which is
+    // what this guard is: without it each of N blocks would remake the same
+    // pair and throw away N-1 of them.
+    if(!m_s->scores || m_s->scores->rows() != m_capacity ||
+       m_s->scores->cols() != m_seq * m_heads) {
+        m_s->scores = m_b.make(m_capacity, m_seq * m_heads);
+        m_s->probs = m_b.make(m_capacity, m_seq * m_heads);
+    }
 }
 
 template<typename T>
@@ -510,23 +588,25 @@ void block<T>::reserve(unsigned int seq) {
 
     m_seq = seq;
 
-    m_norm       = m_b.make(m_d_model, seq);
-    m_qs         = m_b.make(m_heads * m_d_head, seq);
-    m_ks         = m_b.make(m_kv_heads * m_d_head, seq);
-    m_vs         = m_b.make(m_kv_heads * m_d_head, seq);
-    m_heads_out  = m_b.make(m_heads * m_d_head, seq);
+    if(!m_s) m_s.reset(new scratch);
+
+    m_s->norm       = m_b.make(m_d_model, seq);
+    m_s->qs         = m_b.make(m_heads * m_d_head, seq);
+    m_s->ks         = m_b.make(m_kv_heads * m_d_head, seq);
+    m_s->vs         = m_b.make(m_kv_heads * m_d_head, seq);
+    m_s->heads_out  = m_b.make(m_heads * m_d_head, seq);
 
     // As tall as the cache when there is one, and as wide as every head's
     // queries side by side.  grow_cache() remakes these when the capacity
     // changes.
-    m_scores = m_b.make(m_capacity ? m_capacity : seq, seq * m_heads);
+    m_s->scores = m_b.make(m_capacity ? m_capacity : seq, seq * m_heads);
 
 
-    m_probs  = m_b.make(m_capacity ? m_capacity : seq, seq * m_heads);
-    m_attn   = m_b.make(m_d_model, seq);
-    m_h1     = m_b.make(m_d_ff, seq);
-    m_h3     = m_b.make(m_d_ff, seq);
-    m_ffn    = m_b.make(m_d_model, seq);
+    m_s->probs  = m_b.make(m_capacity ? m_capacity : seq, seq * m_heads);
+    m_s->attn   = m_b.make(m_d_model, seq);
+    m_s->h1     = m_b.make(m_d_ff, seq);
+    m_s->h3     = m_b.make(m_d_ff, seq);
+    m_s->ffn    = m_b.make(m_d_model, seq);
 }
 
 template<typename T>
@@ -544,7 +624,7 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
 
     // --- attention, around a residual ---
 
-    m_b.rms_norm(x, m_attn_norm, m_norm, m_eps);
+    m_b.rms_norm(x, m_attn_norm, m_s->norm, m_eps);
 
     // Where in the sequence these columns sit.  The cache knows; a caller
     // only knows when there is no cache to disagree with.
@@ -555,42 +635,42 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
     // One call for every head's queries, and one each for the keys and values.
     // These were thirty-two and four calls; the arithmetic is identical and the
     // asking is not.
-    if(m_wq_q) m_b.multiply_tn(m_wq_q, m_norm, m_qs);
-    else m_b.multiply_tn(m_wq, m_norm, m_qs);
+    if(m_wq_q) m_b.multiply_tn(m_wq_q, m_s->norm, m_s->qs);
+    else m_b.multiply_tn(m_wq, m_s->norm, m_s->qs);
 
-    if(m_wk_q) m_b.multiply_tn(m_wk_q, m_norm, m_ks);
-    else m_b.multiply_tn(m_wk, m_norm, m_ks);
+    if(m_wk_q) m_b.multiply_tn(m_wk_q, m_s->norm, m_s->ks);
+    else m_b.multiply_tn(m_wk, m_s->norm, m_s->ks);
 
-    if(m_wv_q) m_b.multiply_tn(m_wv_q, m_norm, m_vs);
-    else m_b.multiply_tn(m_wv, m_norm, m_vs);
+    if(m_wv_q) m_b.multiply_tn(m_wv_q, m_s->norm, m_s->vs);
+    else m_b.multiply_tn(m_wv, m_s->norm, m_s->vs);
 
     // Before rope, which is where a bias goes: the rotation is applied to the
     // projected vector, and the vector is the multiply plus the bias.  After
     // it would rotate Wx and then add b unrotated, which is a different model.
-    if(m_bq) m_b.add_columns(m_bq, m_qs);
-    if(m_bk) m_b.add_columns(m_bk, m_ks);
-    if(m_bv) m_b.add_columns(m_bv, m_vs);
+    if(m_bq) m_b.add_columns(m_bq, m_s->qs);
+    if(m_bk) m_b.add_columns(m_bk, m_s->ks);
+    if(m_bv) m_b.add_columns(m_bv, m_s->vs);
 
     // Rotated inside each head, never across the boundary between two.  Values
     // are not rotated at all -- see set_rope.
     if(m_rope) {
-        m_b.rope(m_qs, at, m_theta, m_layout, m_d_head);
-        m_b.rope(m_ks, at, m_theta, m_layout, m_d_head);
+        m_b.rope(m_s->qs, at, m_theta, m_layout, m_d_head);
+        m_b.rope(m_s->ks, at, m_theta, m_layout, m_d_head);
     }
 
     // Rotated before they are stored, so a key is rotated once however many
     // times it is later read.
     if(m_context) {
-        m_b.copy_columns(m_ks, m_kc, at);
-        m_b.copy_columns(m_vs, m_vc, at);
+        m_b.copy_columns(m_s->ks, m_kc, at);
+        m_b.copy_columns(m_s->vs, m_vc, at);
     }
 
-    const tensor_ptr& keys = m_context ? m_kc : m_ks;
-    const tensor_ptr& values = m_context ? m_vc : m_vs;
+    const tensor_ptr& keys = m_context ? m_kc : m_s->ks;
+    const tensor_ptr& values = m_context ? m_vc : m_s->vs;
 
     // And the attention itself, four calls for every head rather than four per
     // head.  The scale rides here rather than in a pass of its own.
-    m_b.attention_scores(m_qs, keys, m_scores, m_heads, m_kv_heads, m_d_head,
+    m_b.attention_scores(m_s->qs, keys, m_s->scores, m_heads, m_kv_heads, m_d_head,
                          T(1.0f / std::sqrt(float(m_d_head))));
 
     // The offset is how many keys precede the queries, which is not the same
@@ -600,50 +680,50 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
     // batch sits. Passing `at` here regardless made base_pos shift the mask,
     // which the uncached rope test caught immediately -- including its control,
     // where base_pos should not have mattered at all.
-    m_b.softcap(m_scores, m_attn_cap);
+    m_b.softcap(m_s->scores, m_attn_cap);
 
-    if(causal) m_b.causal_mask(m_scores, m_context ? at : 0, m_seq);
+    if(causal) m_b.causal_mask(m_s->scores, m_context ? at : 0, m_seq);
 
-    m_b.softmax(m_scores, m_probs);
+    m_b.softmax(m_s->scores, m_s->probs);
 
-    m_b.attention_weighted(values, m_probs, m_heads_out, m_heads, m_kv_heads,
+    m_b.attention_weighted(values, m_s->probs, m_s->heads_out, m_heads, m_kv_heads,
                            m_d_head);
 
     // The heads arrive concatenated, so summing them is one multiply against
     // the whole output projection rather than an accumulation per head.
-    if(m_wo_q) m_b.multiply_tn(m_wo_q, m_heads_out, m_attn);
-    else m_b.multiply_tn(m_wo, m_heads_out, m_attn);
+    if(m_wo_q) m_b.multiply_tn(m_wo_q, m_s->heads_out, m_s->attn);
+    else m_b.multiply_tn(m_wo, m_s->heads_out, m_s->attn);
 
-    // Normalised on the way out, then added.  m_attn is both source and
+    // Normalised on the way out, then added.  m_s->attn is both source and
     // destination, which rms_norm allows -- it reads a whole column before it
     // writes one.
-    if(m_post_attn) m_b.rms_norm(m_attn, m_post_attn, m_attn, m_eps);
+    if(m_post_attn) m_b.rms_norm(m_s->attn, m_post_attn, m_s->attn, m_eps);
 
     m_b.assign(x, out);
-    m_b.add_scaled(T(1), m_attn, out);
+    m_b.add_scaled(T(1), m_s->attn, out);
 
     // --- gated feed-forward, around a second residual ---
 
-    m_b.rms_norm(out, m_ffn_norm, m_norm, m_eps);
+    m_b.rms_norm(out, m_ffn_norm, m_s->norm, m_eps);
 
-    if(m_gate_q) m_b.multiply_tn(m_gate_q, m_norm, m_h1);
-    else m_b.multiply_tn(m_gate, m_norm, m_h1);
+    if(m_gate_q) m_b.multiply_tn(m_gate_q, m_s->norm, m_s->h1);
+    else m_b.multiply_tn(m_gate, m_s->norm, m_s->h1);
 
-    if(m_up_q) m_b.multiply_tn(m_up_q, m_norm, m_h3);
-    else m_b.multiply_tn(m_up, m_norm, m_h3);
+    if(m_up_q) m_b.multiply_tn(m_up_q, m_s->norm, m_s->h3);
+    else m_b.multiply_tn(m_up, m_s->norm, m_s->h3);
 
     // Both in place; see the note on aliasing above.  silu on the gate and not
     // on the up projection, which is the whole of what makes this SwiGLU --
     // and is a convention rather than something the arithmetic forces.
-    m_b.activate(m_gate_act, m_h1, m_h1);
-    m_b.hadamard(m_h1, m_h3, m_h1);
+    m_b.activate(m_gate_act, m_s->h1, m_s->h1);
+    m_b.hadamard(m_s->h1, m_s->h3, m_s->h1);
 
-    if(m_down_q) m_b.multiply_tn(m_down_q, m_h1, m_ffn);
-    else m_b.multiply_tn(m_down, m_h1, m_ffn);
+    if(m_down_q) m_b.multiply_tn(m_down_q, m_s->h1, m_s->ffn);
+    else m_b.multiply_tn(m_down, m_s->h1, m_s->ffn);
 
-    if(m_post_ffn) m_b.rms_norm(m_ffn, m_post_ffn, m_ffn, m_eps);
+    if(m_post_ffn) m_b.rms_norm(m_s->ffn, m_post_ffn, m_s->ffn, m_eps);
 
-    m_b.add_scaled(T(1), m_ffn, out);
+    m_b.add_scaled(T(1), m_s->ffn, out);
 
     // Advanced after everything has read it, since `at` is the position these
     // columns occupy rather than the position after them.

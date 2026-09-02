@@ -171,6 +171,18 @@ public:
     void reserve(unsigned int seq);
 
     /**
+     * Elements of working memory the layers share, or 0 before reserve().
+     *
+     * One block's worth however many layers there are, because that is what
+     * is allocated -- see block::scratch and #187.  Quadratic in the sequence
+     * length, which is the number a caller sizing a context needs and could
+     * not previously get.
+     */
+    std::size_t scratch() const {
+        return m_layers.empty() ? 0 : m_layers[0]->scratch_elements();
+    }
+
+    /**
      * ids -> logits, which come back (vocab x positions).
      *
      * One column of logits per input position, not just for the last one. A
@@ -525,8 +537,15 @@ void model<T>::reserve(unsigned int seq) {
     m_x = m_b.make(m_conf.d_model, seq);
     m_y = m_b.make(m_conf.d_model, seq);
 
-    for(std::size_t i = 0; i < m_layers.size(); i++)
-        m_layers[i]->reserve(seq);
+    // One block allocates and the rest share it.  Nothing in that scratch
+    // survives a forward and the layers run in sequence, so a private copy
+    // per block is N times the memory to do one block's work -- 13.8 GB
+    // rather than 627 MB at 2048 positions on TinyLlama.  See #187, which is
+    // the prefill that died of it.
+    m_layers[0]->reserve(seq);
+
+    for(std::size_t i = 1; i < m_layers.size(); i++)
+        m_layers[i]->share_scratch(*m_layers[0]);
 }
 
 template<typename T>

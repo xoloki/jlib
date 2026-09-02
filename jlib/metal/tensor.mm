@@ -1485,13 +1485,16 @@ void stream<T>::wait() {
 
     const bool failed = ([m_impl->cmd status] == MTLCommandBufferStatusError);
 
+    // Read before the buffer is let go, or the reason goes with it.
+    const std::string why = failed ? command_buffer_error(m_impl->cmd)
+                                   : std::string();
+
     m_impl->cmd = nil;
     m_impl->pending = 0;
 
     [m_impl->held removeAllObjects];
 
-    if(failed)
-        throw exception("the command buffer failed");
+    if(failed) throw exception(why);
 }
 
 // Objective-C++ cannot be a template header, so the instantiations live here.
