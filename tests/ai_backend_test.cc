@@ -1188,6 +1188,17 @@ static matrix<T> from_q8_0(const std::vector<char>& raw, uint rows, uint cols) {
 }
 
 /**
+ * The quantised multiply is right at a tile boundary and either side of one.
+ *
+ * The kernel carries Q8_TILE columns per thread (8), so the interesting
+ * counts are the ones that do not divide by it: a partial tile takes a
+ * different path through the tail, and 1 is the decode case where the tile
+ * loop runs once.  #158 tiled this and the shapes below are what a tiling bug
+ * would show up in.
+ */
+static const unsigned int Q8_COLUMN_COUNTS[] = { 1, 5, 7, 8, 9, 16, 17 };
+
+/**
  * A weight kept quantised multiplies like the same weight dequantised.
  *
  * That is the whole contract: the kernel dequantises as it reads, so what
@@ -1216,7 +1227,7 @@ static void a_quantised_weight_multiplies(const char* name,
     const std::vector<char> raw = as_q8_0(w);
     const matrix<T> dequantised = from_q8_0<T>(raw, K, N);
 
-    for(uint ncols : { 1u, 5u }) {
+    for(uint ncols : Q8_COLUMN_COUNTS) {
         const matrix<T> x = random_matrix<T>(K, ncols, gen);
 
         for(ai::backend<T>* b : backends) {
