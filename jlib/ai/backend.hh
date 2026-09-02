@@ -44,12 +44,12 @@ namespace ai {
  *   relu         s > 0 ? 1 : 0
  *   leaky_relu   s > 0 ? 1 : LEAK
  */
-enum class activation { sigmoid, tanh, relu, leaky_relu, silu };
+enum class activation { sigmoid, tanh, relu, leaky_relu, silu, gelu };
 
 /**
  * Whether f'(x) can be recovered from f(x), which is what slope() is given.
  *
- * False for silu alone, and not as an oversight: silu(x) = x * sigmoid(x) has
+ * False for silu and gelu, and not as an oversight: silu(x) = x * sigmoid(x) has
  * a minimum of about -0.278 near x = -1.278 and rises on both sides of it, so
  * it is not injective.  An output in (-0.278, 0) came from one of two inputs
  * with two different slopes, and nothing in the output says which.  Every other
@@ -60,7 +60,7 @@ enum class activation { sigmoid, tanh, relu, leaky_relu, silu };
  * not need it -- see #TODO in the branch notes.
  */
 inline bool slope_from_output(activation a) {
-    return a != activation::silu;
+    return a != activation::silu && a != activation::gelu;
 }
 
 /**
@@ -234,6 +234,18 @@ public:
 
     /** y += alpha * x */
     virtual void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y) = 0;
+
+    /**
+     * x = cap * tanh(x / cap), elementwise.
+     *
+     * Gemma 2 caps its attention logits at 50 and its final logits at 30.
+     * It is not cosmetic in fp16: an uncapped attention score can leave the
+     * range a half holds, and softmax of an infinity is a NaN -- which is
+     * what the whole logit vector became before this existed.
+     *
+     * A no-op at cap 0, so a caller need not branch.
+     */
+    virtual void softcap(tensor_ptr& x, float cap) = 0;
 
     /**
      * y[r][c] += bias[r], for every column.
@@ -455,6 +467,7 @@ public:
     void subtract(const tensor_ptr& a, const tensor_ptr& b, tensor_ptr& c);
     void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y);
     void add_columns(const tensor_ptr& bias, tensor_ptr& y);
+    void softcap(tensor_ptr& x, float cap);
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
     void causal_mask(tensor_ptr& s, unsigned int key_offset = 0,
@@ -529,6 +542,19 @@ math::matrix<T> activate_matrix(activation a, const math::matrix<T>& in) {
             // x * sigmoid(x).  Smooth, non-monotonic, and what a modern
             // feed-forward gates with -- see swiglu in transformer.hh.
             case activation::silu:       out(r,c) = T(x / (C(1) + std::exp(-x))); break;
+
+            // The tanh approximation, which is what Gemma was trained with --
+            // "gelu_pytorch_tanh" in its config.  Not the erf form: they
+            // differ in the fourth decimal, and a model is entitled to the
+            // one it saw.
+            case activation::gelu: {
+                const C u = C(0.7978845608028654) *
+                            (x + C(0.044715) * x * x * x);
+
+                out(r,c) = T(C(0.5) * x * (C(1) + std::tanh(u)));
+
+                break;
+            }
             }
         }
     }
@@ -557,7 +583,8 @@ math::matrix<T> slope_matrix(activation a, const math::matrix<T>& out) {
             case activation::tanh:       d(r,c) = T(C(1) - s * s);        break;
             case activation::relu:       d(r,c) = T((s > 0) ? C(1) : C(0)); break;
             case activation::leaky_relu: d(r,c) = T((s > 0) ? C(1) : C(LEAK)); break;
-            case activation::silu:       break;   // refused above
+            case activation::silu:
+            case activation::gelu:       break;   // refused above
             }
         }
     }
@@ -1004,6 +1031,17 @@ void host_backend<T>::rope(tensor_ptr& x, unsigned int base_pos, float theta,
             m(b,c) = T(xa * si + xb * co);
         }
     }
+}
+
+template<typename T>
+void host_backend<T>::softcap(tensor_ptr& x, float cap) {
+    if(cap == 0) return;
+
+    math::matrix<T>& m = at(x);
+
+    for(uint r = 0; r < m.M; r++)
+        for(uint c = 0; c < m.N; c++)
+            m(r,c) = T(cap * std::tanh(float(m(r,c)) / cap));
 }
 
 template<typename T>

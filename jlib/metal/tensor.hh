@@ -228,6 +228,9 @@ public:
     /** y[r][c] += bias[r] -- see ai::backend::add_columns. */
     void add_columns(const tensor<T>& bias, tensor<T>& y);
 
+    /** x = cap * tanh(x / cap); see ai::backend::softcap. */
+    void softcap(tensor<T>& x, float cap);
+
     /** Softmax down each column, with the column's maximum subtracted. */
     void softmax(const tensor<T>& in, tensor<T>& out);
 

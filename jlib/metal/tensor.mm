@@ -54,15 +54,38 @@ using namespace metal;
 
 constant float LEAK = 0.01f;
 
+/**
+ * tanh that does not return NaN for a large argument.
+ *
+ * MSL's tanh appears to be (exp(2x)-1)/(exp(2x)+1): exp(2x) overflows to
+ * infinity once x is past about 44, and inf/inf is a NaN.  Measured, this
+ * device returns 1 at x=20 and NaN at x=128, and *only for positive* x --
+ * negative arguments drive exp(2x) to zero and come out at -1 correctly,
+ * which is the asymmetry that identified it.
+ *
+ * tanh(20) is 1 to within 1e-17, far inside float, so clamping the argument
+ * is exact rather than an approximation.  The host's std::tanh has no such
+ * problem, so without this the two backends disagree -- which is how it was
+ * found: Gemma 2's GeGLU feeds tanh arguments in the hundreds, and every
+ * logit came out NaN on the GPU and finite on the CPU.
+ */
+inline float safe_tanh(float x) {
+    return tanh(clamp(x, -20.0f, 20.0f));
+}
+
 inline float apply(uint kind, float x) {
     switch(kind) {
     case 0: return 1.0f / (1.0f + exp(-x));
-    case 1: return tanh(x);
+    case 1: return safe_tanh(x);
     case 2: return (x > 0.0f) ? x : 0.0f;
     case 3: return (x > 0.0f) ? x : LEAK * x;
-    // silu.  Kept off default so that adding another kind cannot silently
-    // arrive here as a leaky relu.
-    default: return x / (1.0f + exp(-x));
+    case 4: return x / (1.0f + exp(-x));                       // silu
+    // gelu, tanh approximation -- "gelu_pytorch_tanh", which is what Gemma
+    // saw.  Kept off default so that adding another kind cannot silently
+    // arrive here as something else.
+    default: return 0.5f * x *
+                 (1.0f + safe_tanh(0.7978845608028654f *
+                                   (x + 0.044715f * x * x * x)));
     }
 }
 
@@ -129,6 +152,19 @@ kernel void k_add_scaled(device const T* x [[buffer(0)]],
                          uint i [[thread_position_in_grid]])
 {
     if(i < n) y[i] = T(float(y[i]) + alpha * float(x[i]));
+}
+
+template<typename T>
+kernel void k_softcap(device T* x [[buffer(0)]],
+                      constant float& cap [[buffer(1)]],
+                      constant uint& n [[buffer(2)]],
+                      uint i [[thread_position_in_grid]])
+{
+    // In float whatever T is: the point of the cap is to keep the value in
+    // range, so computing it in the range it is escaping would be circular.
+    // safe_tanh for the same reason: a logit of 2200 against a cap of 50 is
+    // an argument of 44, and that is where MSL's tanh stops being finite.
+    if(i < n) x[i] = T(cap * safe_tanh(float(x[i]) / cap));
 }
 
 // One thread per element, and the bias index is the row -- so the same value
@@ -502,6 +538,11 @@ INSTANTIATE(k_subtract, half, "_f16")(device const half*, device const half*,
                                       device half*, constant uint&, uint);
 INSTANTIATE(k_add_scaled, float, "_f32")(device const float*, device float*,
                                          constant float&, constant uint&, uint);
+INSTANTIATE(k_softcap, float, "_f32")(device float*, constant float&,
+                                      constant uint&, uint);
+INSTANTIATE(k_softcap, half, "_f16")(device half*, constant float&,
+                                     constant uint&, uint);
+
 INSTANTIATE(k_add_columns, float, "_f32")(device const float*, device float*,
                                           constant uint&, constant uint&, uint);
 INSTANTIATE(k_add_columns, half, "_f16")(device const half*, device half*,
@@ -673,6 +714,7 @@ struct stream<T>::impl {
     id<MTLComputePipelineState> subtract = nil;
     id<MTLComputePipelineState> add_scaled = nil;
     id<MTLComputePipelineState> add_columns = nil;
+    id<MTLComputePipelineState> softcap = nil;
     id<MTLComputePipelineState> softmax = nil;
     id<MTLComputePipelineState> causal_mask = nil;
     id<MTLComputePipelineState> copy_columns = nil;
@@ -702,6 +744,7 @@ struct pipelines {
     id<MTLComputePipelineState> subtract = nil;
     id<MTLComputePipelineState> add_scaled = nil;
     id<MTLComputePipelineState> add_columns = nil;
+    id<MTLComputePipelineState> softcap = nil;
     id<MTLComputePipelineState> softmax = nil;
     id<MTLComputePipelineState> causal_mask = nil;
     id<MTLComputePipelineState> copy_columns = nil;
@@ -761,6 +804,7 @@ pipelines& compiled(id<MTLDevice> gpu) {
         { "k_subtract",   &p.subtract },
         { "k_add_scaled", &p.add_scaled },
         { "k_add_columns", &p.add_columns },
+        { "k_softcap", &p.softcap },
         { "k_softmax",    &p.softmax },
         { "k_causal_mask", &p.causal_mask },
         { "k_copy_columns", &p.copy_columns },
@@ -832,6 +876,7 @@ stream<T>::stream(std::shared_ptr<device> d)
     m_impl->subtract = p.subtract;
     m_impl->add_scaled = p.add_scaled;
     m_impl->add_columns = p.add_columns;
+    m_impl->softcap = p.softcap;
     m_impl->softmax = p.softmax;
     m_impl->causal_mask = p.causal_mask;
     m_impl->copy_columns = p.copy_columns;
@@ -958,6 +1003,24 @@ void stream<T>::subtract(const tensor<T>& a, const tensor<T>& b, tensor<T>& c) {
     [m_impl->enc setBytes:&n length:sizeof(n) atIndex:3];
 
     dispatch(m_impl->enc, m_impl->subtract, n);
+
+    m_impl->pending++;
+}
+
+template<typename T>
+void stream<T>::softcap(tensor<T>& x, float cap) {
+    if(cap == 0) return;
+
+    open();
+
+    const unsigned int n = x.size();
+
+    [m_impl->enc setComputePipelineState:m_impl->softcap];
+    [m_impl->enc setBuffer:x.m_impl->buf offset:0 atIndex:0];
+    [m_impl->enc setBytes:&cap length:sizeof(cap) atIndex:1];
+    [m_impl->enc setBytes:&n length:sizeof(n) atIndex:2];
+
+    dispatch(m_impl->enc, m_impl->softcap, n);
 
     m_impl->pending++;
 }

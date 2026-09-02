@@ -77,6 +77,7 @@ public:
     void subtract(const tensor_ptr& a, const tensor_ptr& b, tensor_ptr& c);
     void add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y);
     void add_columns(const tensor_ptr& bias, tensor_ptr& y);
+    void softcap(tensor_ptr& x, float cap);
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
     void causal_mask(tensor_ptr& s, unsigned int key_offset = 0,

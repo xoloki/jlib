@@ -333,6 +333,7 @@ ai_sampler_test_SOURCES  = ai_sampler_test.cc
 ai_sampler_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 
 ai_tokenizer_test_SOURCES  = ai_tokenizer_test.cc llama3_tokens.hh llama3_splits.hh \
+                             gemma_tokens.hh \
                              qwen_splits.hh qwen_tokens.hh
 ai_tokenizer_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 

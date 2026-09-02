@@ -162,29 +162,65 @@ tokenizer::tokenizer(const gguf& g)
     m_adds_bos = !g.has("tokenizer.ggml.add_bos_token") ||
                  g.integer("tokenizer.ggml.add_bos_token") != 0;
 
-    if(!g.has("tokenizer.ggml.merges"))
-        throw exception("the file carries no merge list, and the scores in "
-                        "these files are not usable -- see tokenizer.hh");
+    // The dummy prefix, and the file decides that too.  Gemma 2 sets it to 0:
+    // its vocabulary has both "Hello" and "\u2581Hello", and it means the
+    // unmarked one for text that begins a prompt.  Absent means yes, which is
+    // what Llama and TinyLlama are.
+    m_adds_space = !g.has("tokenizer.ggml.add_space_prefix") ||
+                   g.integer("tokenizer.ggml.add_space_prefix") != 0;
 
-    const std::vector<std::string>& merges =
-        g.get("tokenizer.ggml.merges").strings;
+    // Which signal this file carries.  Scores count only when they are not
+    // all zero: TinyLlama's are 128000 zero bytes, and merging on them would
+    // tie every candidate and pick by whatever the tie-break happened to be.
+    if(g.has("tokenizer.ggml.scores")) {
+        const std::vector<double>& sc = g.get("tokenizer.ggml.scores").numbers;
 
-    if(merges.empty())
-        throw exception("an empty merge list");
+        bool any = false;
 
-    for(std::size_t i = 0; i < merges.size(); i++) {
-        // Stored already in the form the lookup wants, so the split is only to
-        // reject a line that has no space in it at all.
-        if(merges[i].find(' ') == std::string::npos) {
-            std::ostringstream e;
+        for(std::size_t i = 0; i < sc.size() && !any; i++)
+            if(sc[i] != 0) any = true;
 
-            e << "merge " << i << " has no space in it: '" << merges[i] << "'";
+        if(any) {
+            m_scores.reserve(sc.size());
 
-            throw exception(e.str());
+            for(std::size_t i = 0; i < sc.size(); i++)
+                m_scores.push_back(float(sc[i]));
         }
+    }
 
-        if(m_rank.find(merges[i]) == m_rank.end())
-            m_rank[merges[i]] = int(i);
+    const bool has_merges = g.has("tokenizer.ggml.merges") &&
+                            !g.get("tokenizer.ggml.merges").strings.empty();
+
+    // Merges first when a file has both: they are the pair table the
+    // vocabulary was built with, where a score is a property of one token.
+    m_driver = has_merges ? driver::merges : driver::scores;
+
+    if(!has_merges && m_scores.size() != m_tokens.size())
+        throw exception("this file carries neither a merge list nor a score "
+                        "for every token, so there is nothing to merge by -- "
+                        "see tokenizer.hh");
+
+    // Under scores there is nothing more to build: a score is indexed by id,
+    // and id_of() already finds the token a pair would make.
+    if(m_driver == driver::merges) {
+        const std::vector<std::string>& merges =
+            g.get("tokenizer.ggml.merges").strings;
+
+        for(std::size_t i = 0; i < merges.size(); i++) {
+            // Stored already in the form the lookup wants, so the split is
+            // only to reject a line that has no space in it at all.
+            if(merges[i].find(' ') == std::string::npos) {
+                std::ostringstream e;
+
+                e << "merge " << i << " has no space in it: '" << merges[i]
+                  << "'";
+
+                throw exception(e.str());
+            }
+
+            if(m_rank.find(merges[i]) == m_rank.end())
+                m_rank[merges[i]] = int(i);
+        }
     }
 
     if(g.has("tokenizer.ggml.bos_token_id"))
@@ -347,7 +383,7 @@ void tokenizer::encode_run(const std::string& text, bool add_prefix,
     }
 
     // The marker for every space, and one in front: see the header.
-    std::string prepared = add_prefix ? MARKER : "";
+    std::string prepared = (add_prefix && m_adds_space) ? MARKER : "";
 
     for(std::size_t i = 0; i < text.size(); i++) {
         if(text[i] == ' ') prepared += MARKER;
@@ -355,6 +391,32 @@ void tokenizer::encode_run(const std::string& text, bool add_prefix,
     }
 
     merge_run(prepared, out);
+}
+
+bool tokenizer::merge_key(const std::string& left, const std::string& right,
+                          double& key) const
+{
+    if(m_driver == driver::merges) {
+        const std::map<std::string, int>::const_iterator r =
+            m_rank.find(left + " " + right);
+
+        if(r == m_rank.end()) return false;
+
+        key = double(r->second);
+
+        return true;
+    }
+
+    // SentencePiece's rule: the pair that makes the highest-scoring token.
+    // Negated because this compares lower-is-better, so that the caller does
+    // not have to know which driver it is looking at.
+    const int id = id_of(left + right);
+
+    if(id < 0) return false;
+
+    key = -double(m_scores[std::size_t(id)]);
+
+    return true;
 }
 
 /** The merge table, run over one prepared run of text. */
@@ -373,23 +435,27 @@ void tokenizer::merge_run(const std::string& prepared,
         i += n;
     }
 
-    // Merge the best-ranked adjacent pair until none is left.  Quadratic, and
-    // the header says why that is allowed to stand.
+    // Merge the best adjacent pair until none is left -- best by rank or by
+    // score, which merge_key is the only place that knows.  Quadratic, and the
+    // header says why that is allowed to stand.
     for(;;) {
-        int best = -1;
+        bool found = false;
+        double best = 0;
         std::size_t at = 0;
 
         for(std::size_t i = 0; i + 1 < syms.size(); i++) {
-            std::map<std::string, int>::const_iterator r =
-                m_rank.find(syms[i] + " " + syms[i + 1]);
+            double key = 0;
 
-            if(r != m_rank.end() && (best < 0 || r->second < best)) {
-                best = r->second;
+            if(!merge_key(syms[i], syms[i + 1], key)) continue;
+
+            if(!found || key < best) {
+                found = true;
+                best = key;
                 at = i;
             }
         }
 
-        if(best < 0) break;
+        if(!found) break;
 
         syms[at] += syms[at + 1];
 
@@ -531,7 +597,10 @@ std::string tokenizer::decode(const std::vector<int>& ids) const {
     // And the dummy prefix, which encode() put there and no caller asked for.
     // Only SentencePiece has one; a byte_level leading space is a space the
     // caller wrote, and stripping it would lose a character.
-    if(m_flavour == flavour::sentencepiece && !out.empty() && out[0] == ' ')
+    // Only when encode() put one there.  Stripping it on a file that adds no
+    // prefix would eat a space the text actually had.
+    if(m_flavour == flavour::sentencepiece && m_adds_space &&
+       !out.empty() && out[0] == ' ')
         out.erase(0, 1);
 
     return out;

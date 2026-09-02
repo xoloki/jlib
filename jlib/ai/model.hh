@@ -22,6 +22,8 @@
 #define JLIB_AI_MODEL_HH
 
 #include <jlib/ai/gguf.hh>
+
+#include <cmath>
 #include <jlib/ai/transformer.hh>
 
 #include <memory>
@@ -60,6 +62,32 @@ public:
         unsigned int layers = 0;
         unsigned int vocab = 0;
         unsigned int context = 0;
+
+        /**
+         * The width of one head, or 0 to derive it as d_model / heads.
+         *
+         * An independent quantity that llama and qwen2 files happen to make
+         * derivable.  Gemma 2 states it and disagrees: 2304/8 is 288 and
+         * attention.key_length is 256.
+         */
+        unsigned int d_head = 0;
+
+        /**
+         * What to multiply the embedding by after the lookup, or 0 for none.
+         *
+         * Gemma 2 scales by sqrt(d_model) -- 48 for its 2304 -- and no key in
+         * the file says so; it is a property of the architecture, like the
+         * RoPE layout.  Llama and qwen2 do not.
+         */
+        float embed_scale = 0;
+
+
+        /** SwiGLU or GeGLU; see block::set_gate_activation. */
+        activation gate = activation::silu;
+
+        /** Caps on the attention and output logits; 0 is none. */
+        float attn_cap = 0;
+        float final_cap = 0;
 
         float rope_theta = 10000.0f;
         float rms_eps = 1e-5f;
@@ -156,6 +184,7 @@ private:
     /** Straight across, narrowing to T. */
     static math::matrix<T> narrowed(const math::matrix<float>& w);
 
+
     void expect(const gguf& g, const std::string& name,
                 unsigned int d0, unsigned int d1) const;
 
@@ -187,9 +216,10 @@ typename model<T>::config model<T>::config::from(const gguf& g) {
     // llama and qwen2 differ in exactly one thing that reaches this far: Qwen
     // carries biases on Q, K and V, which load() picks up when they are
     // present.  Everything else about the block is the same tensor set.
-    if(arch != "llama" && arch != "qwen2")
-        throw backend_error("model: this reads llama- and qwen2-architecture "
-                            "files, and that one says '" + arch + "'");
+    if(arch != "llama" && arch != "qwen2" && arch != "gemma2")
+        throw backend_error("model: this reads llama-, qwen2- and "
+                            "gemma2-architecture files, and that one says '" +
+                            arch + "'");
 
     const std::string a = arch + ".";
 
@@ -217,12 +247,52 @@ typename model<T>::config model<T>::config::from(const gguf& g) {
     // for both and nothing here can detect the wrong choice -- it comes out
     // as fluent nonsense, which is exactly what Qwen produced before this
     // line.  See ai::rope_layout, which says the same thing at more length.
-    if(arch == "qwen2") c.layout = rope_layout::split;
+    // qwen2 and gemma2 are both the NeoX layout; llama is the normal one.
+    // Not in any file -- ggml carries it per architecture.  See
+    // ai::rope_layout, and note that getting it wrong is silent.
+    if(arch == "qwen2" || arch == "gemma2") c.layout = rope_layout::split;
 
-    // The head dimension is derived here and the file does not say, which is
-    // true of llama and qwen2 and is *not* true in general -- Gemma 2 carries
-    // attention.key_length and it disagrees with d_model / heads.  See #174;
-    // this is where that would be read.
+    // Gemma 2's two unwritten conventions.  Neither is in the file and both
+    // are load-bearing: without the scale the residual stream starts 48x too
+    // small, and without the offset every norm weight is near zero and scales
+    // the activations to nothing.
+    // Gemma 2's conventions, none of which are in the file.
+    //
+    // **Not** the `1 + w` norm weights, and that is worth writing down
+    // because Gemma's published implementation does exactly that and copying
+    // it from there is wrong here: the GGUF conversion has already applied
+    // it. Measured on gemma-2-2b-it-Q8_0, attn_norm runs [0.000, 5.969] with
+    // mean 1.19 -- non-negative, centred near one -- where TinyLlama's raw
+    // weights run [-0.582, 0.770] with mean 0.006. Adding one again put
+    // every norm out by a factor and the model answered "1" to everything.
+    //
+    // The lesson generalises: the HF checkpoint and the GGUF are different
+    // artefacts, and a convention read out of modeling_gemma2.py describes
+    // the former.
+    if(arch == "gemma2") {
+        c.embed_scale = std::sqrt(float(c.d_model));
+        c.gate = activation::gelu;
+    }
+
+    // The caps, which *are* in the file.
+    if(g.has(a + "attn_logit_softcapping"))
+        c.attn_cap = static_cast<float>(g.real(a + "attn_logit_softcapping"));
+
+    if(g.has(a + "final_logit_softcapping"))
+        c.final_cap = static_cast<float>(g.real(a + "final_logit_softcapping"));
+
+    // The head width, when the file states it.  key_length and value_length
+    // are separate keys and this reads one, because nothing here can hold a
+    // model whose keys and values are different widths -- so they are checked
+    // to agree rather than quietly taking the first.
+    if(g.has(a + "attention.key_length")) {
+        c.d_head = static_cast<unsigned int>(g.integer(a + "attention.key_length"));
+
+        if(g.has(a + "attention.value_length") &&
+           g.integer(a + "attention.value_length") != c.d_head)
+            throw backend_error("model: this file's keys and values are "
+                                "different widths, which nothing here holds");
+    }
 
     // The vocabulary is not a llama.* key.  It is the length of the token
     // array, and the head's width has to agree with it -- which load() checks.
@@ -242,9 +312,12 @@ model<T>::model(backend<T>& b, const config& c)
 
     for(unsigned int i = 0; i < c.layers; i++) {
         std::shared_ptr<block<T> > l(
-            new block<T>(b, c.d_model, c.heads, c.kv_heads, c.d_ff));
+            new block<T>(b, c.d_model, c.heads, c.kv_heads, c.d_ff,
+                         c.d_head));
 
         l->set_eps(c.rms_eps);
+        l->set_gate_activation(c.gate);
+        l->set_attention_cap(c.attn_cap);
         l->set_rope(true, c.rope_theta, c.layout);
 
         m_layers.push_back(l);
@@ -290,7 +363,11 @@ void model<T>::expect(const gguf& g, const std::string& name,
 template<typename T>
 void model<T>::load(const gguf& g) {
     const unsigned int d = m_conf.d_model;
-    const unsigned int dh = d / m_conf.heads;
+
+    // The same width the blocks were built with, and for the same reason:
+    // deriving it here would make every expect() below check a shape the
+    // file does not have.
+    const unsigned int dh = m_conf.d_head ? m_conf.d_head : d / m_conf.heads;
 
     // No transposition for either of these.  The embedding is a table of
     // columns and gather reads columns; the head is used through multiply_tn,
@@ -332,6 +409,22 @@ void model<T>::load(const gguf& g) {
 
         expect(g, p + "ffn_norm.weight", d, 1);
         l.ffn_norm()->write(narrowed(g.read(p + "ffn_norm.weight")));
+
+        // Gemma's post-sublayer norms, from the file rather than the
+        // architecture's name -- absent everywhere else, and the block costs
+        // nothing for them when they are.
+        struct { const char* name; tensor_ptr& (block<T>::*get)(); } post[] = {
+            { "post_attention_norm.weight", &block<T>::post_attn_norm },
+            { "post_ffw_norm.weight",       &block<T>::post_ffn_norm }
+        };
+
+        for(const auto& e : post) {
+            if(!g.has_tensor(p + e.name)) continue;
+
+            expect(g, p + e.name, d, 1);
+
+            (l.*e.get)()->write(narrowed(g.read(p + e.name)));
+        }
 
         // Every one of these is a whole matrix in the file's orientation now
         // -- no slice, no transpose, so all four can stay in the quantisation
@@ -451,6 +544,15 @@ void model<T>::forward(const std::vector<int>& ids, tensor_ptr& logits,
 
     m_b.gather(m_embed, ids, m_x);
 
+    // Scaled after the lookup and not in the table, because the table is also
+    // the output head when the file ties them -- as Gemma's does -- and
+    // scaling it would scale the logits too.
+    //
+    // x += (s - 1) x  is  x *= s, and needs no operation the backend did not
+    // already have.  Safe aliased: add_scaled reads and writes the same index.
+    if(m_conf.embed_scale)
+        m_b.add_scaled(T(m_conf.embed_scale - 1.0f), m_x, m_x);
+
     // Ping-pong rather than in place: block::forward writes its output while
     // still reading its input.
     for(std::size_t i = 0; i < m_layers.size(); i++) {
@@ -462,6 +564,11 @@ void model<T>::forward(const std::vector<int>& ids, tensor_ptr& logits,
     m_b.rms_norm(m_x, m_final_norm, m_y, m_conf.rms_eps);
     if(m_head_q) m_b.multiply_tn(m_head_q, m_y, logits);
     else m_b.multiply_tn(m_head, m_y, logits);
+
+    // Monotone, so it cannot change an argmax -- but it changes every
+    // temperature above zero, and it keeps the logits inside what a half
+    // holds.
+    m_b.softcap(logits, m_conf.final_cap);
 }
 
 }
