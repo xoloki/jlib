@@ -175,7 +175,9 @@ std::vector<int> chat::encode(const std::vector<message>& turns,
 
     std::vector<int> ids;
 
-    if(tok.bos() >= 0) ids.push_back(tok.bos());
+    // The file decides, not the vocabulary: Qwen names a bos token and asks
+    // for it not to be used.  See tokenizer::adds_bos.
+    if(tok.bos() >= 0 && tok.adds_bos()) ids.push_back(tok.bos());
 
     // The dummy prefix belongs to the start of the whole prompt, so it goes to
     // whichever span turns out to be first.

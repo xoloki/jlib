@@ -406,6 +406,69 @@ static bool exists(const std::string& p) {
     return bool(f);
 }
 
+/** A named file, wherever the build happens to be run from. */
+static std::string find_named(const std::string& name) {
+    const std::string where[] = { "", "../", "../../", "../../../" };
+
+    for(const std::string& w : where)
+        if(exists(w + name)) return w + name;
+
+    return "";
+}
+
+/**
+ * Whether a prompt opens with the bos token, which the *file* decides.
+ *
+ * Not the same question as whether the vocabulary has one.  Qwen 2.5 names
+ * 151643 as bos and sets `add_bos_token` to 0, because its template opens
+ * with `<|im_start|>system` and putting `<|endoftext|>` in front of that is an
+ * end-of-document marker at the start of every conversation.  jlib pushed it
+ * anyway until this was read.
+ *
+ * Asserted in both directions: absent means yes, so Llama and TinyLlama must
+ * be unchanged, or reading the key became a change to every model.
+ */
+static void the_file_decides_whether_a_prompt_opens_with_bos() {
+    std::cout << "\nthe file decides whether a prompt opens with bos:\n";
+
+    struct { const char* file; bool wants; } cases[] = {
+        { "qwen2.5-0.5b-instruct-q8_0.gguf",     false },
+        { "Llama-3.2-1B-Instruct-Q8_0.gguf",     true },
+        { "tinyllama-1.1b-chat-v1.0.Q8_0.gguf",  true }
+    };
+
+    for(const auto& c : cases) {
+        const std::string path = find_named(c.file);
+
+        if(path.empty()) {
+            std::cout << "  (no " << c.file << ")\n";
+
+            continue;
+        }
+
+        const ai::gguf g(path);
+        const ai::tokenizer t(g);
+        const ai::chat ch(g, t.token(t.eos()));
+
+        ok(std::string("  ") + c.file + " says "
+           + (c.wants ? "yes" : "no"), t.adds_bos() == c.wants);
+
+        // The vocabulary has one either way, which is the whole point: the
+        // two answers come apart, and taking bos() >= 0 for permission is
+        // what got this wrong.
+        ok("    and names a bos token regardless", t.bos() >= 0,
+           std::to_string(t.bos()));
+
+        const std::vector<int> ids =
+            ch.encode({ { "user", "Hi" } }, t, true);
+
+        ok("    so the prompt " + std::string(c.wants ? "opens" : "does not open")
+           + " with it",
+           !ids.empty() && (ids[0] == t.bos()) == c.wants,
+           std::to_string(ids.empty() ? -1 : ids[0]));
+    }
+}
+
 static void the_file_says_the_same(int argc, char** argv) {
     std::string path;
 
@@ -453,6 +516,7 @@ int main(int argc, char** argv) {
     it_lays_a_turn_out();
     a_template_it_cannot_read_is_refused();
     the_file_says_the_same(argc, argv);
+    the_file_decides_whether_a_prompt_opens_with_bos();
 
     // What a green run does not establish.
     //

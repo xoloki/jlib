@@ -571,6 +571,8 @@ bool parse(int argc, char** argv, options& o) {
                       << "  --temp F        0 is greedy (default 0.8)\n"
                       << "  --top-k N       (default 40)\n"
                       << "  --top-p F       (default 0.95)\n"
+                      << "  --repeat F      discourage a token already\n"
+                      << "                  seen; 1 is off (default 1)\n"
                       << "  --seed N\n";
 
             std::exit(0);
@@ -589,6 +591,7 @@ bool parse(int argc, char** argv, options& o) {
             else if(a == "--temp") o.sampling.temperature = float(std::atof(v.c_str()));
             else if(a == "--top-k") o.sampling.top_k = unsigned(std::atoi(v.c_str()));
             else if(a == "--top-p") o.sampling.top_p = float(std::atof(v.c_str()));
+            else if(a == "--repeat") o.sampling.repetition_penalty = float(std::atof(v.c_str()));
             else if(a == "--seed") o.sampling.seed = std::uint64_t(std::atoll(v.c_str()));
             else {
                 std::cerr << "jalpaca: no such option " << a << "\n";

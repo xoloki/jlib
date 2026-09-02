@@ -131,6 +131,18 @@ kernel void k_add_scaled(device const T* x [[buffer(0)]],
     if(i < n) y[i] = T(float(y[i]) + alpha * float(x[i]));
 }
 
+// One thread per element, and the bias index is the row -- so the same value
+// is read by every column, which is what a broadcast is.
+template<typename T>
+kernel void k_add_columns(device const T* bias [[buffer(0)]],
+                          device T* y [[buffer(1)]],
+                          constant uint& rows [[buffer(2)]],
+                          constant uint& n [[buffer(3)]],
+                          uint i [[thread_position_in_grid]])
+{
+    if(i < n) y[i] = T(float(y[i]) + float(bias[i % rows]));
+}
+
 // The reductions.  One thread per *column*, looping down the rows.
 //
 // Parallel across columns and serial within one, which is the right shape for
@@ -490,6 +502,11 @@ INSTANTIATE(k_subtract, half, "_f16")(device const half*, device const half*,
                                       device half*, constant uint&, uint);
 INSTANTIATE(k_add_scaled, float, "_f32")(device const float*, device float*,
                                          constant float&, constant uint&, uint);
+INSTANTIATE(k_add_columns, float, "_f32")(device const float*, device float*,
+                                          constant uint&, constant uint&, uint);
+INSTANTIATE(k_add_columns, half, "_f16")(device const half*, device half*,
+                                         constant uint&, constant uint&, uint);
+
 INSTANTIATE(k_add_scaled, half, "_f16")(device const half*, device half*,
                                         constant float&, constant uint&, uint);
 INSTANTIATE(k_softmax, float, "_f32")(device const float*, device float*,
@@ -655,6 +672,7 @@ struct stream<T>::impl {
     id<MTLComputePipelineState> hadamard = nil;
     id<MTLComputePipelineState> subtract = nil;
     id<MTLComputePipelineState> add_scaled = nil;
+    id<MTLComputePipelineState> add_columns = nil;
     id<MTLComputePipelineState> softmax = nil;
     id<MTLComputePipelineState> causal_mask = nil;
     id<MTLComputePipelineState> copy_columns = nil;
@@ -683,6 +701,7 @@ struct pipelines {
     id<MTLComputePipelineState> hadamard = nil;
     id<MTLComputePipelineState> subtract = nil;
     id<MTLComputePipelineState> add_scaled = nil;
+    id<MTLComputePipelineState> add_columns = nil;
     id<MTLComputePipelineState> softmax = nil;
     id<MTLComputePipelineState> causal_mask = nil;
     id<MTLComputePipelineState> copy_columns = nil;
@@ -741,6 +760,7 @@ pipelines& compiled(id<MTLDevice> gpu) {
         { "k_hadamard",   &p.hadamard },
         { "k_subtract",   &p.subtract },
         { "k_add_scaled", &p.add_scaled },
+        { "k_add_columns", &p.add_columns },
         { "k_softmax",    &p.softmax },
         { "k_causal_mask", &p.causal_mask },
         { "k_copy_columns", &p.copy_columns },
@@ -811,6 +831,7 @@ stream<T>::stream(std::shared_ptr<device> d)
     m_impl->hadamard = p.hadamard;
     m_impl->subtract = p.subtract;
     m_impl->add_scaled = p.add_scaled;
+    m_impl->add_columns = p.add_columns;
     m_impl->softmax = p.softmax;
     m_impl->causal_mask = p.causal_mask;
     m_impl->copy_columns = p.copy_columns;
@@ -937,6 +958,28 @@ void stream<T>::subtract(const tensor<T>& a, const tensor<T>& b, tensor<T>& c) {
     [m_impl->enc setBytes:&n length:sizeof(n) atIndex:3];
 
     dispatch(m_impl->enc, m_impl->subtract, n);
+
+    m_impl->pending++;
+}
+
+template<typename T>
+void stream<T>::add_columns(const tensor<T>& bias, tensor<T>& y) {
+    if(bias.rows() != y.rows() || bias.cols() != 1)
+        throw std::runtime_error("add_columns: the bias must be one column of "
+                                 "rows entries");
+
+    open();
+
+    const unsigned int rows = y.rows();
+    const unsigned int n = y.size();
+
+    [m_impl->enc setComputePipelineState:m_impl->add_columns];
+    [m_impl->enc setBuffer:bias.m_impl->buf offset:0 atIndex:0];
+    [m_impl->enc setBuffer:y.m_impl->buf offset:0 atIndex:1];
+    [m_impl->enc setBytes:&rows length:sizeof(rows) atIndex:2];
+    [m_impl->enc setBytes:&n length:sizeof(n) atIndex:3];
+
+    dispatch(m_impl->enc, m_impl->add_columns, n);
 
     m_impl->pending++;
 }

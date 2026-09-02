@@ -225,6 +225,9 @@ public:
     /** y += alpha * x. */
     void add_scaled(float alpha, const tensor<T>& x, tensor<T>& y);
 
+    /** y[r][c] += bias[r] -- see ai::backend::add_columns. */
+    void add_columns(const tensor<T>& bias, tensor<T>& y);
+
     /** Softmax down each column, with the column's maximum subtracted. */
     void softmax(const tensor<T>& in, tensor<T>& out);
 

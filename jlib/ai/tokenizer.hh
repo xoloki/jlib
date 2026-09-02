@@ -120,6 +120,25 @@ public:
     flavour convention() const { return m_flavour; }
 
     /**
+     * Whether a prompt should open with bos(), from
+     * `tokenizer.ggml.add_bos_token`.
+     *
+     * A separate question from whether the vocabulary *has* a bos token, and
+     * the two disagree: Qwen 2.5 names 151643 as bos and says not to add it,
+     * because its chat template opens with `<|im_start|>system` and an
+     * `<|endoftext|>` in front of that is an end-of-document marker at the
+     * start of every conversation.
+     *
+     * Absent means yes, which is what Llama and TinyLlama are: they do not
+     * carry the key and they do want one.
+     *
+     * `encode()` does **not** consult this -- its add_bos argument means what
+     * it says, and the fixtures depend on that.  `chat::encode`, which is
+     * what assembles a real prompt, does.
+     */
+    bool adds_bos() const { return m_adds_bos; }
+
+    /**
      * Which cut the file named, from `tokenizer.ggml.pre`.
      *
      * Empty for a sentencepiece vocabulary, which does not have one, and for
@@ -234,6 +253,9 @@ private:
 
     /** tokenizer.ggml.pre, empty when the file does not say. */
     std::string m_pre;
+
+    /** tokenizer.ggml.add_bos_token, defaulting to yes when absent. */
+    bool m_adds_bos = true;
 
     std::string unmap(const std::string& t) const;
 

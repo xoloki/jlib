@@ -143,6 +143,11 @@ void backend<T>::subtract(const tensor_ptr& a, const tensor_ptr& b, tensor_ptr& 
 }
 
 template<typename T>
+void backend<T>::add_columns(const tensor_ptr& bias, tensor_ptr& y) {
+    m_stream->add_columns(at<T>(bias), at<T>(y));
+}
+
+template<typename T>
 void backend<T>::add_scaled(T alpha, const tensor_ptr& x, tensor_ptr& y) {
     m_stream->add_scaled(float(alpha), at<T>(x), at<T>(y));
 }

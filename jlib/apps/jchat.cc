@@ -112,6 +112,9 @@ void usage(std::ostream& o, const char* argv0) {
       << "  --temp F        0 is greedy and repeatable (default 0.8)\n"
       << "  --top-k N       keep the N likeliest, 0 for all (default 40)\n"
       << "  --top-p F       keep the likeliest summing to F (default 0.95)\n"
+      << "  --repeat F      discourage a token already seen; 1 is\n"
+      << "                  off (default 1). Qwen 2.5 asks for 1.1,\n"
+      << "                  Llama 3.2 for none\n"
       << "  --seed N        for a repeatable run at a temperature above 0\n"
       << "  --raw           continue the prompt instead of answering it,\n"
       << "                  which is what a base model wants\n"
@@ -140,6 +143,8 @@ bool parse(int argc, char** argv, options& o) {
             else if(a == "--temp") o.sampling.temperature = float(std::atof(v.c_str()));
             else if(a == "--top-k") o.sampling.top_k = unsigned(std::atoi(v.c_str()));
             else if(a == "--top-p") o.sampling.top_p = float(std::atof(v.c_str()));
+            else if(a == "--repeat")
+                o.sampling.repetition_penalty = float(std::atof(v.c_str()));
             else if(a == "--seed") o.sampling.seed = std::uint64_t(std::atoll(v.c_str()));
             else {
                 std::cerr << "jchat: no such option " << a << "\n";

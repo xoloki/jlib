@@ -49,6 +49,35 @@ struct sampler_config {
     /** Keep the smallest set summing to this; 1 keeps all. */
     float top_p = 0.95f;
 
+    /**
+     * How much to discourage a token that has already appeared.  1 is off.
+     *
+     * A logit for a token already in the window is divided by this when it is
+     * positive and multiplied when it is negative -- the CTRL paper's form,
+     * which is what llama.cpp and transformers both implement, and which
+     * moves a logit *towards* -infinity either way rather than flipping the
+     * sign of a negative one.
+     *
+     * **Off by default, and that is a decision rather than an omission.**  A
+     * penalty is a distortion of the model's distribution: it makes a token
+     * less likely for having occurred rather than for anything the model
+     * believes, so a prompt that legitimately repeats -- a table, a list of
+     * years, code -- is what it damages first.  Llama 3.2's generation_config
+     * asks for none.  Qwen 2.5's asks for 1.1, and says so in the file rather
+     * than in the GGUF, which is why nothing here can read it and a caller
+     * has to say.
+     */
+    float repetition_penalty = 1.0f;
+
+    /**
+     * How many recent tokens the penalty considers; 0 is all of them.
+     *
+     * llama.cpp's default is 64 and this follows it.  The window matters:
+     * over a whole conversation every common word has occurred, so a
+     * penalty applied to all of history penalises "the".
+     */
+    unsigned int penalty_window = 64;
+
     std::uint64_t seed = 0;
 };
 
@@ -102,6 +131,16 @@ public:
     /** One token from one column of logits. */
     int pick(const std::vector<float>& logits);
 
+    /**
+     * The same, discouraging what `recent` already contains.
+     *
+     * `recent` is the sequence so far -- prompt and reply both, since a model
+     * repeating the prompt back is the same failure.  Only the last
+     * `penalty_window` of it are looked at.  With repetition_penalty at 1
+     * this is exactly pick(logits), and the argument costs nothing.
+     */
+    int pick(const std::vector<float>& logits, const std::vector<int>& recent);
+
     /** The largest, with no randomness anywhere. */
     static int argmax(const std::vector<float>& logits);
 
@@ -115,6 +154,17 @@ public:
      */
     std::vector<std::pair<int, float> > distribution(
         const std::vector<float>& logits) const;
+
+    /**
+     * The logits a penalty would leave, for a caller that wants to see it.
+     *
+     * Separate from distribution() so that the penalty can be looked at on
+     * its own: it is the one step here that depends on history rather than on
+     * this column, and it is the one most likely to be wrong in a way the
+     * output does not obviously show.
+     */
+    std::vector<float> penalise(const std::vector<float>& logits,
+                                const std::vector<int>& recent) const;
 
 private:
     config m_conf;

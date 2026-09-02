@@ -177,26 +177,52 @@ typename model<T>::config model<T>::config::from(const gguf& g) {
 
     const std::string arch = g.str("general.architecture");
 
-    if(arch != "llama")
-        throw backend_error("model: this reads llama-architecture files, and "
-                            "that one says '" + arch + "'");
+    // Which architectures this reads, and the list is the *whole* claim: the
+    // metadata keys are prefixed with the architecture's own name, so reading
+    // a file's keys is a matter of spelling the prefix -- and being able to
+    // spell it is not the same as supporting the model.  Anything not named
+    // here is refused even though its keys would read perfectly well, because
+    // the shapes and the sublayers are what decide, not the spelling.
+    //
+    // llama and qwen2 differ in exactly one thing that reaches this far: Qwen
+    // carries biases on Q, K and V, which load() picks up when they are
+    // present.  Everything else about the block is the same tensor set.
+    if(arch != "llama" && arch != "qwen2")
+        throw backend_error("model: this reads llama- and qwen2-architecture "
+                            "files, and that one says '" + arch + "'");
 
-    c.d_model = static_cast<unsigned int>(g.integer("llama.embedding_length"));
-    c.heads   = static_cast<unsigned int>(g.integer("llama.attention.head_count"));
-    c.d_ff    = static_cast<unsigned int>(g.integer("llama.feed_forward_length"));
-    c.layers  = static_cast<unsigned int>(g.integer("llama.block_count"));
-    c.context = static_cast<unsigned int>(g.integer("llama.context_length"));
+    const std::string a = arch + ".";
 
-    c.kv_heads = g.has("llama.attention.head_count_kv")
-        ? static_cast<unsigned int>(g.integer("llama.attention.head_count_kv"))
+    c.d_model = static_cast<unsigned int>(g.integer(a + "embedding_length"));
+    c.heads   = static_cast<unsigned int>(g.integer(a + "attention.head_count"));
+    c.d_ff    = static_cast<unsigned int>(g.integer(a + "feed_forward_length"));
+    c.layers  = static_cast<unsigned int>(g.integer(a + "block_count"));
+    c.context = static_cast<unsigned int>(g.integer(a + "context_length"));
+
+    c.kv_heads = g.has(a + "attention.head_count_kv")
+        ? static_cast<unsigned int>(g.integer(a + "attention.head_count_kv"))
         : c.heads;
 
-    if(g.has("llama.rope.freq_base"))
-        c.rope_theta = static_cast<float>(g.real("llama.rope.freq_base"));
+    if(g.has(a + "rope.freq_base"))
+        c.rope_theta = static_cast<float>(g.real(a + "rope.freq_base"));
 
-    if(g.has("llama.attention.layer_norm_rms_epsilon"))
+    if(g.has(a + "attention.layer_norm_rms_epsilon"))
         c.rms_eps = static_cast<float>(
-            g.real("llama.attention.layer_norm_rms_epsilon"));
+            g.real(a + "attention.layer_norm_rms_epsilon"));
+
+    // **Which RoPE layout, and it is not in the file.**  ggml carries it as a
+    // per-architecture constant: llama is the normal type and qwen2 is the
+    // NeoX one, and a GGUF says neither.  The two differ only in which
+    // coordinates share a rotation block, so every property RoPE has holds
+    // for both and nothing here can detect the wrong choice -- it comes out
+    // as fluent nonsense, which is exactly what Qwen produced before this
+    // line.  See ai::rope_layout, which says the same thing at more length.
+    if(arch == "qwen2") c.layout = rope_layout::split;
+
+    // The head dimension is derived here and the file does not say, which is
+    // true of llama and qwen2 and is *not* true in general -- Gemma 2 carries
+    // attention.key_length and it disagrees with d_model / heads.  See #174;
+    // this is where that would be read.
 
     // The vocabulary is not a llama.* key.  It is the length of the token
     // array, and the head's width has to agree with it -- which load() checks.
@@ -330,6 +356,27 @@ void model<T>::load(const gguf& g) {
             }
             else
                 (l.*e.get)()->write(narrowed(g.read(p + e.name)));
+        }
+
+        // Present on qwen2, absent on llama, and optional here rather than
+        // architecture-gated: the file is what says, and a llama file that
+        // grew biases would work without this having to learn its name.
+        //
+        // Never quantised -- these are one vector each and every file stores
+        // them in float -- so there is no q8_0 branch to mirror.
+        struct { const char* name; unsigned int rows;
+                 tensor_ptr& (block<T>::*get)(); } bias[] = {
+            { "attn_q.bias", m_conf.heads * dh,    &block<T>::bq },
+            { "attn_k.bias", m_conf.kv_heads * dh, &block<T>::bk },
+            { "attn_v.bias", m_conf.kv_heads * dh, &block<T>::bv }
+        };
+
+        for(const auto& e : bias) {
+            if(!g.has_tensor(p + e.name)) continue;
+
+            expect(g, p + e.name, e.rows, 1);
+
+            (l.*e.get)()->write(narrowed(g.read(p + e.name)));
         }
 
         expect(g, p + "ffn_gate.weight", d, m_conf.d_ff);

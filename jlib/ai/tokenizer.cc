@@ -150,9 +150,17 @@ tokenizer::tokenizer(const gguf& g)
 
         if(!pretokenizer::supported(m_pre))
             throw exception("this file's pre-tokenizer is '" + m_pre +
-                            "', and the only one implemented is 'llama-bpe' "
-                            "-- see pretokenizer.hh");
+                            "', and the ones implemented are 'llama-bpe' and "
+                            "'qwen2' -- see pretokenizer.hh");
     }
+
+    // Whether a prompt should begin with the beginning-of-sequence token, and
+    // the file is what says.  Qwen 2.5 says no -- its template opens with
+    // <|im_start|>system and prepending <|endoftext|> puts an end-of-document
+    // marker in front of every conversation.  Llama and TinyLlama do not
+    // carry the key and want one, so absent means yes.
+    m_adds_bos = !g.has("tokenizer.ggml.add_bos_token") ||
+                 g.integer("tokenizer.ggml.add_bos_token") != 0;
 
     if(!g.has("tokenizer.ggml.merges"))
         throw exception("the file carries no merge list, and the scores in "
@@ -318,7 +326,8 @@ void tokenizer::encode_run(const std::string& text, bool add_prefix,
         // The merges may not run across a chunk boundary -- that is the whole
         // point of the pre-tokenizer, and why "1234567890" is four tokens
         // rather than three.  Each chunk is mapped and merged on its own.
-        const std::vector<std::string> chunks = pretokenizer::split(text);
+        const std::vector<std::string> chunks =
+            pretokenizer::split(text, m_pre);
 
         for(std::size_t c = 0; c < chunks.size(); c++) {
             std::string prepared;

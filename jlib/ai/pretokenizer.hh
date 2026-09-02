@@ -41,20 +41,30 @@ namespace ai {
  * crash, just a prompt slightly off the distribution, which is the failure
  * this file exists to remove.
  *
- * The cut is specified as a regex, and `tokenizer.ggml.pre` names which one;
- * `supported()` answers whether this is it, and `tokenizer` refuses a file
- * that names another rather than running this pattern on it and calling the
- * ids right.  This is `llama-bpe`, from Llama 3.2's own tokenizer.json --
- * the `Split` step of its pre_tokenizer, `behavior: Isolated`:
+ * The cut is specified as a regex, and `tokenizer.ggml.pre` names which one.
+ * Two are implemented; `supported()` says which, and `tokenizer` refuses a
+ * file naming any other rather than running the wrong pattern over it and
+ * calling the ids right.
+ *
+ * Both are the `Split` step of the file's own pre_tokenizer,
+ * `behavior: Isolated`, copied out of the vendor's tokenizer.json.
+ *
+ * `llama-bpe`, from Llama 3.2:
  *
  *     (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}
  *     | ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
  *
- * Qwen 2.5 names a different one (`qwen2`) and is not implemented here -- so
- * a Qwen file is refused, which is the point of reading the key.  The second
- * pattern is worth writing when there is a Qwen oracle to check it against,
- * on the same rule the Jinja subset grew by: widen the language when a real
- * file refuses, not before.
+ * `qwen2`, from Qwen 2.5:
+ *
+ *     (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}
+ *     | ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+ *
+ * **They differ in one character.**  Llama takes digits `{1,3}` at a time and
+ * Qwen one at a time, so "1234567890" is four chunks under the first and ten
+ * under the second, and everything else about the two is the same text.  That
+ * is why the grammar below is one body with the `digits` rule prepended per
+ * flavour rather than two copies differing in a line -- a second copy would
+ * be forty lines that have to be *checked* to find out they agree.
  *
  * ## Why a grammar and not a regex
  *
@@ -113,10 +123,18 @@ private:
     std::string m_msg;
 };
 
-/** Which pattern this file names, from `tokenizer.ggml.pre`. */
+/** Whether `tokenizer.ggml.pre` names a pattern this implements. */
 bool supported(const std::string& pre);
 
-inline const char* const LLAMA_BPE = R"ABNF(
+/**
+ * Everything both patterns share, which is all of it but `digits`.
+ *
+ * Not a grammar on its own: `digits` is referenced here and defined by
+ * whichever flavour is prepended, so compiling this text alone fails
+ * check() -- deliberately, since there is no such thing as "the"
+ * pre-tokenizer.
+ */
+inline const char* const PATTERN_BODY = R"ABNF(
 ; The whole input, as the chunks the merges may run inside.
 chunks         =  *chunk
 
@@ -129,9 +147,6 @@ contraction    =  "'" ( "re" / "ve" / "ll" / "s" / "t" / "m" / "d" )
 
 ; [^\r\n\p{L}\p{N}]?\p{L}+
 letters        =  [ lead-char ] 1*letter-char
-
-; \p{N}{1,3} -- three at a time, which is why a long number is several tokens.
-digits         =  1*3number-char
 
 ;  ?[^\s\p{L}\p{N}]+[\r\n]*
 symbols        =  [ SP ] 1*symbol-char *eol-char
@@ -171,8 +186,27 @@ symbol-char    =  <one codepoint that is none of White_Space, L or N>
 lead-char      =  <one codepoint that is none of CR, LF, L or N>
 )ABNF";
 
-/** The compiled grammar, with the character classes supplied. */
-const util::abnf::grammar& grammar();
+/**
+ * `\p{N}{1,3}` -- three at a time, which is why a long number is several
+ * tokens and not one.
+ */
+inline const char* const LLAMA_BPE_DIGITS =
+    "digits         =  1*3number-char\n";
+
+/** `\p{N}` -- one at a time, so every digit is its own chunk. */
+inline const char* const QWEN2_DIGITS =
+    "digits         =  number-char\n";
+
+/**
+ * The compiled grammar for a named pattern, with the classes supplied.
+ *
+ * @param pre `tokenizer.ggml.pre`, or empty for files old enough to predate
+ *            the key -- which are all llama-bpe.
+ *
+ * Compiled once per flavour and cached; throws for a name supported() would
+ * have refused.
+ */
+const util::abnf::grammar& grammar(const std::string& pre = "");
 
 /**
  * The chunks the merge table may run inside.
@@ -180,7 +214,8 @@ const util::abnf::grammar& grammar();
  * Every byte of the input appears in exactly one chunk, in order, so
  * concatenating the result gives the input back.
  */
-std::vector<std::string> split(const std::string& text);
+std::vector<std::string> split(const std::string& text,
+                               const std::string& pre = "");
 
 }
 

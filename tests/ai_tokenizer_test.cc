@@ -23,6 +23,8 @@
 
 #include "llama3_tokens.hh"
 #include "llama3_splits.hh"
+#include "qwen_splits.hh"
+#include "qwen_tokens.hh"
 
 #include <chrono>
 #include <cstdlib>
@@ -485,6 +487,106 @@ static void a_byte_that_is_not_a_character_still_splits() {
 }
 
 /**
+ * The qwen2 pattern, which differs from llama-bpe in one character.
+ *
+ * `\p{N}` rather than `\p{N}{1,3}`, so a digit is its own chunk.  The same 34
+ * inputs as the llama fixtures, run under the other flavour -- and the
+ * contrast is the point: if the two ever produced the same answers, one of
+ * them would be being ignored.
+ */
+static void the_qwen2_pattern_cuts_digits_singly() {
+    std::cout << "\nthe qwen2 pattern cuts digits singly:\n";
+
+    std::size_t matched = 0, differ = 0;
+
+    for(const pre_split& c : QWEN_SPLITS) {
+        std::vector<std::string> got;
+
+        try { got = ai::pretokenizer::split(c.text, "qwen2"); }
+        catch(std::exception& e) {
+            ok(std::string("  '") + c.text + "'", false, e.what());
+
+            continue;
+        }
+
+        bool same = got.size() == std::size_t(c.count);
+
+        for(int j = 0; same && j < c.count; j++)
+            same = got[std::size_t(j)] == c.parts[j];
+
+        std::string spelled;
+
+        for(const std::string& g : got) spelled += "[" + g + "]";
+
+        ok(std::string("  '") + c.text + "'", same, spelled);
+
+        if(same) matched++;
+
+        // The two flavours over the same input, which is what says the
+        // choice reaches anything at all.
+        if(ai::pretokenizer::split(c.text, "llama-bpe") != got) differ++;
+    }
+
+    std::cout << "    " << matched << " of "
+              << sizeof(QWEN_SPLITS) / sizeof(QWEN_SPLITS[0])
+              << " match the pattern, and " << differ
+              << " are cut differently from llama-bpe\n";
+
+    ok("  the two flavours are not the same grammar", differ > 0,
+       std::to_string(differ) + " of "
+       + std::to_string(sizeof(QWEN_SPLITS) / sizeof(QWEN_SPLITS[0])));
+}
+
+/**
+ * Qwen's vocabulary against Qwen's reference tokenizer.
+ *
+ * Its own oracle, because llama3_tokens.hh holds *Llama's* answers and
+ * running those against another vocabulary tests nothing.
+ */
+static void the_qwen_vocabulary_matches_its_reference(const std::string& path) {
+    std::cout << "\nit tokenizes Qwen's vocabulary as Qwen's reference does:\n";
+
+    const ai::gguf g(path);
+    const ai::tokenizer t(g);
+
+    ok("  the flavour is byte-level and the cut is qwen2",
+       t.convention() == ai::tokenizer::flavour::byte_level &&
+       t.pre() == "qwen2", t.pre());
+
+    std::size_t matched = 0, pending = 0;
+
+    for(std::size_t i = 0; i < QWEN_COUNT; i++) {
+        const qwen_tokenization& c = QWEN[i];
+        const std::vector<int> got = t.encode(c.text, false, true);
+
+        bool same = got.size() == std::size_t(c.count);
+
+        for(int j = 0; same && j < c.count; j++)
+            same = got[std::size_t(j)] == c.ids[j];
+
+        // The reference normalises to NFC first and this does not.  Asserted
+        // still different, so implementing it fails here rather than being
+        // absorbed by a fixture nobody re-reads.
+        if(c.nfc) {
+            ok(std::string("  '") + c.text + "' still differs, wanting NFC",
+               !same, spell(t, got));
+
+            pending++;
+
+            continue;
+        }
+
+        ok(std::string("  '") + c.text + "'", same, spell(t, got));
+
+        if(same) matched++;
+    }
+
+    std::cout << "    " << matched << " of " << (QWEN_COUNT - pending)
+              << " match the reference tokenizer, with " << pending
+              << " recorded as needing NFC\n";
+}
+
+/**
  * A file that names a pre-tokenizer this does not have is refused.
  *
  * The vocabulary and the cut are two halves of one convention.  Qwen 2.5 has
@@ -503,26 +605,20 @@ static void a_file_naming_another_pre_tokenizer_is_refused() {
     ok("  and a file that does not say is taken as that",
        ai::pretokenizer::supported(""));
 
-    ok("  but qwen2 is a different pattern and says so",
-       !ai::pretokenizer::supported("qwen2"));
+    ok("  and so is qwen2, since this branch", ai::pretokenizer::supported("qwen2"));
 
-    const std::string qwen = find_named("qwen2.5-0.5b-instruct-q8_0.gguf");
-
-    if(qwen.empty()) {
-        std::cout << "  (no Qwen file to hand; the refusal is untested "
-                  << "against a real one)\n";
-
-        return;
-    }
+    // Named is not implemented.  gpt-4o, deepseek-llm and a dozen others are
+    // real values of this key, and each is a different pattern.
+    ok("  but a name this does not implement is refused, not guessed",
+       !ai::pretokenizer::supported("deepseek-llm") &&
+       !ai::pretokenizer::supported("gpt-4o"));
 
     bool threw = false;
-    std::string why;
 
-    try { const ai::gguf g(qwen); const ai::tokenizer t(g); }
-    catch(ai::tokenizer::exception& e) { threw = true; why = e.what(); }
+    try { ai::pretokenizer::split("x", "deepseek-llm"); }
+    catch(ai::pretokenizer::exception&) { threw = true; }
 
-    ok("  and a real Qwen file is refused rather than mistokenized", threw,
-       why);
+    ok("  and asking for one throws rather than falling back", threw);
 }
 
 /**
@@ -595,6 +691,7 @@ int main(int argc, char** argv) {
         the_pre_tokenizer_splits_as_the_pattern_does();
         a_byte_that_is_not_a_character_still_splits();
         an_overlong_form_is_not_the_character_it_spells();
+        the_qwen2_pattern_cuts_digits_singly();
         a_file_naming_another_pre_tokenizer_is_refused();
     }
     catch(std::exception& e) {
@@ -635,6 +732,13 @@ int main(int argc, char** argv) {
             std::cout << "\n(no byte-level model; set JLIB_GGUF_BPE to run those)\n";
         else
             a_byte_level_vocabulary_matches_the_reference(bpe);
+
+        const std::string qwen = find_named("qwen2.5-0.5b-instruct-q8_0.gguf");
+
+        if(qwen.empty())
+            std::cout << "\n(no Qwen file; its vocabulary is unchecked)\n";
+        else
+            the_qwen_vocabulary_matches_its_reference(qwen);
 
     }
     catch(std::exception& e) {
