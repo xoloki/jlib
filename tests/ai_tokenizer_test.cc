@@ -20,6 +20,7 @@
 
 #include <jlib/ai/tokenizer.hh>
 #include <jlib/ai/pretokenizer.hh>
+#include <jlib/ai/generate.hh>
 
 #include "llama3_tokens.hh"
 #include "llama3_splits.hh"
@@ -659,6 +660,50 @@ static void an_overlong_form_is_not_the_character_it_spells() {
     }
 }
 
+/**
+ * A stop named on a command line, resolved against the vocabulary.
+ *
+ * The file names one ending token and a model may have several, so a caller
+ * has to be able to say -- and a person says `<|im_end|>`, not 151645.
+ */
+static void a_stop_is_named_or_numbered(const std::string& path) {
+    std::cout << "\na stop is named or numbered:\n";
+
+    const ai::gguf g(path);
+    const ai::tokenizer t(g);
+
+    ok("  by name", ai::stop_id(t, "<|im_end|>") == 151645,
+       std::to_string(ai::stop_id(t, "<|im_end|>")));
+
+    ok("  and by id, for a marker whose name nobody remembers",
+       ai::stop_id(t, "151643") == 151643);
+
+    // The ambiguity, and it is a real one: "5" is a token in this vocabulary
+    // *and* a valid index.  The name wins, because that is what a person
+    // typing --stop 5 means.
+    const int five = t.id_of("5");
+
+    ok("  a spelling that is both a token and an id reads as the token",
+       five >= 0 && five != 5 && ai::stop_id(t, "5") == five,
+       "token \"5\" is id " + std::to_string(five));
+
+    bool threw = false;
+
+    try { ai::stop_id(t, "<|nope|>"); }
+    catch(ai::tokenizer::exception&) { threw = true; }
+
+    ok("  a name in no vocabulary is refused, not ignored", threw);
+
+    threw = false;
+
+    try { ai::stop_id(t, "999999999"); }
+    catch(ai::tokenizer::exception&) { threw = true; }
+
+    // Silently accepting it would add a stop that can never fire, which looks
+    // exactly like the flag not working.
+    ok("  and so is an id past the end of the vocabulary", threw);
+}
+
 /** SentencePiece is untouched by any of it. */
 static void the_sentencepiece_path_is_unchanged(const ai::tokenizer& t) {
     std::cout << "\nthe sentencepiece path is unchanged:\n";
@@ -743,8 +788,10 @@ int main(int argc, char** argv) {
 
         if(qwen.empty())
             std::cout << "\n(no Qwen file; its vocabulary is unchecked)\n";
-        else
+        else {
             the_qwen_vocabulary_matches_its_reference(qwen);
+            a_stop_is_named_or_numbered(qwen);
+        }
 
     }
     catch(std::exception& e) {

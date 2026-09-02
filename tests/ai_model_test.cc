@@ -419,6 +419,120 @@ static void it_answers_a_question(const char* name, ai::backend<T>& b,
  * interrupt reaches the generation through, and a signal is not something the
  * piped tests can send.
  */
+/**
+ * A reply ends on any of several tokens, not on one.
+ *
+ * No model file: an untrained model at temperature zero produces a
+ * deterministic stream, so the test runs it once to find out what it says and
+ * then asks for one of those tokens to end it.  That is stronger than
+ * asserting against a token chosen in advance, which would be asserting
+ * against this test's own arithmetic.
+ */
+static void a_reply_ends_on_any_of_several_tokens() {
+    std::cout << "\na reply ends on any of several tokens:\n";
+
+    // The type first, which has no model in it at all.
+    ok("  a default stops is empty and matches nothing",
+       ai::stops().empty() && !ai::stops().contains(0));
+
+    ok("  it converts from an int, which is how every call site reads",
+       ai::stops(7).contains(7) && ai::stops(7).size() == 1);
+
+    // -1 is what tokenizer::eos() returns for a file without one, and it must
+    // be no stop rather than a stop that can never match.
+    ok("  a negative id is no id", ai::stops(-1).empty());
+
+    ai::stops several{ 3, 5, 3, -1 };
+
+    ok("  and a list keeps each id once, dropping the negative",
+       several.size() == 2 && several.contains(3) && several.contains(5),
+       std::to_string(several.size()));
+
+    typename ai::model<float>::config c;
+
+    c.d_model = 8;
+    c.heads = 2;
+    c.kv_heads = 1;
+    c.d_ff = 16;
+    c.layers = 1;
+    c.vocab = 32;
+    c.context = 64;
+
+    ai::host_backend<float> b;
+    ai::model<float> m(b, c);
+
+    // Sampled with a fixed seed rather than greedy.  Greedy on an untrained
+    // model emits a *constant* argmax, so any token picked out of the stream
+    // occurs at position 0 and a stop can only ever fire immediately -- which
+    // tests the plumbing and not a stop arriving in the middle of a reply.
+    // A seed makes the stream vary and stay reproducible, since the logits
+    // depend only on the ids so far and those agree until the stop.
+    ai::sampler::config sc;
+    sc.temperature = 1.0f;
+    sc.seed = 20260902;
+
+    const std::vector<int> prompt{ 1, 2, 3 };
+
+    ai::sampler s0(sc);
+
+    const std::vector<int> plain = ai::generate<float>(m, b, prompt, 10, s0);
+
+    ok("  the untrained model runs to the limit with no stop",
+       plain.size() == prompt.size() + 10);
+
+    // Whatever it said fourth is what we now ask it to stop on -- and where
+    // generation should end is the *first* time that token appears, which
+    // need not be the fourth position.  Assuming it was is how this assertion
+    // failed the first time it ran.
+    const int fourth = plain[prompt.size() + 3];
+
+    std::size_t first = 0;
+
+    while(plain[prompt.size() + first] != fourth) first++;
+
+    ai::sampler s1(sc);
+
+    const std::vector<int> cut =
+        ai::generate<float>(m, b, prompt, 10, s1, fourth);
+
+    ok("  and stops on the single id it is given",
+       cut.size() == prompt.size() + first + 1 && cut.back() == fourth,
+       std::to_string(cut.size() - prompt.size()) + " tokens, first occurrence "
+       + std::to_string(first));
+
+    // The point of the type: a stop that never occurs must not mask one that
+    // does, and the one that fires need not be the first in the list.
+    // A token the run did not produce, found rather than guessed.
+    int never = -1;
+
+    for(int id = 0; id < 32 && never < 0; id++) {
+        bool seen = false;
+
+        for(std::size_t i = prompt.size(); i < plain.size(); i++)
+            if(plain[i] == id) seen = true;
+
+        if(!seen) never = id;
+    }
+
+    ok("  and there is a token the run never produced", never >= 0,
+       std::to_string(never));
+
+    ai::sampler s2(sc);
+
+    const std::vector<int> both =
+        ai::generate<float>(m, b, prompt, 10, s2,
+                            ai::stops{ never, fourth });
+
+    ok("  and on any member of a set, not merely the first",
+       both.size() == cut.size() && both.back() == fourth,
+       std::to_string(both.size() - prompt.size()));
+
+    // And the stop is kept.  A reply that ends on a marker contains it, the
+    // way it did when this took one int -- callers strip it, and one that
+    // did not would otherwise lose a token silently.
+    ok("  the token that ended it is in the result", both.back() == fourth);
+}
+
 static void generation_stops_when_asked() {
     std::cout << "\ngeneration stops when asked:\n";
 
@@ -641,6 +755,7 @@ int main(int argc, char** argv) {
     // Runs with or without a model, so the generation loop is covered on a
     // machine that has neither the file nor a GPU.
     generation_stops_when_asked();
+    a_reply_ends_on_any_of_several_tokens();
     the_cache_changes_nothing();
     a_qwen_file_reads_with_its_own_conventions();
 
@@ -692,6 +807,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // That the several-stops path matters for any model here.  Every GGUF on
+    // this machine names exactly one ending token, because
+    // tokenizer.ggml.eos_token_id is a scalar and the rest of a model's list
+    // lives in a generation_config.json the file does not carry -- so the set
+    // is exercised against a toy model and a --stop nobody has needed yet.
+    // What it buys is that the signature no longer claims there is one.  See
+    // #178.
+    //
     // What a green run does not establish.
     //
     // That the numbers match llama.cpp, only that the answer is right.  A small

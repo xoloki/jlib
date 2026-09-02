@@ -99,6 +99,15 @@ struct options {
 
     /** Continue the text rather than laying it out as a conversation. */
     bool raw = false;
+
+    /**
+     * Extra ids or token names that end a reply, from --stop.
+     *
+     * The file names one and a model may have several; see ai::stops.  Held
+     * as text because the vocabulary is not open yet when the arguments are
+     * read.
+     */
+    std::vector<std::string> stop;
 };
 
 void usage(std::ostream& o, const char* argv0) {
@@ -112,6 +121,9 @@ void usage(std::ostream& o, const char* argv0) {
       << "  --temp F        0 is greedy and repeatable (default 0.8)\n"
       << "  --top-k N       keep the N likeliest, 0 for all (default 40)\n"
       << "  --top-p F       keep the likeliest summing to F (default 0.95)\n"
+      << "  --stop TOKEN    also end a reply on this, by name or id;\n"
+      << "                  repeatable. The file names one and a model\n"
+      << "                  may have several\n"
       << "  --repeat F      discourage a token already seen; 1 is\n"
       << "                  off (default 1). Qwen 2.5 asks for 1.1,\n"
       << "                  Llama 3.2 for none\n"
@@ -143,6 +155,7 @@ bool parse(int argc, char** argv, options& o) {
             else if(a == "--temp") o.sampling.temperature = float(std::atof(v.c_str()));
             else if(a == "--top-k") o.sampling.top_k = unsigned(std::atoi(v.c_str()));
             else if(a == "--top-p") o.sampling.top_p = float(std::atof(v.c_str()));
+            else if(a == "--stop") o.stop.push_back(v);
             else if(a == "--repeat")
                 o.sampling.repetition_penalty = float(std::atof(v.c_str()));
             else if(a == "--seed") o.sampling.seed = std::uint64_t(std::atoll(v.c_str()));
@@ -204,8 +217,13 @@ reply answer(ai::model<T>& m, ai::backend<T>& b, const ai::tokenizer& tok,
 
     const double start = now();
 
+    // What the file said, plus whatever the caller knew that it could not.
+    ai::stops ends(tok.eos());
+
+    for(const std::string& spec : o.stop) ends.add(ai::stop_id(tok, spec));
+
     const std::vector<int> out = ai::generate<T>(
-        m, b, ids, o.tokens, s, tok.eos(),
+        m, b, ids, o.tokens, s, ends,
         [&](int id) {
             std::string p = tok.piece(id);
 
@@ -396,14 +414,19 @@ int main(int argc, char** argv) {
 #ifdef HAVE_METAL
         // fp16 on the GPU, which halves the weights and is what MPS is built
         // for -- and whose GEMM accumulates wider than it stores.
-        try {
-            jlib::metal::backend<_Float16> b;
+        //
+        // The fallback covers *constructing* the backend and nothing else.
+        // Wrapping the whole run in it reported every failure inside as "no
+        // Metal backend" -- a mistyped --stop said the GPU was missing, then
+        // reloaded the model on the CPU, produced nothing and exited 0.
+        std::shared_ptr<jlib::metal::backend<_Float16> > gpu;
 
-            return run<_Float16>(b, g, o);
-        }
+        try { gpu.reset(new jlib::metal::backend<_Float16>); }
         catch(std::exception& e) {
             std::cerr << "jchat: no Metal backend (" << e.what() << ")\n";
         }
+
+        if(gpu) return run<_Float16>(*gpu, g, o);
 #endif
 
         // float, not fp16: the host GEMM accumulates in the element type, and

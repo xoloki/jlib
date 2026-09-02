@@ -544,6 +544,9 @@ struct options {
     unsigned int tokens = 512;
 
     ai::sampler::config sampling;
+
+    /** Extra ids or token names that end a reply, from --stop. */
+    std::vector<std::string> stop;
 };
 
 bool parse(int argc, char** argv, options& o) {
@@ -571,6 +574,8 @@ bool parse(int argc, char** argv, options& o) {
                       << "  --temp F        0 is greedy (default 0.8)\n"
                       << "  --top-k N       (default 40)\n"
                       << "  --top-p F       (default 0.95)\n"
+                      << "  --stop TOKEN    also end a reply on this, by\n"
+                      << "                  name or id; repeatable\n"
                       << "  --repeat F      discourage a token already\n"
                       << "                  seen; 1 is off (default 1)\n"
                       << "  --seed N\n";
@@ -591,6 +596,7 @@ bool parse(int argc, char** argv, options& o) {
             else if(a == "--temp") o.sampling.temperature = float(std::atof(v.c_str()));
             else if(a == "--top-k") o.sampling.top_k = unsigned(std::atoi(v.c_str()));
             else if(a == "--top-p") o.sampling.top_p = float(std::atof(v.c_str()));
+            else if(a == "--stop") o.stop.push_back(v);
             else if(a == "--repeat") o.sampling.repetition_penalty = float(std::atof(v.c_str()));
             else if(a == "--seed") o.sampling.seed = std::uint64_t(std::atoll(v.c_str()));
             else {
@@ -617,6 +623,12 @@ template<typename T>
 int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
     const ai::tokenizer tok(g);
     const ai::chat ch(g, tok.token(tok.eos()));
+
+    // Resolved before the screen is built, so a mistyped --stop is a message
+    // on a terminal rather than one painted into a curses window and lost.
+    ai::stops ends(tok.eos());
+
+    for(const std::string& spec : o.stop) ends.add(ai::stop_id(tok, spec));
 
     typename ai::model<T>::config c = ai::model<T>::config::from(g);
 
@@ -739,7 +751,7 @@ int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
         }
 
         const std::vector<int> out = ai::generate<T>(
-            m, b, ids, budget, sampler, tok.eos(),
+            m, b, ids, budget, sampler, ends,
             [&](int id) {
                 std::string p = tok.piece(id);
 
@@ -825,14 +837,19 @@ int main(int argc, char** argv) {
         const ai::gguf g(o.model);
 
 #ifdef HAVE_METAL
-        try {
-            jlib::metal::backend<_Float16> b;
+        // Constructing the backend only.  Wrapping the whole conversation in
+        // this reported every failure inside it as "no Metal backend" and
+        // then started again on the CPU -- and in a curses app that means
+        // tearing the screen down and rebuilding it to report something that
+        // was never about the GPU.
+        std::shared_ptr<jlib::metal::backend<_Float16> > gpu;
 
-            return converse<_Float16>(b, g, o);
-        }
+        try { gpu.reset(new jlib::metal::backend<_Float16>); }
         catch(std::exception& e) {
             std::cerr << "jalpaca: no Metal backend (" << e.what() << ")\n";
         }
+
+        if(gpu) return converse<_Float16>(*gpu, g, o);
 #endif
 
         std::cerr << "jalpaca: running on the CPU in float -- this will be very "
