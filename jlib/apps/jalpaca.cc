@@ -63,6 +63,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <clocale>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -129,6 +130,16 @@ public:
     static const int PAD_ROWS = 4000;
 
     screen() {
+        // Before initscr, and not optional: without it ncurses runs in the
+        // C locale and draws each *byte* as its own cell, so a four-byte
+        // emoji comes out as four cells of garbage.  jchat writes to stdout
+        // and never had the problem, which is why it took a model that
+        // answers with emoji to notice.
+        //
+        // "" is the environment's locale rather than a named one, so a user
+        // in a non-UTF-8 locale still gets what they asked for.
+        setlocale(LC_ALL, "");
+
         initscr();
         cbreak();               // keys arrive unbuffered, which Escape needs
         noecho();               // the input window draws the line itself
