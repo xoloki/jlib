@@ -470,6 +470,37 @@ kernel void k_gather(device const T* table [[buffer(0)]],
  * moves 2, and measured against MPS on a 2048-square matrix-vector product it
  * takes 39us to MPS's 68us at about the same bandwidth.
  */
+/**
+ * How many columns of x one thread carries.
+ *
+ * The kernel below reads a weight block once and uses it for this many
+ * columns, so the weight traffic falls by this factor.  Eight because the
+ * accumulators and the unpacked block have to live in registers: at eight it
+ * is 8 floats of accumulator and 32 of block per thread, and going wider
+ * starts spilling and costs more than the traffic it saves.
+ *
+ * One is exactly the old kernel.  Decode passes ncols = 1 and takes the same
+ * path it always did, with the tile loop running once.
+ */
+constant uint Q8_TILE = 8;
+
+/**
+ * y = alpha * (W^T x) + beta * y, with W held as q8_0 and never expanded.
+ *
+ * The dequantisation is inside the multiply -- a weight block is 34 bytes,
+ * one f16 scale and thirty-two signed quants, and it is turned into floats in
+ * registers and used there.  That much is #164's.
+ *
+ * **The tiling is what makes it a GEMM rather than N GEMVs.**  It was one
+ * thread per output element, each streaming a whole weight row from global
+ * memory, so every column of x re-read all 1.1 GB of weights: at 2048 columns
+ * that is 2.2 TB of traffic where 1.1 GB would do, and prefill cost a flat
+ * ~7 ms per token however long the prompt -- the signature of no reuse at all.
+ * See #158.
+ *
+ * Each thread now owns one output row and Q8_TILE columns, so a block is
+ * fetched once and spent eight times.
+ */
 template<typename T>
 kernel void k_q8_gemv(device const uchar* w [[buffer(0)]],
                       device const T* x [[buffer(1)]],
@@ -481,17 +512,23 @@ kernel void k_q8_gemv(device const uchar* w [[buffer(0)]],
                       constant float& beta [[buffer(7)]],
                       uint gid [[thread_position_in_grid]])
 {
-    const uint j = gid % N;
-    const uint c = gid / N;
+    const uint tiles = (ncols + Q8_TILE - 1) / Q8_TILE;
 
-    if(c >= ncols) return;
+    const uint j = gid % N;
+    const uint t = gid / N;
+
+    if(t >= tiles) return;
+
+    const uint c0 = t * Q8_TILE;
+    const uint have = min(Q8_TILE, ncols - c0);
 
     const uint nb = K / 32;
 
     device const uchar* base = w + (ulong)j * nb * 34;
-    device const T* xc = x + (ulong)c * K;
 
-    float sum = 0.0f;
+    float sum[Q8_TILE];
+
+    for(uint i = 0; i < Q8_TILE; i++) sum[i] = 0.0f;
 
     for(uint b = 0; b < nb; b++) {
         device const uchar* p = base + (ulong)b * 34;
@@ -501,20 +538,32 @@ kernel void k_q8_gemv(device const uchar* w [[buffer(0)]],
 
         device const char* q = (device const char*)(p + 2);
 
-        float acc = 0.0f;
+        // Unpacked once, here, and then spent on every column in the tile.
+        // This array is the whole optimisation: without it each column would
+        // go back to global memory for the same thirty-two bytes.
+        float qs[32];
 
-        for(uint i = 0; i < 32; i++)
-            acc += float(q[i]) * float(xc[b * 32 + i]);
+        for(uint i = 0; i < 32; i++) qs[i] = float(q[i]);
 
-        sum += d * acc;
+        for(uint cc = 0; cc < have; cc++) {
+            device const T* xc = x + (ulong)(c0 + cc) * K + b * 32;
+
+            float acc = 0.0f;
+
+            for(uint i = 0; i < 32; i++) acc += qs[i] * float(xc[i]);
+
+            sum[cc] += d * acc;
+        }
     }
 
-    const ulong at = (ulong)c * N + j;
+    for(uint cc = 0; cc < have; cc++) {
+        const ulong at = (ulong)(c0 + cc) * N + j;
 
-    // beta of zero does not read y, which is what BLAS specifies -- and what
-    // the host got wrong until a cache left -infinity in an output.
-    y[at] = T(beta == 0.0f ? alpha * sum
-                           : alpha * sum + beta * float(y[at]));
+        // beta of zero does not read y, which is what BLAS specifies -- and
+        // what the host got wrong until a cache left -infinity in an output.
+        y[at] = T(beta == 0.0f ? alpha * sum[cc]
+                               : alpha * sum[cc] + beta * float(y[at]));
+    }
 }
 
 #define INSTANTIATE(NAME, T, SUFFIX)                                        \
@@ -1276,7 +1325,12 @@ void stream<T>::multiply_tn(const qweight& w, const tensor<T>& x, tensor<T>& y,
     [m_impl->enc setBytes:&alpha length:sizeof(alpha) atIndex:6];
     [m_impl->enc setBytes:&beta length:sizeof(beta) atIndex:7];
 
-    dispatch(m_impl->enc, m_impl->q8_gemv, N * ncols);
+    // One thread per output row per tile of columns, not per element: the
+    // kernel now carries Q8_TILE columns each.  Kept in step with the
+    // constant in the shader by name rather than by number.
+    const unsigned int tiles = (ncols + 8 - 1) / 8;
+
+    dispatch(m_impl->enc, m_impl->q8_gemv, N * tiles);
 
     m_impl->pending++;
 }
