@@ -169,7 +169,7 @@ void matrix_multiply::operator()(const math::matrix<float>& a,
     [cmd waitUntilCompleted];
 
     if([cmd status] == MTLCommandBufferStatusError)
-        throw exception("the command buffer failed");
+        throw exception(command_buffer_error(cmd));
 
     std::memcpy(pc, [bc contents], csize);
 }

@@ -599,6 +599,73 @@ static void a_reply_ends_on_any_of_several_tokens() {
     ok("  the token that ended it is in the result", both.back() == fourth);
 }
 
+/**
+ * The layers share one scratch, so working memory does not scale with depth.
+ *
+ * Nothing in a block's scratch outlives a forward and the layers run one at a
+ * time, so a private copy per block is N times the memory to do one block's
+ * work.  On TinyLlama at 2048 positions that was 13.8 GB against 627 MB, and
+ * a prefill at the model's own advertised context died of it -- #187.
+ *
+ * Asserted structurally rather than by measuring the process: a Metal buffer
+ * does not appear in RSS until it is touched and does not appear in
+ * phys_footprint reliably either, which is how the size of this went unnoticed.
+ */
+static void the_layers_share_one_scratch() {
+    std::cout << "\nthe layers share one scratch:\n";
+
+    typename ai::model<float>::config c;
+
+    c.d_model = 64;
+    c.heads = 4;
+    c.kv_heads = 2;
+    c.d_ff = 128;
+    c.vocab = 32;
+    c.context = 256;
+
+    ai::host_backend<float> b;
+
+    const unsigned int seq = 64;
+
+    std::size_t one = 0, many = 0;
+
+    {
+        c.layers = 1;
+
+        ai::model<float> m(b, c);
+
+        m.reserve(seq);
+        one = m.scratch();
+    }
+
+    c.layers = 16;
+
+    ai::model<float> m(b, c);
+
+    m.reserve(seq);
+    many = m.scratch();
+
+    ok("  sixteen layers reserve what one does", one == many && one > 0,
+       std::to_string(one) + " elements either way");
+
+    // And it really is one object, not two of equal size.
+    ok("  because it is the same scratch, not a copy of the same shape",
+       m.layer(0).shares_scratch_with(m.layer(15)));
+
+    ok("  and a layer does not share it with a different model's",
+       !m.layer(0).shares_scratch_with(ai::model<float>(b, c).layer(0)));
+
+    // Quadratic in the sequence, which is the reason it matters and the
+    // number a caller sizing a context needs.
+    ai::model<float> wide(b, c);
+
+    wide.reserve(seq * 2);
+
+    ok("  and doubling the sequence more than doubles it",
+       wide.scratch() > 2 * many,
+       std::to_string(many) + " -> " + std::to_string(wide.scratch()));
+}
+
 static void generation_stops_when_asked() {
     std::cout << "\ngeneration stops when asked:\n";
 
@@ -822,6 +889,7 @@ int main(int argc, char** argv) {
     // machine that has neither the file nor a GPU.
     generation_stops_when_asked();
     a_reply_ends_on_any_of_several_tokens();
+    the_layers_share_one_scratch();
     the_cache_changes_nothing();
     a_qwen_file_reads_with_its_own_conventions();
     a_gemma_file_reads_with_its_own_conventions();
