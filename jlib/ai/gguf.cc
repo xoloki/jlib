@@ -33,6 +33,61 @@ namespace {
     const std::uint64_t Q8_0_BYTES = 34;
 
     /**
+     * The K-quant super-block, and the two layouts built on it.
+     *
+     * A q8_0 block is flat: one scale and thirty-two bytes.  A K-quant block
+     * is two-tier -- 256 weights sharing one f16 super-block scale, and
+     * *sub-block* scales quantised against it.  That second tier is what buys
+     * the accuracy at four bits, and it is the whole of the difference.
+     *
+     *     q6_K   210 bytes   128 low nibbles + 64 high pairs
+     *                        + 16 int8 sub-block scales + 1 f16
+     *     q4_K   144 bytes   128 nibbles + 12 packed bytes holding six-bit
+     *                        scales *and* mins + 2 f16
+     *
+     * q4_K's mins are the part with no analogue above: its quantisation is
+     * affine, `d*q - m`, not symmetric, so a block can represent a range that
+     * does not straddle zero.
+     *
+     * Q4_K_M -- the format most models ship in -- is a *mixture*, some
+     * tensors q4_K and some q6_K, so reading one file needs both.
+     */
+    const std::uint64_t QK_K = 256;
+    const std::uint64_t Q6_K_BYTES = 210;
+    const std::uint64_t Q4_K_BYTES = 144;
+
+    /** An f16 read from an unaligned offset, which every block has. */
+    float half_at(const char* p) {
+        _Float16 h;
+
+        std::memcpy(&h, p, sizeof(h));
+
+        return float(h);
+    }
+
+    /**
+     * q4_K's sub-block scale and min, unpacked.
+     *
+     * Twelve bytes hold eight six-bit scales and eight six-bit mins.  The
+     * first four of each sit in their own byte's low six bits; the last four
+     * are split, four bits in one byte and the top two bits borrowed from the
+     * high end of an earlier one.  This is ggml's `get_scale_min_k4` and the
+     * bit positions are its, not a re-derivation.
+     */
+    void scale_min_k4(int j, const unsigned char* q,
+                      unsigned char& d, unsigned char& m)
+    {
+        if(j < 4) {
+            d = q[j] & 63;
+            m = q[j + 4] & 63;
+        }
+        else {
+            d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+            m = (q[j + 4] >> 4)  | ((q[j - 0] >> 6) << 4);
+        }
+    }
+
+    /**
      * A bound on how long a string in the metadata may be.
      *
      * Not a format limit -- there is none -- but a length is read from the
@@ -394,10 +449,109 @@ math::matrix<float> gguf::read(const tensor_info& t) const {
         break;
     }
 
+    case tensor_type::q6_k: {
+        if(n % QK_K)
+            throw exception("tensor '" + t.name + "' is q6_K but its element "
+                            "count is not a multiple of the block size");
+
+        const std::uint64_t blocks = n / QK_K;
+
+        std::vector<char> raw(static_cast<std::size_t>(blocks * Q6_K_BYTES));
+
+        m_file.read(raw.data(), static_cast<std::streamsize>(raw.size()));
+
+        for(std::uint64_t b = 0; b < blocks; b++) {
+            const unsigned char* p =
+                reinterpret_cast<const unsigned char*>(raw.data() +
+                                                       b * Q6_K_BYTES);
+
+            const unsigned char* ql = p;              // 128 low nibbles
+            const unsigned char* qh = p + 128;        // 64 high bit-pairs
+            const signed char* sc =
+                reinterpret_cast<const signed char*>(p + 192);   // 16 scales
+
+            const float d = half_at(reinterpret_cast<const char*>(p) + 208);
+
+            float* y = into + b * QK_K;
+
+            // Two halves of 128, each drawing four six-bit weights per byte
+            // of ql: the low nibble and the high nibble, each topped up with
+            // two bits from qh.  The 32 is the zero point -- six bits are
+            // stored unsigned and mean [-32, 31].
+            for(std::uint64_t h = 0; h < 2; h++) {
+                for(std::uint64_t l = 0; l < 32; l++) {
+                    const int is = int(l / 16);
+
+                    const int q1 = int((ql[l]      & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                    const int q2 = int((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                    const int q3 = int((ql[l]      >> 4)  | (((qh[l] >> 4) & 3) << 4)) - 32;
+                    const int q4 = int((ql[l + 32] >> 4)  | (((qh[l] >> 6) & 3) << 4)) - 32;
+
+                    y[l]      = d * float(sc[is + 0]) * float(q1);
+                    y[l + 32] = d * float(sc[is + 2]) * float(q2);
+                    y[l + 64] = d * float(sc[is + 4]) * float(q3);
+                    y[l + 96] = d * float(sc[is + 6]) * float(q4);
+                }
+
+                y  += 128;
+                ql += 64;
+                qh += 32;
+                sc += 8;
+            }
+        }
+
+        break;
+    }
+
+    case tensor_type::q4_k: {
+        if(n % QK_K)
+            throw exception("tensor '" + t.name + "' is q4_K but its element "
+                            "count is not a multiple of the block size");
+
+        const std::uint64_t blocks = n / QK_K;
+
+        std::vector<char> raw(static_cast<std::size_t>(blocks * Q4_K_BYTES));
+
+        m_file.read(raw.data(), static_cast<std::streamsize>(raw.size()));
+
+        for(std::uint64_t b = 0; b < blocks; b++) {
+            const char* base = raw.data() + b * Q4_K_BYTES;
+
+            const float d    = half_at(base);          // scale of the scales
+            const float dmin = half_at(base + 2);      // scale of the mins
+
+            const unsigned char* sc =
+                reinterpret_cast<const unsigned char*>(base + 4);    // 12
+            const unsigned char* q =
+                reinterpret_cast<const unsigned char*>(base + 16);   // 128
+
+            float* y = into + b * QK_K;
+
+            // Four groups of 64, each byte of q holding two weights.  Affine:
+            // the min is subtracted rather than the weights being centred.
+            for(int j = 0; j < 4; j++) {
+                unsigned char s1 = 0, m1 = 0, s2 = 0, m2 = 0;
+
+                scale_min_k4(j * 2,     sc, s1, m1);
+                scale_min_k4(j * 2 + 1, sc, s2, m2);
+
+                const float d1 = d * float(s1), o1 = dmin * float(m1);
+                const float d2 = d * float(s2), o2 = dmin * float(m2);
+
+                for(int l = 0; l < 32; l++) *y++ = d1 * float(q[l] & 0xF) - o1;
+                for(int l = 0; l < 32; l++) *y++ = d2 * float(q[l] >> 4)  - o2;
+
+                q += 32;
+            }
+        }
+
+        break;
+    }
+
     default:
         throw exception("tensor '" + t.name + "' is " + type_name(t.type) +
-                        ", which this does not dequantise -- f32, f16 and q8_0 "
-                        "are all it reads");
+                        ", which this does not dequantise -- f32, f16, q8_0, "
+                        "q4_K and q6_K are all it reads");
     }
 
     if(!m_file)
@@ -415,6 +569,8 @@ std::uint64_t gguf::stored_bytes(tensor_type t, std::uint64_t n) {
     case tensor_type::f32:  return n * 4;
     case tensor_type::f16:  return n * 2;
     case tensor_type::q8_0: return (n / Q8_0_BLOCK) * Q8_0_BYTES;
+    case tensor_type::q6_k: return (n / QK_K) * Q6_K_BYTES;
+    case tensor_type::q4_k: return (n / QK_K) * Q4_K_BYTES;
     default: break;
     }
 

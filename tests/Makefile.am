@@ -341,7 +341,7 @@ ai_model_test_SOURCES  = ai_model_test.cc
 ai_model_test_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)
 ai_model_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA) $(METAL_LA)
 
-ai_gguf_test_SOURCES  = ai_gguf_test.cc
+ai_gguf_test_SOURCES  = ai_gguf_test.cc  kquant_values.hh
 ai_gguf_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 
 ai_transformer_test_SOURCES  = ai_transformer_test.cc
