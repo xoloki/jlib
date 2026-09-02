@@ -33,7 +33,15 @@
  * grammar and the pattern ever disagree this says so.
  *
  * The same 34 inputs as llama3_splits.hh, deliberately: it is the *contrast*
- * that is worth having in the tree, and eight of them cut differently.
+ * that is worth having in the tree.  **Six of them cut differently**, and
+ * they are exactly the six carrying a run of more than one digit:
+ *
+ *     "1234567890"  "42"  "4242"  "424242"  "4242424242"  "\u20ac100"
+ *
+ * The rest agree, including `a1b2` and `line1\nline2`, which have digits but
+ * never two in a row -- so `{1,3}` and no repeat give the same answer. That
+ * is the whole reach of the one-character difference between the patterns,
+ * and the test asserts the count rather than trusting this comment.
  */
 static const pre_split QWEN_SPLITS[] = {
     { "  double", 2, { " ", " double" } },

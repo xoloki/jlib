@@ -532,7 +532,13 @@ static void the_qwen2_pattern_cuts_digits_singly() {
               << " match the pattern, and " << differ
               << " are cut differently from llama-bpe\n";
 
-    ok("  the two flavours are not the same grammar", differ > 0,
+    // Exactly six, not merely more than none.  They are the six inputs with
+    // a run of more than one digit, which is the entire reach of the one
+    // character by which the two patterns differ -- so the count is a fact
+    // about the fixtures that can be checked by reading them, and a change to
+    // it should make somebody look rather than pass quietly.
+    ok("  and exactly the six with a run of more than one digit differ",
+       differ == 6,
        std::to_string(differ) + " of "
        + std::to_string(sizeof(QWEN_SPLITS) / sizeof(QWEN_SPLITS[0])));
 }
