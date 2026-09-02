@@ -26,6 +26,7 @@
 #include "llama3_splits.hh"
 #include "qwen_splits.hh"
 #include "qwen_tokens.hh"
+#include "gemma_tokens.hh"
 
 #include <chrono>
 #include <cstdlib>
@@ -704,6 +705,62 @@ static void a_stop_is_named_or_numbered(const std::string& path) {
     ok("  and so is an id past the end of the vocabulary", threw);
 }
 
+/**
+ * A llama vocabulary with no merges, driven by its scores.
+ *
+ * Gemma 2 and TinyLlama are both `tokenizer.ggml.model == "llama"` and are
+ * exact complements: one carries merges and zero scores, the other real
+ * scores and no merges.  So the driver is a property of the *file*, not of
+ * the flavour, and inferring it from the flavour would get both wrong.
+ */
+static void a_scored_vocabulary_matches_its_reference(const std::string& path) {
+    std::cout << "\nit tokenizes a scored vocabulary as the reference does:\n";
+
+    const ai::gguf g(path);
+    const ai::tokenizer t(g);
+
+    ok("  the flavour is llama, as TinyLlama's is",
+       t.convention() == ai::tokenizer::flavour::sentencepiece);
+
+    ok("  and the driver is scores, where TinyLlama's is merges",
+       t.driven_by() == ai::tokenizer::driver::scores);
+
+    ok("  with no dummy prefix, because the file says not to",
+       !t.adds_space_prefix());
+
+    // The two forms are different tokens and the file means the unmarked one
+    // for text that starts a prompt.  This is the assertion the flag exists
+    // for: on Llama both spellings give the marked form.
+    ok("  so a leading word is the unmarked token",
+       t.encode("Hello", false, false) ==
+       std::vector<int>({ t.id_of("Hello") }),
+       spell(t, t.encode("Hello", false, false)));
+
+    ok("  and a spaced one is the marked token",
+       t.encode(" Hello", false, false) ==
+       std::vector<int>({ t.id_of("\xe2\x96\x81" "Hello") }),
+       spell(t, t.encode(" Hello", false, false)));
+
+    std::size_t matched = 0;
+
+    for(std::size_t i = 0; i < GEMMA_COUNT; i++) {
+        const tokenization& c = GEMMA[i];
+        const std::vector<int> got = t.encode(c.text, false, true);
+
+        bool same = got.size() == std::size_t(c.count);
+
+        for(int j = 0; same && j < c.count; j++)
+            same = got[std::size_t(j)] == c.ids[j];
+
+        ok(std::string("  '") + c.text + "'", same, spell(t, got));
+
+        if(same) matched++;
+    }
+
+    std::cout << "    " << matched << " of " << GEMMA_COUNT
+              << " match the reference tokenizer\n";
+}
+
 /** SentencePiece is untouched by any of it. */
 static void the_sentencepiece_path_is_unchanged(const ai::tokenizer& t) {
     std::cout << "\nthe sentencepiece path is unchanged:\n";
@@ -783,6 +840,13 @@ int main(int argc, char** argv) {
             std::cout << "\n(no byte-level model; set JLIB_GGUF_BPE to run those)\n";
         else
             a_byte_level_vocabulary_matches_the_reference(bpe);
+
+        const std::string gemma = find_named("gemma-2-2b-it-Q4_K_M.gguf");
+
+        if(gemma.empty())
+            std::cout << "\n(no Gemma file; the scored path is unchecked)\n";
+        else
+            a_scored_vocabulary_matches_its_reference(gemma);
 
         const std::string qwen = find_named("qwen2.5-0.5b-instruct-q8_0.gguf");
 

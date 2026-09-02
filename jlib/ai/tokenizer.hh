@@ -42,22 +42,31 @@ namespace ai {
  * learned pairs from the most frequent down. A GGUF can carry both:
  * `tokenizer.ggml.scores` and `tokenizer.ggml.merges`.
  *
- * This uses the merges, because in the file it was written against **every one
- * of the 32000 scores is zero**. Not approximately zero and not zero for the
- * control tokens alone -- checked against the raw bytes, the array is 128000
- * zero bytes. Score-driven merging cannot work at all on such a file: every
- * candidate pair ties, and what happens next is whatever the tie-break happens
- * to be rather than what the vocabulary meant.
+ * **Which one a file means is a property of the file, and the two known cases
+ * are exact complements.**
  *
- * The merges are real. There are 61249 of them and they begin `▁ t`, `e r`,
- * `i n` -- the most frequent pairs in English, in descending frequency, which
- * is exactly what a BPE merge table is. So rank is the file's actual signal
- * and score is vestigial.
+ * TinyLlama carries 61249 merges beginning `▁ t`, `e r`, `i n` -- the most
+ * frequent pairs in English in descending frequency, which is what a BPE
+ * merge table is -- and **every one of its 32000 scores is zero**. Not
+ * approximately zero and not zero for the control tokens alone: checked
+ * against the raw bytes, the array is 128000 zero bytes. Score-driven merging
+ * cannot work on it at all, because every candidate ties.
  *
- * That this is the right reading is not an inference: `encode("Hello world")`
+ * Gemma 2 carries **no merge list** and 256000 real scores. They are ranks
+ * rather than log-probabilities -- score is `-(index - 473)` across the whole
+ * ordinary vocabulary, the offset being the specials and byte tokens ahead of
+ * it -- so the highest-scoring pair is the earliest one in the vocabulary,
+ * and that is the signal the file has.
+ *
+ * So this reads whichever the file actually carries, and refuses a file with
+ * neither. Scores are taken as usable only when they are not all zero, which
+ * is the test that separates the two cases above.
+ *
+ * That the merge reading is right is not an inference: `encode("Hello world")`
  * gives `[1, 15043, 3186]`, which is the published Llama tokenization, and the
  * whole test suite rests on agreeing with ids that were established
- * independently.
+ * independently. The score reading is checked the same way, against Gemma's
+ * own reference tokenizer.
  *
  * ### The dummy prefix
  *
@@ -120,6 +129,16 @@ public:
     flavour convention() const { return m_flavour; }
 
     /**
+     * Which signal drives the merges; see the note at the top.
+     *
+     * A property of the file rather than of the flavour: TinyLlama and Gemma
+     * are both `llama` vocabularies and are driven the opposite ways.
+     */
+    enum class driver { merges, scores };
+
+    driver driven_by() const { return m_driver; }
+
+    /**
      * Whether a prompt should open with bos(), from
      * `tokenizer.ggml.add_bos_token`.
      *
@@ -137,6 +156,18 @@ public:
      * what assembles a real prompt, does.
      */
     bool adds_bos() const { return m_adds_bos; }
+
+    /**
+     * Whether a leading word gets the space marker, from
+     * `tokenizer.ggml.add_space_prefix`.
+     *
+     * SentencePiece's dummy prefix, and not every file wants it: Gemma 2 says
+     * no, so "Hello" is the unmarked token and " Hello" the marked one, where
+     * on Llama both are the marked one. decode() follows -- it strips a
+     * leading space only where encode() put one, or it would eat a space the
+     * text really had.
+     */
+    bool adds_space_prefix() const { return m_adds_space; }
 
     /**
      * Which cut the file named, from `tokenizer.ggml.pre`.
@@ -256,6 +287,26 @@ private:
 
     /** tokenizer.ggml.add_bos_token, defaulting to yes when absent. */
     bool m_adds_bos = true;
+
+    /** tokenizer.ggml.add_space_prefix, defaulting to yes when absent. */
+    bool m_adds_space = true;
+
+    driver m_driver = driver::merges;
+
+    /** tokenizer.ggml.scores, kept only when they are the file's signal. */
+    std::vector<float> m_scores;
+
+    /**
+     * How good a merge of these two would be, lower being better, or false
+     * if they do not merge at all.
+     *
+     * The one place the two drivers differ.  Under merges the key is the
+     * pair's rank; under scores it is the *negated* score of the token the
+     * pair would make, since a higher score is a better merge and this
+     * compares the other way round.
+     */
+    bool merge_key(const std::string& left, const std::string& right,
+                   double& key) const;
 
     std::string unmap(const std::string& t) const;
 
