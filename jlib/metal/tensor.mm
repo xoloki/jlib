@@ -190,13 +190,31 @@ kernel void k_add_columns(device const T* bias [[buffer(0)]],
 // measurement nobody has taken, and this is the version that is obviously
 // correct.
 
+/**
+ * exp(x - max) / sum, down each column.
+ *
+ * **A SIMD group to a column.**  One thread meant three serial passes over
+ * the column with a dependent load each step and nothing to hide the latency
+ * behind -- the same shape that made rms_norm the most expensive kernel in a
+ * decode step until #192.
+ *
+ * Lane L takes rows L, L+32, ...; `simd_max` folds the maximum and `simd_sum`
+ * the total.  Each lane reads back only what it wrote, so the second and
+ * third passes need no barrier beyond the lockstep the folds already impose.
+ *
+ * In float whatever T is: exp() of a score that fp16 can hold still overflows
+ * fp16, which is what the max subtraction is for in the first place.
+ */
 template<typename T>
 kernel void k_softmax(device const T* in [[buffer(0)]],
                       device T* out [[buffer(1)]],
                       constant uint& rows [[buffer(2)]],
                       constant uint& cols [[buffer(3)]],
-                      uint c [[thread_position_in_grid]])
+                      uint gid [[thread_position_in_grid]],
+                      uint lane [[thread_index_in_simdgroup]])
 {
+    const uint c = gid / 32;
+
     if(c >= cols) return;
 
     // Column-major, so a column is contiguous.
@@ -208,19 +226,23 @@ kernel void k_softmax(device const T* in [[buffer(0)]],
     // largest exponent at zero and changes nothing else.
     float m = -INFINITY;
 
-    for(uint r = 0; r < rows; r++)
+    for(uint r = lane; r < rows; r += 32)
         m = max(m, float(x[r]));
+
+    m = simd_max(m);
 
     float sum = 0.0f;
 
-    for(uint r = 0; r < rows; r++) {
+    for(uint r = lane; r < rows; r += 32) {
         const float e = exp(float(x[r]) - m);
 
         y[r] = T(e);
         sum += e;
     }
 
-    for(uint r = 0; r < rows; r++)
+    sum = simd_sum(sum);
+
+    for(uint r = lane; r < rows; r += 32)
         y[r] = T(float(y[r]) / sum);
 }
 
@@ -665,9 +687,11 @@ INSTANTIATE(k_add_columns, half, "_f16")(device const half*, device half*,
 INSTANTIATE(k_add_scaled, half, "_f16")(device const half*, device half*,
                                         constant float&, constant uint&, uint);
 INSTANTIATE(k_softmax, float, "_f32")(device const float*, device float*,
-                                      constant uint&, constant uint&, uint);
+                                      constant uint&, constant uint&,
+                                      uint, uint);
 INSTANTIATE(k_softmax, half, "_f16")(device const half*, device half*,
-                                     constant uint&, constant uint&, uint);
+                                     constant uint&, constant uint&,
+                                     uint, uint);
 INSTANTIATE(k_causal_mask, float, "_f32")(device float*, constant uint&,
                                           constant uint&, constant uint&,
                                           constant uint&, uint);
@@ -1254,7 +1278,8 @@ void stream<T>::softmax(const tensor<T>& in, tensor<T>& out) {
     [m_impl->enc setBytes:&cols length:sizeof(cols) atIndex:3];
 
     // One thread per column, not per element.
-    dispatch(m_impl->enc, m_impl->softmax, cols);
+    // A SIMD group to a column now; see the kernel.
+    dispatch(m_impl->enc, m_impl->softmax, cols * 32);
 
     m_impl->pending++;
 }
