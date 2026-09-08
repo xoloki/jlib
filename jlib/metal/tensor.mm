@@ -224,6 +224,24 @@ kernel void k_softmax(device const T* in [[buffer(0)]],
         y[r] = T(float(y[r]) / sum);
 }
 
+/**
+ * x / rms(x) * w, down each column.
+ *
+ * **A SIMD group to a column, not a thread.**  One thread meant 2048 loads in
+ * a dependency chain with nothing to hide the latency behind, and it cost
+ * ~200us per call whatever the width -- 260us at one column, 201us at five
+ * hundred, because the threads simply overlapped identical stalls.
+ *
+ * That made it **the largest single cost in a decode step**: 36% of one
+ * layer's kernel time on its own, and a layer calls it twice, against 14% for
+ * the widest q8 matmul.  A 2048-element normalisation was costing more than
+ * an 11.5M-multiply-accumulate matrix product.  See #190.
+ *
+ * Lane L takes rows L, L+32, ..., `simd_sum` folds the partial sums of
+ * squares, and the scaling pass is spread the same way.  The reduction is in
+ * float whatever T is: a sum of squares over a few thousand features
+ * overflows fp16 long before the values themselves do.
+ */
 template<typename T>
 kernel void k_rms_norm(device const T* in [[buffer(0)]],
                        device const T* w [[buffer(1)]],
@@ -231,25 +249,27 @@ kernel void k_rms_norm(device const T* in [[buffer(0)]],
                        constant uint& rows [[buffer(3)]],
                        constant uint& cols [[buffer(4)]],
                        constant float& eps [[buffer(5)]],
-                       uint c [[thread_position_in_grid]])
+                       uint gid [[thread_position_in_grid]],
+                       uint lane [[thread_index_in_simdgroup]])
 {
+    const uint c = gid / 32;
+
     if(c >= cols) return;
 
     device const T* x = in + (ulong)c * rows;
     device T* y = out + (ulong)c * rows;
 
-    // Accumulated in float even when T is half: a sum of squares over a few
-    // thousand features overflows fp16 long before the values themselves do.
     float ss = 0.0f;
 
-    for(uint r = 0; r < rows; r++) {
+    for(uint r = lane; r < rows; r += 32) {
         const float v = float(x[r]);
+
         ss += v * v;
     }
 
-    const float inv = rsqrt(ss / float(rows) + eps);
+    const float inv = rsqrt(simd_sum(ss) / float(rows) + eps);
 
-    for(uint r = 0; r < rows; r++)
+    for(uint r = lane; r < rows; r += 32)
         y[r] = T(float(x[r]) * inv * float(w[r]));
 }
 
@@ -702,10 +722,12 @@ INSTANTIATE(k_rope, half, "_f16")(device half*, constant uint&, constant uint&,
                                   constant uint&, constant uint&, uint);
 INSTANTIATE(k_rms_norm, float, "_f32")(device const float*, device const float*,
                                        device float*, constant uint&,
-                                       constant uint&, constant float&, uint);
+                                       constant uint&, constant float&,
+                                       uint, uint);
 INSTANTIATE(k_rms_norm, half, "_f16")(device const half*, device const half*,
                                       device half*, constant uint&,
-                                      constant uint&, constant float&, uint);
+                                      constant uint&, constant float&,
+                                      uint, uint);
 )METAL";
 
 /** The per-type details: what MPS calls it, and what the kernels are named. */
@@ -1521,7 +1543,8 @@ void stream<T>::rms_norm(const tensor<T>& in, const tensor<T>& weight,
     [m_impl->enc setBytes:&cols length:sizeof(cols) atIndex:4];
     [m_impl->enc setBytes:&eps length:sizeof(eps) atIndex:5];
 
-    dispatch(m_impl->enc, m_impl->rms_norm, cols);
+    // A SIMD group to a column now; see the kernel.
+    dispatch(m_impl->enc, m_impl->rms_norm, cols * 32);
 
     m_impl->pending++;
 }
