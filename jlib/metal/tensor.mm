@@ -20,6 +20,8 @@
 #include <jlib/metal/tensor.hh>
 #include <jlib/metal/impl.hh>
 
+#include <cstdlib>
+
 #include <cstring>
 #include <sstream>
 #include <vector>
@@ -485,6 +487,18 @@ kernel void k_gather(device const T* table [[buffer(0)]],
 constant uint Q8_TILE = 8;
 
 /**
+ * How many lanes share one output row, fixed when the pipeline is built.
+ *
+ * A **function constant**, not a kernel argument, and that distinction is the
+ * whole of it: passed as an argument the inner loop's stride becomes `b +=
+ * lanes` with `lanes` unknown, the compiler stops unrolling, and prefill went
+ * from 7.5s to 13.6s for a value that never varies within a dispatch.
+ * Specialised here it is a literal, and the two pipelines are built from the
+ * same source with 1 and 32.
+ */
+constant uint Q8_LANES [[function_constant(0)]];
+
+/**
  * y = alpha * (W^T x) + beta * y, with W held as q8_0 and never expanded.
  *
  * The dequantisation is inside the multiply -- a weight block is 34 bytes,
@@ -500,6 +514,26 @@ constant uint Q8_TILE = 8;
  *
  * Each thread now owns one output row and Q8_TILE columns, so a block is
  * fetched once and spent eight times.
+ *
+ * ## And a SIMD group per row rather than a thread
+ *
+ * Tiling fixed prefill and did nothing for decode, because decode's problem
+ * is the opposite shape. With one column there is one thread per output row
+ * and no more: 2048 for q and o, **256 for k and v**. That is far too little
+ * to fill this GPU, and each of those threads walked all K/32 = 64 blocks
+ * serially with every iteration waiting on the last.
+ *
+ * So a row *may* be carried by a SIMD group instead: lane L takes blocks
+ * L, L+32, ..., and `simd_sum` folds the partials. Thirty-two times the
+ * threads and a dependency chain of two rather than sixty-four.
+ *
+ * **Only when there are too few rows to fill the machine**, which is what
+ * `lanes` selects. Prefill already has one unit per row *per column tile* and
+ * needs no help; giving it a reduction as well costs 19-26%. The caller
+ * decides and passes 1 or 32.
+ *
+ * Measured before this: a repacked weight layout and four-wide loads changed
+ * nothing at all, which is what said the limit was never the bytes. See #190.
  */
 template<typename T>
 kernel void k_q8_gemv(device const uchar* w [[buffer(0)]],
@@ -510,12 +544,18 @@ kernel void k_q8_gemv(device const uchar* w [[buffer(0)]],
                       constant uint& ncols [[buffer(5)]],
                       constant float& alpha [[buffer(6)]],
                       constant float& beta [[buffer(7)]],
-                      uint gid [[thread_position_in_grid]])
+                      uint gid [[thread_position_in_grid]],
+                      uint sl [[thread_index_in_simdgroup]])
 {
     const uint tiles = (ncols + Q8_TILE - 1) / Q8_TILE;
 
-    const uint j = gid % N;
-    const uint t = gid / N;
+    // Either one thread to a (row, column-tile), or a whole SIMD group to
+    // one.  Uniform across the dispatch, so the branch is free.
+    const uint unit = (Q8_LANES == 1) ? gid : gid / 32;
+    const uint lane = (Q8_LANES == 1) ? 0u : sl;
+
+    const uint j = unit % N;
+    const uint t = unit / N;
 
     if(t >= tiles) return;
 
@@ -530,7 +570,7 @@ kernel void k_q8_gemv(device const uchar* w [[buffer(0)]],
 
     for(uint i = 0; i < Q8_TILE; i++) sum[i] = 0.0f;
 
-    for(uint b = 0; b < nb; b++) {
+    for(uint b = lane; b < nb; b += Q8_LANES) {
         device const uchar* p = base + (ulong)b * 34;
 
         const ushort bits = ushort(p[0]) | (ushort(p[1]) << 8);
@@ -557,12 +597,17 @@ kernel void k_q8_gemv(device const uchar* w [[buffer(0)]],
     }
 
     for(uint cc = 0; cc < have; cc++) {
+        // Each lane holds part of this row's dot product when they split it.
+        const float total = (Q8_LANES == 1) ? sum[cc] : simd_sum(sum[cc]);
+
+        if(lane != 0) continue;
+
         const ulong at = (ulong)(c0 + cc) * N + j;
 
         // beta of zero does not read y, which is what BLAS specifies -- and
         // what the host got wrong until a cache left -infinity in an output.
-        y[at] = T(beta == 0.0f ? alpha * sum[cc]
-                               : alpha * sum[cc] + beta * float(y[at]));
+        y[at] = T(beta == 0.0f ? alpha * total
+                               : alpha * total + beta * float(y[at]));
     }
 }
 
@@ -636,11 +681,13 @@ INSTANTIATE(k_copy_columns, half, "_f16")(device const half*, device half*,
 INSTANTIATE(k_q8_gemv, float, "_f32")(device const uchar*, device const float*,
                                       device float*, constant uint&,
                                       constant uint&, constant uint&,
-                                      constant float&, constant float&, uint);
+                                      constant float&, constant float&,
+                                      uint, uint);
 INSTANTIATE(k_q8_gemv, half, "_f16")(device const uchar*, device const half*,
                                      device half*, constant uint&,
                                      constant uint&, constant uint&,
-                                     constant float&, constant float&, uint);
+                                     constant float&, constant float&,
+                                     uint, uint);
 INSTANTIATE(k_gather, float, "_f32")(device const float*, device float*,
                                      device const int*, constant uint&,
                                      constant uint&, uint);
@@ -769,7 +816,8 @@ struct stream<T>::impl {
     id<MTLComputePipelineState> copy_columns = nil;
     id<MTLComputePipelineState> rope = nil;
     id<MTLComputePipelineState> gather = nil;
-    id<MTLComputePipelineState> q8_gemv = nil;
+    id<MTLComputePipelineState> q8_gemv = nil;        // one thread per row
+    id<MTLComputePipelineState> q8_gemv_simd = nil;   // a SIMD group per row
     id<MTLComputePipelineState> attn_scores = nil;
     id<MTLComputePipelineState> attn_weighted = nil;
     id<MTLComputePipelineState> rms_norm = nil;
@@ -786,6 +834,31 @@ struct stream<T>::impl {
 
 namespace {
 
+/**
+ * Below how many units the q8 multiply splits each row across a SIMD group.
+ *
+ * A unit is one output row for one tile of columns, and it is one thread
+ * unless this says otherwise.  Decode produces very few -- one column means
+ * one unit per row, and k and v have 256 -- which does not fill the machine
+ * however fast each thread is.  Prefill produces N per column tile and needs
+ * no help.
+ *
+ * The number is measured rather than reasoned: see the comment on the
+ * dispatch.
+ */
+unsigned int q8_reduce_below() {
+    // Overridable so the two paths can be compared inside one process, which
+    // is the only way to compare them without a rebuild and a different
+    // thermal state in between.  0 turns the reduction off entirely.
+    static const unsigned int n = [] {
+        const char* e = std::getenv("JLIB_Q8_REDUCE_BELOW");
+
+        return e ? unsigned(std::atoi(e)) : 16384u;
+    }();
+
+    return n;
+}
+
 struct pipelines {
     id<MTLComputePipelineState> activate = nil;
     id<MTLComputePipelineState> slope = nil;
@@ -799,7 +872,8 @@ struct pipelines {
     id<MTLComputePipelineState> copy_columns = nil;
     id<MTLComputePipelineState> rope = nil;
     id<MTLComputePipelineState> gather = nil;
-    id<MTLComputePipelineState> q8_gemv = nil;
+    id<MTLComputePipelineState> q8_gemv = nil;        // one thread per row
+    id<MTLComputePipelineState> q8_gemv_simd = nil;   // a SIMD group per row
     id<MTLComputePipelineState> attn_scores = nil;
     id<MTLComputePipelineState> attn_weighted = nil;
     id<MTLComputePipelineState> rms_norm = nil;
@@ -859,11 +933,37 @@ pipelines& compiled(id<MTLDevice> gpu) {
         { "k_copy_columns", &p.copy_columns },
         { "k_rope",       &p.rope },
         { "k_gather",     &p.gather },
-        { "k_q8_gemv",    &p.q8_gemv },
         { "k_attn_scores", &p.attn_scores },
         { "k_attn_weighted", &p.attn_weighted },
         { "k_rms_norm",   &p.rms_norm },
     };
+
+    // The q8 multiply is built twice from one source, specialised on how many
+    // lanes share a row.  See Q8_LANES.
+    for(unsigned int lanes : { 1u, 32u }) {
+        MTLFunctionConstantValues* cv = [MTLFunctionConstantValues new];
+
+        [cv setConstantValue:&lanes type:MTLDataTypeUInt atIndex:0];
+
+        const std::string name = std::string("k_q8_gemv") + traits<T>::suffix();
+
+        id<MTLFunction> fn =
+            [lib newFunctionWithName:[NSString stringWithUTF8String:name.c_str()]
+                      constantValues:cv
+                               error:&err];
+
+        if(fn == nil)
+            throw ai::backend_error("no kernel called " + name);
+
+        id<MTLComputePipelineState> built =
+            [gpu newComputePipelineStateWithFunction:fn error:&err];
+
+        if(built == nil)
+            throw ai::backend_error("could not build a pipeline for " + name);
+
+        if(lanes == 1) p.q8_gemv = built;
+        else p.q8_gemv_simd = built;
+    }
 
     for(auto& w : wanted) {
         const std::string name = std::string(w.base) + traits<T>::suffix();
@@ -932,6 +1032,7 @@ stream<T>::stream(std::shared_ptr<device> d)
     m_impl->rope = p.rope;
     m_impl->gather = p.gather;
     m_impl->q8_gemv = p.q8_gemv;
+    m_impl->q8_gemv_simd = p.q8_gemv_simd;
     m_impl->attn_scores = p.attn_scores;
     m_impl->attn_weighted = p.attn_weighted;
     m_impl->held = [NSMutableArray array];
@@ -1315,7 +1416,21 @@ void stream<T>::multiply_tn(const qweight& w, const tensor<T>& x, tensor<T>& y,
 
     const unsigned int ncols = x.cols();
 
-    [m_impl->enc setComputePipelineState:m_impl->q8_gemv];
+    // One thread per output row per tile of columns.  A "unit" is that pair.
+    const unsigned int tiles = (ncols + 8 - 1) / 8;
+    const unsigned int units = N * tiles;
+
+    // A SIMD group per row only when there are too few units to fill the GPU.
+    // Decode is the case that needs it: one column means one unit per output
+    // row, and k and v have 256 of them.  Prefill already has a unit per row
+    // per column tile, and a reduction there only costs -- measured at 19-26%
+    // before this was made conditional.  See Q8_LANES and q8_reduce_below.
+    const bool reduce = units < q8_reduce_below();
+
+    id<MTLComputePipelineState> pipe =
+        reduce ? m_impl->q8_gemv_simd : m_impl->q8_gemv;
+
+    [m_impl->enc setComputePipelineState:pipe];
     [m_impl->enc setBuffer:w.m_impl->buf offset:0 atIndex:0];
     [m_impl->enc setBuffer:x.m_impl->buf offset:0 atIndex:1];
     [m_impl->enc setBuffer:y.m_impl->buf offset:0 atIndex:2];
@@ -1325,12 +1440,7 @@ void stream<T>::multiply_tn(const qweight& w, const tensor<T>& x, tensor<T>& y,
     [m_impl->enc setBytes:&alpha length:sizeof(alpha) atIndex:6];
     [m_impl->enc setBytes:&beta length:sizeof(beta) atIndex:7];
 
-    // One thread per output row per tile of columns, not per element: the
-    // kernel now carries Q8_TILE columns each.  Kept in step with the
-    // constant in the shader by name rather than by number.
-    const unsigned int tiles = (ncols + 8 - 1) / 8;
-
-    dispatch(m_impl->enc, m_impl->q8_gemv, N * tiles);
+    dispatch(m_impl->enc, pipe, units * (reduce ? 32u : 1u));
 
     m_impl->pending++;
 }
