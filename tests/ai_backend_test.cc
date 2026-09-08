@@ -1199,6 +1199,20 @@ static matrix<T> from_q8_0(const std::vector<char>& raw, uint rows, uint cols) {
 static const unsigned int Q8_COLUMN_COUNTS[] = { 1, 5, 7, 8, 9, 16, 17 };
 
 /**
+ * Output widths that land either side of the SIMD-reduction threshold.
+ *
+ * The q8 multiply has **two** kernels now, chosen by how many units a
+ * dispatch produces -- a unit being one output row for one tile of columns.
+ * Below the threshold a SIMD group shares a row and folds with `simd_sum`;
+ * above it, one thread owns a row outright.
+ *
+ * 8 rows is far below and 16384 is at the line, so between them these two
+ * cover both kernels.  The previous version of this test used 8 alone, which
+ * meant the path every prefill takes was never run here.
+ */
+static const unsigned int Q8_ROW_COUNTS[] = { 8, 16384 };
+
+/**
  * A weight kept quantised multiplies like the same weight dequantised.
  *
  * That is the whole contract: the kernel dequantises as it reads, so what
@@ -1218,75 +1232,77 @@ static void a_quantised_weight_multiplies(const char* name,
     std::cout << "\na quantised weight multiplies, " << name << ":\n";
 
     const uint K = 64;
-    const uint N = 8;
 
-    std::mt19937 gen(97);
+    for(uint N : Q8_ROW_COUNTS) {
 
-    const matrix<T> w = random_matrix<T>(K, N, gen);
+        std::mt19937 gen(97);
 
-    const std::vector<char> raw = as_q8_0(w);
-    const matrix<T> dequantised = from_q8_0<T>(raw, K, N);
+        const matrix<T> w = random_matrix<T>(K, N, gen);
 
-    for(uint ncols : Q8_COLUMN_COUNTS) {
-        const matrix<T> x = random_matrix<T>(K, ncols, gen);
+        const std::vector<char> raw = as_q8_0(w);
+        const matrix<T> dequantised = from_q8_0<T>(raw, K, N);
+
+        for(uint ncols : Q8_COLUMN_COUNTS) {
+            const matrix<T> x = random_matrix<T>(K, ncols, gen);
+
+            for(ai::backend<T>* b : backends) {
+                typename ai::backend<T>::quantised_ptr q =
+                    b->make_q8_0(K, N, raw.data(), raw.size());
+
+                    ok(std::string("  ") + b->name() + ": it knows its own shape",
+                   q->rows() == K && q->cols() == N);
+
+                typename ai::backend<T>::tensor_ptr tx = b->make(x);
+                typename ai::backend<T>::tensor_ptr got = b->make(N, ncols);
+
+                b->multiply_tn(q, tx, got);
+
+                // The reference: dequantise first, then the ordinary multiply.
+                typename ai::backend<T>::tensor_ptr td = b->make(dequantised);
+                typename ai::backend<T>::tensor_ptr want = b->make(N, ncols);
+
+                b->multiply_tn(td, tx, want);
+                b->wait();
+
+                const double d = worst(got->read(), want->read());
+
+                ok(std::string("  ") + b->name() + ": " + std::to_string(N) +
+                   " rows x " + std::to_string(ncols) +
+                   " column(s) match dequantising first",
+                   d < ((sizeof(T) == 2) ? 5e-2 : 1e-3), std::to_string(d));
+            }
+        }
 
         for(ai::backend<T>* b : backends) {
-            typename ai::backend<T>::quantised_ptr q =
-                b->make_q8_0(K, N, raw.data(), raw.size());
+            bool threw = false;
 
-            ok(std::string("  ") + b->name() + ": it knows its own shape",
-               q->rows() == K && q->cols() == N);
-
-            typename ai::backend<T>::tensor_ptr tx = b->make(x);
-            typename ai::backend<T>::tensor_ptr got = b->make(N, ncols);
-
-            b->multiply_tn(q, tx, got);
-
-            // The reference: dequantise first, then the ordinary multiply.
-            typename ai::backend<T>::tensor_ptr td = b->make(dequantised);
-            typename ai::backend<T>::tensor_ptr want = b->make(N, ncols);
-
-            b->multiply_tn(td, tx, want);
-            b->wait();
-
-            const double d = worst(got->read(), want->read());
-
-            ok(std::string("  ") + b->name() + ": " + std::to_string(ncols) +
-               " column(s) match dequantising first",
-               d < ((sizeof(T) == 2) ? 5e-2 : 1e-3), std::to_string(d));
-        }
-    }
-
-    for(ai::backend<T>* b : backends) {
-        bool threw = false;
-
-        try { b->make_q8_0(K, N, raw.data(), raw.size() - 34); }
-        catch(std::exception&) { threw = true; }
-
-        ok(std::string("  ") + b->name() + ": bytes that do not match the shape "
-           "are refused", threw);
-
-        // And a weight from the other backend is refused rather than read.
-        if(backends.size() > 1) {
-            ai::backend<T>* other = (b == backends[0]) ? backends[1] : backends[0];
-
-            typename ai::backend<T>::quantised_ptr foreign =
-                other->make_q8_0(K, N, raw.data(), raw.size());
-
-            typename ai::backend<T>::tensor_ptr tx = b->make(K, 1);
-            typename ai::backend<T>::tensor_ptr out = b->make(N, 1);
-
-            threw = false;
-
-            try { b->multiply_tn(foreign, tx, out); b->wait(); }
+            try { b->make_q8_0(K, N, raw.data(), raw.size() - 34); }
             catch(std::exception&) { threw = true; }
 
-            ok(std::string("  ") + b->name() + ": and one from another backend is too",
-               threw);
+            ok(std::string("  ") + b->name() + ": bytes that do not match the shape "
+               "are refused", threw);
+
+            // And a weight from the other backend is refused rather than read.
+            if(backends.size() > 1) {
+                ai::backend<T>* other = (b == backends[0]) ? backends[1] : backends[0];
+
+                typename ai::backend<T>::quantised_ptr foreign =
+                    other->make_q8_0(K, N, raw.data(), raw.size());
+
+                typename ai::backend<T>::tensor_ptr tx = b->make(K, 1);
+                typename ai::backend<T>::tensor_ptr out = b->make(N, 1);
+
+                threw = false;
+
+                try { b->multiply_tn(foreign, tx, out); b->wait(); }
+                catch(std::exception&) { threw = true; }
+
+                ok(std::string("  ") + b->name() + ": and one from another backend is too",
+                   threw);
+            }
         }
     }
 }
-
 /**
  * Every head at once gives what one head at a time gave.
  *
