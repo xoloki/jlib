@@ -52,6 +52,10 @@ or `cuda`.
   (`-alpha` does image classification via ImageMagick++/MNIST).
 - `jjoystick`, `jjoy2xev` — Linux joystick → X events, with `*-{axes,buttons}-*.map`
   data files for WoW / KSP / SW:TOR on PS3 and X360 pads.
+- `jserve` — an OpenAI-compatible endpoint over `ai::engine` and
+  `net::http::server`, so a coding harness can drive jlib's inference.
+  **aider works against it end to end**, in its `whole` edit format, which is
+  the one that needs no tool calling. Loopback only, and the header says why.
 - `jnote`, `jmelody`, `jm3u`, `jpoisoned`, `jcublas`.
 - `jneural.cc` is **not** in `bin_PROGRAMS` — a scratch file. (`jhypermusic` is
   built, under the media conditional.)

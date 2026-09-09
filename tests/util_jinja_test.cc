@@ -308,6 +308,43 @@ static void renders(const std::string& what, const std::string& source,
     ok(what, got == want, got == want ? "" : "got '" + got + "'");
 }
 
+/**
+ * raise_exception, rendered rather than merely parsed.
+ *
+ * It parsed from the beginning and had never been *evaluated* here, which is
+ * how it came to read the wrong child name and index an empty list -- a
+ * segfault rather than a refusal, in the one construct whose whole job is to
+ * refuse.  Gemma 2's template calls it for a system role, so every request
+ * carrying one crashed the process.
+ */
+static void a_template_that_refuses_says_so() {
+    std::cout << "\nit renders a template that refuses:\n";
+
+    const value ctx = value::of(std::map<std::string, value>());
+
+    std::string got;
+    bool threw = false;
+
+    try { tmpl("{{ raise_exception('no system role here') }}").str(ctx); }
+    catch(std::exception& e) { threw = true; got = e.what(); }
+
+    ok("  it throws rather than rendering", threw);
+
+    // The template's own words, which are the only thing that says which of
+    // several raise_exception calls fired.
+    ok("  and carries the reason the template gave",
+       got.find("no system role here") != std::string::npos, got);
+
+    // Legal Jinja, and the argument list is empty -- which is the second way
+    // the old code would have indexed past the end.
+    threw = false;
+
+    try { tmpl("{{ raise_exception() }}").str(ctx); }
+    catch(std::exception&) { threw = true; }
+
+    ok("  and one with no argument at all still throws", threw);
+}
+
 /** The constructs, evaluated rather than merely parsed. */
 static void it_evaluates_the_constructs() {
     std::cout << "\nit evaluates the constructs:\n";
@@ -633,6 +670,7 @@ int main() {
     it_parses_tags_as_tags();
     it_refuses_what_it_does_not_implement();
     it_evaluates_the_constructs();
+    a_template_that_refuses_says_so();
     it_lays_out_whitespace_the_way_transformers_does();
     it_renders_tinyllama_exactly();
     it_keeps_the_templates_text_apart_from_the_users();

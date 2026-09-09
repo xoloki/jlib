@@ -162,6 +162,20 @@ public:
     ptr obj(const std::string& key);
     ptr obj(unsigned int x);
 
+    /**
+     * A nested array by key.
+     *
+     * The counterpart of obj(key), which existed while this did not -- so
+     * reading `{"messages": [...]}` meant reaching past the facade to json-c.
+     *
+     * The result **borrows** from this object, as obj(key) does: it does not
+     * take a reference and must not outlive the parent.
+     *
+     * @throws missing_key if there is no such key
+     * @throws type_mismatch if there is one and it is not an array
+     */
+    arrayptr arr(const std::string& key);
+
     bool is(type t) const;
     
     std::string str(bool pretty = false) const;

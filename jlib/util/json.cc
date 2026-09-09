@@ -454,6 +454,21 @@ object::ptr object::obj(const std::string& key) {
 
     return ptr(new object(o, false));
 }
+
+array::ptr object::arr(const std::string& key) {
+    json_object* o = 0;
+
+    if(!json_object_object_get_ex(m_obj, key.c_str(), &o) || o == 0)
+        throw missing_key("no array for \"" + key + "\"");
+
+    // Checked rather than assumed: array::get on a non-array returns nothing
+    // and the caller would read an empty list where the document had a
+    // string, which is a wrong answer rather than an error.
+    if(json_object_get_type(o) != json_type_array)
+        throw type_mismatch("\"" + key + "\" is not an array");
+
+    return array::ptr(new array(o));
+}
     
 object::ptr object::obj(unsigned int x) {
     json_object* o = json_object_array_get_idx(m_obj, x);

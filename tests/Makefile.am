@@ -64,6 +64,7 @@ TESTS = \
 	ai_transformer_test \
 	ai_gguf_test \
 	ai_engine_test \
+	ai_openai_test \
 	ai_model_test \
 	ai_tokenizer_test \
 	ai_sampler_test \
@@ -341,6 +342,9 @@ ai_tokenizer_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 ai_model_test_SOURCES  = ai_model_test.cc
 ai_model_test_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)
 ai_model_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA) $(METAL_LA)
+
+ai_openai_test_SOURCES  = ai_openai_test.cc
+ai_openai_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 
 ai_engine_test_SOURCES  = ai_engine_test.cc
 ai_engine_test_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)
