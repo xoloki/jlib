@@ -108,7 +108,17 @@ server::response& server::response::body(std::string body) {
     return *this;
 }
 
+std::string server::response::head(const std::string& server_name) const {
+    return serialise(server_name, false);
+}
+
 std::string server::response::str(const std::string& server_name) const {
+    return serialise(server_name, true) + m_body;
+}
+
+std::string server::response::serialise(const std::string& server_name,
+                                        bool with_length) const
+{
     std::ostringstream o;
 
     const std::string reason = m_reason.empty() ? reason_for(m_status) : m_reason;
@@ -126,7 +136,9 @@ std::string server::response::str(const std::string& server_name) const {
     if(!m_fields.has("Server") && !server_name.empty())
         o << "Server: " << server_name << "\r\n";
 
-    if(!m_fields.has("Content-Length"))
+    // Omitted entirely when the body is not yet known -- a streaming response
+    // is delimited by the close instead.  See responder::begin.
+    if(with_length && !m_fields.has("Content-Length"))
         o << "Content-Length: " << m_body.size() << "\r\n";
 
     // Always.  One request per connection takes every keep-alive framing
@@ -146,7 +158,7 @@ std::string server::response::str(const std::string& server_name) const {
         o << f.first << ": " << f.second << "\r\n";
     }
 
-    o << "\r\n" << m_body;
+    o << "\r\n";
 
     return o.str();
 }
@@ -195,6 +207,18 @@ void server::route(const std::string& method, const std::string& path, handler h
     m_routes.push_back(std::move(e));
 }
 
+void server::route(const std::string& method, const std::string& path,
+                   stream_handler h)
+{
+    entry e;
+
+    e.method = method;
+    e.path = path;
+    e.stream = std::move(h);
+
+    m_routes.push_back(std::move(e));
+}
+
 void server::otherwise(handler h) {
     if(h) m_otherwise = std::move(h);
 }
@@ -208,6 +232,36 @@ void server::stop(bool drain) { m_transport->stop(drain); }
 void server::join() { m_transport->join(); }
 
 sys::server& server::transport() { return *m_transport; }
+
+void server::responder::send(const response& r) {
+    if(m_started)
+        throw error("a responder sent a whole response after it had begun "
+                    "streaming one");
+
+    m_started = true;
+
+    *m_s << r.str(m_name) << std::flush;
+}
+
+void server::responder::begin(const response& head) {
+    if(m_started)
+        throw error("a responder began a response twice");
+
+    m_started = true;
+
+    // head() omits Content-Length, so the body is delimited by the close --
+    // which this server sends on every response anyway.
+    *m_s << head.head(m_name) << std::flush;
+}
+
+void server::responder::write(const std::string& piece) {
+    if(!m_started)
+        throw error("a responder wrote a body piece before begin()");
+
+    *m_s << piece << std::flush;
+}
+
+bool server::responder::live() const { return m_s && bool(*m_s); }
 
 void server::serve(sys::socketstream& s, const sys::peer&) {
     response r;
@@ -276,13 +330,51 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
         }
     }
 
-    const handler* chosen = 0;
+    const entry* chosen = 0;
 
     for(const entry& e : m_routes) {
         if(e.method == q.method() && e.path == path) {
-            chosen = &e.run;
+            chosen = &e;
             break;
         }
+    }
+
+    // A streaming route takes a different path entirely, because the promise
+    // the buffered one makes -- that a handler which throws is still answered
+    // -- cannot be kept once bytes have gone.
+    if(chosen && chosen->stream) {
+        responder out(s, m_options.server_name);
+
+        try {
+            chosen->stream(q, out);
+        }
+        catch(...) {
+            if(!out.started()) {
+                response oops;
+
+                oops.status(500).type("text/plain").body("internal error\n");
+
+                s << oops.str(m_options.server_name) << std::flush;
+            }
+
+            // Otherwise there is nothing to say: the status went out long ago
+            // and the client sees the close as a truncated body.  Rethrown
+            // either way, so sys::server::on_error still learns of it.
+            throw;
+        }
+
+        // A handler that produced nothing at all is a bug in the handler, and
+        // a bare close would look like a crash.
+        if(!out.started()) {
+            response oops;
+
+            oops.status(500).type("text/plain")
+                .body("the handler produced no response\n");
+
+            s << oops.str(m_options.server_name) << std::flush;
+        }
+
+        return;
     }
 
     // Nothing has reached the socket yet, so a handler that throws can still be
@@ -296,7 +388,7 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
     std::string answer;
 
     try {
-        (chosen ? *chosen : m_otherwise)(q, r);
+        (chosen ? chosen->run : m_otherwise)(q, r);
 
         answer = r.str(m_options.server_name);
     }
