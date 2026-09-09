@@ -62,9 +62,14 @@ struct server_options {
  * One request per connection and `Connection: close`, always.  No keep-alive:
  * the branch that built the message layer refused it because keep-alive framing
  * is where request smuggling lives, and a server has strictly more to lose there
- * than a client.  No streaming: a response is accumulated whole and written in
- * one go, which is what lets a handler that throws still be answered with a 500,
- * and which means a body has to fit in memory.
+ * than a client.
+ *
+ * A response is accumulated whole and written in one go, which is what lets a
+ * handler that throws still be answered with a 500, and which means a body has
+ * to fit in memory.  **Unless the handler asks otherwise** -- see `responder`,
+ * added for server-sent events, where a body produced over seconds has to
+ * reach the client as it appears.  That path gives up the 500, knowingly and
+ * only for the handlers that take it.
  *
  * It exists to receive an OAuth2 redirect on loopback and to be a test harness.
  * **It is not hardened for a public port** -- see the note on sys::server.
@@ -96,7 +101,18 @@ public:
         /** The octets, head and body, as they go on the wire. */
         std::string str(const std::string& server_name) const;
 
+        /**
+         * The head alone, with no Content-Length.
+         *
+         * For a response whose length is not known when it starts; the body
+         * follows from responder::write and is delimited by the close.
+         */
+        std::string head(const std::string& server_name) const;
+
     private:
+        std::string serialise(const std::string& server_name,
+                              bool with_length) const;
+
         int m_status = 200;
         std::string m_reason;
         http::fields m_fields;
@@ -104,6 +120,88 @@ public:
     };
 
     typedef std::function<void(const Request&, response&)> handler;
+
+    /**
+     * A response written as it is produced, rather than accumulated.
+     *
+     * A buffered handler fills a `response` and the server sends it; that is
+     * unchanged and is still the right shape for almost everything.  This is
+     * for the case a buffered handler cannot serve at all: a body that is
+     * produced over seconds and has to reach the client as it appears.
+     *
+     * Server-sent events are the case in hand.  A token stream at ninety
+     * tokens a second is twenty seconds of silence and then a dump if it is
+     * accumulated, and a coding harness reading it will have given up.
+     *
+     * ## What calling begin() gives up
+     *
+     * The status line goes out immediately, so it can no longer be changed.
+     * A handler that throws afterwards **cannot** be answered with a 500 --
+     * the 200 left long ago -- and the connection is closed instead, which the
+     * client sees as a truncated body.
+     *
+     * That is precisely what the buffered path bought by accumulating, and it
+     * is given up knowingly rather than by oversight.  A handler that can fail
+     * should do its failing before it calls begin().
+     *
+     * ## Framing
+     *
+     * No `Content-Length`, because the length is not known, and
+     * `Connection: close`, so the body is delimited by the close.  That is
+     * legal HTTP/1.1 and it is what this server already does about
+     * keep-alive; chunked encoding would buy nothing here and is another
+     * framing to get wrong.
+     */
+    class responder {
+    public:
+        responder(sys::socketstream& s, const std::string& server_name)
+            : m_s(&s), m_name(server_name) {}
+
+        /** Send a complete response.  Exactly what a buffered handler does. */
+        void send(const response& r);
+
+        /**
+         * Send the head now and commit the status.
+         *
+         * The response's body is ignored -- what follows comes from write().
+         * `Content-Length` is omitted whatever the handler set, because a
+         * length that later disagrees with the body is a framing bug and this
+         * is the one place the server can be sure it would.
+         */
+        void begin(const response& head);
+
+        /** One piece of the body, flushed. */
+        void write(const std::string& piece);
+
+        /** Whether anything has reached the socket. */
+        bool started() const { return m_started; }
+
+        /**
+         * Whether the client is still there.
+         *
+         * A stream nobody is reading should stop being produced -- for a
+         * token stream that means a model held for nothing.  False once a
+         * write has failed.
+         */
+        bool live() const;
+
+    private:
+        sys::socketstream* m_s;
+        std::string m_name;
+        bool m_started = false;
+    };
+
+    /**
+     * A handler that may stream.
+     *
+     * Registered by the same `route()`, overloaded on the signature.  Nothing
+     * chooses between buffered and streaming *for* a handler: the request's
+     * head and body are both read before routing, so a handler sees
+     * `Accept: text/event-stream` and `"stream": true` in a JSON body alike
+     * and decides for itself.  Which matters, because the OpenAI protocol puts
+     * it in the body and clients disagree about sending the header.
+     */
+    typedef std::function<void(const Request&, responder&)> stream_handler;
 
     using options = server_options;
 
@@ -149,6 +247,10 @@ public:
      */
     void route(const std::string& method, const std::string& path, handler h);
 
+    /** The same, for a handler that may stream; see responder. */
+    void route(const std::string& method, const std::string& path,
+               stream_handler h);
+
     /** What runs when no route matched.  The default answers 404. */
     void otherwise(handler h);
 
@@ -190,7 +292,11 @@ private:
     struct entry {
         std::string method;
         std::string path;
+
+        // One or the other, never both.  A route is registered by whichever
+        // overload of route() was called.
         handler run;
+        stream_handler stream;
     };
 
     options m_options;

@@ -83,6 +83,44 @@ static void furnish(http::server& s, std::string* saw_body = 0,
         r.status(200).type("application/json").body("{\"got\":true}");
     });
 
+    // Streaming routes.  Registered by the same route(), overloaded on the
+    // handler's signature -- nothing about the request selects between them.
+    s.route("GET", "/stream", [](const http::server::Request&,
+                                 http::server::responder& out) {
+        http::server::response head;
+
+        head.status(200).type("text/event-stream");
+
+        out.begin(head);
+
+        for(int i = 0; i < 3; i++)
+            out.write("data: piece " + std::to_string(i) + "\n\n");
+    });
+
+    // Throws *after* the head has gone, which is the case the buffered path
+    // does not have and cannot be answered.
+    s.route("GET", "/stream-boom", [](const http::server::Request&,
+                                      http::server::responder& out) {
+        http::server::response head;
+
+        head.status(200).type("text/event-stream");
+
+        out.begin(head);
+        out.write("data: before the failure\n\n");
+
+        throw std::runtime_error("a streaming handler failed mid-body");
+    });
+
+    // Throws before anything is sent, which still can be.
+    s.route("GET", "/stream-early", [](const http::server::Request&,
+                                       http::server::responder&) {
+        throw std::runtime_error("a streaming handler failed before starting");
+    });
+
+    // Produces nothing at all, which is a bug in the handler.
+    s.route("GET", "/stream-silent", [](const http::server::Request&,
+                                        http::server::responder&) {});
+
     s.route("GET", "/boom", [](const http::server::Request&,
                                http::server::response&) {
         throw std::runtime_error("the handler gave up");
@@ -476,6 +514,107 @@ static void over_tls() {
     std::remove(key.c_str());
 }
 
+/**
+ * A response written as it is produced.
+ *
+ * The point is not that the bytes arrive -- a buffered handler could send the
+ * same three lines -- but that the framing says the length is not known and
+ * the head leaves before the body exists.  That is what a token stream needs
+ * and what the buffered path cannot do.
+ */
+static void a_streaming_handler_writes_as_it_goes() {
+    std::cout << "\na streaming handler writes as it goes:\n";
+
+    http::server s(0, "127.0.0.1");
+
+    furnish(s);
+    s.transport().on_error([](const std::exception&, const jlib::sys::peer&) {});
+
+    std::thread t([&s]{ s.run(); });
+
+    const jlib::util::http::Response r = http::get(jlib::util::URL(s.url("/stream")));
+
+    ok("  it answers 200", r.status() == 200, std::to_string(r.status()));
+
+    ok("  as an event stream",
+       jlib::util::http::fold(r.fields().get("Content-Type")) == "text/event-stream",
+       r.fields().get("Content-Type"));
+
+    // The two halves of the framing decision: no length, and the close is
+    // what ends the body.
+    ok("  with no Content-Length, because it was not known",
+       !r.fields().has("Content-Length"));
+
+    ok("  and the connection closing is what delimits it",
+       jlib::util::http::fold(r.fields().get("Connection")) == "close",
+       r.fields().get("Connection"));
+
+    ok("  every piece arrives, in order",
+       r.body() == "data: piece 0\n\ndata: piece 1\n\ndata: piece 2\n\n",
+       "\"" + r.body() + "\"");
+
+    s.stop();
+    t.join();
+}
+
+/**
+ * What streaming gives up, asserted rather than only documented.
+ *
+ * A buffered handler that throws is answered with a 500 because nothing has
+ * reached the socket.  A streaming one that has already called begin() cannot
+ * be: the 200 went out, and the client sees a truncated body.  Both halves
+ * are checked here, because the difference between them is the whole cost of
+ * the feature.
+ */
+static void a_handler_that_throws_mid_stream_cannot_be_answered() {
+    std::cout << "\na handler that throws mid-stream cannot be answered:\n";
+
+    http::server s(0, "127.0.0.1");
+
+    furnish(s);
+
+    // The rethrow reaches sys::server; swallow it so the pool keeps serving.
+    std::atomic<int> seen(0);
+
+    s.transport().on_error([&seen](const std::exception&, const jlib::sys::peer&) {
+        seen++;
+    });
+
+    std::thread t([&s]{ s.run(); });
+
+    {
+        const jlib::util::http::Response r = http::get(jlib::util::URL(s.url("/stream-early")));
+
+        ok("  throwing before begin() is still a 500", r.status() == 500,
+           std::to_string(r.status()));
+    }
+
+    {
+        const jlib::util::http::Response r = http::get(jlib::util::URL(s.url("/stream-boom")));
+
+        // The status was already sent, so it is the success it promised.
+        ok("  throwing after begin() leaves the 200 that was sent",
+           r.status() == 200, std::to_string(r.status()));
+
+        ok("  and the client keeps what arrived before the failure",
+           r.body() == "data: before the failure\n\n",
+           "\"" + r.body() + "\"");
+    }
+
+    {
+        const jlib::util::http::Response r = http::get(jlib::util::URL(s.url("/stream-silent")));
+
+        ok("  a handler that sends nothing is a 500, not a bare close",
+           r.status() == 500, std::to_string(r.status()));
+    }
+
+    ok("  and every failure reached on_error", seen >= 2,
+       std::to_string(seen.load()));
+
+    s.stop();
+    t.join();
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -484,6 +623,8 @@ int main() {
     what_it_refuses();
     a_pool_answers_them_at_once();
     stopping_a_pool_without_draining();
+    a_streaming_handler_writes_as_it_goes();
+    a_handler_that_throws_mid_stream_cannot_be_answered();
     over_tls();
 
     // What a green run does not establish.
