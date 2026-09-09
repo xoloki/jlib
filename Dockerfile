@@ -67,6 +67,7 @@ COPY autogen.sh configure.ac Makefile.am AUTHORS ChangeLog NEWS README ./
 COPY m4/ ./m4/
 COPY jlib/ ./jlib/
 COPY tests/ ./tests/
+COPY tools/ ./tools/
 
 RUN ./autogen.sh
 
