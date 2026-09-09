@@ -82,6 +82,15 @@ libsigc++ and glibmm are gone — `sys/signal.hh` and `std::` replaced them.
 is copied in rather than bind-mounted, because a bind mount on macOS crosses the
 VM's filesystem layer and is dramatically slower. See `DOCKER`.
 
+`tools/perf/` holds the measurement programs — decode and prefill timing, a
+per-kernel breakdown, and what the device will actually move. Built only with
+`--enable-perf` and never by `make check`: they need a model file, take
+minutes, and emit a number to read rather than a pass or a fail. They are in
+the tree because every performance number in #158 and after came from them
+while they lived outside it, and one was wrong by a factor of fifteen. Read
+`tools/perf/README.md` before trusting any of them — in particular, take the
+minimum and never the mean.
+
 Tests are plain `main()` programs registered in `TESTS` — no framework. They
 `std::cerr` a message and return non-zero on failure. Exit 77 means SKIP, which
 is how tests needing a display or an audio device report a headless machine.

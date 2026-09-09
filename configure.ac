@@ -325,6 +325,23 @@ AC_SUBST([METAL_LIBS])
 AM_CONDITIONAL([HAVE_METAL], [test "x$have_metal" = xyes])
 
 dnl ------------------------------------------------------------------
+dnl tools/perf -- the measurement programs
+dnl ------------------------------------------------------------------
+dnl
+dnl Off by default and never part of `make check`.  They need a model file,
+dnl they take minutes, and what they emit is a number to read rather than a
+dnl pass or a fail.  In the tree because every performance number in #158 and
+dnl after came from them while they lived outside it, unreviewed, and one was
+dnl wrong by a factor of fifteen -- see #197.
+
+AC_ARG_ENABLE([perf],
+  [AS_HELP_STRING([--enable-perf],
+                  [build the performance measurement tools in tools/perf])],
+  [want_perf=$enableval], [want_perf=no])
+
+AM_CONDITIONAL([HAVE_PERF], [test "x$want_perf" = xyes])
+
+dnl ------------------------------------------------------------------
 dnl Installed pkg-config file
 dnl ------------------------------------------------------------------
 
@@ -361,6 +378,7 @@ AC_CONFIG_FILES([Makefile
     jlib/metal/Makefile
     jlib/apps/Makefile
     tests/Makefile
+    tools/perf/Makefile
     jlib/jlib-1.2.pc
 ])
 
