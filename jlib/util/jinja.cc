@@ -529,11 +529,28 @@ value eval_postfix(const abnf::match& m, const scope& s)
                                                       : called) +
                                       "', and only raise_exception() is implemented");
 
-            const abnf::match args = kids[i].child("arg-list");
-            const std::string why = args ? eval(direct(args, "expr")[0], s).flat()
-                                         : std::string();
+            // The grammar is `arg-list = arg *( ows "," ows arg )`, so the
+            // children are `arg` and never `expr` -- this asked for "expr",
+            // got an empty list, and indexed [0] on it.  Gemma 2's template
+            // calls raise_exception for a system role, so **every** request
+            // carrying one segfaulted, which is what a coding harness sends
+            // on every turn.
+            std::string why;
 
-            throw tmpl::exception("the template refused: " + why);
+            if(const abnf::match args = kids[i].child("arg-list")) {
+                const abnf::match::list all = direct(args, "arg");
+
+                // Guarded as well as named correctly.  `raise_exception()`
+                // with no argument is legal Jinja and reaching for [0] would
+                // be undefined behaviour again for a different reason.
+                if(!all.empty())
+                    if(const abnf::match e = all[0].child("expr"))
+                        why = eval(e, s).flat();
+            }
+
+            throw tmpl::exception("the template refused" +
+                                  (why.empty() ? std::string()
+                                               : ": " + why));
         }
     }
 

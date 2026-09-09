@@ -52,7 +52,7 @@ if HAVE_GLFW
 glfw_programs = jglfwhyper jgltorus jhardhyper
 endif
 
-bin_PROGRAMS = jlib-mail jcrypt jm3u jchat \
+bin_PROGRAMS = jlib-mail jcrypt jm3u jchat jserve \
 	$(alpaca_programs) \
 	$(curve_programs) \
 	$(neural_programs) \
@@ -98,6 +98,12 @@ jalpaca_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA) $(METAL_LA) $(CURSES_LIBS)
 jchat_SOURCES  = jchat.cc
 jchat_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)
 jchat_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA) $(METAL_LA)
+
+# jnet as well as jai: this is the one app that is both ends at once.
+jserve_SOURCES  = jserve.cc
+jserve_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)
+jserve_LDADD    = $(JAI_LA) $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) \
+                  $(METAL_LA)
 
 jcurve_SOURCES = jcurve.cc
 jcurve_LDADD   = $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) $(SODIUM_LIBS)
