@@ -19,25 +19,40 @@ Inside the container the build lives at /src/jlib/build:
 
 configure prints a feature summary saying which optional modules were enabled
 and which were skipped for want of a dependency.  On Linux it should report
-x11, glx and the joystick API as present; on macOS those are absent and the
-GL/GLU/GLUT frameworks are used instead.
+x11, glx and the joystick API as present; on macOS those are absent, GLFW is
+the portable windowing backend, and Metal is the GPU compute backend -- so the
+container never builds jlib/metal and every test that needs a GPU skips there.
 
 Dependencies install in their own layer, so editing source re-runs only the
 autogen/configure/make steps.  A .dockerignore keeps the host's build trees
 and generated autotools output out of the image so the container always
 bootstraps for its own platform.
 
-The image also installs dovecot-imapd, for tests/net_imap_live_test.  That
-test starts a Dovecot on a high port with a Maildir it seeds, drives
-jlib::net::Imap4 against it, and stops it again -- it is the only thing in the
-suite that talks to a server rather than to a std::istringstream, and the only
-way to exercise a literal, because only a server decides when to send one.
+The image also installs dovecot, nginx and tinyproxy, for the *_live_test
+programs: net_imap_live_test, net_pop3_live_test, net_http_live_test and
+sys_proxy_live_test.  Each starts a real server on a high port, drives jlib
+against it, and stops it again.
 
-Outside the container there is usually no dovecot, and the test reports SKIP
-(exit 77) rather than failing.  It needs to run as root: Dovecot refuses to
+They exist because a std::istringstream produces only the responses somebody
+thought of, and so does an in-process server you wrote yourself: an IMAP
+literal, a Date and an ETag in an order nobody chose, a proxy's 403, are all
+things only a server decides to send.  The in-process servers -- tests/
+httpserver.hh, and the scripted one in net_imap_sasl_test -- are for the
+opposite case, a chunked body whose data looks like its own framing, which no
+real server will produce on request.  Both kinds are needed.
+
+Outside the container those daemons are usually absent, and the tests report
+SKIP (exit 77) rather than failing.  It needs to run as root: Dovecot refuses to
 start imap-login as root, so the config leaves that process on the package's
 own unprivileged user, and the seeded Maildir has to be chowned to an ordinary
 uid because Dovecot also refuses a mail uid of 0.
+
+No model file is copied in -- .dockerignore keeps *.gguf out, since they are
+gigabytes -- so the ai_* tests run whatever half needs no model and skip the
+rest.  ai_engine_test exercises its bookkeeping, ai_tokenizer_test its
+pre-tokenizer, and neither loads weights.  The GPU kernels are verified on
+macOS only; what the container establishes for them is that they compile under
+a second compiler and that the host paths still agree.
 
 Note: the crypt_groth_test allocates heavily.  If it is killed with exit 137
 the container hit its memory ceiling -- raise the Docker VM's RAM allocation.

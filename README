@@ -1,39 +1,112 @@
-README for jlib-1.2.x
+README for jlib-2.0.x
 ------------------------
-jlib is a library of STL compatible C++ utility classes.
+jlib is a personal C++ library, begun in 1999 and worked on sporadically ever
+since.  It started as a set of STL-compatible utility classes and grew into
+something wider: a mail client that speaks OAuth2 to Gmail, a transformer that
+runs quantized models on the GPU, renderers that draw four-dimensional objects
+as solid geometry, and the RFC parsers underneath the first of those.
+
+Two habits hold it together.
+
+The older one is that most of it either models an STL container or iterator
+concept, or plugs into std::streambuf and std::iostream.  A socket, a TLS
+connection, a subprocess, a serial port and a temporary file are all streams
+here, so they compose with each other and with everything else that takes an
+istream.
+
+The newer one is that where a format has a published grammar, that grammar is
+pasted into a header and read as it stands -- RFC 5322 addresses, MIME
+headers, URLs, IMAP responses, HTTP messages -- rather than approximated with
+find() and substr().  Every departure from the published text is marked at the
+point of use, because the whole value of pasting it in is that a reader can
+check one against the other.
+
+Errors are thrown rather than returned, and each class nests its own
+exception type.  Everything lives in namespace jlib::<module>.
+
+What is in it:
+
+    sys      iostream wrappers over OS facilities -- sockets, TLS, subprocesses,
+             serial ports, a listener and a threaded server, a job queue, a
+             lock-free ring buffer
+    util     an ABNF parser-combinator core with an RFC 5234 front end, and the
+             RFC grammars read through it: 5322, 2045/2047, 3986, 9110/9112.
+             Plus JSON, MIME headers, a Jinja2 subset, and an XML parser
+    crypt    OpenPGP through GPGME, and ristretto255 curve/Schnorr/Groth proofs
+    net      an email client stack -- Email, MBox, POP3, IMAP4 -- with OAuth2,
+             and an HTTP client and server
+    ai       a quantized transformer that runs GGUF files: llama, qwen2 and
+             gemma2, with Metal compute where there is one
+    media    audio through PortAudio, driven from its callback
+    math     matrices, tensors, polynomials, and N-dimensional objects
+    x/gl     Xlib, OpenGL, GLX and GLFW rendering, including 4-D solids
+
+Some programs it builds:
+
+    jlib-mail   a command-line mail client
+    jchat       talk to a GGUF model
+    jserve      an OpenAI-compatible endpoint, which aider can drive
+    jhardhyper  4-D hypercubes and tori as solid 3-D geometry
+    jcrypt      a GPGME encrypt/decrypt filter
 
 
 REQUIREMENTS
 ------------
-1. gcc-3.1         <http://gcc.gnu.org>
-2. libsigc++-1.0.3 <http://libsigc.sourceforge.net>
-3. openssl         <http://www.openssl.org>
+A C++20 compiler.  Apple clang 15+ and gcc 11+ are what it is built with;
+configure probes for the standard explicitly and stops if it is not there.
+
+Required:
+
+    json-c      >= 0.9
+    gpgme       >= 1.0
+    gpg-error
+    openssl     >= 1.1
+
+Optional, each gating its own module:
+
+    libsodium (with ristretto headers)   crypt/curve, schnorr, groth
+    portaudio                            media
+    glfw                                 the GLFW window and its 4-D apps
+    ncurses                              jalpaca
+    ImageMagick++                        jneural-alpha
+    X11, OpenGL, GLU, GLX                the X11 and GLX rendering
+    CUDA                                 --with-cuda
+    Metal                                the GPU compute backend, on macOS
+
+configure prints a summary of what it found and what it skipped.
+
 
 INSTALLATION
 ------------
-First, make sure you're using gcc-3.0 or greater.  No gcc-2.x compiler
-will work, since the STL support is extremely primitive.  I've never
-tried compiling with a non-gcc compiler; if you get it to work, send me
-a note.
+Out-of-tree builds are expected:
 
-If you're installing from CVS, you first need to 
+    ./autogen.sh
+    mkdir build && cd build
+    ../configure
+    make -j8
+    make check
+    make install
 
-    libtoolize && aclocal && autoheader && automake -a && autoconf
-
-For the default installation:
-
-	./configure
-	make
-	make install
-
-
-If you want to change any of the defaults, 
-
-	./configure --with-OPTION=VALUE
+autogen.sh is a one-line autoreconf and is only needed from a git checkout.
+It wants autoconf, automake, libtool, pkg-config and autoconf-archive -- the
+last for AX_CXX_COMPILE_STDCXX and AX_PTHREAD.
 
 For a list of options,
-	
-	./configure --help
+
+    ../configure --help
+
+Two worth knowing:
+
+    --enable-perf    build tools/perf, the measurement programs.  They need a
+                     model file and take minutes, so they are never run by
+                     make check.  Read tools/perf/README.md first
+    --with-cuda      build jlib/cuda
+
+Tests are plain main() programs registered in TESTS -- no framework.  Exit 77
+means SKIP, which is how a test needing a display, an audio device, or a GGUF
+model file reports a machine without one.  See DOCKER for building and testing
+on Linux.
+
 
 LICENSE
 -------
@@ -50,10 +123,6 @@ parser -- was replaced.
 
 CONTACT
 -------
-Copyright (c) 2000 Joey Yandle <xoloki@gmail.com>
+Copyright (c) 1999-2026 Joey Yandle <xoloki@gmail.com>
 
-jlib homepage:	
-
-	http://jlib.sourceforge.net/
-
-	
+    https://github.com/xoloki/jlib

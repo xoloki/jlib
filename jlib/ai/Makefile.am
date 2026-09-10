@@ -8,7 +8,7 @@ libjai_la_LDFLAGS = -version-info $(LIBJ_SO_VERSION) -release $(JLIB_RELEASE) -n
 libjai_la_LIBADD = $(top_builddir)/jlib/util/libjutil.la \
                    $(top_builddir)/jlib/sys/libjsys.la
 
-libjaiincludedir = $(includedir)/jlib-1.2/jlib/ai
+libjaiincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/ai
 libjaiinclude_HEADERS = environment.hh agent.hh percept.hh action.hh vacuum.hh \
                         neural.hh backend.hh attention.hh transformer.hh \
                         gguf.hh model.hh engine.hh openai.hh unicode.hh pretokenizer.hh \

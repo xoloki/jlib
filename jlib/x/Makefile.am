@@ -11,7 +11,7 @@ libjx_la_LIBADD = $(X11_LIBS)
 
 jx_hdrs = Window.hh Plot.hh Display.hh
 
-libjxincludedir = $(includedir)/jlib-1.2/jlib/x
+libjxincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/x
 if HAVE_X
 libjxinclude_HEADERS = $(jx_hdrs)
 endif

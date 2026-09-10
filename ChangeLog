@@ -1,3 +1,6 @@
-jlib-1.2.0:
-	New improved directory layout enabling vpath builds and internal make check
-	
+jlib does not keep a hand-written ChangeLog.  The history is in git:
+
+    git log --stat
+
+This file exists because the GNU coding standards, and therefore automake,
+expect it.  NEWS carries the user-visible summary.

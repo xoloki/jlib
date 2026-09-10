@@ -2,9 +2,12 @@
 
 A personal C++ utility library by Joey Yandle, begun ~1999-2000 and worked on
 sporadically ever since (CVS → SourceForge → git import in 2011). Apache-2.0
-since 2026, GPL v2+ before that. Version 1.2.0; installs headers under
-`$(includedir)/jlib-1.2/jlib/<module>` and ships a `jlib-1.2.pc` pkg-config
-file.
+since 2026, GPL v2+ before that. Version 2.0.0; installs headers under
+`$(includedir)/jlib-$(JLIB_RELEASE)/jlib/<module>` and ships a
+`jlib-2.0.pc` pkg-config file. The 2.0 bump is the licence change, C++20
+becoming mandatory and libsigc++ leaving the public headers -- three real
+breaks -- and it carried `libj_so_version` to 7:0:0, which had read 6:6:1
+since the 2011 CVS import and through all of them.
 
 The name of the game is "STL-compatible C++ utility classes": most of the library
 either models an STL container/iterator concept or plugs into `std::streambuf` /

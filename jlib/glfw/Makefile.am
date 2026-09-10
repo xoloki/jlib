@@ -13,7 +13,7 @@ libjglfw_la_LIBADD = $(top_builddir)/jlib/gl/libjgl.la \
 
 jglfw_hdrs = Window.hh Plot.hh
 
-libjglfwincludedir = $(includedir)/jlib-1.2/jlib/glfw
+libjglfwincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/glfw
 if HAVE_GLFW
 libjglfwinclude_HEADERS = $(jglfw_hdrs)
 endif

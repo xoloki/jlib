@@ -15,5 +15,5 @@ libjcrypt_la_LIBADD = $(top_builddir)/jlib/sys/libjsys.la \
                       $(top_builddir)/jlib/util/libjutil.la \
                       $(GPGME_LIBS) $(GPGERROR_LIBS) $(CURVE_LIBS)
 
-libjcryptincludedir = $(includedir)/jlib-1.2/jlib/crypt
+libjcryptincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/crypt
 libjcryptinclude_HEADERS = crypt.hh curve.hh groth.hh schnorr.hh

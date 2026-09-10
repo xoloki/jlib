@@ -11,7 +11,7 @@ libjgl_la_LIBADD = $(GL_LIBS)
 
 jgl_hdrs = lights.hh buffers.hh opengl.hh shapes.hh
 
-libjglincludedir = $(includedir)/jlib-1.2/jlib/gl
+libjglincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/gl
 if HAVE_GL
 libjglinclude_HEADERS = $(jgl_hdrs)
 endif
