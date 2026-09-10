@@ -8,7 +8,7 @@ libjsys_la_LDFLAGS = -version-info $(LIBJ_SO_VERSION) -release $(JLIB_RELEASE) -
 # so until now the flags were enough and the libraries were not needed.
 libjsys_la_LIBADD = $(PTHREAD_LIBS) $(OPENSSL_LIBS)
 
-libjsysincludedir = $(includedir)/jlib-1.2/jlib/sys
+libjsysincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/sys
 libjsysinclude_HEADERS = tfstream.hh socketstream.hh sslstream.hh proxystream.hh \
                          listener.hh tls.hh server.hh \
                          sslproxystream.hh serialstream.hh pstream.hh \

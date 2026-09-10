@@ -1,3 +1,13 @@
+jlib (2.0-1) unstable; urgency=low
+
+  * Not compatible with 1.2: the licence changed from GPL-2+ to Apache-2.0,
+    C++20 became mandatory, and libsigc++ left the public headers.
+  * Headers move to /usr/include/jlib-2.0 and the pkg-config file to
+    jlib-2.0.pc, so 1.2 and 2.0 co-install.
+  * Shared library version-info is 7:0:0, from 6:6:1.
+
+ -- Joey Yandle <xoloki@gmail.com>  Thu, 10 Sep 2026 00:00:00 +0200
+
 jlib (1.2-1) unstable; urgency=low
 
   * Initial release (Closes: #nnnn)  <nnnn is the bug number of your ITP>

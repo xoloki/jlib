@@ -1,6 +1,6 @@
 # Process this file with autoconf to produce a configure script.-*- autoconf -*-
 AC_PREREQ([2.69])
-AC_INIT([jlib], [1.2.0], [xoloki@gmail.com])
+AC_INIT([jlib], [2.0.0], [xoloki@gmail.com])
 
 AC_CONFIG_SRCDIR([jlib/sys/sys.hh])
 AC_CONFIG_MACRO_DIRS([m4])
@@ -11,8 +11,8 @@ AM_SILENT_RULES([yes])
 
 AC_CANONICAL_HOST
 
-JLIB_MAJOR_VERSION=1
-JLIB_MINOR_VERSION=2
+JLIB_MAJOR_VERSION=2
+JLIB_MINOR_VERSION=0
 JLIB_MICRO_VERSION=0
 
 AC_DEFINE_UNQUOTED([JLIB_MAJOR_VERSION], [$JLIB_MAJOR_VERSION], [jlib major version])
@@ -25,7 +25,14 @@ AC_DEFINE_UNQUOTED([JLIB_MICRO_VERSION], [$JLIB_MICRO_VERSION], [jlib micro vers
 #  ? :+1 : ?   == just some internal changes, nothing breaks but might work
 #                 better
 # CURRENT : REVISION : AGE
-libj_so_version="6:6:1"
+# 2.0 breaks the 1.2 interface: C++20 is required where it was not, libsigc++
+# is gone from the public headers, and the licence changed.  So CURRENT goes
+# up and both REVISION and AGE go to zero -- this library is compatible with
+# nothing that came before it.
+#
+# It had read 6:6:1 since the 2011 CVS import, through all of that, which
+# meant the soname claimed a compatibility that had not been true for years.
+libj_so_version="7:0:0"
 
 jlib_version="$JLIB_MAJOR_VERSION.$JLIB_MINOR_VERSION.$JLIB_MICRO_VERSION"
 jlib_release="$JLIB_MAJOR_VERSION.$JLIB_MINOR_VERSION"
@@ -379,7 +386,7 @@ AC_CONFIG_FILES([Makefile
     jlib/apps/Makefile
     tests/Makefile
     tools/perf/Makefile
-    jlib/jlib-1.2.pc
+    jlib/jlib-${JLIB_RELEASE}.pc:jlib/jlib.pc.in
 ])
 
 AC_OUTPUT
@@ -413,6 +420,9 @@ AC_MSG_NOTICE([
 
   platform
     linux joystick ....... $have_joystick
+
+  tools
+    tools/perf ........... $want_perf
 
   legacy
     oss audio ............ $have_oss_audio

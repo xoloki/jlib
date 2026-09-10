@@ -1,2 +1,71 @@
-Tue Jan 29 07:05:05 PST 2002
-cvs import of jlib-1.2 begins.
+User-visible changes in jlib.  The full history is in git; this is the summary
+a packager or a returning user wants.
+
+
+2.0.0 (unreleased)
+------------------
+
+Compatibility
+    This release is compatible with nothing before it, which is what the
+    major bump says.  Three things break: the licence changed, C++20 became
+    mandatory where it was not, and libsigc++ left the public headers in
+    favour of std:: and jlib/sys/signal.hh.
+
+    Headers install under $(includedir)/jlib-2.0/ and the pkg-config file is
+    jlib-2.0.pc, so 1.2 and 2.0 can be installed side by side.
+
+    libj_so_version is 7:0:0.  It had read 6:6:1 since the 2011 CVS import
+    and through every change above, so the soname had been claiming a
+    compatibility that stopped being true some years ago.
+
+License
+    Relicensed from GNU GPL v2-or-later to Apache License 2.0.  Everything up
+    to and including the relicensing commit remains available under the old
+    terms.  It became possible only when the last file jlib did not hold the
+    copyright to -- a third-party XML parser -- was replaced clean-room.
+
+Build
+    C++20 is now required and probed for explicitly.  Builds on macOS (Apple
+    clang, arm64) and modern Linux (gcc 13).  Out-of-tree builds expected.
+    libsigc++ and glibmm are gone, replaced by std:: and jlib/sys/signal.hh.
+    OSS audio replaced by PortAudio; GLUT replaced by GLFW.
+
+Parsing
+    A new ABNF parser-combinator core, jlib/util/abnf.hh, with an RFC 5234
+    text front end -- an RFC's grammar can be pasted into a header and read as
+    it stands.  Addresses (RFC 5322), MIME headers (2045/2047/2231), URLs
+    (3986), dates, IMAP responses (3501), HTTP messages (9110/9112) and XML
+    are all read this way now rather than by find() and substr().
+
+Mail
+    OAuth2: the refresh grant, the authorization-code grant with PKCE, a
+    loopback redirect receiver, and XOAUTH2 for IMAP.  Gmail has required this
+    since 2022 and Outlook.com for personal accounts since September 2024, so
+    a client with only LOGIN and AUTH PLAIN could reach neither.
+
+Servers
+    jlib::sys::server accepts a connection and hands it to a handler as a
+    stream, plain or TLS, dispatching through a job_queue.  jlib::net::http::
+    server reads a request against the same RFC 9112 grammar the client's
+    responses go through, and can stream a response for server-sent events.
+    Both are for loopback and a test harness, and both say so in their headers.
+
+Machine learning
+    A new jlib/ai module runs quantized transformers from GGUF files: llama,
+    qwen2 and gemma2 architectures, SentencePiece and GPT-2 byte-level
+    vocabularies, f32/f16/q8_0/q4_K/q6_K tensors, with a Metal compute backend
+    where there is one.  Chat templates are rendered by evaluating the model's
+    own Jinja2 template rather than by scanning it.
+
+    New programs: jchat, jalpaca (a curses front end), and jserve -- an
+    OpenAI-compatible endpoint, which aider drives end to end.
+
+Graphics
+    The headline goal since 1999 is done: jhardhyper draws 4-D objects as
+    solid, depth-sorted, translucent 3-D geometry, and under stereographic
+    projection shows the Hopf foliation as nested tori.
+
+
+1.2.0
+-----
+    New directory layout enabling vpath builds and an internal make check.

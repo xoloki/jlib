@@ -14,5 +14,5 @@ libjmetal_la_LIBADD  = $(top_builddir)/jlib/ai/libjai.la $(METAL_LIBS)
 # without a retain/release in every path.
 libjmetal_la_OBJCXXFLAGS = $(AM_OBJCXXFLAGS) -fobjc-arc -std=c++20
 
-libjmetalincludedir = $(includedir)/jlib-1.2/jlib/metal
+libjmetalincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/metal
 libjmetalinclude_HEADERS = device.hh gemm.hh tensor.hh backend.hh

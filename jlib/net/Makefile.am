@@ -11,7 +11,7 @@ libjnet_la_LIBADD = $(top_builddir)/jlib/sys/libjsys.la \
                     $(top_builddir)/jlib/crypt/libjcrypt.la \
                     $(OPENSSL_LIBS) $(PTHREAD_LIBS)
 
-libjnetincludedir = $(includedir)/jlib-1.2/jlib/net
+libjnetincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/net
 libjnetinclude_HEADERS = Imap4Box.hh Pop3.hh MBox.hh Email.hh \
                          Imap4.hh Imap4Fetch.hh net.hh MFolder.hh \
                          Imap4Folder.hh MailBox.hh MailFetch.hh MailFolder.hh \

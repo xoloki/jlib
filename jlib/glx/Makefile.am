@@ -14,7 +14,7 @@ libjglx_la_LIBADD = $(top_builddir)/jlib/x/libjx.la \
 
 jglx_hdrs = Window.hh Plot.hh
 
-libjglxincludedir = $(includedir)/jlib-1.2/jlib/glx
+libjglxincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/glx
 if HAVE_GLX
 libjglxinclude_HEADERS = $(jglx_hdrs)
 endif

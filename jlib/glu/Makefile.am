@@ -11,7 +11,7 @@ libjglu_la_LIBADD = $(GLU_LIBS) $(GL_LIBS)
 
 jglu_hdrs = textures.hh projection.hh
 
-libjgluincludedir = $(includedir)/jlib-1.2/jlib/glu
+libjgluincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/glu
 if HAVE_GLU
 libjgluinclude_HEADERS = $(jglu_hdrs)
 endif
