@@ -147,26 +147,33 @@ namespace jlib {
                     std::cerr << "basic_tlsbuf::underflow()"<<std::endl;
 
                 this->m_eintr = false;
-                int count = SSL_read(m_ssl, this->eback(), BUF_SIZE);
-                
-                if(count < 0) {
-                    //throw exception("error reading");
-                    //this->setstate(std::ios_base::badbit);
-                    if(errno == EINTR) {
-                        this->m_eintr = true;
-                    }
-                    std::cerr << print("SSL_read", count) << std::endl;
-                    return traits_type::eof();
-                }                
-                else if(count == 0) {
+                this->m_timeout = false;
+
+                // So that print() reports this call's errors and not whatever
+                // the thread was carrying.  server.cc clears the queue per
+                // connection for the same reason; this makes that belt to
+                // this braces.
+                ERR_clear_error();
+
+                // The same buffer and the same length every time, which
+                // OpenSSL requires of a retry after WANT_READ.  Anything that
+                // later teaches this to accumulate into a partly-full get
+                // area has to keep that true.
+                const int count = SSL_read(m_ssl, this->eback(), BUF_SIZE);
+
+                // <= 0, not < 0: SSL_read returns 0 for a connection that has
+                // closed, and which *kind* of close it was is a question only
+                // SSL_get_error can answer.
+                if(count <= 0) {
+                    classify("SSL_read", count);
+
                     return traits_type::eof();
                 }
-                else {
-                    char_type* end = this->eback()+count;
-                    this->setg(this->eback(), this->eback(), end);
-                    
-                    return traits_type::to_int_type(*this->gptr());
-                }
+
+                char_type* end = this->eback()+count;
+                this->setg(this->eback(), this->eback(), end);
+
+                return traits_type::to_int_type(*this->gptr());
             }
 
             virtual int_type sync() {
@@ -189,20 +196,34 @@ namespace jlib {
                 
                 while( (diff=(total-sofar)) > 0 ) {
                     this->m_eintr = false;
+                    this->m_timeout = false;
+
+                    ERR_clear_error();
+
                     count = SSL_write(m_ssl, current, diff);
 
-                    if(count == -1) {
-                        if(getenv("JLIB_SYS_SOCKET_DEBUG"))
-                            std::cerr << print("SSL_write", count) <<std::endl;
+                    // <= 0, not == -1.  OpenSSL's contract is that anything
+                    // not positive failed, and the old test let a return of 0
+                    // through to `sofar += 0` -- which leaves diff unchanged
+                    // and calls SSL_write on a dead connection until the
+                    // process is killed.
+                    if(count <= 0) {
+                        classify("SSL_write", count);
 
-                        if(errno == EINTR) {
-                            this->m_eintr = true;
-                        }
                         return traits_type::eof();
                     }
+
                     sofar += count;
                     current += count;
                 }
+
+                // The put area is deliberately left alone on the failure
+                // path, where basic_socketbuf::sync() moves the unwritten
+                // remainder down.  Two reasons, and they point the same way:
+                // SSL_MODE_ENABLE_PARTIAL_WRITE is off, so sofar is only ever
+                // 0 or total and there is no remainder to keep; and OpenSSL
+                // requires a retry after WANT_WRITE to present the *same*
+                // buffer and length, which moving the bytes would break.
                 
                 this->setp(this->pbase(), this->pbase()+BUF_SIZE);
                 return 0;                
@@ -224,7 +245,60 @@ namespace jlib {
                 Base::close();
             }
 
+            /**
+             * Begin TLS on a connection that has been speaking in the clear.
+             *
+             * ## Both buffers have to be empty, and this is CVE-2011-0411
+             *
+             * Flipping m_delay changes where the *next* underflow() reads
+             * from.  It does not change what is already in the get area -- and
+             * underflow() is only called when gptr() == egptr(), so plaintext
+             * sitting there is served from the buffer and SSL_read is never
+             * reached.
+             *
+             * Those bytes are not lost.  **They are handed to the caller as
+             * though they had arrived over TLS**, which is the STARTTLS
+             * command-injection bug: an attacker who writes
+             * `a001 OK\r\n* CAPABILITY ... AUTH=PLAIN\r\n` in one segment,
+             * before the handshake, has the second line answered after it.
+             *
+             * Imap4::upgrade is the live path, and the comment above its
+             * second capability() call says exactly why that call exists --
+             * "a man in the middle could have removed STARTTLS from that list
+             * or added an AUTH mechanism to it".  Unchecked, the buffer
+             * defeats the mitigation the comment describes.  Pop3::upgrade has
+             * the same shape.
+             *
+             * So: refuse, rather than discard.  Discarding would lose a
+             * server's legitimate pipelining as silently as it drops an
+             * attacker's injection, and the 2021 "NO STARTTLS" paper is clear
+             * that this is a protocol error.  Errors here are thrown, as
+             * everywhere else in this library.
+             *
+             * The put side is the cheaper half of the same guard: unflushed
+             * plaintext would go out encrypted, which no caller wants and
+             * which nothing currently produces, since command() flushes.
+             *
+             * @throws Base::exception if either buffer is not empty
+             */
             void start() {
+                if(this->gptr() != this->egptr()) {
+                    throw typename Base::exception(
+                        "STARTTLS with " +
+                        std::to_string(this->egptr() - this->gptr()) +
+                        " octets already buffered: everything read before the "
+                        "handshake was unauthenticated, and answering it "
+                        "afterwards is how a command is injected");
+                }
+
+                if(this->pptr() != this->pbase()) {
+                    throw typename Base::exception(
+                        "STARTTLS with " +
+                        std::to_string(this->pptr() - this->pbase()) +
+                        " octets written and not flushed, which would be sent "
+                        "encrypted to a peer that is not expecting them yet");
+                }
+
                 m_delay = false;
                 open_ssl();
             }
@@ -251,6 +325,71 @@ namespace jlib {
             }
 
         protected:
+
+            /**
+             * What a failed SSL_read or SSL_write actually meant.
+             *
+             * This used to read `errno`, which is only meaningful under
+             * SSL_ERROR_SYSCALL -- so a clean close, a protocol failure and
+             * "not ready yet" all became the same bare eof(), and a caller
+             * could not tell a server that finished from one that stalled.
+             *
+             * ## WANT_READ on a blocking descriptor is not exotic
+             *
+             * It is what a timeout looks like.  SO_RCVTIMEO makes a blocking
+             * read(2) return EAGAIN, OpenSSL classifies that as retryable, and
+             * SSL_get_error answers WANT_READ.  Since basic_socketbuf applies
+             * a timeout to every descriptor it configures -- and both
+             * sys::server and net::http set one by default -- this is the
+             * ordinary case rather than a corner.
+             *
+             * So WANT_READ means "timed out" here, and m_nonblocking is the
+             * seam where that stops being true: once a descriptor is driven by
+             * a reactor it will mean "not ready", and only this switch has to
+             * learn the difference.
+             *
+             * ## What the caller still sees
+             *
+             * eof(), in every case, because a streambuf has nothing else to
+             * say.  The distinction lives in timed_out() and interrupted(),
+             * which is the arrangement basic_socketbuf already uses and which
+             * TLS was silently excluded from -- m_timeout was never set on
+             * this path, so tlsstream::timed_out() was permanently false.
+             */
+            void classify(const std::string& what, int ret) {
+                const int e = SSL_get_error(m_ssl, ret);
+
+                switch(e) {
+                case SSL_ERROR_ZERO_RETURN:
+                    // close_notify: the peer finished and said so.  Nothing to
+                    // record -- eof() is the whole truth.
+                    break;
+
+                case SSL_ERROR_WANT_READ:
+                case SSL_ERROR_WANT_WRITE:
+                    if(!m_nonblocking) this->m_timeout = true;
+                    break;
+
+                case SSL_ERROR_SYSCALL:
+                    // The one case where errno means anything.  ret == 0 here
+                    // is a peer that vanished without close_notify, which is
+                    // what a truncation attack looks like and which errno does
+                    // not describe; it stays an undistinguished eof().
+                    if(errno == EINTR) this->m_eintr = true;
+                    else if(errno == EAGAIN || errno == EWOULDBLOCK)
+                        this->m_timeout = true;
+                    break;
+
+                default:
+                    break;
+                }
+
+                // Behind the guard, where the read path's copy of this was not
+                // -- so a library wrote to stderr on every TLS read error, and
+                // would have written once per pass under a reactor.
+                if(getenv("JLIB_SYS_SOCKET_DEBUG"))
+                    std::cerr << print(what, ret) << std::endl;
+            }
 
             std::string print(const std::string& ctx, int err) {
                 std::ostringstream o;
@@ -390,6 +529,16 @@ namespace jlib {
             std::string m_verify_host;
             bool m_delay;
             bool m_accept;
+
+            /**
+             * Whether the descriptor under this is non-blocking.
+             *
+             * False, and nothing sets it yet.  It is the seam classify() needs
+             * when a reactor starts driving these: WANT_READ means "timed out"
+             * on a blocking descriptor and "not ready" on a non-blocking one,
+             * and that is the only line of the classifier that has to change.
+             */
+            bool m_nonblocking = false;
         };
 
         /** TLS straight over a socket. */

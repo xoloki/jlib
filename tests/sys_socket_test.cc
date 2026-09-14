@@ -352,6 +352,179 @@ static void a_read_can_be_bounded() {
     }
 }
 
+/**
+ * A flush that fails half way keeps its place.
+ *
+ * sync() writes the put area in a loop.  When the loop failed it returned
+ * without touching the put area at all -- so pptr() still pointed past the
+ * octets the kernel had already taken, and the next sync() started again from
+ * pbase() and sent them a second time.
+ *
+ * **Latent, not live.**  sync() returning eof() sets badbit, after which every
+ * << and flush() is a no-op, and nothing in jlib clears it and retries.  What
+ * the fix buys is that SO_SNDTIMEO becomes usable on the write side at all:
+ * until now a write that timed out half way through could only be recovered
+ * by duplicating bytes.
+ *
+ * ## It asserts on macOS and skips on Linux, and that is measured
+ *
+ * The state being staged is a write of the 1024-octet put area that the
+ * kernel accepts *part* of.  On Linux no primitive here will produce one: a
+ * 1024-octet write to a pipe, a unix socket or a loopback TCP socket is
+ * either taken whole or refused with EAGAIN, with the transition at a page.
+ * Swept across free-space sizes from 300 to 16384 octets on all three, and
+ * the answer is the same every time -- room below 4096 gives EAGAIN and room
+ * at or above gives the full 1024.  macOS pipes do accept a partial, which is
+ * why this runs there.
+ *
+ * So the skip below is a property of the platform rather than a flake, and
+ * the cursor arithmetic it guards is platform-independent -- a memmove and a
+ * pbump.  What is verified on one platform is the behaviour; what is verified
+ * on both is that it compiles and that nothing else regressed.
+ *
+ * This proves the cursor arithmetic and says nothing about SO_SNDTIMEO, which
+ * remains untested on the write side; see the closing note.
+ */
+static void a_failed_flush_keeps_its_place() {
+    std::cout << "a failed flush keeps its place\n";
+
+    int fds[2];
+
+    if(::pipe(fds) != 0) {
+        ok("a pipe", false, "pipe() failed");
+        return;
+    }
+
+    // Both ends non-blocking.  The write end so a full pipe answers EAGAIN
+    // instead of parking us -- which is the state being staged -- and the
+    // read end so draining stops when the pipe is empty rather than waiting
+    // for a writer that is this same thread.
+    for(int i = 0; i < 2; i++) {
+        const int flags = ::fcntl(fds[i], F_GETFL, 0);
+
+        ::fcntl(fds[i], F_SETFL, flags | O_NONBLOCK);
+    }
+
+    // Fill it with something that cannot be confused with the payload.
+    const std::string filler(4096, 'F');
+    std::size_t packed = 0;
+
+    for(;;) {
+        const ssize_t n = ::write(fds[1], filler.data(), filler.size());
+
+        if(n <= 0) break;
+
+        packed += std::size_t(n);
+    }
+
+    // Open a gap smaller than the payload, so the flush gets part of the way
+    // and then stops.
+    //
+    // A whole page is read and *most* of it written back, rather than simply
+    // reading the size of the gap.  Linux releases a pipe's page only when the
+    // page is fully consumed, so reading 300 octets of a full pipe frees no
+    // writable space at all -- room is 0 or 4096 and never the sub-1024 gap a
+    // 1024-octet put area needs.  Reading a page and returning all but the gap
+    // stages it on both platforms.
+    const std::size_t PAGE = 4096;
+    const std::size_t GAP  = 300;
+
+    std::string drained(PAGE, '\0');
+    const ssize_t freed = ::read(fds[0], &drained[0], drained.size());
+
+    if(packed == 0 || freed <= 0 || std::size_t(freed) <= GAP) {
+        std::cout << "  skip  the pipe would not fill\n";
+        ::close(fds[0]);
+        ::close(fds[1]);
+        return;
+    }
+
+    const std::string back(std::size_t(freed) - GAP, 'F');
+
+    if(::write(fds[1], back.data(), back.size()) != ssize_t(back.size())) {
+        std::cout << "  skip  could not stage the gap\n";
+        ::close(fds[0]);
+        ::close(fds[1]);
+        return;
+    }
+
+    // Digits, so the filler and the payload cannot be mistaken for each other.
+    std::string payload;
+
+    for(int i = 0; i < 1000; i++) payload += char('0' + (i % 10));
+
+    std::string got;
+
+    {
+        jlib::sys::basic_socketbuf<char> buf(jlib::sys::adopt, fds[1], "", 0, 0);
+
+        buf.sputn(payload.data(), std::streamsize(payload.size()));
+
+        const int first = buf.pubsync();
+
+        ok("the flush fails once the pipe is full", first == -1,
+           std::to_string(first));
+
+        // Drain everything: the filler, plus however much of the payload got
+        // through before the pipe filled.
+        for(;;) {
+            char b[4096];
+            const ssize_t n = ::read(fds[0], b, sizeof b);
+
+            if(n <= 0) break;
+
+            got.append(b, std::size_t(n));
+        }
+
+        // Counted rather than derived: the filler is all 'F' and arrives
+        // first, so the first octet that is not one begins the payload.  The
+        // capacity arithmetic this replaced was a second thing to get wrong.
+        const std::string::size_type at = got.find_first_not_of('F');
+        const std::size_t sent =
+            at == std::string::npos ? 0 : got.size() - at;
+
+        if(sent == 0 || sent >= payload.size()) {
+            // Linux, every time: the kernel took all of it or none of it.
+            std::cout << "  skip  this kernel does not do partial writes ("
+                      << sent << " octets of " << payload.size() << ")\n";
+            ::close(fds[0]);
+            return;
+        }
+
+        ok("some of the payload got through", sent > 0 && sent < payload.size(),
+           std::to_string(sent) + " of " + std::to_string(payload.size()));
+
+        // The retry.  With the cursor lost this resends from the beginning.
+        const int second = buf.pubsync();
+
+        ok("and the rest goes on the retry", second == 0,
+           std::to_string(second));
+    }
+
+    for(;;) {
+        char b[4096];
+        const ssize_t n = ::read(fds[0], b, sizeof b);
+
+        if(n <= 0) break;
+
+        got.append(b, std::size_t(n));
+    }
+
+    // Strip the filler; what is left is every payload octet the peer saw, in
+    // order, across both flushes.
+    const std::string::size_type start = got.find_first_not_of('F');
+    const std::string seen =
+        start == std::string::npos ? std::string() : got.substr(start);
+
+    // The assertion.  With the bug this is 1000 + however much the first
+    // flush managed, with that many octets repeated in the middle.
+    ok("the peer saw the payload exactly once", seen == payload,
+       std::to_string(seen.size()) + " octets, wanted " +
+       std::to_string(payload.size()));
+
+    ::close(fds[0]);
+}
+
 int main() {
     a_listener_accepts_a_connection();
     a_handshake_against_a_silent_server_gives_up();
@@ -360,6 +533,7 @@ int main() {
     a_listener_says_who_connected();
     a_pipe_closes_what_it_opened();
     a_read_can_be_bounded();
+    a_failed_flush_keeps_its_place();
 
     // What a green run does not establish: that the connect timeout is
     // enforced by anything but poll(2) on this one host.  A firewall that
