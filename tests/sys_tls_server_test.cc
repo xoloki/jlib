@@ -44,6 +44,7 @@
 
 #include <openssl/ssl.h>
 
+#include <chrono>
 #include <cstdio>
 #include <iostream>
 #include <memory>
@@ -85,6 +86,100 @@ static void echo_once(sys::listener& l, const sys::tls_context& ctx,
     catch(std::exception& e) {
         if(saw) *saw = std::string("server threw: ") + e.what();
     }
+}
+
+/**
+ * A server that is slow is not a server that finished.
+ *
+ * The distinction basic_socketbuf has had all along and basic_tlsbuf did not.
+ * A read timeout arrives as eof() -- a streambuf has nothing else to say -- so
+ * without timed_out() a caller reads a stall as a clean end of response, and
+ * util::http's until_close framing hands back a truncated body as a complete
+ * one.
+ *
+ * The last assertion is the whole point and could not be written before: after
+ * the timeout the connection is *still there*, and clearing the stream reads
+ * what the server eventually said.
+ */
+static void a_slow_server_is_not_a_finished_one(const std::string& cert,
+                                                const std::string& key)
+{
+    std::cout << "\na slow server is not a finished one:\n";
+
+    sys::tls_context ctx = sys::tls_context::server(cert, key);
+    sys::listener l(0, "127.0.0.1");
+
+    std::thread server([&l, &ctx]{
+        try {
+            const int fd = l.accept(10);
+
+            if(fd < 0) return;
+
+            sys::tlsstream s(sys::tls_server, ctx, sys::adopt, fd, "", 0, 10);
+
+            // Long enough that the client's half-second bound expires first,
+            // and the silence is under this test's control rather than the
+            // network's.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+            s << "late\r\n" << std::flush;
+
+            // Held open until the client has read it, so the second read
+            // cannot be satisfied by a close rather than by the data.
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+            s.close();
+        }
+        catch(std::exception&) {}
+    });
+
+    // A generous handshake bound, then a tight one for the read: the
+    // handshake must not be what times out.
+    sys::tlsstream client("localhost", l.port(), false, 10.0, 10.0);
+
+    client.set_timeout(0.5);
+
+    const auto start = std::chrono::steady_clock::now();
+
+    std::string line;
+
+    std::getline(client, line);
+
+    const double waited =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+        .count();
+
+    // One-sided at the bottom, loose at the top: it must have waited for the
+    // bound, and a loaded machine must not make it fail.
+    ok("  the read gives up near the bound", waited >= 0.4 && waited < 3.0,
+       std::to_string(waited) + "s");
+
+    ok("  and says it timed out rather than ended", client.timed_out());
+
+    ok("  though the stream itself can only say eof", client.eof());
+
+    // The assertion this commit exists for.  Before it, timed_out() was
+    // permanently false on a TLS stream and this was indistinguishable from a
+    // server that had closed.
+    //
+    // The bound is raised first, because it is still half a second and the
+    // server has not spoken yet -- reading again on the old one would expire
+    // again, which is correct behaviour and not what is being tested.  This
+    // is what a caller who consulted timed_out() would do: decide to wait
+    // longer rather than conclude the response was complete.
+    client.clear();
+    client.set_timeout(10.0);
+
+    std::string late;
+
+    std::getline(client, late);
+
+    if(!late.empty() && late.back() == '\r') late.pop_back();
+
+    ok("  and the connection was still there all along", late == "late",
+       "\"" + late + "\"");
+
+    server.join();
 }
 
 static void a_context_reads_a_certificate(const std::string& cert,
@@ -348,6 +443,7 @@ int main() {
     the_certificate_has_to_be_the_right_one(cert, key);
     an_untrusted_certificate_is_refused(cert, key);
     a_plaintext_client_does_not_take_the_server_with_it(cert, key);
+    a_slow_server_is_not_a_finished_one(cert, key);
 
     std::remove(cert.c_str());
     std::remove(key.c_str());
