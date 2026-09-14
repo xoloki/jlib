@@ -249,6 +249,18 @@ std::string read_body(std::istream& is, framing how, std::size_t length,
                       std::size_t cap = 1 << 20);
 
 /**
+ * The same, suspending rather than blocking.  See the definition in http.cc.
+ *
+ * **Additive**: the blocking ones above are unchanged and every existing
+ * caller still uses them.  Nothing in the tree awaits these yet.
+ */
+sys::task<std::string> read_body(sys::async_reader& in, framing how,
+                                 std::size_t length, std::size_t cap = 1048576);
+
+sys::task<std::string> read_body(sys::async_reader& in, const Response& head,
+                                 std::size_t cap = 1048576);
+
+/**
  * The composed grammar: RFC 3986, then RFC 9110, then RFC 9112.
  *
  * Built once, on first use.  Exposed so a test can ask it what it knows --

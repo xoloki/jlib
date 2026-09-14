@@ -176,6 +176,146 @@ static void the_two_read_heads_agree() {
                "GET / HTTP/1.1\r\n\r\n", 17);
 }
 
+// ---------------------------------------------------------------- read_body
+
+static outcome sync_body(const std::string& in, http::framing how,
+                         std::size_t length, std::size_t cap)
+{
+    outcome o;
+    std::istringstream is(in);
+
+    try { o.value = http::read_body(is, how, length, cap); }
+    catch(std::exception& e) { o.threw = true; o.why = e.what(); }
+
+    return o;
+}
+
+static outcome async_body(const std::string& in, http::framing how,
+                          std::size_t length, std::size_t cap,
+                          std::size_t chunk)
+{
+    outcome o;
+
+    sys::reactor r;
+
+    int fds[2];
+
+    if(::pipe(fds) != 0) { o.threw = true; o.why = "pipe() failed"; return o; }
+
+    std::thread feeder([&]{
+        for(std::size_t at = 0; at < in.size(); at += chunk) {
+            const std::string part = in.substr(at, chunk);
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+            ::write(fds[1], part.data(), part.size());
+        }
+
+        ::close(fds[1]);
+    });
+
+    sys::async_reader in_r(r, fds[0]);
+    sys::task<std::string> t = http::read_body(in_r, how, length, cap);
+
+    try { o.value = sys::run_until_complete(r, t); }
+    catch(std::exception& e) { o.threw = true; o.why = e.what(); }
+
+    feeder.join();
+
+    ::close(fds[0]);
+
+    return o;
+}
+
+static void bodies_agree(const std::string& what, const std::string& input,
+                         http::framing how, std::size_t length = 0,
+                         std::size_t cap = 1048576)
+{
+    const outcome a = sync_body(input, how, length, cap);
+
+    // One octet at a time: a suspension between every pair of characters, so
+    // every state of the chunked loop is crossed by a co_await -- mid size
+    // line, mid chunk data, mid trailing CRLF, mid trailer.
+    const outcome b = async_body(input, how, length, cap, 1);
+
+    const outcome c = async_body(input, how, length, cap,
+                                 input.empty() ? 1 : input.size());
+
+    ok("  " + what, a == b && a == c,
+       a == b ? (a == c ? "" : "differs when delivered whole")
+              : "differs when delivered one octet at a time");
+
+    if(!(a == b)) {
+        std::cout << "         sync : "
+                  << (a.threw ? "threw " + a.why : "\"" + a.value + "\"") << "\n";
+        std::cout << "         async: "
+                  << (b.threw ? "threw " + b.why : "\"" + b.value + "\"") << "\n";
+    }
+}
+
+/**
+ * The four framing cases, and the one that matters.
+ *
+ * read_head was the easy one -- a byte loop over a delimiter with nothing
+ * carried across a suspension.  The chunked case interleaves *parsing* a size
+ * with *reading* data, round after round, and one octet at a time puts a
+ * co_await between every step of that.
+ */
+static void the_two_read_bodies_agree() {
+    std::cout << "\nthe synchronous and suspending read_body agree:\n";
+
+    bodies_agree("no body at all", "", http::framing::none);
+
+    bodies_agree("a body of a stated length", "hello", http::framing::length, 5);
+
+    bodies_agree("one that is short", "hel", http::framing::length, 5);
+
+    bodies_agree("one longer than the cap", "hello", http::framing::length, 5, 4);
+
+    bodies_agree("a body read to end of stream", "whatever arrives",
+                 http::framing::until_close);
+
+    bodies_agree("one read to close, past the cap", "0123456789",
+                 http::framing::until_close, 0, 4);
+
+    // The chunked cases.
+    bodies_agree("one chunk", "5\r\nhello\r\n0\r\n\r\n", http::framing::chunked);
+
+    bodies_agree("several chunks",
+                 "3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n", http::framing::chunked);
+
+    bodies_agree("a chunk extension, parsed off",
+                 "5;a=b\r\nhello\r\n0\r\n\r\n", http::framing::chunked);
+
+    bodies_agree("a trailer section, consumed",
+                 "3\r\nabc\r\n0\r\nX-Thing: 1\r\n\r\n",
+                 http::framing::chunked);
+
+    // Data that looks like its own framing, which is the case an in-process
+    // peer exists to produce and a real server never will on request.
+    bodies_agree("chunk data that looks like a chunk header",
+                 "9\r\n5\r\nhello\r\n\r\n0\r\n\r\n", http::framing::chunked);
+
+    // The refusals.
+    bodies_agree("a bad chunk size", "zz\r\nhello\r\n0\r\n\r\n",
+                 http::framing::chunked);
+
+    bodies_agree("a chunk that ends early", "5\r\nhel", http::framing::chunked);
+
+    bodies_agree("a chunk not followed by CRLF", "5\r\nhelloXX0\r\n\r\n",
+                 http::framing::chunked);
+
+    bodies_agree("a bare LF in a chunked body", "5\nhello\r\n0\r\n\r\n",
+                 http::framing::chunked);
+
+    bodies_agree("a chunked body past the cap",
+                 "10\r\n0123456789abcdef\r\n0\r\n\r\n",
+                 http::framing::chunked, 0, 8);
+
+    bodies_agree("a chunked body that just stops", "3\r\nabc\r\n",
+                 http::framing::chunked);
+}
+
 /** The half that did not change: the parser, over what the coroutine produced. */
 static void the_parser_is_untouched() {
     std::cout << "\nthe parser is untouched:\n";
@@ -245,6 +385,7 @@ int main() {
     std::cout << std::unitbuf;
 
     the_two_read_heads_agree();
+    the_two_read_bodies_agree();
     the_parser_is_untouched();
     a_framing_function_inherits_cancellation();
 
