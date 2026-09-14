@@ -30,6 +30,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <queue>
 #include <string>
 #include <vector>
@@ -378,6 +379,19 @@ public:
     /** "kqueue", "epoll" or "poll".  For a log line, and for a test's detail. */
     const char* backend() const;
 
+    /**
+     * Whether the calling thread is the one turning this reactor.
+     *
+     * True before the loop has ever run, because there is no other thread to
+     * be wrong about yet and a caller registering during setup is the normal
+     * case.  After the first pass it is the thread that made it.
+     *
+     * Exists because a coroutine can now be moved to a worker -- see
+     * sys::on_pool -- and an await made from there cannot register directly.
+     * until_ready asks this and posts instead.
+     */
+    bool on_reactor_thread() const;
+
     void on_error(error_handler h);
 
 private:
@@ -444,6 +458,12 @@ private:
     std::atomic<int>  m_work{0};
 
     bool m_dispatching = false;         // reactor thread only
+
+    // Whose thread this is.  Claimed by the first pass rather than by the
+    // constructor: a reactor is routinely built on one thread and run on
+    // another, and the constructor's thread is not the interesting one.
+    std::atomic<bool>       m_claimed{false};
+    std::thread::id         m_owner;
 
     error_handler m_on_error;
 };

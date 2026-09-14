@@ -29,11 +29,14 @@
 
 #include "certificate.hh"
 
+#include <jlib/sys/await.hh>
 #include <jlib/sys/server.hh>
 #include <jlib/sys/socketstream.hh>
 #include <jlib/sys/sslstream.hh>
 
 #include <atomic>
+#include <set>
+#include <mutex>
 #include <chrono>
 #include <cstdio>
 #include <iostream>
@@ -463,6 +466,112 @@ static void a_server_with_no_handler_refuses_to_be_built() {
     ok("  and so does the async one", async_threw);
 }
 
+namespace {
+    std::mutex g_seen_lock;
+    std::set<std::thread::id> g_worked_on;
+    std::set<std::thread::id> g_read_on;
+}
+
+/**
+ * A handler that reads on the reactor and computes on the pool.
+ *
+ * The shape policy::threads means on an async server: the connection never
+ * occupies a thread, and what the workers are for is the part of a handler
+ * that is computation rather than I/O.
+ */
+static sys::task<void> read_then_work(sys::server::connection& c,
+                                      const sys::peer&) {
+    std::string line;
+
+    if(!co_await line_from(c, line)) co_return;
+
+    {
+        std::lock_guard<std::mutex> g(g_seen_lock);
+
+        g_read_on.insert(std::this_thread::get_id());
+    }
+
+    co_await sys::on_pool(c.pool());
+
+    {
+        // On a worker.  A real handler would parse, decompress, hash.
+        std::lock_guard<std::mutex> g(g_seen_lock);
+
+        g_worked_on.insert(std::this_thread::get_id());
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    co_await sys::on_reactor(c.reactor());
+
+    co_await c.writer().write("done: " + line + "\r\n");
+}
+
+/**
+ * policy::threads on an async server is the pool, and it is reachable.
+ *
+ * Four workers, eight connections.  Every read happens on the reactor's one
+ * thread; the computation happens on more than one worker.  Before this the
+ * queue was built with the right number of threads and nothing could post to
+ * it, so they sat idle for the life of the server.
+ */
+static void the_pool_does_the_computation() {
+    std::cout << "\nthe pool does the computation:\n";
+
+    {
+        std::lock_guard<std::mutex> g(g_seen_lock);
+
+        g_worked_on.clear();
+        g_read_on.clear();
+    }
+
+    sys::server::policy p;
+
+    p.threads = 4;
+    p.max_connections = 32;
+
+    sys::server s(0, sys::server::async_handler(read_then_work), "127.0.0.1",
+                  sys::tls_context(), p);
+
+    std::thread t([&s]{ s.run(); });
+
+    const int N = 8;
+
+    std::vector<std::thread> clients;
+    std::atomic<int> answered(0);
+
+    for(int i = 0; i < N; i++) {
+        clients.push_back(std::thread([&s, &answered]{
+            try {
+                if(say(s.port(), "x") == "done: x") ++answered;
+            }
+            catch(std::exception&) {}
+        }));
+    }
+
+    for(std::size_t i = 0; i < clients.size(); i++) clients[i].join();
+
+    ok("  every connection was served", answered.load() == N,
+       std::to_string(answered.load()) + " of " + std::to_string(N));
+
+    std::lock_guard<std::mutex> g(g_seen_lock);
+
+    // One reactor, one thread, however many connections.
+    ok("  every read happened on one thread", g_read_on.size() == 1,
+       std::to_string(g_read_on.size()) + " thread(s)");
+
+    // And the expensive half did not.  More than one worker, or the pool is
+    // not being used.
+    ok("  the computation ran on the pool", g_worked_on.size() > 1,
+       std::to_string(g_worked_on.size()) + " worker(s)");
+
+    ok("  and not on the reactor's thread",
+       g_worked_on.find(*g_read_on.begin()) == g_worked_on.end());
+
+    s.stop();
+    t.join();
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -477,6 +586,7 @@ int main() {
     it_serves_a_connection();
     many_at_once_with_no_pool();
     the_connection_cap_holds();
+    the_pool_does_the_computation();
 
     if(have_cert) it_serves_a_tls_connection(cert, key);
     else std::cout << "\n  skip  no certificate, so the TLS path is not run\n";

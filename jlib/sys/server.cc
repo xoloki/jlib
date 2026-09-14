@@ -389,7 +389,7 @@ task<void> server::serve_async(int fd, peer from, cancel_token t) {
 
             co_await tls.handshake();
 
-            connection c(m_reactor, tls.reader(), tls.writer(), from, t);
+            connection c(m_reactor, m_jobs, tls.reader(), tls.writer(), from, t);
 
             co_await m_async(c, from);
 
@@ -399,7 +399,7 @@ task<void> server::serve_async(int fd, peer from, cancel_token t) {
             async_fd_reader r(m_reactor, fd, t);
             async_fd_writer w(m_reactor, fd, t);
 
-            connection c(m_reactor, r, w, from, t);
+            connection c(m_reactor, m_jobs, r, w, from, t);
 
             co_await m_async(c, from);
         }

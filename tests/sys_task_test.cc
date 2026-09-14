@@ -34,6 +34,7 @@
 #include <jlib/sys/await.hh>
 #include <jlib/sys/pipe.hh>
 #include <jlib/sys/reactor.hh>
+#include <jlib/sys/sync.hh>
 #include <jlib/sys/task.hh>
 
 #include <unistd.h>
@@ -518,6 +519,190 @@ static void a_synchronous_caller_stays_synchronous() {
        got == "already here", "\"" + got + "\"");
 }
 
+/**
+ * The pool hop: I/O on the reactor's thread, computation on a worker.
+ *
+ * The design #4 settled on and the last piece of it to be built.  A connection
+ * lives on the reactor and never occupies a thread; what the pool is for is
+ * the parts of a handler that are *computation*, so the reactor keeps
+ * dispatching for everyone else meanwhile.
+ */
+static sys::task<void> hops(sys::reactor& r, sys::job_queue& q,
+                            std::thread::id* on_pool_id,
+                            std::thread::id* back_id)
+{
+    co_await sys::on_pool(q);
+
+    *on_pool_id = std::this_thread::get_id();
+
+    co_await sys::on_reactor(r);
+
+    *back_id = std::this_thread::get_id();
+}
+
+static void work_moves_to_a_worker_and_back() {
+    std::cout << "\nwork moves to a worker and back:\n";
+
+    sys::reactor r;
+    sys::job_queue q(2);
+
+    std::thread::id on_pool_id;
+    std::thread::id back_id;
+
+    const std::thread::id here = std::this_thread::get_id();
+
+    sys::task<void> t = hops(r, q, &on_pool_id, &back_id);
+
+    t.start();
+
+    const auto start = std::chrono::steady_clock::now();
+
+    while(!t.done() &&
+          std::chrono::duration<double>(std::chrono::steady_clock::now()
+                                        - start).count() < 5.0) {
+        r.run_one(std::chrono::milliseconds(20));
+    }
+
+    ok("  it completes", t.done());
+
+    ok("  the middle ran on a worker, not here", on_pool_id != here &&
+       on_pool_id != std::thread::id());
+
+    ok("  and it came back to the reactor's thread", back_id == here);
+}
+
+/** With no pool, the hop is a no-op and the handler is simply serial. */
+static void no_pool_means_no_hop() {
+    std::cout << "\nno pool means no hop:\n";
+
+    sys::reactor r;
+    sys::job_queue q(0);
+
+    std::thread::id on_pool_id;
+    std::thread::id back_id;
+
+    const std::thread::id here = std::this_thread::get_id();
+
+    sys::task<void> t = hops(r, q, &on_pool_id, &back_id);
+
+    t.start();
+
+    while(!t.done()) r.run_one(std::chrono::milliseconds(20));
+
+    // job_queue(0) runs a job on the thread that posted it, which is the whole
+    // of its zero mode: one number decides serial or concurrent.
+    ok("  the work stayed on this thread", on_pool_id == here,
+       on_pool_id == here ? "" : "moved");
+
+    ok("  and so did the return", back_id == here);
+}
+
+/**
+ * A read from a worker, which until_ready has to notice and post.
+ *
+ * once() may only be called from the thread turning the reactor, so an await
+ * made from the pool registers by posting -- and resumes on the reactor's
+ * thread, which is the cost the header names.
+ */
+static sys::task<std::string> read_from_the_pool(sys::reactor& r,
+                                                 sys::job_queue& q, int fd,
+                                                 std::thread::id* woke_on)
+{
+    co_await sys::on_pool(q);
+
+    // On a worker now.  This registration cannot be made directly.
+    co_await sys::readable(r, fd);
+
+    *woke_on = std::this_thread::get_id();
+
+    char buf[64];
+
+    const ssize_t n = ::read(fd, buf, sizeof buf);
+
+    co_return n > 0 ? std::string(buf, std::size_t(n)) : std::string();
+}
+
+static void a_read_from_a_worker_posts_its_registration() {
+    std::cout << "\na read from a worker posts its registration:\n";
+
+    sys::reactor r;
+    sys::job_queue q(2);
+    sys::pipe p(false, false);
+
+    std::thread::id woke_on;
+
+    const std::thread::id here = std::this_thread::get_id();
+
+    sys::task<std::string> t = read_from_the_pool(r, q, p.get_reader(),
+                                                 &woke_on);
+
+    t.start();
+
+    // Give the hop time to land on a worker and the post to be made.
+    const auto start = std::chrono::steady_clock::now();
+
+    while(r.count() == 0 &&
+          std::chrono::duration<double>(std::chrono::steady_clock::now()
+                                        - start).count() < 5.0) {
+        r.run_one(std::chrono::milliseconds(10));
+    }
+
+    ok("  the registration was made, from the reactor's thread",
+       r.count() == 1, std::to_string(r.count()));
+
+    feed(p.get_writer(), "from a worker", 13);
+
+    std::string got;
+
+    while(!t.done() &&
+          std::chrono::duration<double>(std::chrono::steady_clock::now()
+                                        - start).count() < 5.0) {
+        r.run_one(std::chrono::milliseconds(20));
+    }
+
+    ok("  the read completes", t.done());
+
+    if(t.done()) got = t.result();
+
+    ok("  with what arrived", got == "from a worker", "\"" + got + "\"");
+
+    // The consequence the header states: an I/O await from a worker brings the
+    // coroutine home, because that is where the readiness callback runs.
+    ok("  and it woke on the reactor's thread, not the worker's",
+       woke_on == here);
+}
+
+/** A task destroyed mid-hop must not be resumed by the job still in flight. */
+static void a_task_destroyed_mid_hop() {
+    std::cout << "\na task destroyed mid-hop:\n";
+
+    sys::reactor r;
+
+    // No pool thread, and nothing draining: a posted job sits there.
+    sys::job_queue q(1);
+
+    std::atomic<bool> ran(false);
+
+    {
+        // Hops to the pool and is destroyed before the reactor ever turns.
+        sys::task<void> t = [](sys::job_queue& q, std::atomic<bool>& ran)
+            -> sys::task<void> {
+            co_await sys::on_pool(q);
+
+            ran = true;
+        }(q, ran);
+
+        t.start();
+    }
+
+    // Whatever the pool was going to do, it must not have resumed a frame that
+    // no longer exists.  Without the weak_ptr this is a use-after-free that
+    // only ASan reliably reports.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    ok("  the pending resume found the frame gone", !ran.load());
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -532,6 +717,10 @@ int main() {
     one_cancel_ends_every_wait_on_the_token();
     a_deadline_ends_a_wait_that_would_not();
     a_deadline_that_is_not_needed();
+    work_moves_to_a_worker_and_back();
+    no_pool_means_no_hop();
+    a_read_from_a_worker_posts_its_registration();
+    a_task_destroyed_mid_hop();
     sleeping();
     a_synchronous_caller_stays_synchronous();
 
