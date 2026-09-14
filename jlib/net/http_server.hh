@@ -404,6 +404,25 @@ private:
 
     bool m_async = false;
 
+    /**
+     * How long an *async* server gives a client to deliver a whole request.
+     *
+     * Taken from policy::io_timeout, and the two are not quite the same thing
+     * -- which is worth saying, because this is the one place the two servers
+     * bound a client differently.
+     *
+     * On the blocking server io_timeout is `SO_RCVTIMEO`: **per operation**,
+     * so a client that sends one octet every twenty-nine seconds resets it
+     * every time and can hold a connection for as long as it likes.  Here it
+     * is a deadline over the *whole* request read, so that client is dropped.
+     * That is the slow-loris, and the async server is the one that refuses it.
+     *
+     * The deadline is cancelled once the request is in hand: a handler that
+     * takes a long time to answer is a different question, and bounding it
+     * here would turn a slow reply into a dropped connection.
+     */
+    double m_request_timeout = 30;
+
 
     options m_options;
     std::vector<entry> m_routes;

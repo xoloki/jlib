@@ -199,6 +199,98 @@ static void a_head_delivered_one_octet_at_a_time() {
     t.join();
 }
 
+/**
+ * A slow-loris is dropped; a merely slow client is not.
+ *
+ * The attack is a client that dribbles a request head forever, never
+ * finishing, holding a connection for nothing.  The section above shows one
+ * octet at a time *works*; this shows it is bounded.
+ *
+ * Note what makes this possible and what would not: the blocking server's
+ * io_timeout is SO_RCVTIMEO, **per operation**, so a client sending an octet
+ * just inside it resets the clock every time and is never dropped.  A deadline
+ * over the whole read is what refuses that, and only the async server has one.
+ */
+static void a_slow_loris_is_dropped() {
+    std::cout << "\na slow loris is dropped:\n";
+
+    sys::server::policy p;
+
+    // Short, so the test is quick.  A real one is policy::io_timeout's 30s.
+    p.io_timeout = 0.4;
+
+    http::server s(http::server::async_t(), 0, "127.0.0.1",
+                   sys::tls_context(), p);
+
+    furnish(s);
+    s.transport().on_error([](const std::exception&, const sys::peer&) {});
+
+    std::thread t([&s]{ s.run(); });
+
+    {
+        sys::socketstream c("127.0.0.1", s.port(), -1, 10.0);
+
+        const std::string head = "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n";
+
+        const auto start = std::chrono::steady_clock::now();
+
+        // One octet every 50ms: the head needs about a second and a half, and
+        // the deadline is four hundred milliseconds.
+        bool broke = false;
+
+        for(std::size_t i = 0; i < head.size(); i++) {
+            c << head[i] << std::flush;
+
+            if(!c) { broke = true; break; }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        std::string status;
+
+        std::getline(c, status);
+
+        const double took =
+            std::chrono::duration<double>(std::chrono::steady_clock::now()
+                                          - start).count();
+
+        // Either the write failed partway or the read came back empty; both
+        // mean the server let go.  What must *not* happen is a 200.
+        ok("  it never gets an answer",
+           status.find("200") == std::string::npos,
+           broke ? "the connection broke mid-request" : "\"" + status + "\"");
+
+        ok("  and is let go at about the deadline", took < 3.0,
+           std::to_string(took) + "s");
+    }
+
+    // The same server, a client that is slow but finishes inside the bound.
+    {
+        sys::socketstream c("127.0.0.1", s.port(), -1, 10.0);
+
+        const std::string head = "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n";
+
+        // Two pieces, 100ms apart: slow, but well within four hundred.
+        c << head.substr(0, 12) << std::flush;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        c << head.substr(12) << std::flush;
+
+        std::string status;
+
+        std::getline(c, status);
+
+        if(!status.empty() && status.back() == '\r') status.pop_back();
+
+        ok("  while a merely slow client is served",
+           status == "HTTP/1.1 200 OK", status);
+    }
+
+    s.stop();
+    t.join();
+}
+
 /** A streaming handler, which is the one kind that has to be written anew. */
 static sys::task<void> ticker(const http::server::Request&,
                               http::server::async_responder& out)
@@ -300,6 +392,7 @@ int main() {
 
     the_two_servers_agree();
     a_head_delivered_one_octet_at_a_time();
+    a_slow_loris_is_dropped();
     a_streaming_handler();
     a_route_for_the_other_kind_of_server();
 
@@ -313,11 +406,14 @@ int main() {
     // transport's TLS branch with a byte-stream handler; nothing here puts
     // HTTP over it.
     //
-    // Nothing about a slow-loris.  The pieces exist -- the connection is a
-    // coroutine with a token, and a handler can arm a deadline -- and
-    // serve_async arms nothing, so a client that connects and dribbles one
-    // octet a minute holds a connection for as long as it likes.  The section
-    // above proves the dribbling *works*, not that it is bounded.
+    // That a handler is bounded.  The deadline covers the *request read* and
+    // is cancelled once it is in hand, so a handler that never returns holds
+    // its connection until the server stops.  Bounding that is a different
+    // decision -- a slow reply is not an attack -- and nothing here makes it.
+    //
+    // Nor that this is a defence.  It refuses one shape of abuse; there is no
+    // connection rate limit, no per-address cap, and no bound on how many
+    // connections one peer may open, and server.hh still says so.
     //
     // And nothing about concurrency here.  sys_async_server_test measures that
     // eight connections are in flight at once; this file has one client at a

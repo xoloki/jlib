@@ -477,7 +477,8 @@ server::server(async_t, unsigned short port, const std::string& host,
                const options& o)
     : m_options(o),
       m_tls(!tls.empty()),
-      m_async(true)
+      m_async(true),
+      m_request_timeout(p.io_timeout)
 {
     m_otherwise = [](const Request&, response& r) {
         r.status(404).type("text/plain").body("not found\n");
@@ -510,6 +511,25 @@ sys::task<void> server::serve_async(sys::server::connection& c,
 {
     async_responder out(c.writer(), m_options.server_name);
 
+    // **The slow-loris bound.**  Every piece of this existed before and
+    // nothing armed it: the connection is a coroutine carrying a token, the
+    // token now ends a wait rather than merely marking it (#212), and a
+    // deadline is a timer that requests one.  This is the line that uses them.
+    //
+    // Over the whole request read, not per operation -- which is the
+    // difference from the blocking server's SO_RCVTIMEO, and is what makes a
+    // client sending one octet every twenty-nine seconds a dropped connection
+    // here and an indefinite one there.
+    sys::reactor::timer_token limit = sys::reactor::timer_token::none;
+
+    if(m_request_timeout > 0) {
+        limit = sys::deadline(
+            c.reactor(),
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::duration<double>(m_request_timeout)),
+            c.token());
+    }
+
     Request q;
 
     // **co_await cannot appear in a catch handler.**  That is a language rule,
@@ -538,6 +558,18 @@ sys::task<void> server::serve_async(sys::server::connection& c,
         // something rather than seeing a bare close, and stop.
         bad = std::string(e.what()) + "\n";
     }
+    catch(sys::cancelled&) {
+        // The deadline, or a shutdown.  Nothing is sent: the client has not
+        // finished asking, and a 408 down a connection whose peer is still
+        // mid-request is as likely to be missed as read.  The connection
+        // closes when this returns.
+        co_return;
+    }
+
+    // In hand.  A handler that takes a long time to answer is a different
+    // question, and leaving this armed would turn a slow reply into a dropped
+    // connection.
+    if(limit != sys::reactor::timer_token::none) c.reactor().cancel(limit);
 
     if(!bad.empty()) {
         response r;
