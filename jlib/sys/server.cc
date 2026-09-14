@@ -32,7 +32,6 @@
 #include <sstream>
 #include <thread>
 
-#include <poll.h>
 #include <unistd.h>
 
 namespace jlib {
@@ -81,10 +80,24 @@ server::server(listener l, handler h, tls_context tls, const policy& p)
 {
     if(!m_handler) throw exception("a server with no handler");
 
-    // So the accept never blocks: serve_one polls the listening descriptor and
-    // the wake pipe together, and a client that sends an RST between the poll
-    // and the accept would otherwise leave it waiting for the next one.
+    // So the accept never blocks: the reactor reports the listening descriptor
+    // ready, and a client that sends an RST between the readiness and the
+    // accept would otherwise leave it waiting for the next one.
     m_listener.set_blocking(false);
+
+    // Registered once, here, rather than a two-element pollfd array rebuilt on
+    // every serve_one.  The reactor's own wake pipe is the second descriptor
+    // now, and it registers that itself.
+    m_listen = m_reactor.add(
+        m_listener.get_socket(), reactor::READ,
+        [this](reactor::token, int, reactor::event_type) {
+            // Caught rather than thrown: a reactor callback that throws goes to
+            // on_error and the pass carries on, where serve_one's caller has
+            // always been told about a failed accept.  Parked, and rethrown
+            // once the pass is over.
+            try { m_accepted = accept_and_post(); }
+            catch(...) { m_accept_error = std::current_exception(); }
+        });
 }
 
 server::server(unsigned short port, handler h, const std::string& host,
@@ -136,11 +149,9 @@ void server::stop(bool drain) {
     // wait, whose predicate ORs in the queue's own exit flag.
     m_jobs.stop(drain);
 
-    // And the third: a thread in poll(2).  A byte down the pipe rather than
-    // closing the listening descriptor, which is undefined while another thread
-    // polls it and on macOS does not wake it.
-    try { m_wake.write_int(1); }
-    catch(std::exception&) { /* full is fine; one byte is all it takes */ }
+    // And the third: a thread waiting in the reactor.  It owns the wake pipe
+    // now, and the byte-down-a-pipe this used to write by hand went with it.
+    m_reactor.stop();
 }
 
 void server::join() {
@@ -208,74 +219,7 @@ void server::serve(int fd, const peer& from) {
     }
 }
 
-bool server::serve_one(double timeout) {
-    if(m_stop.load()) return false;
-
-    // Admission control before the poll, so an overflow connection waits in the
-    // kernel's listen backlog rather than here, accepted and holding a
-    // descriptor.  The queue holds the depth and the lock; what counts as full
-    // is this caller's opinion, and this is the one line that has one.
-    const std::size_t room = cap();
-    const auto full = [room](std::size_t depth) { return depth < room; };
-
-    // One budget across both waits, not one each.  The header says the timeout
-    // covers admission control as well as the accept, and without a deadline
-    // serve_one(10) could spend ten seconds waiting for room and ten more in
-    // poll(2) -- twenty, for a caller who asked for ten.
-    const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(timeout));
-
-    const bool have_room = timeout > 0
-        ? m_jobs.wait(full, std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                std::chrono::duration<double>(timeout)))
-        : m_jobs.wait(full);
-
-    if(!have_room) return false;
-
-    struct pollfd fds[2];
-
-    fds[0].fd = m_listener.get_socket();
-    fds[0].events = POLLIN;
-    fds[0].revents = 0;
-
-    fds[1].fd = m_wake.get_reader();
-    fds[1].events = POLLIN;
-    fds[1].revents = 0;
-
-    int ms = -1;
-
-    if(timeout > 0) {
-        const auto left = deadline - std::chrono::steady_clock::now();
-
-        if(left <= std::chrono::steady_clock::duration::zero()) return false;
-
-        ms = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(left).count());
-    }
-
-    int r;
-
-    while((r = ::poll(fds, 2, ms)) < 0 && errno == EINTR)
-        ;
-
-    if(r < 0)
-        throw exception(std::string("error in poll(): ") + std::strerror(errno));
-
-    if(r == 0) return false;
-
-    if(fds[1].revents & POLLIN) {
-        // Drain it; the pipe's read end is non-blocking.
-        try {
-            for(;;) m_wake.read_int();
-        }
-        catch(std::exception&) {}
-
-        return false;
-    }
-
-    if(!(fds[0].revents & POLLIN)) return false;
-
+bool server::accept_and_post() {
     peer from;
     int fd;
 
@@ -285,7 +229,12 @@ bool server::serve_one(double timeout) {
     catch(std::exception& e) {
         // Out of descriptors is not a reason to stop serving, and it is a
         // condition that clears.  Without the pause this spins at full tilt,
-        // because the connection stays queued and the poll stays readable.
+        // because the connection stays queued and the listener stays readable.
+        //
+        // The reactor makes the better answer easy -- modify(m_listen, NONE)
+        // and an after() to re-arm -- but that only works when the accept loop
+        // is reactor-driven rather than call-driven, and serve_one(timeout) is
+        // call-driven by contract.  Left as it was; named as the follow-up.
         if(errno == EMFILE || errno == ENFILE) {
             m_on_error(e, from);
 
@@ -317,6 +266,63 @@ bool server::serve_one(double timeout) {
     m_jobs.post([this, held, from] { serve(held->release(), from); });
 
     return true;
+}
+
+bool server::serve_one(double timeout) {
+    if(m_stop.load()) return false;
+
+    // Admission control before the wait, so an overflow connection waits in the
+    // kernel's listen backlog rather than here, accepted and holding a
+    // descriptor.  The queue holds the depth and the lock; what counts as full
+    // is this caller's opinion, and this is the one line that has one.
+    const std::size_t room = cap();
+    const auto full = [room](std::size_t depth) { return depth < room; };
+
+    // One budget across both waits, not one each.  The header says the timeout
+    // covers admission control as well as the accept, and without a deadline
+    // serve_one(10) could spend ten seconds waiting for room and ten more in
+    // the reactor -- twenty, for a caller who asked for ten.
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(timeout));
+
+    const bool have_room = timeout > 0
+        ? m_jobs.wait(full, std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::duration<double>(timeout)))
+        : m_jobs.wait(full);
+
+    if(!have_room) return false;
+
+    // The two conventions meet here and nowhere else: serve_one spells
+    // "forever" as 0, as listener::accept and basic_socketbuf's timeouts do,
+    // and the reactor spells it negative so that 0 can mean "drain what is
+    // ready and return".  reactor.hh says why.
+    std::chrono::nanoseconds wait = reactor::forever;
+
+    if(timeout > 0) {
+        const auto left = deadline - std::chrono::steady_clock::now();
+
+        if(left <= std::chrono::steady_clock::duration::zero()) return false;
+
+        wait = std::chrono::duration_cast<std::chrono::nanoseconds>(left);
+    }
+
+    m_accepted = false;
+
+    m_reactor.run_one(wait);
+
+    // Rethrown here rather than from the callback, so that an accept failure
+    // still reaches serve_one's caller as it always has.  Inside the reactor
+    // it would have gone to on_error and the pass would have carried on.
+    if(m_accept_error) {
+        const std::exception_ptr e = m_accept_error;
+
+        m_accept_error = nullptr;
+
+        std::rethrow_exception(e);
+    }
+
+    return m_accepted;
 }
 
 void server::run() {

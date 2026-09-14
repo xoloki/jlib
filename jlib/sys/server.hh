@@ -22,6 +22,7 @@
 #define JLIB_SYS_SERVER_HH
 
 #include <jlib/sys/listener.hh>
+#include <jlib/sys/reactor.hh>
 #include <jlib/sys/pipe.hh>
 #include <jlib/sys/socketstream.hh>
 #include <jlib/sys/sync.hh>
@@ -88,11 +89,20 @@ struct server_policy {
  *
  * ## Deliberately small, and deliberately blocking
  *
- * It accepts, optionally secures, and dispatches.  There is no event loop, no
- * connection reuse, no protocol.  An event-driven design belongs with the async
- * I/O work, and the thing that has to survive that change is the *handler
- * contract* -- given a connection, do something with it -- which is why run()
- * is a thin loop over serve_one() and not the other way round.
+ * It accepts, optionally secures, and dispatches.  There is no connection
+ * reuse and no protocol.
+ *
+ * There *is* an event loop now -- serve_one() waits in a sys::reactor rather
+ * than in a poll(2) of its own -- and that changed nothing else.  **This is
+ * still a blocking server**: a handler is handed a stream and blocks on it,
+ * one connection per job, exactly as before.  What the reactor bought here is
+ * one multiplexer instead of a pollfd array rebuilt per call, and a shutdown
+ * that wakes one thing rather than three.
+ *
+ * The thing that had to survive that change is the *handler contract* -- given
+ * a connection, do something with it -- which is why run() is a thin loop over
+ * serve_one() and not the other way round.  It did: sys_server_test passes
+ * unaltered.
  *
  * It is a server for a loopback OAuth2 redirect and a test harness.  **It is
  * not hardened for a public port**: nothing here defends against a slow-loris,
@@ -293,15 +303,36 @@ private:
     void serve(int fd, const peer& from);
     std::size_t cap() const;
 
+    /** One accept and one post.  What the reactor calls the listener ready for. */
+    bool accept_and_post();
+
     listener      m_listener;
     handler       m_handler;
     error_handler m_on_error;
     tls_context   m_tls;
     policy        m_policy;
 
-    // Non-blocking at both ends, so a stop() called a thousand times cannot
-    // block once the pipe fills.
-    pipe m_wake{false, false};
+    // Declared after m_listener, so it is destroyed *before* it: the
+    // registration below names a descriptor the listener owns.
+    //
+    // The wake pipe used to live here, alongside a two-element pollfd array
+    // rebuilt on every call.  Both moved into the reactor, and with them the
+    // note about why a byte down a pipe beats closing the listening descriptor
+    // -- which is undefined while another thread polls it and on macOS does not
+    // wake it.
+    reactor        m_reactor;
+    reactor::token m_listen = reactor::token::none;
+
+    // This pass's answer, written by the callback and read by serve_one.  A
+    // plain bool because only the reactor's thread touches it, which is the
+    // thread that called serve_one.
+    bool m_accepted = false;
+
+    // What the callback threw, carried back out.  A reactor callback's
+    // exception goes to on_error and the pass continues, but serve_one has
+    // always let an accept failure propagate to its caller -- so it is caught,
+    // parked here, and rethrown once the pass is over.
+    std::exception_ptr m_accept_error;
 
     std::atomic<bool> m_stop{false};
 
