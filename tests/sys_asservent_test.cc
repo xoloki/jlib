@@ -26,6 +26,8 @@
 // it takes to prove which thread is running.
 
 #include <jlib/sys/ASServent.hh>
+#include <jlib/sys/pipe.hh>
+#include <jlib/sys/reactor.hh>
 
 #include <sys/resource.h>
 
@@ -72,6 +74,52 @@ struct job {
 
 struct answer {
     int n = 0;
+};
+
+/**
+ * Answers every request, so there is something to announce down the response
+ * pipe.  `counter` deliberately does not: its subject is the request half.
+ */
+class echoer : public sys::ASServent<job, answer> {
+public:
+    // Or the two overloads below hide the base's no-argument handle(), which
+    // is the one an event loop is told to call.  ASMailBox needed the same
+    // line and did not have it; see the note there.
+    using sys::ASServent<job, answer>::handle;
+
+    virtual ~echoer() { stop(); }
+
+    virtual void handle(const job& j) {
+        answer a;
+
+        a.n = j.n;
+
+        push(a);
+    }
+
+    virtual void handle(const answer& a) {
+        std::lock_guard<std::mutex> lock(m_lock);
+
+        m_answers.push_back(a.n);
+        m_on.insert(std::this_thread::get_id());
+    }
+
+    std::vector<int> answers() const {
+        std::lock_guard<std::mutex> lock(m_lock);
+
+        return m_answers;
+    }
+
+    std::set<std::thread::id> answered_on() const {
+        std::lock_guard<std::mutex> lock(m_lock);
+
+        return m_on;
+    }
+
+private:
+    mutable std::mutex m_lock;
+    std::vector<int> m_answers;
+    std::set<std::thread::id> m_on;
 };
 
 /**
@@ -309,6 +357,103 @@ static void stopping_twice_is_allowed() {
        std::to_string(c.handled()));
 }
 
+/**
+ * One thread waiting on a request and a descriptor at once.
+ *
+ * This is what #4 was for, and until the reactor existed jlib could not do it.
+ * get_response_reader() has been a published contract since 2002 -- the header
+ * explains at length that the response half is a pipe *precisely* so a foreign
+ * event loop can select on it -- and **nothing in this tree has ever called
+ * it**. The GUI that consumed it lives outside the repo, so the contract has
+ * been carried for twenty-four years with nothing verifying it.
+ *
+ * Pinned here without changing a line of ASServent.hh: the reactor is the
+ * event loop the header always assumed somebody else would bring.
+ */
+static void one_loop_waits_on_both() {
+    std::cout << "\none loop waits on a response and a descriptor:\n";
+
+    echoer e;
+    sys::reactor r;
+    sys::pipe other(false, false);
+
+    // reset(), not start().  start() *is* the worker loop and blocks forever;
+    // reset() is what puts it on a thread.  The header says "Blocks." and the
+    // name does not, which cost a hang to find out.
+    e.reset();
+
+    int answered = 0;
+    int elsewhere = 0;
+
+    std::set<std::thread::id> dispatched_on;
+
+    r.add(e.get_response_reader(), sys::reactor::READ,
+          [&](sys::reactor::token, int, sys::reactor::event_type) {
+              dispatched_on.insert(std::this_thread::get_id());
+
+              // Reads the byte and drains the response queue, which is exactly
+              // what the header tells an event loop to do here.
+              e.handle();
+
+              answered++;
+          });
+
+    r.add(other.get_reader(), sys::reactor::READ,
+          [&](sys::reactor::token, int, sys::reactor::event_type) {
+              dispatched_on.insert(std::this_thread::get_id());
+
+              other.read_int();
+
+              elsewhere++;
+          });
+
+    ok("  both sources are registered on one reactor", r.count() == 2,
+       std::to_string(r.count()));
+
+    job j;
+
+    j.n = 7;
+
+    e.push(j);
+
+    other.write_int(1);
+
+    // One thread, both sources.  Before this there was no way to write this
+    // loop: the worker's answer arrives on a descriptor and a request would
+    // have arrived on a condition variable, and nothing could wait for both.
+    const auto start = std::chrono::steady_clock::now();
+
+    while((answered == 0 || elsewhere == 0) && seconds_since(start) < 5.0)
+        r.run_one(std::chrono::milliseconds(100));
+
+    ok("  the worker's answer arrived through the reactor", answered > 0,
+       std::to_string(answered));
+
+    ok("  and so did the unrelated descriptor", elsewhere > 0,
+       std::to_string(elsewhere));
+
+    ok("  carrying the value the worker was given",
+       e.answers().size() == 1 && e.answers()[0] == 7,
+       std::to_string(e.answers().size()) + " answer(s)");
+
+    // The point.  Not "it worked" but "it worked on one thread" -- two
+    // sources, one waiter, which is the thing four wakeup mechanisms could not
+    // do between them.
+    ok("  both dispatched on the same thread", dispatched_on.size() == 1,
+       std::to_string(dispatched_on.size()) + " thread(s)");
+
+    ok("  which is the thread that called run_one",
+       dispatched_on.count(std::this_thread::get_id()) == 1);
+
+    // The response was handled on the caller's thread and not the worker's,
+    // which is the whole reason the response half is a pipe.
+    ok("  and the response was handled off the worker thread",
+       e.answered_on().size() == 1 &&
+       e.answered_on().count(std::this_thread::get_id()) == 1);
+
+    e.stop();
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -316,6 +461,7 @@ int main() {
     reset_retires_the_worker_it_replaces();
     the_destructor_waits_for_the_worker();
     an_idle_worker_costs_nothing();
+    one_loop_waits_on_both();
     stopping_twice_is_allowed();
 
     // What a green run does not establish.
@@ -341,9 +487,20 @@ int main() {
     // still have its worker inside handle() when the derived part is gone.
     // Every subclass here and in net/ does stop(); nothing enforces it.
     //
-    // Not the response half, and it is now the interesting one.  push(Response)
-    // still writes a byte to the response pipe and still *swallows*
-    // would_block on a full one -- the same fault the request side just shed.
+    // The response *reader* is pinned now -- one_loop_waits_on_both registers
+    // get_response_reader() on a sys::reactor beside an unrelated descriptor
+    // and shows one thread serving both, which is what that contract was
+    // always for and what nothing in this tree had ever done.  Writing it
+    // found that the contract did not compile: any subclass declaring
+    // handle(Request) and handle(Response) hides the base's no-argument
+    // handle(), which is the one an event loop is told to call, and ASMailBox
+    // had no using-declaration.  A GUI holding an ASImapBox& could not make
+    // the documented call.
+    //
+    // Not the response half's *framing*, which is still the interesting one.
+    // push(Response) still writes a byte to the response pipe and still
+    // *swallows* would_block on a full one -- the same fault the request side
+    // shed earlier.
     // It matters more here, because that byte is what wakes an event loop
     // watching get_response_reader(): a dropped write means a response sits in
     // the queue with nothing to announce it until the next push happens to
