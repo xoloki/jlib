@@ -27,6 +27,8 @@
  * protocol and say nothing about it.
  */
 
+#include "feed.hh"
+
 #include <jlib/net/imap_response.hh>
 #include <jlib/sys/async_reader.hh>
 #include <jlib/sys/await.hh>
@@ -99,7 +101,7 @@ static outcome async_read(const std::string& in, std::size_t chunk) {
 
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
-            ::write(fds[1], part.data(), part.size());
+            feed(fds[1], part);
         }
 
         ::close(fds[1]);
@@ -192,7 +194,7 @@ static void the_parser_is_untouched() {
 
     const std::string wire = "* 1 FETCH (BODY[] {5}\r\nhello)\r\n";
 
-    ::write(fds[1], wire.data(), wire.size());
+    feed(fds[1], wire);
     ::close(fds[1]);
 
     sys::async_fd_reader in(r, fds[0]);

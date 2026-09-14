@@ -29,6 +29,8 @@
  * long it took.
  */
 
+#include "feed.hh"
+
 #include <jlib/sys/await.hh>
 #include <jlib/sys/pipe.hh>
 #include <jlib/sys/reactor.hh>
@@ -198,7 +200,7 @@ static void a_task_suspends_on_a_descriptor() {
 
     const char* msg = "hello";
 
-    ::write(p.get_writer(), msg, 5);
+    feed(p.get_writer(), msg, 5);
 
     const std::string got = sys::run_until_complete(r, t);
 
@@ -243,7 +245,7 @@ static void a_task_destroyed_while_parked_unregisters() {
 
     // Would resume a freed frame if the registration had survived.  Without
     // a sanitizer this may pass either way, which the closing note says.
-    ::write(p.get_writer(), "x", 1);
+    feed(p.get_writer(), "x", 1);
 
     r.run_one(std::chrono::milliseconds(100));
 
@@ -271,7 +273,7 @@ static void cancellation() {
         // The registration is still armed, so something has to wake the pass.
         // A real caller cancels from a timer or a callback on this thread; a
         // write is the test's way of doing the same.
-        ::write(p.get_writer(), "x", 1);
+        feed(p.get_writer(), "x", 1);
 
         bool threw = false;
 
@@ -350,7 +352,7 @@ static void a_synchronous_caller_stays_synchronous() {
     sys::pipe p(false, false);
     sys::cancel_token none;
 
-    ::write(p.get_writer(), "already here", 12);
+    feed(p.get_writer(), "already here", 12);
 
     // This function is not a coroutine and does not become one.  That is the
     // whole property: Imap4 and jlib-mail can keep their blocking shape.

@@ -36,6 +36,8 @@
  * does not work.
  */
 
+#include "feed.hh"
+
 #include <jlib/sys/reactor.hh>
 #include <jlib/sys/pipe.hh>
 
@@ -576,7 +578,7 @@ static void hangup_is_not_end_of_data() {
 
     const char* payload = "abc";
 
-    ::write(fds[1], payload, 3);
+    feed(fds[1], payload, 3);
     ::close(fds[1]);
 
     sys::reactor::event_type saw = sys::reactor::NONE;
@@ -615,8 +617,11 @@ static void a_throwing_callback_does_not_stop_the_loop() {
           [&r, &after](sys::reactor::token t, int fd, sys::reactor::event_type) {
               r.remove(t);
 
-              int drain;
-              ::read(fd, &drain, sizeof drain);
+              int token;
+
+              // Consumed so the level-triggered registration stops firing;
+              // what it was does not matter.
+              if(::read(fd, &token, sizeof token) < 0) { /* drained */ }
 
               r.post([&after]{ after++; });
 
@@ -649,8 +654,11 @@ static void nesting_throws() {
           [&](sys::reactor::token t, int fd, sys::reactor::event_type) {
               r.remove(t);
 
-              int drain;
-              ::read(fd, &drain, sizeof drain);
+              int token;
+
+              // Consumed so the level-triggered registration stops firing;
+              // what it was does not matter.
+              if(::read(fd, &token, sizeof token) < 0) { /* drained */ }
 
               try { r.run_one(SHORT); }
               catch(sys::reactor::exception&) { threw = true; }

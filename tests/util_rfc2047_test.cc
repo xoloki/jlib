@@ -233,7 +233,7 @@ static void the_length_limit() {
         rfc2047::encode("\xc3\xa9\xc3\xa9", std::string(80, 'x'));
 
     ok("an absurd charset name does not produce an empty word",
-       wide.find("?B??=") == std::string::npos, wide.substr(0, 40));
+       wide.find("?B?\?=") == std::string::npos, wide.substr(0, 40));
 }
 
 static void through_headers() {
