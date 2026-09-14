@@ -301,28 +301,168 @@ static void a_handler_can_set_its_own_deadline() {
     t.join();
 }
 
+/**
+ * TLS on the async path.
+ *
+ * server::serve_async has had the branch since it was written and nothing had
+ * ever run it: sys_async_tls_test drives async_tls from the *client* side, so
+ * SSL_accept through the reactor was code with no test -- which is true until
+ * somebody runs it.
+ *
+ * The client is the blocking tlsstream, deliberately.  Two async ends talking
+ * only to each other would pass a shared misunderstanding.
+ */
+static void it_serves_a_tls_connection(const std::string& cert,
+                                       const std::string& key)
+{
+    std::cout << "\nit serves a TLS connection:\n";
+
+    sys::tls_context ctx = sys::tls_context::server(cert, key);
+
+    sys::server s(0, sys::server::async_handler(echo), "127.0.0.1", ctx);
+
+    std::thread t([&s]{ s.run(); });
+
+    std::string got;
+    std::string threw;
+
+    try {
+        sys::tlsstream c("localhost", s.port(), false, 10.0, 10.0);
+
+        c << "over tls\r\n" << std::flush;
+
+        std::getline(c, got);
+
+        if(!got.empty() && got.back() == '\r') got.pop_back();
+    }
+    catch(std::exception& e) { threw = e.what(); }
+
+    ok("  the handshake was answered through the reactor", threw.empty(),
+       threw);
+
+    ok("  and the exchange went through", got == "echo: over tls", got);
+
+    // A second, so the context is proved reusable across connections on this
+    // path as sys_tls_server_test proves it on the blocking one.
+    try {
+        sys::tlsstream c("localhost", s.port(), false, 10.0, 10.0);
+
+        c << "again\r\n" << std::flush;
+
+        std::string second;
+
+        std::getline(c, second);
+
+        if(!second.empty() && second.back() == '\r') second.pop_back();
+
+        ok("  and so did a second connection", second == "echo: again",
+           second);
+    }
+    catch(std::exception& e) { ok("  and so did a second connection", false,
+                                  e.what()); }
+
+    s.stop();
+    t.join();
+}
+
+/**
+ * The connection cap, and the two lines that enforce it.
+ *
+ * Reaching it disables the listener's registration -- modify(m_listen, NONE)
+ * -- so the overflow waits in the kernel's listen backlog rather than being
+ * accepted and refused.  reap() re-arms it when a slot frees.  Neither line
+ * had ever run: the previous test used eight connections against a cap of
+ * sixty-four.
+ */
+static void the_connection_cap_holds() {
+    std::cout << "\nthe connection cap holds:\n";
+
+    g_live = 0;
+    g_most = 0;
+    g_release = false;
+
+    sys::server::policy p;
+
+    p.threads = 0;
+    p.max_connections = 2;
+
+    sys::server s(0, sys::server::async_handler(hold), "127.0.0.1",
+                  sys::tls_context(), p);
+
+    std::thread t([&s]{ s.run(); });
+
+    const int N = 6;
+
+    std::vector<std::thread> clients;
+    std::atomic<int> answered(0);
+
+    for(int i = 0; i < N; i++) {
+        clients.push_back(std::thread([&s, &answered]{
+            try {
+                if(say(s.port(), "waiting") == "released") ++answered;
+            }
+            catch(std::exception&) {}
+        }));
+    }
+
+    // Long enough that every client has connected and any that were going to
+    // be accepted have been.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    ok("  no more than the cap are in flight", g_most.load() <= 2,
+       std::to_string(g_most.load()) + " of a cap of 2");
+
+    ok("  and the cap was actually reached", g_most.load() == 2,
+       std::to_string(g_most.load()));
+
+    // Letting them go frees slots, which reap() notices and which re-arms the
+    // listener -- so the four still in the backlog are accepted.
+    g_release = true;
+
+    for(std::size_t i = 0; i < clients.size(); i++) clients[i].join();
+
+    ok("  every connection is served once slots come free",
+       answered.load() == N,
+       std::to_string(answered.load()) + " of " + std::to_string(N));
+
+    s.stop();
+    t.join();
+}
+
 int main() {
     std::cout << std::unitbuf;
 
+    const std::string cert = "async_server_cert.pem";
+    const std::string key = "async_server_key.pem";
+
+    const bool have_cert = make_cert(cert, key);
+
+    if(have_cert) ::setenv("SSL_CERT_FILE", cert.c_str(), 1);
+
     it_serves_a_connection();
     many_at_once_with_no_pool();
+    the_connection_cap_holds();
+
+    if(have_cert) it_serves_a_tls_connection(cert, key);
+    else std::cout << "\n  skip  no certificate, so the TLS path is not run\n";
     stopping_ends_a_parked_connection();
     a_handler_can_set_its_own_deadline();
 
     // What a green run does not establish.
     //
-    // Nothing about TLS on this path.  server::serve_async has the branch and
-    // awaits the handshake, and no test here exercises it -- sys_async_tls_test
-    // drives async_tls directly, from the client side, which is not the same.
+    // Not a real peer.  Every client here is jlib, and the TLS one uses a
+    // certificate this test generated, as sys_tls_server_test says of itself.
     //
-    // Nothing about max_connections actually holding.  The cap disables the
-    // listener's registration and re-arms it in reap(), and this test never
-    // reaches it: eight connections against a cap of sixty-four.
+    // Not a client that goes away mid-handshake, which is the case
+    // serve_async's TLS branch would have to unwind from.  The handshake is
+    // awaited and nothing here abandons one.
     //
     // And nothing about what a *blocking* server would have done differently
     // here beyond the note in the concurrency section.  The claim that eight
     // connections could not be in flight at once with threads == 0 rests on
     // sys_server_test's own assertion, not on anything measured here.
+    if(have_cert) { std::remove(cert.c_str()); std::remove(key.c_str()); }
+
     std::cout << "\n" << (failures ? "FAILED" : "PASSED") << ": " << failures
               << " failure(s)\n";
 
