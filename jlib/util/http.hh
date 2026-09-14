@@ -239,6 +239,10 @@ Request parse_request_head(std::string_view head);
 /** read_head() then parse_request_head(). */
 Request read_request_head(std::istream& is, std::size_t cap = 8192);
 
+/** The same, suspending.  Additive; see read_head. */
+sys::task<Request> read_request_head(sys::async_reader& in,
+                                     std::size_t cap = 8192);
+
 /**
  * Read a body whose framing is already known.
  *
@@ -321,6 +325,11 @@ Response parse_head(std::string_view head, bool head_request = false);
 /** read_head() then parse_head(). */
 Response read_response_head(std::istream& is, bool head_request = false,
                             std::size_t cap = 8192);
+
+/** The same, suspending.  Additive; see read_head. */
+sys::task<Response> read_response_head(sys::async_reader& in,
+                                       bool head_request = false,
+                                       std::size_t cap = 8192);
 
 /**
  * Read a body, however the head says it is delimited.

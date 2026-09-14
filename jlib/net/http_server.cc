@@ -19,6 +19,8 @@
 
 #include <jlib/net/http_server.hh>
 
+#include <exception>
+
 #include <jlib/util/URL.hh>
 #include <jlib/util/util.hh>
 
@@ -263,6 +265,58 @@ void server::responder::write(const std::string& piece) {
 
 bool server::responder::live() const { return m_s && bool(*m_s); }
 
+/**
+ * The request target as a path, or a reason it is not one.
+ *
+ * Shared by the blocking and the suspending serve, because a difference
+ * between them here is a *routing* difference -- one server reaching a handler
+ * the other refuses -- and that is the last place two implementations should
+ * be allowed to drift.
+ *
+ * @return whether it decoded; `why` carries the 400's body if not
+ */
+bool server::path_of(const std::string& target, std::string& path,
+                     std::string& why)
+{
+    // An encoded separator is refused rather than decoded: decoding one would
+    // change how many segments the path has, which is the shape of a traversal
+    // bug.  Everything else is decoded, because RFC 3986 2.1 makes "%65" and
+    // "e" the same character.
+    const std::string lowered = util::http::fold(target);
+
+    if(lowered.find("%2f") != std::string::npos ||
+       lowered.find("%5c") != std::string::npos) {
+        why = "an encoded path separator in the request target\n";
+
+        return false;
+    }
+
+    try {
+        util::URL u;
+
+        u.parse_reference(target);
+
+        path = util::uri::decode(u.get_path());
+    }
+    catch(std::exception&) {
+        why = "not a request target\n";
+
+        return false;
+    }
+
+    return true;
+}
+
+const server::entry* server::route_for(const std::string& method,
+                                       const std::string& path) const
+{
+    for(const entry& e : m_routes) {
+        if(e.method == method && e.path == path) return &e;
+    }
+
+    return 0;
+}
+
 void server::serve(sys::socketstream& s, const sys::peer&) {
     response r;
 
@@ -294,54 +348,35 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
     // The path, without the query.  parse_reference is what learned to read one
     // of these two branches ago.
     std::string path;
+    std::string why;
 
-    {
-        const std::string& target = q.target();
+    if(!path_of(q.target(), path, why)) {
+        r.status(400).type("text/plain").body(why);
 
-        // An encoded separator is refused rather than decoded: decoding one
-        // would change how many segments the path has, which is the shape of a
-        // traversal bug.  Everything else is decoded, because RFC 3986 2.1
-        // makes "%65" and "e" the same character.
-        const std::string lowered = util::http::fold(target);
+        s << r.str(m_options.server_name) << std::flush;
 
-        if(lowered.find("%2f") != std::string::npos ||
-           lowered.find("%5c") != std::string::npos) {
-            r.status(400).type("text/plain")
-             .body("an encoded path separator in the request target\n");
-
-            s << r.str(m_options.server_name) << std::flush;
-
-            return;
-        }
-
-        try {
-            util::URL u;
-
-            u.parse_reference(target);
-
-            path = util::uri::decode(u.get_path());
-        }
-        catch(std::exception&) {
-            r.status(400).type("text/plain").body("not a request target\n");
-
-            s << r.str(m_options.server_name) << std::flush;
-
-            return;
-        }
+        return;
     }
 
-    const entry* chosen = 0;
-
-    for(const entry& e : m_routes) {
-        if(e.method == q.method() && e.path == path) {
-            chosen = &e;
-            break;
-        }
-    }
+    const entry* chosen = route_for(q.method(), path);
 
     // A streaming route takes a different path entirely, because the promise
     // the buffered one makes -- that a handler which throws is still answered
     // -- cannot be kept once bytes have gone.
+    // Registered for an async server, reached on a blocking one.  Refused
+    // where it is reached, so one route table can be built for both modes.
+    if(chosen && chosen->async_stream) {
+        response oops;
+
+        oops.status(500).type("text/plain")
+            .body("that route has a suspending handler and this server is "
+                  "blocking\n");
+
+        s << oops.str(m_options.server_name) << std::flush;
+
+        return;
+    }
+
     if(chosen && chosen->stream) {
         responder out(s, m_options.server_name);
 
@@ -405,6 +440,213 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
     }
 
     s << answer << std::flush;
+}
+
+
+// ---------------------------------------------------------- the async server
+
+sys::task<void> server::async_responder::send(const response& r) {
+    if(m_started)
+        throw error("a responder sent a whole response after it had begun "
+                    "streaming one");
+
+    m_started = true;
+
+    co_await m_writer->write(r.str(m_name));
+}
+
+sys::task<void> server::async_responder::begin(const response& head) {
+    if(m_started) throw error("a responder began a response twice");
+
+    m_started = true;
+
+    // head() omits Content-Length, so the body is delimited by the close --
+    // which this server sends on every response anyway.
+    co_await m_writer->write(head.head(m_name));
+}
+
+sys::task<void> server::async_responder::write(const std::string& piece) {
+    if(!m_started)
+        throw error("a responder wrote a body piece before begin()");
+
+    co_await m_writer->write(piece);
+}
+
+server::server(async_t, unsigned short port, const std::string& host,
+               const sys::tls_context& tls, const sys::server::policy& p,
+               const options& o)
+    : m_options(o),
+      m_tls(!tls.empty()),
+      m_async(true)
+{
+    m_otherwise = [](const Request&, response& r) {
+        r.status(404).type("text/plain").body("not found\n");
+    };
+
+    m_transport.reset(new sys::server(
+        sys::listener(port, host),
+        sys::server::async_handler(
+            [this](sys::server::connection& c, const sys::peer& from)
+                -> sys::task<void> {
+                co_await serve_async(c, from);
+            }),
+        tls, p));
+}
+
+void server::route(const std::string& method, const std::string& path,
+                   async_stream_handler h)
+{
+    entry e;
+
+    e.method = method;
+    e.path = path;
+    e.async_stream = std::move(h);
+
+    m_routes.push_back(std::move(e));
+}
+
+sys::task<void> server::serve_async(sys::server::connection& c,
+                                    const sys::peer&)
+{
+    async_responder out(c.writer(), m_options.server_name);
+
+    Request q;
+
+    // **co_await cannot appear in a catch handler.**  That is a language rule,
+    // not a limitation of anything here, and it shapes every error path below:
+    // the failure is recorded, the catch ends, and the answer is written
+    // afterwards.  The blocking serve() writes from inside its catch, which
+    // reads more directly and is not available here.
+    std::string bad;
+
+    try {
+        q = co_await util::http::read_request_head(c.reader(),
+                                                   m_options.max_head);
+
+        // RFC 9110 10.1.1.  curl sends this for any POST over about a
+        // kilobyte and then waits for it; a server that ignores it makes
+        // every such client wait out its own timeout before sending the body.
+        if(util::http::fold(q.fields().get("Expect")) == "100-continue")
+            co_await c.writer().write("HTTP/1.1 100 Continue\r\n\r\n");
+
+        q.set_body(co_await util::http::read_body(c.reader(), q.body_framing(),
+                                                  q.content_length(),
+                                                  m_options.max_body));
+    }
+    catch(util::http::error& e) {
+        // A message this cannot read at all.  Answer, so a client learns
+        // something rather than seeing a bare close, and stop.
+        bad = std::string(e.what()) + "\n";
+    }
+
+    if(!bad.empty()) {
+        response r;
+
+        r.status(400).type("text/plain").body(bad);
+
+        co_await out.send(r);
+
+        co_return;
+    }
+
+    std::string path;
+
+    if(!path_of(q.target(), path, bad)) {
+        response r;
+
+        r.status(400).type("text/plain").body(bad);
+
+        co_await out.send(r);
+
+        co_return;
+    }
+
+    const entry* chosen = route_for(q.method(), path);
+
+    // A route registered for the blocking streaming handler cannot run here:
+    // responder writes to a socketstream and there is not one.  Refused where
+    // it is reached rather than where it was registered, so one route table
+    // can be built for both modes.
+    if(chosen && chosen->stream) {
+        response oops;
+
+        oops.status(500).type("text/plain")
+            .body("that route has a blocking streaming handler and this "
+                  "server is asynchronous\n");
+
+        co_await out.send(oops);
+
+        co_return;
+    }
+
+    if(chosen && chosen->async_stream) {
+        // Held rather than rethrown with a bare `throw;` outside the catch:
+        // by then there is no exception in flight and a bare throw calls
+        // std::terminate.  That is the sharp edge the co_await-in-a-catch rule
+        // creates, and it is a crash rather than a diagnostic.
+        std::exception_ptr threw;
+
+        try {
+            co_await chosen->async_stream(q, out);
+        }
+        catch(...) {
+            threw = std::current_exception();
+        }
+
+        if(threw && !out.started()) {
+            response oops;
+
+            oops.status(500).type("text/plain").body("internal error\n");
+
+            co_await out.send(oops);
+        }
+
+        // A handler that produced nothing at all is a bug in the handler, and
+        // a bare close would look like a crash.
+        if(!threw && !out.started()) {
+            response oops;
+
+            oops.status(500).type("text/plain")
+                .body("the handler produced no response\n");
+
+            co_await out.send(oops);
+        }
+
+        // Rethrown so sys::server::on_error still learns of it.  Once begin()
+        // has gone out there is nothing to *say* -- the status left long ago
+        // and the client sees the close as a truncated body -- which is what
+        // responder gave up in #200 and is no different here.
+        if(threw) std::rethrow_exception(threw);
+
+        co_return;
+    }
+
+    // The buffered case, and the common one.  **The handler is not a
+    // coroutine**: it fills a response and cannot suspend, so the same handler
+    // runs on both servers -- which is what lets the two be compared on one
+    // route table.
+    response r;
+
+    std::exception_ptr threw;
+
+    try {
+        (chosen ? chosen->run : m_otherwise)(q, r);
+    }
+    catch(...) {
+        threw = std::current_exception();
+    }
+
+    if(threw) {
+        response oops;
+
+        oops.status(500).type("text/plain").body("internal error\n");
+
+        co_await out.send(oops);
+
+        std::rethrow_exception(threw);
+    }
+
+    co_await out.send(r);
 }
 
 }
