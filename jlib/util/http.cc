@@ -408,6 +408,11 @@ Request read_request_head(std::istream& is, std::size_t cap) {
     return parse_request_head(read_head(is, cap));
 }
 
+/** The same, suspending.  read_head() then the same parser, unchanged. */
+sys::task<Request> read_request_head(sys::async_reader& in, std::size_t cap) {
+    co_return parse_request_head(co_await read_head(in, cap));
+}
+
 Response parse_head(std::string_view head, bool head_request) {
     const std::vector<std::string> lines = split_lines(head);
 
@@ -458,6 +463,12 @@ Response parse_head(std::string_view head, bool head_request) {
 
 Response read_response_head(std::istream& is, bool head_request, std::size_t cap) {
     return parse_head(read_head(is, cap), head_request);
+}
+
+/** The same, suspending.  read_head() then the same parser, unchanged. */
+sys::task<Response> read_response_head(sys::async_reader& in,
+                                       bool head_request, std::size_t cap) {
+    co_return parse_head(co_await read_head(in, cap), head_request);
 }
 
 // --------------------------------------------------------------- read_body

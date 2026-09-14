@@ -22,7 +22,9 @@
 
 #include <jlib/net/http.hh>
 
+#include <jlib/sys/async_writer.hh>
 #include <jlib/sys/server.hh>
+#include <jlib/sys/task.hh>
 #include <jlib/sys/tls.hh>
 
 #include <functional>
@@ -203,6 +205,62 @@ public:
      */
     typedef std::function<void(const Request&, responder&)> stream_handler;
 
+    /**
+     * A response written as it is produced, without blocking a thread.
+     *
+     * The suspending twin of responder.  Every operation returns a task
+     * because a write can fill the socket buffer and have to wait for room,
+     * and a server that blocked there would stall every other connection on
+     * the reactor.
+     *
+     * The same contract otherwise, including the one that matters: once
+     * begin() has gone out the status cannot change, so **a handler that
+     * throws afterwards cannot be answered with a 500**.  http_server.hh has
+     * said that about responder since #200 and it is no less true here.
+     */
+    class async_responder {
+    public:
+        async_responder(sys::async_writer& w, const std::string& server_name)
+            : m_writer(&w), m_name(server_name) {}
+
+        /** Send a complete response.  Exactly what a buffered handler does. */
+        sys::task<void> send(const response& r);
+
+        /**
+         * Send the head now and commit the status.
+         *
+         * Content-Length is omitted whatever the handler set, and the body is
+         * delimited by the close -- see responder::begin, which explains why
+         * chunked would buy nothing against a server that closes anyway.
+         */
+        sys::task<void> begin(const response& head);
+
+        /** One piece of the body. */
+        sys::task<void> write(const std::string& piece);
+
+        bool started() const { return m_started; }
+
+    private:
+        sys::async_writer* m_writer;
+        std::string        m_name;
+        bool               m_started = false;
+    };
+
+    /**
+     * A streaming handler that suspends.
+     *
+     * For a body produced over seconds -- server-sent events, a token stream.
+     * A *buffered* handler needs none of this: it fills a response and the
+     * server writes it, so the existing `handler` type works in async mode
+     * unchanged, which is what lets the two modes be compared on the same
+     * routes.
+     */
+    typedef std::function<sys::task<void>(const Request&, async_responder&)>
+        async_stream_handler;
+
+    /** Tag for the constructors that serve on a reactor.  See the class note. */
+    struct async_t { explicit async_t() = default; };
+
     using options = server_options;
 
     /**
@@ -213,6 +271,24 @@ public:
      * @param p    threads, timeouts and the queue depth, all fixed here
      */
     server(unsigned short port = 0,
+           const std::string& host = "127.0.0.1",
+           const sys::tls_context& tls = sys::tls_context(),
+           const sys::server::policy& p = sys::server::policy(),
+           const options& o = options());
+
+    /**
+     * The same, serving on a reactor rather than on threads.
+     *
+     * A connection is a coroutine suspended on the transport's reactor, so
+     * policy::threads is not used and policy::max_connections is what bounds
+     * concurrency instead.  See sys::server for the shape of that.
+     *
+     * **Buffered handlers work unchanged.**  A handler that fills a response
+     * never suspends, so the same route table serves both modes -- which is
+     * how the two are compared in net_http_server_test.  Only a *streaming*
+     * handler has to be written differently, because only writing suspends.
+     */
+    server(async_t, unsigned short port = 0,
            const std::string& host = "127.0.0.1",
            const sys::tls_context& tls = sys::tls_context(),
            const sys::server::policy& p = sys::server::policy(),
@@ -251,6 +327,17 @@ public:
     void route(const std::string& method, const std::string& path,
                stream_handler h);
 
+    /**
+     * The same, for a handler that suspends.  Only an async server can run one.
+     *
+     * A route registered this way on a blocking server throws when it is
+     * reached, rather than at registration: a server may legitimately carry
+     * routes it never serves, and refusing at registration would stop a
+     * caller building one table for both modes.
+     */
+    void route(const std::string& method, const std::string& path,
+               async_stream_handler h);
+
     /** What runs when no route matched.  The default answers 404. */
     void otherwise(handler h);
 
@@ -287,8 +374,9 @@ public:
     sys::server& transport();
 
 private:
-    void serve(sys::socketstream& s, const sys::peer& from);
-
+    // Ahead of the methods that name it: a member declaration is not a
+    // complete-class context, so route_for() cannot return a type the class
+    // declares further down.
     struct entry {
         std::string method;
         std::string path;
@@ -297,7 +385,44 @@ private:
         // overload of route() was called.
         handler run;
         stream_handler stream;
+        async_stream_handler async_stream;
     };
+
+    void serve(sys::socketstream& s, const sys::peer& from);
+
+    /** The coroutine an async server runs per connection. */
+    sys::task<void> serve_async(sys::server::connection& c,
+                                const sys::peer& from);
+
+    /** Shared by both serves: the target as a path, or why it is not one. */
+    static bool path_of(const std::string& target, std::string& path,
+                        std::string& why);
+
+    /** Shared by both serves: the route table lookup. */
+    const entry* route_for(const std::string& method,
+                           const std::string& path) const;
+
+    bool m_async = false;
+
+    /**
+     * How long an *async* server gives a client to deliver a whole request.
+     *
+     * Taken from policy::io_timeout, and the two are not quite the same thing
+     * -- which is worth saying, because this is the one place the two servers
+     * bound a client differently.
+     *
+     * On the blocking server io_timeout is `SO_RCVTIMEO`: **per operation**,
+     * so a client that sends one octet every twenty-nine seconds resets it
+     * every time and can hold a connection for as long as it likes.  Here it
+     * is a deadline over the *whole* request read, so that client is dropped.
+     * That is the slow-loris, and the async server is the one that refuses it.
+     *
+     * The deadline is cancelled once the request is in hand: a handler that
+     * takes a long time to answer is a different question, and bounding it
+     * here would turn a slow reply into a dropped connection.
+     */
+    double m_request_timeout = 30;
+
 
     options m_options;
     std::vector<entry> m_routes;
