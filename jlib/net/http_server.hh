@@ -201,14 +201,22 @@ public:
          * For a response whose length is not known when it starts; the body
          * follows from responder::write and is delimited by the close.
          */
-        std::string head(const std::string& server_name) const;
-        // No persist parameter, and there should not be one: this omits
-        // Content-Length, so the close *is* the framing and the connection
-        // cannot be reused whatever anybody would prefer.
+        /**
+         * The head alone, for a body whose length is not known yet.
+         *
+         * @param chunked  frame what follows with Transfer-Encoding: chunked
+         * @param persist  whether the connection carries another message after
+         *                 this one.  Only possible when chunked: a
+         *                 close-delimited body ends at the close, so there is
+         *                 no boundary for a next message to begin at.
+         */
+        std::string head(const std::string& server_name, bool chunked = false,
+                         bool persist = false) const;
 
     private:
         std::string serialise(const std::string& server_name,
-                              bool with_length, bool persist) const;
+                              bool with_length, bool persist,
+                              bool chunked = false) const;
 
         int m_status = 200;
         std::string m_reason;
@@ -243,16 +251,38 @@ public:
      *
      * ## Framing
      *
-     * No `Content-Length`, because the length is not known, and
-     * `Connection: close`, so the body is delimited by the close.  That is
-     * legal HTTP/1.1 and it is what this server already does about
-     * keep-alive; chunked encoding would buy nothing here and is another
-     * framing to get wrong.
+     * No `Content-Length`, because the length is not known.  What delimits the
+     * body instead is `Transfer-Encoding: chunked` for an HTTP/1.1 client, and
+     * the close for anything older.
+     *
+     * **It used to be the close in both cases**, and the reason written here
+     * was that "chunked would buy nothing against a server that closes
+     * anyway".  That stopped being true when the async server learned
+     * keep-alive: it does not close anyway, and a close-delimited body was
+     * then the only thing left that forced it to.
+     *
+     * Chunked earns its keep a second time even when the connection *is* about
+     * to close, and this is the half that was wrong all along: a
+     * close-delimited body gives the client no way to tell a complete response
+     * from one whose server died halfway through.  A terminating chunk does.
+     * So a handler that fails mid-stream now produces a body that is visibly
+     * unfinished rather than one that merely stops.
      */
     class responder {
     public:
         responder(sys::socketstream& s, const std::string& server_name)
             : m_s(&s), m_name(server_name) {}
+
+        /**
+         * How the body after begin() is framed.
+         *
+         * Decided by the server once it has read the request, because that is
+         * what decides it: chunked needs a client that speaks HTTP/1.1.  Must
+         * precede begin(), which is where it takes effect.
+         */
+        void framing(bool chunked);
+
+        bool chunked() const { return m_chunked; }
 
         /** Send a complete response.  Exactly what a buffered handler does. */
         void send(const response& r);
@@ -263,12 +293,32 @@ public:
          * The response's body is ignored -- what follows comes from write().
          * `Content-Length` is omitted whatever the handler set, because a
          * length that later disagrees with the body is a framing bug and this
-         * is the one place the server can be sure it would.
+         * is the one place the server can be sure it would.  What delimits the
+         * body instead is decided by framing(), above.
          */
         void begin(const response& head);
 
-        /** One piece of the body, flushed. */
+        /**
+         * One piece of the body.
+         *
+         * An empty piece is **ignored rather than written**, because a
+         * zero-length chunk is how a chunked body says it has ended: a handler
+         * that wrote one would terminate its own response early and the client
+         * would believe it had the whole thing.
+         */
         void write(const std::string& piece);
+
+        /**
+         * Finish the body.
+         *
+         * Writes the terminating chunk, and is **only reached when the handler
+         * returned normally.**  A handler that fails partway through leaves
+         * the body unterminated and the connection closed, so the client sees
+         * a truncated message rather than a complete one -- which is why a
+         * streaming response wants chunked framing even on a connection that
+         * is about to close anyway.
+         */
+        void end();
 
         /** Whether anything has reached the socket. */
         bool started() const { return m_started; }
@@ -286,6 +336,8 @@ public:
         sys::socketstream* m_s;
         std::string m_name;
         bool m_started = false;
+        bool m_chunked = false;
+        bool m_ended = false;
     };
 
     /**
@@ -333,14 +385,53 @@ public:
         /**
          * Send the head now and commit the status.
          *
-         * Content-Length is omitted whatever the handler set, and the body is
-         * delimited by the close -- see responder::begin, which explains why
-         * chunked would buy nothing against a server that closes anyway.
+         * Content-Length is omitted whatever the handler set; what delimits
+         * the body is decided by framing(), above.  See the responder class
+         * comment for why that is chunked rather than the close.
          */
         sys::task<void> begin(const response& head);
 
-        /** One piece of the body. */
+        /**
+         * How the body after begin() is framed.
+         *
+         * Decided by the server once it has read the request, because that is
+         * what decides it: chunked needs a client that speaks HTTP/1.1.  Must
+         * precede begin(), which is where it takes effect.
+         */
+        void framing(bool chunked, bool persist);
+
+        bool chunked() const { return m_chunked; }
+
+        /**
+         * Whether the connection can carry another request after this body.
+         *
+         * Read back rather than assumed, because framing() is where the two
+         * questions are reconciled: a caller may want to persist and still not
+         * get to, if what it is about to send is delimited by the close.
+         */
+        bool persist() const { return m_persist; }
+
+        /**
+         * One piece of the body.
+         *
+         * An empty piece is **ignored rather than written**, because a
+         * zero-length chunk is how a chunked body says it has ended: a handler
+         * that wrote one would terminate its own response early and the client
+         * would believe it had the whole thing.
+         */
         sys::task<void> write(const std::string& piece);
+
+        /**
+         * Finish the body.
+         *
+         * Writes the terminating chunk, and is **only reached when the handler
+         * returned normally.**  A handler that fails partway through leaves
+         * the body unterminated and the connection closed, so the client sees
+         * a truncated message rather than a complete one -- which is why a
+         * streaming response wants chunked framing even on a connection that
+         * is about to close anyway.
+         */
+        sys::task<void> end();
 
         bool started() const { return m_started; }
 
@@ -348,6 +439,9 @@ public:
         sys::async_writer* m_writer;
         std::string        m_name;
         bool               m_started = false;
+        bool               m_chunked = false;
+        bool               m_persist = false;
+        bool               m_ended   = false;
     };
 
     /**

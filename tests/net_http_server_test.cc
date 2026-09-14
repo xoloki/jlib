@@ -545,7 +545,14 @@ static void a_streaming_handler_writes_as_it_goes() {
     ok("  with no Content-Length, because it was not known",
        !r.fields().has("Content-Length"));
 
-    ok("  and the connection closing is what delimits it",
+    // Chunked even here, where the connection closes after one response
+    // anyway: what it buys on a closing server is the terminator, and the
+    // terminator is what separates "the body ended" from "the server died".
+    ok("  framed by Transfer-Encoding: chunked instead",
+       jlib::util::http::fold(r.fields().get("Transfer-Encoding")) == "chunked",
+       r.fields().get("Transfer-Encoding"));
+
+    ok("  and the blocking server still closes after it",
        jlib::util::http::fold(r.fields().get("Connection")) == "close",
        r.fields().get("Connection"));
 
@@ -590,15 +597,36 @@ static void a_handler_that_throws_mid_stream_cannot_be_answered() {
     }
 
     {
-        const jlib::util::http::Response r = http::get(jlib::util::URL(s.url("/stream-boom")));
+        // **The client can now tell, and before chunked framing it could not.**
+        // The status was already sent, so it is still the success it promised
+        // -- that much cannot be taken back.  What changed is the body: it used
+        // to be delimited by the close, so a handler that died halfway produced
+        // something indistinguishable from a response that had finished, and
+        // this test asserted the truncated body as though it were the answer.
+        //
+        // The terminating chunk is the thing the handler never reached.  So the
+        // message stops in the middle of one, and saying so is the client's
+        // job.
+        bool threw = false;
+        std::string why;
 
-        // The status was already sent, so it is the success it promised.
-        ok("  throwing after begin() leaves the 200 that was sent",
-           r.status() == 200, std::to_string(r.status()));
+        try {
+            const jlib::util::http::Response r =
+                http::get(jlib::util::URL(s.url("/stream-boom")));
 
-        ok("  and the client keeps what arrived before the failure",
-           r.body() == "data: before the failure\n\n",
-           "\"" + r.body() + "\"");
+            why = "a complete " + std::to_string(r.status()) + " with \"" +
+                  r.body() + "\"";
+        }
+        catch(std::exception& e) {
+            threw = true;
+            why = e.what();
+        }
+
+        ok("  throwing after begin() gives the client a body it can see is cut",
+           threw, why);
+
+        ok("  and the reason is the framing, not a bare close",
+           threw && why.find("chunked") != std::string::npos, why);
     }
 
     {
