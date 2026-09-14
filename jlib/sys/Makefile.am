@@ -11,7 +11,7 @@ libjsys_la_LIBADD = $(PTHREAD_LIBS) $(OPENSSL_LIBS)
 
 libjsysincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/sys
 libjsysinclude_HEADERS = tfstream.hh socketstream.hh sslstream.hh proxystream.hh \
-                         listener.hh tls.hh server.hh reactor.hh \
+                         listener.hh tls.hh server.hh reactor.hh task.hh await.hh \
                          sslproxystream.hh serialstream.hh pstream.hh \
                          sys.hh Directory.hh auto.hh sync.hh ringbuffer.hh Servent.hh \
                          ASServent.hh pipe.hh object.hh joystick.hh
