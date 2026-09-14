@@ -246,6 +246,26 @@ namespace jlib {
                         if(errno == EAGAIN || errno == EWOULDBLOCK) {
                             m_timeout = true;
                         }
+                        // Keep what did not go out, and only that.
+                        //
+                        // The put area used to be left exactly as it was, so
+                        // pptr() still pointed past the `sofar` octets the
+                        // kernel had already taken -- and a later sync()
+                        // started again from pbase() and sent them twice.
+                        //
+                        // The bytes move; the pointer does not.  free_buffers()
+                        // deletes pbase() as the array head, so the put area
+                        // has to keep starting where it was allocated.
+                        const int left = total - sofar;
+
+                        if(sofar > 0 && left > 0) {
+                            std::memmove(this->pbase(), current,
+                                         std::size_t(left) * sizeof(char_type));
+                        }
+
+                        this->setp(this->pbase(), this->pbase() + BUF_SIZE);
+                        this->pbump(left);
+
                         // EPIPE arrives here now instead of as a signal.
                         return traits_type::eof();
                     }
