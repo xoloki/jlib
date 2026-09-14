@@ -21,6 +21,8 @@
 #define JLIB_NET_IMAP_RESPONSE_HH
 
 #include <cstddef>
+#include <jlib/sys/async_reader.hh>
+#include <jlib/sys/task.hh>
 #include <iosfwd>
 #include <map>
 #include <stdexcept>
@@ -105,6 +107,14 @@ bool literal_size(const std::string& line, std::size_t& n);
  * a truncated response is not a short one.
  */
 std::string read(std::istream& is);
+
+/**
+ * The same, suspending rather than blocking.  See the definition.
+ *
+ * **Additive**: the blocking one above is unchanged and every caller -- Imap4,
+ * ASImapBox -- still uses it.  Nothing in the tree awaits this yet.
+ */
+sys::task<std::string> read(sys::async_reader& in);
 
 /** A response that could not be read. */
 class error : public std::runtime_error {
