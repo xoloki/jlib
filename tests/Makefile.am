@@ -103,6 +103,7 @@ TESTS = \
 	sys_tls_server_test \
 	sys_async_tls_test \
 	sys_server_test \
+	sys_async_server_test \
 	sys_reactor_test \
 	sys_task_test \
  \
@@ -260,6 +261,9 @@ sys_task_test_LDADD   = $(JSYS_LA)
 sys_reactor_test_SOURCES  = sys_reactor_test.cc feed.hh
 sys_reactor_test_CPPFLAGS = $(AM_CPPFLAGS) $(REACTOR_CPPFLAGS)
 sys_reactor_test_LDADD    = $(JSYS_LA)
+
+sys_async_server_test_SOURCES = sys_async_server_test.cc certificate.hh
+sys_async_server_test_LDADD   = $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
 sys_server_test_SOURCES = sys_server_test.cc
 sys_server_test_LDADD   = $(JSYS_LA) $(OPENSSL_LIBS)
