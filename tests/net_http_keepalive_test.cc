@@ -100,7 +100,13 @@ static bool reply(std::istream& is, util::http::Response& r) {
         // until_close would sit here until the server hung up, which is the
         // opposite of what a kept-alive response does -- so a response framed
         // that way is a failure of this test's premise, not a body to read.
-        if(r.body_framing() != util::http::framing::length) return false;
+        //
+        // Length and chunked are both self-delimiting, and that is the
+        // property every section here depends on: a response whose end the
+        // client can find without waiting for a close is a response another
+        // request can follow.
+        if(r.body_framing() != util::http::framing::length &&
+           r.body_framing() != util::http::framing::chunked) return false;
 
         r.set_body(util::http::read_body(is, r, 1 << 20));
 
@@ -450,19 +456,25 @@ static void the_bounds() {
     }
 }
 
-static void a_streaming_response_still_closes() {
-    std::cout << "\na streaming response still ends at the close:\n";
+/**
+ * A streaming response is chunked, and the connection survives it.
+ *
+ * This section asserted the exact opposite one branch ago -- "a streaming
+ * response still closes", because its body was delimited by the close and
+ * there was no boundary for a next request to begin at.  The terminating chunk
+ * is that boundary.
+ *
+ * The load-bearing assertion is the **second request**, not the framing
+ * header: a server can announce chunked and still get the chunk sizes wrong,
+ * and the only way to find out is to ask it for something afterwards on the
+ * same connection and see whether the reader is still in step.
+ */
+static void a_streaming_response_is_chunked_and_reusable() {
+    std::cout << "\na streaming response is chunked, and the connection survives:\n";
 
-    // An idle_timeout far longer than this section can take, so that "the
-    // connection closed" cannot be confused with "the connection was reaped".
-    // A server that kept a streaming connection alive would sit here for
-    // thirty seconds; a correct one closes as the handler returns.
-    http::server::options o;
+    http::server s(http::server::async_t(), 0, "127.0.0.1");
 
-    o.idle_timeout = 30;
-
-    http::server s(http::server::async_t(), 0, "127.0.0.1",
-                   sys::tls_context(), sys::server::policy(), o);
+    furnish(s);
 
     s.route("GET", "/stream",
             [](const http::server::Request&,
@@ -473,6 +485,15 @@ static void a_streaming_response_still_closes() {
 
                 co_await out.begin(head);
                 co_await out.write("data: one\n\n");
+
+                // **A zero-length chunk is the terminator.**  Writing one here
+                // would end the body in the middle of the handler, and the
+                // client would believe it had everything.  Ignored instead --
+                // and the assertion that it was ignored is that "data: two"
+                // arrives at all.
+                co_await out.write("");
+
+                co_await out.write("data: two\n\n");
             });
 
     s.transport().on_error([](const std::exception&, const sys::peer&) {});
@@ -484,39 +505,174 @@ static void a_streaming_response_still_closes() {
 
         c << "GET /stream HTTP/1.1\r\nHost: x\r\n\r\n" << std::flush;
 
+        util::http::Response r;
+
+        const bool got = reply(c, r);
+
+        ok("  it answers 200", got && r.status() == 200,
+           std::to_string(r.status()));
+
+        ok("  with no Content-Length, because it was not known",
+           got && !r.fields().has("Content-Length"));
+
+        ok("  framed by Transfer-Encoding: chunked",
+           got && util::http::fold(r.fields().get("Transfer-Encoding")) ==
+           "chunked", r.fields().get("Transfer-Encoding"));
+
+        ok("  and no Connection: close, because there need not be one",
+           got && connection_of(r) != "close", connection_of(r));
+
+        ok("  every piece arrives, and the empty one was ignored",
+           got && r.body() == "data: one\n\ndata: two\n\n",
+           "\"" + r.body() + "\"");
+
+        // **The one that proves the chunk sizes were right.**  Nothing
+        // reconnected, so the reader is still positioned where the server
+        // thinks it is; a single wrong size would leave it mid-body and this
+        // would parse garbage as a status line.
+        c << "GET /second HTTP/1.1\r\nHost: x\r\n\r\n" << std::flush;
+
+        util::http::Response next;
+
+        const bool again = reply(c, next);
+
+        ok("  and a request after the stream is answered on that connection",
+           again && next.body() == "second\n", next.body());
+    }
+
+    s.stop();
+    t.join();
+}
+
+/**
+ * An HTTP/1.0 client gets the close, because it cannot be told anything else.
+ *
+ * Chunked is an HTTP/1.1 transfer coding.  A 1.0 client handed one reads the
+ * chunk sizes as body, which is a corrupted response rather than a slow one --
+ * so the version decides this, not a preference.
+ */
+static void a_streaming_response_to_http_1_0() {
+    std::cout << "\na streaming response to an HTTP/1.0 client:\n";
+
+    http::server s(http::server::async_t(), 0, "127.0.0.1");
+
+    s.route("GET", "/stream",
+            [](const http::server::Request&,
+               http::server::async_responder& out) -> sys::task<void> {
+                http::server::response head;
+
+                head.status(200).type("text/plain");
+
+                co_await out.begin(head);
+                co_await out.write("plain body\n");
+            });
+
+    s.transport().on_error([](const std::exception&, const sys::peer&) {});
+
+    std::thread t([&s]{ s.run(); });
+
+    {
+        sys::socketstream c("127.0.0.1", s.port(), -1, 10.0);
+
+        c << "GET /stream HTTP/1.0\r\nHost: x\r\n\r\n" << std::flush;
+
         const std::string head = util::http::read_head(c, 8192);
         const util::http::Response r = util::http::parse_head(head);
 
         ok("  it answers 200", r.status() == 200, std::to_string(r.status()));
 
-        ok("  with no Content-Length, because it was not known",
-           !r.fields().has("Content-Length"));
+        ok("  with no Transfer-Encoding, which it could not read",
+           !r.fields().has("Transfer-Encoding"),
+           r.fields().get("Transfer-Encoding"));
 
-        // The reason it cannot be kept alive, stated on the wire: there is no
-        // length, so the close *is* the framing, so there is no boundary for a
-        // next request to begin at.  Chunked output is what would change this
-        // and there is none.
-        ok("  and says close, whatever keep_alive is set to",
+        ok("  and says close, because the close is the framing",
            connection_of(r) == "close", connection_of(r));
-
-        const auto began = std::chrono::steady_clock::now();
 
         const std::string body = util::http::read_body(c, r, 1 << 20);
 
-        const double waited = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - began).count();
-
-        ok("  the body arrives and the close delimits it",
-           body == "data: one\n\n", body);
-
-        // **The assertion the Connection field cannot make.**  begin() writes
-        // "close" into the head whatever the server then does, so a server
-        // that looped after a streaming response would still look correct on
-        // the wire -- and would be found only by the client waiting out an
-        // idle_timeout for a body that had already finished.
-        ok("  and the close is the handler returning, not a timeout expiring",
-           waited < 3.0, std::to_string(waited) + "s of a 30s idle_timeout");
+        ok("  the body arrives raw, with no chunk sizes in it",
+           body == "plain body\n", "\"" + body + "\"");
     }
+
+    s.stop();
+    t.join();
+}
+
+/**
+ * A handler that fails mid-stream leaves a body the client can see is cut.
+ *
+ * **This is what chunked buys that the close never could.**  A close-delimited
+ * body ends when the connection ends, so a server that died halfway through
+ * produces exactly the same octets as one that finished -- the client cannot
+ * tell, and will hand a truncated answer to its caller as a complete one.
+ *
+ * The terminating chunk is the difference, and the handler that threw never
+ * reached it.
+ */
+static void a_stream_that_fails_is_visibly_unfinished() {
+    std::cout << "\na stream that fails is visibly unfinished:\n";
+
+    http::server s(http::server::async_t(), 0, "127.0.0.1");
+
+    s.route("GET", "/boom",
+            [](const http::server::Request&,
+               http::server::async_responder& out) -> sys::task<void> {
+                http::server::response head;
+
+                head.status(200).type("text/plain");
+
+                co_await out.begin(head);
+                co_await out.write("as far as it got\n");
+
+                throw std::runtime_error("the handler failed mid-stream");
+            });
+
+    std::atomic<int> seen(0);
+
+    s.transport().on_error([&seen](const std::exception&, const sys::peer&) {
+        ++seen;
+    });
+
+    std::thread t([&s]{ s.run(); });
+
+    {
+        sys::socketstream c("127.0.0.1", s.port(), -1, 10.0);
+
+        c << "GET /boom HTTP/1.1\r\nHost: x\r\n\r\n" << std::flush;
+
+        const std::string head = util::http::read_head(c, 8192);
+        const util::http::Response r = util::http::parse_head(head);
+
+        ok("  the 200 that was promised still arrives", r.status() == 200,
+           std::to_string(r.status()));
+
+        ok("  chunked, so the end of the body is a thing that can be missing",
+           util::http::fold(r.fields().get("Transfer-Encoding")) == "chunked",
+           r.fields().get("Transfer-Encoding"));
+
+        bool threw = false;
+        std::string why;
+
+        try {
+            const std::string body = util::http::read_body(c, r, 1 << 20);
+
+            why = "read a complete \"" + body + "\"";
+        }
+        catch(std::exception& e) {
+            threw = true;
+            why = e.what();
+        }
+
+        ok("  and reading the body says it was cut off", threw, why);
+
+        ok("  in terms of the chunked framing",
+           threw && why.find("chunked") != std::string::npos, why);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    ok("  the failure still reached on_error", seen.load() >= 1,
+       std::to_string(seen.load()));
 
     s.stop();
     t.join();
@@ -1051,7 +1207,9 @@ int main() {
         the_bounds();
         three_bounds_three_questions();
         stopping_while_a_connection_is_parked();
-        a_streaming_response_still_closes();
+        a_streaming_response_is_chunked_and_reusable();
+        a_streaming_response_to_http_1_0();
+        a_stream_that_fails_is_visibly_unfinished();
         the_polite_goodbye();
         what_it_costs_and_saves();
     }

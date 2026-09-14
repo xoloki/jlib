@@ -38,6 +38,31 @@ std::string default_server_name() { return "jlib/" JLIB_RELEASE_STRING; }
 
 namespace {
 
+    /**
+     * One chunk, as RFC 9112 7.1 spells it: the size in hex, CRLF, the octets,
+     * CRLF.
+     *
+     * Lower-case hex and no chunk extensions -- both are what the grammar in
+     * rfc9112.hh accepts, and this server's own reader parses what this writes
+     * with `chunk-size` out of that same grammar.  Writing something its
+     * reader would refuse is the failure mode worth ruling out by
+     * construction.
+     */
+    std::string chunk(const std::string& piece) {
+        std::ostringstream o;
+
+        o << std::hex << piece.size() << "\r\n" << piece << "\r\n";
+
+        return o.str();
+    }
+
+    /** The terminating zero-length chunk, and an empty trailer section. */
+    std::string last_chunk() { return "0\r\n\r\n"; }
+
+}
+
+namespace {
+
     /** RFC 9110 5.6.7's IMF-fixdate, which is fixed-format and never localised. */
     std::string http_date() {
         static const char* const DAY[] = { "Sun", "Mon", "Tue", "Wed", "Thu",
@@ -115,8 +140,10 @@ server::response& server::response::body(std::string body) {
     return *this;
 }
 
-std::string server::response::head(const std::string& server_name) const {
-    return serialise(server_name, false, false);
+std::string server::response::head(const std::string& server_name,
+                                   bool chunked, bool persist) const
+{
+    return serialise(server_name, false, persist, chunked);
 }
 
 std::string server::response::str(const std::string& server_name,
@@ -126,7 +153,8 @@ std::string server::response::str(const std::string& server_name,
 }
 
 std::string server::response::serialise(const std::string& server_name,
-                                        bool with_length, bool persist) const
+                                        bool with_length, bool persist,
+                                        bool chunked) const
 {
     std::ostringstream o;
 
@@ -146,9 +174,17 @@ std::string server::response::serialise(const std::string& server_name,
         o << "Server: " << server_name << "\r\n";
 
     // Omitted entirely when the body is not yet known -- a streaming response
-    // is delimited by the close instead.  See responder::begin.
+    // is framed by Transfer-Encoding or by the close instead.  See
+    // responder::begin.
     if(with_length && !m_fields.has("Content-Length"))
         o << "Content-Length: " << m_body.size() << "\r\n";
+
+    // RFC 9112 6.1 forbids both at once and util::http::decide_framing refuses
+    // a message carrying them, so a server that emitted both would be writing
+    // what its own reader would throw out.  They are mutually exclusive above
+    // and here by construction, not by checking.
+    if(chunked && !m_fields.has("Transfer-Encoding"))
+        o << "Transfer-Encoding: chunked\r\n";
 
     // Unless the handler said otherwise, and then what the caller decided.
     // Stated rather than left out: keep-alive is the HTTP/1.1 default, so
@@ -255,22 +291,45 @@ void server::responder::send(const response& r) {
     *m_s << r.str(m_name) << std::flush;
 }
 
+void server::responder::framing(bool chunked) {
+    if(m_started)
+        throw error("a responder was told how to frame a response it has "
+                    "already begun");
+
+    m_chunked = chunked;
+}
+
 void server::responder::begin(const response& head) {
     if(m_started)
         throw error("a responder began a response twice");
 
     m_started = true;
 
-    // head() omits Content-Length, so the body is delimited by the close --
-    // which this server sends on every response anyway.
-    *m_s << head.head(m_name) << std::flush;
+    // The blocking server closes after one response whatever happens, so
+    // persist is false here and chunked buys only the terminator -- which is
+    // what tells a client the difference between a body that ended and a
+    // server that died.  See the responder class comment.
+    *m_s << head.head(m_name, m_chunked, false) << std::flush;
 }
 
 void server::responder::write(const std::string& piece) {
     if(!m_started)
         throw error("a responder wrote a body piece before begin()");
 
-    *m_s << piece << std::flush;
+    // A zero-length chunk is the terminator, so writing one here would end the
+    // body early and the client would believe it complete.  Nothing to send.
+    if(piece.empty()) return;
+
+    if(m_chunked) *m_s << chunk(piece) << std::flush;
+    else          *m_s << piece << std::flush;
+}
+
+void server::responder::end() {
+    if(!m_started || m_ended) return;
+
+    m_ended = true;
+
+    if(m_chunked) *m_s << last_chunk() << std::flush;
 }
 
 bool server::responder::live() const { return m_s && bool(*m_s); }
@@ -390,6 +449,12 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
     if(chosen && chosen->stream) {
         responder out(s, m_options.server_name);
 
+        // Chunked for an HTTP/1.1 client, the close for anything older.  This
+        // server closes after one response either way, so what chunked buys
+        // here is only the terminator -- and that is not nothing: without it a
+        // client cannot tell a body that ended from a server that died.
+        out.framing(q.version() == "HTTP/1.1");
+
         try {
             chosen->stream(q, out);
         }
@@ -417,6 +482,13 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
                 .body("the handler produced no response\n");
 
             s << oops.str(m_options.server_name) << std::flush;
+        }
+        else {
+            // **Only on this path.**  A handler that threw took the catch
+            // above and was rethrown out of this function, so it never reaches
+            // here and its body is never terminated -- which is exactly what
+            // tells the client the response is unfinished.
+            out.end();
         }
 
         return;
@@ -475,21 +547,49 @@ sys::task<void> server::async_responder::send_serialised(const std::string& wire
     co_await m_writer->write(wire);
 }
 
+void server::async_responder::framing(bool chunked, bool persist) {
+    if(m_started)
+        throw error("a responder was told how to frame a response it has "
+                    "already begun");
+
+    m_chunked = chunked;
+
+    // A close-delimited body ends at the close, so there is nothing after it
+    // to keep the connection for.
+    //
+    // **No caller can currently reach this**, and it is worth saying so rather
+    // than letting it look load-bearing: chunked needs HTTP/1.1 and so does
+    // util::http::persistent, so the server asks one question twice and the
+    // two answers cannot disagree.  It stays because framing() is public and
+    // the failure it prevents is a silent one -- a client waiting out its own
+    // timeout for a response that ended at the close it was not told about.
+    m_persist = persist && chunked;
+}
+
 sys::task<void> server::async_responder::begin(const response& head) {
     if(m_started) throw error("a responder began a response twice");
 
     m_started = true;
 
-    // head() omits Content-Length, so the body is delimited by the close --
-    // which this server sends on every response anyway.
-    co_await m_writer->write(head.head(m_name));
+    co_await m_writer->write(head.head(m_name, m_chunked, m_persist));
 }
 
 sys::task<void> server::async_responder::write(const std::string& piece) {
     if(!m_started)
         throw error("a responder wrote a body piece before begin()");
 
-    co_await m_writer->write(piece);
+    // A zero-length chunk is the terminator; see the note on the declaration.
+    if(piece.empty()) co_return;
+
+    co_await m_writer->write(m_chunked ? chunk(piece) : piece);
+}
+
+sys::task<void> server::async_responder::end() {
+    if(!m_started || m_ended) co_return;
+
+    m_ended = true;
+
+    if(m_chunked) co_await m_writer->write(last_chunk());
 }
 
 server::server(async_t, unsigned short port, const std::string& host,
@@ -817,6 +917,20 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     }
 
     if(chosen && chosen->async_stream) {
+        // Chunked needs an HTTP/1.1 client; anything older gets the close, and
+        // gets it as the framing rather than as an afterthought.
+        const bool can_chunk = q.version() == "HTTP/1.1";
+
+        // Note what this does *not* ask: whether the body can be framed so
+        // that something may follow it.  framing() is the one place that
+        // reconciles the two, and out.persist() below is its answer -- so
+        // there is a single place to be wrong rather than two that must agree.
+        const bool persist = m_options.keep_alive &&
+                             util::http::persistent(q) &&
+                             served + 1 < m_options.max_requests;
+
+        out.framing(can_chunk, persist);
+
         // Held rather than rethrown with a bare `throw;` outside the catch:
         // by then there is no exception in flight and a bare throw calls
         // std::terminate.  That is the sharp edge the co_await-in-a-catch rule
@@ -829,6 +943,13 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
         catch(...) {
             threw = std::current_exception();
         }
+
+        // **Snapshot before anything below sends a 500**, because send() marks
+        // the responder started too -- and a 500 is a whole Content-Length
+        // response that says close, not a streamed body that can be continued
+        // from.  Conflating the two would keep a connection open after telling
+        // the client it was closing.
+        const bool streamed = out.started();
 
         if(threw && !out.started()) {
             response oops;
@@ -849,16 +970,21 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
             co_await out.send(oops);
         }
 
+        // Terminated only when the handler returned.  A handler that failed
+        // leaves the body unfinished on purpose: the status left long ago and
+        // cannot be taken back, so the one thing still available to say "this
+        // is not the whole response" is to not write the terminator.
+        if(!threw && streamed) co_await out.end();
+
         // Rethrown so sys::server::on_error still learns of it.  Once begin()
-        // has gone out there is nothing to *say* -- the status left long ago
-        // and the client sees the close as a truncated body -- which is what
-        // responder gave up in #200 and is no different here.
+        // has gone out there is nothing to *say* -- which is what responder
+        // gave up in #200 and is no different here.
         if(threw) std::rethrow_exception(threw);
 
-        // A streaming body is delimited by the close, so there is no boundary
-        // for a next request to start at.  Not a policy choice: chunked output
-        // is what would make this reusable, and there is none.
-        co_return false;
+        // And now a streaming response can be followed by another request,
+        // which is what the terminating chunk bought.  Asked of the responder
+        // rather than recomputed: it is what actually went out on the wire.
+        co_return streamed && out.persist();
     }
 
     // The buffered case, and the common one.  **The handler is not a
