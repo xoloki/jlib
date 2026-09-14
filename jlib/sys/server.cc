@@ -20,6 +20,8 @@
 
 #include <jlib/sys/server.hh>
 
+#include <jlib/sys/async_tls.hh>
+
 #include <jlib/sys/sslstream.hh>
 
 #include <openssl/err.h>
@@ -78,7 +80,14 @@ server::server(listener l, handler h, tls_context tls, const policy& p)
       m_policy(p),
       m_jobs(static_cast<int>(p.threads))
 {
-    if(!m_handler) throw exception("a server with no handler");
+    // The async constructor delegates here with an empty one and installs its
+    // own; a caller reaching this constructor directly must supply one.
+
+    // Not checked here: the async constructor delegates to this one with an
+    // empty blocking handler and installs its own afterwards, so the check
+    // belongs where both paths have finished being built.  Each public
+    // constructor makes it.
+
 
     // So the accept never blocks: the reactor reports the listening descriptor
     // ready, and a client that sends an RST between the readiness and the
@@ -95,12 +104,32 @@ server::server(listener l, handler h, tls_context tls, const policy& p)
             // on_error and the pass carries on, where serve_one's caller has
             // always been told about a failed accept.  Parked, and rethrown
             // once the pass is over.
-            try { m_accepted = accept_and_post(); }
+            try {
+                m_accepted = m_async ? accept_and_start() : accept_and_post();
+            }
             catch(...) { m_accept_error = std::current_exception(); }
         });
 }
 
 server::server(unsigned short port, handler h, const std::string& host,
+               tls_context tls, const policy& p)
+    : server(listener(port, host), std::move(h), std::move(tls), p)
+{}
+
+server::server(listener l, async_handler h, tls_context tls, const policy& p)
+    : server(std::move(l), handler(), std::move(tls), p)
+{
+    m_async = std::move(h);
+
+    if(!m_async) throw exception("a server with no handler");
+}
+
+bool server::full() const {
+    return m_live.size() >= (m_policy.max_connections != 0
+                             ? m_policy.max_connections : 1);
+}
+
+server::server(unsigned short port, async_handler h, const std::string& host,
                tls_context tls, const policy& p)
     : server(listener(port, host), std::move(h), std::move(tls), p)
 {}
@@ -148,6 +177,18 @@ void server::stop(bool drain) {
     // is missed.  This is the second: a thread parked in the queue's depth
     // wait, whose predicate ORs in the queue's own exit flag.
     m_jobs.stop(drain);
+
+    // And the connections themselves, for an async server: each is a
+    // coroutine parked on a read that may never complete, and before #212 a
+    // token could not end one.  Requesting it resumes the coroutine, which
+    // throws cancelled out of the await and unwinds -- closing the descriptor
+    // on the way, because held_fd lives in the frame.
+    for(std::list<live>::iterator i = m_live.begin(); i != m_live.end(); ++i) {
+        try { i->token.request(); }
+        catch(std::exception&) { /* already requested */ }
+    }
+
+    reap();
 
     // And the third: a thread waiting in the reactor.  It owns the wake pipe
     // now, and the byte-down-a-pipe this used to write by hand went with it.
@@ -268,13 +309,137 @@ bool server::accept_and_post() {
     return true;
 }
 
+
+bool server::accept_and_start() {
+    peer from;
+    int fd;
+
+    try {
+        fd = m_listener.accept(from, 0);
+    }
+    catch(std::exception& e) {
+        if(errno == EMFILE || errno == ENFILE) {
+            m_on_error(e, from);
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            return false;
+        }
+
+        throw;
+    }
+
+    if(fd < 0) return false;
+
+    // Its own, so stop() can end this connection without ending every other,
+    // and so a handler can hang a deadline on it.
+    const cancel_token t = cancel_token::create();
+
+    // The coroutine is created before it is owned and moved into the list
+    // afterwards.  Lazy, so nothing runs until start() below -- which matters,
+    // because a coroutine that ran on creation would run before anything held
+    // its frame.
+    m_live.push_back(live{ serve_async(fd, from, t), t });
+
+    m_live.back().work.start();
+
+    if(full()) {
+        // Stop asking about the listener rather than accepting and refusing.
+        m_reactor.modify(m_listen, reactor::NONE);
+
+        m_listen_off = true;
+    }
+
+    return true;
+}
+
+void server::reap() {
+    for(std::list<live>::iterator i = m_live.begin(); i != m_live.end(); ) {
+        if(i->work.done()) i = m_live.erase(i);
+        else ++i;
+    }
+
+    if(m_listen_off && !full()) {
+        m_reactor.modify(m_listen, reactor::READ);
+
+        m_listen_off = false;
+    }
+}
+
+task<void> server::serve_async(int fd, peer from, cancel_token t) {
+    // Owns the descriptor for the whole coroutine, including the paths where
+    // it is destroyed while suspended -- a stop(), or the task being dropped
+    // -- because destroying the frame destroys this.
+    held_fd held(fd);
+
+    // The reactor's thread serves every connection, so OpenSSL's per-thread
+    // error queue is shared between all of them rather than between the
+    // connections one pool thread happened to take.  Cleared for the same
+    // reason the blocking path clears it, more so.
+    ERR_clear_error();
+
+    try {
+        if(!m_tls.empty()) {
+            // The handshake is awaited rather than performed in a
+            // constructor, which is the whole reason async_tls exists: a slow
+            // or hostile client stalls itself and nothing else.
+            async_tls tls(m_reactor, fd, tls_server, m_tls, t);
+
+            co_await tls.handshake();
+
+            connection c(m_reactor, tls.reader(), tls.writer(), from, t);
+
+            co_await m_async(c, from);
+
+            co_await tls.shutdown();
+        }
+        else {
+            async_fd_reader r(m_reactor, fd, t);
+            async_fd_writer w(m_reactor, fd, t);
+
+            connection c(m_reactor, r, w, from, t);
+
+            co_await m_async(c, from);
+        }
+    }
+    catch(cancelled&) {
+        // Not a failure.  A connection ends this way when the server stops or
+        // when a handler's own deadline fires, and both are decisions rather
+        // than errors -- reporting them would put a line on stderr for every
+        // connection on every shutdown.
+    }
+    catch(std::exception& e) {
+        m_on_error(e, from);
+    }
+    catch(...) {
+        const exception unknown("a handler threw something that is not an "
+                                "exception");
+
+        m_on_error(unknown, from);
+    }
+}
+
 bool server::serve_one(double timeout) {
+    if(!m_handler && !m_async)
+        throw exception("a server with no handler");
+
     if(m_stop.load()) return false;
+
+    // Connections that have finished let go of their descriptors here, once a
+    // pass, rather than at some point inside a coroutine that has no good
+    // place to remove itself from a list it is running out of.  Re-arms the
+    // listener too, if a slot has come free.
+    if(m_async) reap();
 
     // Admission control before the wait, so an overflow connection waits in the
     // kernel's listen backlog rather than here, accepted and holding a
     // descriptor.  The queue holds the depth and the lock; what counts as full
     // is this caller's opinion, and this is the one line that has one.
+    //
+    // An async server has no queue and nothing to wait *for*: a slot frees
+    // when a coroutine finishes, which needs this same thread to keep turning
+    // the reactor.  Its cap is enforced by disabling the listener's
+    // registration instead; see accept_and_start.
     const std::size_t room = cap();
     const auto full = [room](std::size_t depth) { return depth < room; };
 
@@ -286,12 +451,15 @@ bool server::serve_one(double timeout) {
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(
             std::chrono::duration<double>(timeout));
 
-    const bool have_room = timeout > 0
-        ? m_jobs.wait(full, std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                std::chrono::duration<double>(timeout)))
-        : m_jobs.wait(full);
+    if(!m_async) {
+        const bool have_room = timeout > 0
+            ? m_jobs.wait(full,
+                          std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::duration<double>(timeout)))
+            : m_jobs.wait(full);
 
-    if(!have_room) return false;
+        if(!have_room) return false;
+    }
 
     // The two conventions meet here and nowhere else: serve_one spells
     // "forever" as 0, as listener::accept and basic_socketbuf's timeouts do,

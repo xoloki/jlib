@@ -22,13 +22,18 @@
 #define JLIB_SYS_SERVER_HH
 
 #include <jlib/sys/listener.hh>
+#include <jlib/sys/async_reader.hh>
+#include <jlib/sys/async_writer.hh>
+#include <jlib/sys/await.hh>
 #include <jlib/sys/reactor.hh>
+#include <jlib/sys/task.hh>
 #include <jlib/sys/pipe.hh>
 #include <jlib/sys/socketstream.hh>
 #include <jlib/sys/sync.hh>
 #include <jlib/sys/tls.hh>
 
 #include <atomic>
+#include <list>
 #include <cstddef>
 #include <exception>
 #include <functional>
@@ -79,6 +84,21 @@ struct server_policy {
      * finds the descriptor bound was load-bearing.
      */
     std::size_t max_queued = 0;
+
+    /**
+     * How many connections an *async* server will carry at once.
+     *
+     * The analogue of max_queued for a server with no queue.  A coroutine per
+     * connection is cheap -- a frame, not a stack -- but it is not free, and a
+     * server that accepts without limit is one a flood takes down.  Beyond
+     * this the accept loop stops accepting and the overflow waits in the
+     * kernel's listen backlog, which is where a connection is supposed to
+     * wait.
+     *
+     * Ignored by a blocking server, which bounds itself with threads and
+     * max_queued.
+     */
+    std::size_t max_connections = 256;
 };
 
 /**
@@ -153,6 +173,77 @@ public:
     typedef std::function<void(socketstream&, const peer&)> handler;
 
     /**
+     * A connection, as an async handler sees it.
+     *
+     * A reader and a writer rather than a stream, because a coroutine cannot
+     * suspend inside operator>>.  The same pair every converted framing
+     * function already takes -- util::http::read_head and imap::read were
+     * written against async_reader& and work here untouched.
+     *
+     * **Plain or TLS, and a handler cannot tell**, which is the property the
+     * blocking contract has through socketstream& and which is worth keeping:
+     * async_tls hands out the same two interfaces async_fd_reader and
+     * async_fd_writer implement.
+     */
+    class connection {
+    public:
+        connection(sys::reactor& r, async_reader& rd, async_writer& w,
+                   const peer& from, cancel_token t)
+            : m_reactor(r), m_reader(rd), m_writer(w), m_peer(from),
+              m_token(t) {}
+
+        async_reader& reader() { return m_reader; }
+        async_writer& writer() { return m_writer; }
+
+        /**
+         * The loop this connection is running on.
+         *
+         * A handler needs it to do anything async beyond reading and writing
+         * -- and the first of those is a deadline:
+         *
+         *     sys::deadline(c.reactor(), std::chrono::seconds(10), c.token());
+         *
+         * which is what bounds a client that connects and then says nothing.
+         * Without this a handler could suspend but not arm anything, which
+         * makes the token below unusable.
+         */
+        sys::reactor& reactor() { return m_reactor; }
+
+        const peer& from() const { return m_peer; }
+
+        /**
+         * This connection's own token.
+         *
+         * Cancelled when the server stops, and available to a handler that
+         * wants a deadline of its own -- sys::deadline(reactor, d, token)
+         * around a read is what bounds a client that connects and says
+         * nothing.
+         */
+        cancel_token& token() { return m_token; }
+
+    private:
+        sys::reactor& m_reactor;
+        async_reader& m_reader;
+        async_writer& m_writer;
+        peer          m_peer;
+        cancel_token  m_token;
+    };
+
+    /**
+     * A handler that suspends rather than blocking.
+     *
+     * **A connection served this way does not occupy a thread.**  It lives on
+     * the server's reactor as a coroutine, suspended at whatever read or write
+     * it is waiting on, and the accept loop carries on.  policy::threads and
+     * the job queue are not used at all -- there is nothing to dispatch.
+     *
+     * The blocking handler is unchanged and is still the right thing for a
+     * handler that wants a std::iostream.  One or the other, chosen by which
+     * constructor was called.
+     */
+    typedef std::function<task<void>(connection&, const peer&)> async_handler;
+
+    /**
      * What to do with an exception a handler let escape, or a handshake that
      * did not complete.  Runs on whichever thread the connection did.
      *
@@ -164,6 +255,21 @@ public:
 
     /** From a listener already bound: the caller chose the port and backlog. */
     server(listener l, handler h, tls_context tls = tls_context(),
+           const policy& p = policy());
+
+    /**
+     * The same, with a handler that suspends.
+     *
+     * policy::threads and policy::max_queued are ignored: there is no queue
+     * and no pool, because a connection never leaves the reactor.  What bounds
+     * concurrency instead is policy::max_connections.
+     */
+    server(listener l, async_handler h, tls_context tls = tls_context(),
+           const policy& p = policy());
+
+    server(unsigned short port, async_handler h,
+           const std::string& host = "127.0.0.1",
+           tls_context tls = tls_context(),
            const policy& p = policy());
 
     /** Bind and serve.  Loopback by default, for the reason listener gives. */
@@ -306,6 +412,18 @@ private:
     /** One accept and one post.  What the reactor calls the listener ready for. */
     bool accept_and_post();
 
+    /** Whether an async server is carrying all the connections it will. */
+    bool full() const;
+
+    /** The async path: one accept, and a coroutine that owns the descriptor. */
+    bool accept_and_start();
+
+    /** The coroutine one connection runs in. */
+    task<void> serve_async(int fd, peer from, cancel_token t);
+
+    /** Drop the connections that have finished.  Called once per pass. */
+    void reap();
+
     listener      m_listener;
     handler       m_handler;
     error_handler m_on_error;
@@ -333,6 +451,30 @@ private:
     // always let an accept failure propagate to its caller -- so it is caught,
     // parked here, and rethrown once the pass is over.
     std::exception_ptr m_accept_error;
+
+    async_handler m_async;
+
+    /**
+     * The connections in flight, each a suspended coroutine.
+     *
+     * Held because a coroutine started and forgotten is a leak: something has
+     * to own the frame until it completes.  Each carries its own token so that
+     * stop() can end a connection that is parked on a peer which will never
+     * speak -- which before #212 was not something a token could do.
+     */
+    struct live {
+        task<void>   work;
+        cancel_token token;
+    };
+
+    std::list<live> m_live;
+
+    // Whether the listener's registration is currently disabled because the
+    // connection cap is reached.  Disabling it rather than accepting and
+    // dropping is what keeps the overflow in the kernel's listen backlog,
+    // where a connection is supposed to wait -- and what stops the accept loop
+    // spinning on a readiness it refuses to act on.
+    bool m_listen_off = false;
 
     std::atomic<bool> m_stop{false};
 
