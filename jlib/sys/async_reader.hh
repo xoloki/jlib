@@ -25,6 +25,7 @@
 #include <jlib/sys/task.hh>
 
 #include <cstddef>
+#include <cstring>
 #include <string>
 
 namespace jlib {
@@ -89,6 +90,30 @@ public:
         if(m_at == m_end) return empty;
 
         return static_cast<unsigned char>(m_buf[m_at++]);
+    }
+
+    /**
+     * Up to n octets from the buffer into out.
+     *
+     * @return how many were taken, which is zero when the buffer is dry.
+     *
+     * For a caller that knows how much it wants -- a body of a stated length,
+     * a chunk.  get() in a loop would be correct and would cost a call per
+     * octet; a megabyte body is a megabyte of them.
+     *
+     * Never blocks, never suspends, never allocates.
+     */
+    std::size_t take(char* out, std::size_t n) {
+        const std::size_t have = m_end - m_at;
+        const std::size_t took = n < have ? n : have;
+
+        if(took == 0) return 0;
+
+        std::memcpy(out, m_buf + m_at, took);
+
+        m_at += took;
+
+        return took;
     }
 
     /** How much is in hand without waiting. */
