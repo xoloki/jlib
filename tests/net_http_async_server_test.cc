@@ -35,6 +35,8 @@
 #include <jlib/util/URL.hh>
 
 #include <atomic>
+#include <set>
+#include <mutex>
 #include <chrono>
 #include <cstdio>
 #include <iostream>
@@ -387,11 +389,186 @@ static void a_route_for_the_other_kind_of_server() {
     }
 }
 
+namespace {
+    std::mutex g_where_lock;
+    std::set<std::thread::id> g_handler_ran_on;
+    std::thread::id g_reactor_thread;
+}
+
+/**
+ * The handler runs on a worker; the I/O does not.
+ *
+ * Measured before this was wired up: parsing a head of eight fields is 59us
+ * and serialising ten fields is 52us, against 5.85us for a hop round trip.
+ * All of that was running on the thread that dispatches every other
+ * connection.
+ *
+ * "It still works" would be just as true if the hop had been wired somewhere
+ * useless, so this asserts *where* rather than *whether*.
+ */
+static void the_handler_runs_on_a_worker() {
+    std::cout << "\nthe handler runs on a worker:\n";
+
+    {
+        std::lock_guard<std::mutex> g(g_where_lock);
+
+        g_handler_ran_on.clear();
+        g_reactor_thread = std::thread::id();
+    }
+
+    sys::server::policy p;
+
+    p.threads = 4;
+
+    http::server s(http::server::async_t(), 0, "127.0.0.1",
+                   sys::tls_context(), p);
+
+    s.route("GET", "/where", [](const http::server::Request&,
+                                http::server::response& r) {
+        {
+            std::lock_guard<std::mutex> g(g_where_lock);
+
+            g_handler_ran_on.insert(std::this_thread::get_id());
+        }
+
+        r.status(200).type("text/plain").body("ok\n");
+    });
+
+    // A streaming handler is *not* hopped -- it does its own writing -- so it
+    // is the control: it must run on the reactor's thread.
+    s.route("GET", "/stream-where",
+            http::server::async_stream_handler(
+                [](const http::server::Request&,
+                   http::server::async_responder& out) -> sys::task<void> {
+                    {
+                        std::lock_guard<std::mutex> g(g_where_lock);
+
+                        g_reactor_thread = std::this_thread::get_id();
+                    }
+
+                    http::server::response head;
+
+                    head.status(200).type("text/plain");
+
+                    co_await out.begin(head);
+                    co_await out.write("ok\n");
+                }));
+
+    s.transport().on_error([](const std::exception&, const sys::peer&) {});
+
+    std::thread t([&s]{ s.run(); });
+
+    // Several, so more than one worker is likely to be seen.
+    for(int i = 0; i < 8; i++) {
+        const answer a = fetch(s, "/where");
+
+        if(a.status != 200) { ok("  the request was served", false,
+                                 std::to_string(a.status)); break; }
+    }
+
+    // The control, which pins the reactor's thread id.
+    const answer c = fetch(s, "/stream-where");
+
+    ok("  the streaming handler answered", c.status == 200,
+       std::to_string(c.status));
+
+    std::lock_guard<std::mutex> g(g_where_lock);
+
+    ok("  the buffered handler ran somewhere", !g_handler_ran_on.empty(),
+       std::to_string(g_handler_ran_on.size()) + " thread(s)");
+
+    // The assertion.  Before this commit the handler ran on the reactor's
+    // thread and this set would have contained exactly it.
+    ok("  and never on the reactor's thread",
+       g_handler_ran_on.find(g_reactor_thread) == g_handler_ran_on.end());
+
+    ok("  while the streaming handler did run there",
+       g_reactor_thread != std::thread::id());
+
+    s.stop();
+    t.join();
+}
+
+/**
+ * A slow handler does not stop the server.
+ *
+ * The reason the hop is worth having, and the one the microsecond numbers
+ * understate.  Parsing and serialising are the floor -- about 111us for a
+ * realistic request -- but a *real* handler does milliseconds of work: a file
+ * server reads a file, an application server queries something, a template
+ * gets rendered.
+ *
+ * Without the hop all of that runs on the single thread that dispatches every
+ * other connection, so four requests to a 100ms handler take four hundred
+ * milliseconds and nothing else is served meanwhile.  With it they overlap.
+ *
+ * Asserted as a ratio rather than a duration: four concurrent requests to a
+ * handler that sleeps must take closer to one sleep than to four.
+ */
+static void a_slow_handler_does_not_stop_the_server() {
+    std::cout << "\na slow handler does not stop the server:\n";
+
+    sys::server::policy p;
+
+    p.threads = 4;
+
+    http::server s(http::server::async_t(), 0, "127.0.0.1",
+                   sys::tls_context(), p);
+
+    // Stands in for a file read, a query, a render.
+    s.route("GET", "/slow", [](const http::server::Request&,
+                               http::server::response& r) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        r.status(200).type("text/plain").body("slow\n");
+    });
+
+    s.transport().on_error([](const std::exception&, const sys::peer&) {});
+
+    std::thread t([&s]{ s.run(); });
+
+    const int N = 4;
+
+    std::atomic<int> answered(0);
+
+    const auto start = std::chrono::steady_clock::now();
+
+    {
+        std::vector<std::thread> clients;
+
+        for(int i = 0; i < N; i++) {
+            clients.push_back(std::thread([&s, &answered]{
+                if(fetch(s, "/slow").status == 200) ++answered;
+            }));
+        }
+
+        for(std::size_t i = 0; i < clients.size(); i++) clients[i].join();
+    }
+
+    const double took =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+        .count();
+
+    ok("  all four were served", answered.load() == N,
+       std::to_string(answered.load()) + " of " + std::to_string(N));
+
+    // Serialised on the reactor this is 0.4s; overlapped on four workers it is
+    // a little over 0.1s.  The midpoint is a wide margin either way.
+    ok("  and they overlapped rather than queueing", took < 0.25,
+       std::to_string(took) + "s for " + std::to_string(N) +
+       " x 100ms handlers");
+
+    s.stop();
+    t.join();
+}
+
 int main() {
     std::cout << std::unitbuf;
 
     the_two_servers_agree();
     a_head_delivered_one_octet_at_a_time();
+    the_handler_runs_on_a_worker();
+    a_slow_handler_does_not_stop_the_server();
     a_slow_loris_is_dropped();
     a_streaming_handler();
     a_route_for_the_other_kind_of_server();

@@ -21,10 +21,12 @@
 #define JLIB_SYS_AWAIT_HH
 
 #include <jlib/sys/reactor.hh>
+#include <jlib/sys/sync.hh>
 #include <jlib/sys/task.hh>
 
 #include <chrono>
 #include <exception>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -60,9 +62,12 @@ struct waiter {
     reactor::token          reg = reactor::token::none;
     std::coroutine_handle<> h;
 
-    // Set by whichever of the two gets there first -- the descriptor becoming
-    // ready, or the cancellation -- so the loser does nothing.
-    bool                    finished = false;
+    // Set by whichever gets there first -- the descriptor becoming ready, the
+    // cancellation, or the frame being destroyed -- so the losers do nothing.
+    //
+    // Atomic since the pool hop: a resume can be pending on a worker while the
+    // reactor's thread cancels, and a plain bool read from both is a race.
+    std::atomic<bool>       finished{false};
 };
 
 }
@@ -190,9 +195,7 @@ inline void cancel_token::request() {
     for(std::size_t i = 0; i < live.size(); i++) {
         detail::waiter& w = *live[i];
 
-        if(w.finished) continue;
-
-        w.finished = true;
+        if(w.finished.exchange(true)) continue;
 
         // Taken out of the reactor before resuming, so the descriptor becoming
         // ready afterwards finds nothing and cannot resume a second time.
@@ -237,8 +240,25 @@ public:
      */
     ~until_ready() {
         if(m_waiter) {
-            if(!m_waiter->finished && m_waiter->reg != reactor::token::none)
-                m_reactor.remove(m_waiter->reg);
+            // Claimed first, so a callback or a posted registration that runs
+            // after this finds the wait already over and does nothing.  That
+            // is what makes destroying a frame whose registration has not been
+            // made yet safe.
+            const bool was = m_waiter->finished.exchange(true);
+
+            if(!was && m_waiter->reg != reactor::token::none) {
+                if(m_reactor.on_reactor_thread()) {
+                    m_reactor.remove(m_waiter->reg);
+                }
+                else {
+                    // remove() is reactor-thread-only, and this frame may be
+                    // being destroyed on a worker.
+                    reactor& r = m_reactor;
+                    const reactor::token t = m_waiter->reg;
+
+                    r.post([&r, t]{ r.remove(t); });
+                }
+            }
 
             return;
         }
@@ -259,6 +279,49 @@ public:
     bool await_ready() const { return m_token.requested(); }
 
     void await_suspend(std::coroutine_handle<> h) {
+        // **Off the reactor's thread**, which on_pool makes possible.  once()
+        // may only be called from the thread turning the reactor, so the
+        // registration is posted rather than made -- and the consequence,
+        // which the header states, is that this resumes on the reactor's
+        // thread rather than where it suspended.
+        if(!m_reactor.on_reactor_thread()) {
+            m_waiter = std::make_shared<detail::waiter>();
+
+            m_waiter->r = &m_reactor;
+            m_waiter->h = h;
+
+            const std::weak_ptr<detail::waiter> w = m_waiter;
+
+            reactor& r = m_reactor;
+            const int fd = m_fd;
+            const reactor::event_type events = m_events;
+
+            m_reactor.post([w, &r, fd, events]{
+                const std::shared_ptr<detail::waiter> s = w.lock();
+
+                // The frame went away between the post and this.
+                if(!s || s->finished.load()) return;
+
+                s->reg = r.once(fd, events,
+                                [w](reactor::token, int, reactor::event_type) {
+                                    const std::shared_ptr<detail::waiter> t =
+                                        w.lock();
+
+                                    if(!t) return;
+
+                                    t->reg = reactor::token::none;
+
+                                    if(t->finished.exchange(true)) return;
+
+                                    t->h.resume();
+                                });
+            });
+
+            if(m_token.live()) m_token.join(m_waiter);
+
+            return;
+        }
+
         if(!m_token.live()) {
             // Nothing can cancel this, so none of the bookkeeping below is
             // reachable -- and this is the common path, taken by every
@@ -292,9 +355,7 @@ public:
 
                                // The cancellation got here first and has
                                // already resumed this.
-                               if(w->finished) return;
-
-                               w->finished = true;
+                               if(w->finished.exchange(true)) return;
 
                                w->h.resume();
                            });
@@ -365,6 +426,132 @@ inline until_after sleep_for(reactor& r, std::chrono::nanoseconds d,
 {
     return until_after(r, d, t);
 }
+
+/**
+ * Move this coroutine onto a worker thread, and stay there.
+ *
+ * The other half of the design the reactor was built for: **I/O on the
+ * reactor's thread, everything expensive on a pool.**  A handler that has read
+ * a request and now has to parse, decompress, hash or otherwise burn CPU does
+ * it here, so the reactor keeps dispatching for every other connection
+ * meanwhile.
+ *
+ *     co_await sys::on_pool(c.pool());     // now on a worker
+ *     ... the expensive part ...
+ *     co_await sys::on_reactor(c.reactor());
+ *
+ * ## What is true on the far side
+ *
+ * **Not the reactor's thread**, so anything documented as reactor-thread-only
+ * is out: add(), remove(), modify(), cancel(), a timer, cancel_token::request.
+ *
+ * Reading and writing still work, and that is deliberate rather than
+ * accidental -- until_ready notices it is on the wrong thread and posts the
+ * registration rather than making it.  The cost is that **an I/O await from a
+ * worker resumes on the reactor's thread**, because that is where the
+ * readiness callback runs.  So a read from the pool quietly hops back, which
+ * is usually what was wanted and is never what was written.
+ *
+ * ## Two things that are unsafe across this
+ *
+ * A **std::mutex held across the hop** is unlocked by a different thread than
+ * locked it, which is undefined.  Take it and release it on one side.
+ *
+ * **Thread-local state**, and OpenSSL's error queue in particular: clear it on
+ * one thread and read it on another and the diagnostic describes whatever that
+ * thread last did.  #204 made those diagnostics trustworthy; this is the way
+ * to make them lie again.
+ *
+ * With no pool -- job_queue(0) -- post() runs the job inline, so this resumes
+ * immediately on the same thread and the whole thing is a no-op.  A caller can
+ * be written once and made serial or concurrent by one number, which is what
+ * that mode is for.
+ */
+class on_pool {
+public:
+    explicit on_pool(job_queue& q) : m_queue(q) {}
+
+    ~on_pool() {
+        // Nothing to unregister -- a posted job is not a registration -- but
+        // the pending resume has to be told the frame is gone.
+        if(m_hop) m_hop->finished.store(true);
+    }
+
+    on_pool(const on_pool&) = delete;
+    on_pool& operator=(const on_pool&) = delete;
+
+    bool await_ready() const { return false; }
+
+    void await_suspend(std::coroutine_handle<> h) {
+        m_hop = std::make_shared<detail::waiter>();
+
+        m_hop->h = h;
+
+        // Weak, so a job that runs after the frame was destroyed finds nothing
+        // rather than resuming freed memory.  The same shape the cancellation
+        // work needed, for the same reason.
+        const std::weak_ptr<detail::waiter> w = m_hop;
+
+        m_queue.post([w]{
+            const std::shared_ptr<detail::waiter> s = w.lock();
+
+            if(!s || s->finished.exchange(true)) return;
+
+            s->h.resume();
+        });
+    }
+
+    void await_resume() const {}
+
+private:
+    job_queue&                      m_queue;
+    std::shared_ptr<detail::waiter> m_hop;
+};
+
+/**
+ * Move this coroutine back onto the reactor's thread.
+ *
+ * The return leg of on_pool.  Uses reactor::post, which is documented safe
+ * from any thread and is the only way another one may reach the reactor at
+ * all.
+ *
+ * Awaiting it when already on the reactor's thread still costs a pass: the job
+ * runs at the top of the next one rather than immediately, because a job that
+ * ran inline could recurse into the dispatch it was posted from.
+ */
+class on_reactor {
+public:
+    explicit on_reactor(reactor& r) : m_reactor(r) {}
+
+    ~on_reactor() { if(m_hop) m_hop->finished.store(true); }
+
+    on_reactor(const on_reactor&) = delete;
+    on_reactor& operator=(const on_reactor&) = delete;
+
+    bool await_ready() const { return false; }
+
+    void await_suspend(std::coroutine_handle<> h) {
+        m_hop = std::make_shared<detail::waiter>();
+
+        m_hop->h = h;
+
+        const std::weak_ptr<detail::waiter> w = m_hop;
+
+        m_reactor.post([w]{
+            const std::shared_ptr<detail::waiter> s = w.lock();
+
+            if(!s || s->finished.exchange(true)) return;
+
+            s->h.resume();
+        });
+    }
+
+    void await_resume() const {}
+
+private:
+    reactor&                        m_reactor;
+    std::shared_ptr<detail::waiter> m_hop;
+};
 
 /**
  * Cancel the token in d, unless the timer is cancelled first.

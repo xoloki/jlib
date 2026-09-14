@@ -62,6 +62,13 @@ reactor::~reactor() {}
 
 const char* reactor::backend() const { return m_backend->name(); }
 
+bool reactor::on_reactor_thread() const {
+    // Nobody has run a pass, so nobody can be on the wrong thread.
+    if(!m_claimed.load()) return true;
+
+    return std::this_thread::get_id() == m_owner;
+}
+
 void reactor::on_error(error_handler h) { m_on_error = std::move(h); }
 
 void reactor::report(const std::exception& e) {
@@ -256,6 +263,12 @@ bool reactor::run_one(std::chrono::nanoseconds timeout) {
         throw exception("run_one() from inside a callback; the loop is single "
                         "threaded and a nested pass would dispatch the same "
                         "readiness twice");
+    }
+
+    if(!m_claimed.load()) {
+        m_owner = std::this_thread::get_id();
+
+        m_claimed.store(true);
     }
 
     m_dispatching = true;

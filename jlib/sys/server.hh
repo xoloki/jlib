@@ -97,6 +97,13 @@ struct server_policy {
      * the queue look full and stall the accept loop against work already under
      * way.  Zero means "threads", resolved at construction.
      *
+     * **On an async server this is the *pool*, not the connections.**  A
+     * connection there is a coroutine on the reactor and never occupies a
+     * thread; what these serve is `co_await sys::on_pool(c.pool())` -- the
+     * parts of a handler that are computation rather than I/O.  Zero means the
+     * hop runs inline and the handler is serial, which is job_queue's usual
+     * bargain.
+     *
      * **This bounds descriptors, not concurrency.**  Concurrency is threads.
      * Since up to threads jobs can be running, the process holds at most
      * max_queued + threads connection descriptors.  Two numbers, two jobs, and
@@ -213,10 +220,10 @@ public:
      */
     class connection {
     public:
-        connection(sys::reactor& r, async_reader& rd, async_writer& w,
-                   const peer& from, cancel_token t)
-            : m_reactor(r), m_reader(rd), m_writer(w), m_peer(from),
-              m_token(t) {}
+        connection(sys::reactor& r, job_queue& q, async_reader& rd,
+                   async_writer& w, const peer& from, cancel_token t)
+            : m_reactor(r), m_pool(q), m_reader(rd), m_writer(w),
+              m_peer(from), m_token(t) {}
 
         async_reader& reader() { return m_reader; }
         async_writer& writer() { return m_writer; }
@@ -235,6 +242,25 @@ public:
          */
         sys::reactor& reactor() { return m_reactor; }
 
+        /**
+         * The worker pool, for the parts that are not I/O.
+         *
+         *     co_await sys::on_pool(c.pool());
+         *     ... parse, decompress, hash ...
+         *     co_await sys::on_reactor(c.reactor());
+         *
+         * **This is what policy::threads means on an async server.**  It is
+         * not how many connections are served at once -- that is
+         * max_connections, and the reactor serves them all on one thread --
+         * it is how many can be doing something expensive at once.
+         *
+         * With threads == 0 the queue runs a job on the thread that posted it,
+         * so the hop is a no-op and a handler written this way is simply
+         * serial.  One number, two behaviours, which is what job_queue's zero
+         * mode has always been for.
+         */
+        job_queue& pool() { return m_pool; }
+
         const peer& from() const { return m_peer; }
 
         /**
@@ -249,6 +275,7 @@ public:
 
     private:
         sys::reactor& m_reactor;
+        job_queue&    m_pool;
         async_reader& m_reader;
         async_writer& m_writer;
         peer          m_peer;

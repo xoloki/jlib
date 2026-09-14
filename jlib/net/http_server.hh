@@ -235,6 +235,15 @@ public:
         sys::task<void> send(const response& r);
 
         /**
+         * The same, for a caller that has already serialised it.
+         *
+         * Which serve_async has, because it does that on a worker: str()
+         * checks every field against the grammar and is not something to do
+         * on the thread dispatching every other connection.
+         */
+        sys::task<void> send_serialised(const std::string& wire);
+
+        /**
          * Send the head now and commit the status.
          *
          * Content-Length is omitted whatever the handler set, and the body is

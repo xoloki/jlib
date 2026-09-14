@@ -19,6 +19,8 @@
 
 #include <jlib/net/http_server.hh>
 
+#include <jlib/sys/await.hh>
+
 #include <exception>
 
 #include <jlib/util/URL.hh>
@@ -458,6 +460,16 @@ sys::task<void> server::async_responder::send(const response& r) {
     co_await m_writer->write(r.str(m_name));
 }
 
+sys::task<void> server::async_responder::send_serialised(const std::string& wire) {
+    if(m_started)
+        throw error("a responder sent a whole response after it had begun "
+                    "streaming one");
+
+    m_started = true;
+
+    co_await m_writer->write(wire);
+}
+
 sys::task<void> server::async_responder::begin(const response& head) {
     if(m_started) throw error("a responder began a response twice");
 
@@ -543,8 +555,23 @@ sys::task<void> server::serve_async(sys::server::connection& c,
     std::string bad;
 
     try {
-        q = co_await util::http::read_request_head(c.reader(),
-                                                   m_options.max_head);
+        // Read on the reactor's thread, because that is where the descriptor
+        // is.  **Parsed on a worker**, because it is not: parsing a head of
+        // eight fields measures at 59us, and every microsecond of it is a
+        // microsecond no other connection is being dispatched.  The hop costs
+        // 5.85us round trip, so it pays for itself at about one field.
+        //
+        // read_head and parse_request_head were already separate -- the
+        // RFC-grammar work split framing from parsing for its own reasons --
+        // so this is a hop between two calls that already existed.
+        const std::string head =
+            co_await util::http::read_head(c.reader(), m_options.max_head);
+
+        co_await sys::on_pool(c.pool());
+
+        q = util::http::parse_request_head(head);
+
+        co_await sys::on_reactor(c.reactor());
 
         // RFC 9110 10.1.1.  curl sends this for any POST over about a
         // kilobyte and then waits for it; a server that ignores it makes
@@ -660,6 +687,32 @@ sys::task<void> server::serve_async(sys::server::connection& c,
     // coroutine**: it fills a response and cannot suspend, so the same handler
     // runs on both servers -- which is what lets the two be compared on one
     // route table.
+    // **The handler and the serialisation, on a worker.**
+    //
+    // The parsing and serialising are the *floor*, and they are measurable:
+    // a head of eight fields parses in 59us and a response of ten fields
+    // serialises in 52us, because str() checks every field against the
+    // grammar on the way out.  That is 111us on the reactor's thread for a
+    // handler that does nothing at all, against 5.85us for a hop round trip.
+    //
+    // **But the handler is the reason.**  A buffered handler is arbitrary
+    // code: a file server reads a file, an application server queries
+    // something, a template gets rendered.  That is milliseconds, not
+    // microseconds -- and without this hop every one of them runs on the one
+    // thread that dispatches every other connection, so a single handler
+    // reading a slow disk stops the whole server for as long as it takes.
+    //
+    // The microseconds justify the hop for a trivial handler.  The
+    // milliseconds are why it matters.
+    //
+    // A *streaming* handler is not hopped, above: it does its own writing, so
+    // it has to be where the writer is, and a handler that wants the pool for
+    // part of its work can co_await on_pool itself.
+    //
+    // With policy::threads == 0 the queue runs a job on the thread that posted
+    // it, so all of this is inline and a serial server pays nothing.
+    co_await sys::on_pool(c.pool());
+
     response r;
 
     std::exception_ptr threw;
@@ -671,6 +724,15 @@ sys::task<void> server::serve_async(sys::server::connection& c,
         threw = std::current_exception();
     }
 
+    // Serialised here, on the worker, rather than as the argument to write()
+    // on the reactor -- which is what it was, and is the half of this that is
+    // easy to miss.
+    std::string wire;
+
+    if(!threw) wire = r.str(m_options.server_name);
+
+    co_await sys::on_reactor(c.reactor());
+
     if(threw) {
         response oops;
 
@@ -681,7 +743,7 @@ sys::task<void> server::serve_async(sys::server::connection& c,
         std::rethrow_exception(threw);
     }
 
-    co_await out.send(r);
+    co_await out.send_serialised(wire);
 }
 
 }
