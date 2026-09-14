@@ -72,23 +72,14 @@ namespace {
 
 }
 
-server::server(listener l, handler h, tls_context tls, const policy& p)
+server::server(deferred_handler_t, listener l, tls_context tls,
+               const policy& p)
     : m_listener(std::move(l)),
-      m_handler(std::move(h)),
       m_on_error(complain),
       m_tls(std::move(tls)),
       m_policy(p),
       m_jobs(static_cast<int>(p.threads))
 {
-    // The async constructor delegates here with an empty one and installs its
-    // own; a caller reaching this constructor directly must supply one.
-
-    // Not checked here: the async constructor delegates to this one with an
-    // empty blocking handler and installs its own afterwards, so the check
-    // belongs where both paths have finished being built.  Each public
-    // constructor makes it.
-
-
     // So the accept never blocks: the reactor reports the listening descriptor
     // ready, and a client that sends an RST between the readiness and the
     // accept would otherwise leave it waiting for the next one.
@@ -111,13 +102,24 @@ server::server(listener l, handler h, tls_context tls, const policy& p)
         });
 }
 
+server::server(listener l, handler h, tls_context tls, const policy& p)
+    : server(deferred_handler_t(), std::move(l), std::move(tls), p)
+{
+    m_handler = std::move(h);
+
+    // At construction, not at first serve.  A server built wrong should say so
+    // when it is built, and routing this through the tagged constructor above
+    // is what lets the async one delegate without disarming it.
+    if(!m_handler) throw exception("a server with no handler");
+}
+
 server::server(unsigned short port, handler h, const std::string& host,
                tls_context tls, const policy& p)
     : server(listener(port, host), std::move(h), std::move(tls), p)
 {}
 
 server::server(listener l, async_handler h, tls_context tls, const policy& p)
-    : server(std::move(l), handler(), std::move(tls), p)
+    : server(deferred_handler_t(), std::move(l), std::move(tls), p)
 {
     m_async = std::move(h);
 
@@ -420,9 +422,6 @@ task<void> server::serve_async(int fd, peer from, cancel_token t) {
 }
 
 bool server::serve_one(double timeout) {
-    if(!m_handler && !m_async)
-        throw exception("a server with no handler");
-
     if(m_stop.load()) return false;
 
     // Connections that have finished let go of their descriptors here, once a

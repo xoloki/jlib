@@ -406,6 +406,20 @@ public:
     void join();
 
 private:
+    /**
+     * Tag for the constructor the async one delegates to.
+     *
+     * Which exists so the blocking constructor can keep throwing on a null
+     * handler.  Delegating to it with an empty one and installing the async
+     * handler afterwards would have meant moving that check somewhere both
+     * paths reach -- and the only such place is serve_one, which turns a
+     * construction-time error into a first-use one.  A server built wrong
+     * should say so when it is built.
+     */
+    struct deferred_handler_t { explicit deferred_handler_t() = default; };
+
+    server(deferred_handler_t, listener l, tls_context tls, const policy& p);
+
     void serve(int fd, const peer& from);
     std::size_t cap() const;
 

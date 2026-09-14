@@ -429,6 +429,40 @@ static void the_connection_cap_holds() {
     t.join();
 }
 
+/**
+ * A server built without a handler says so at construction.
+ *
+ * Nothing covered this, which is how adding the async path quietly moved the
+ * check: the async constructor had delegated to the blocking one with an empty
+ * handler and installed its own afterwards, so the check had to move somewhere
+ * both paths reached -- and the only such place was serve_one, which turns a
+ * construction-time error into a first-use one.
+ *
+ * A private tagged constructor carries the shared body now, and both public
+ * ones check their own handler.  This is the test that would have caught it.
+ */
+static void a_server_with_no_handler_refuses_to_be_built() {
+    std::cout << "\na server with no handler refuses to be built:\n";
+
+    bool blocking_threw = false;
+
+    try {
+        sys::server s(0, sys::server::handler(), "127.0.0.1");
+    }
+    catch(sys::server::exception&) { blocking_threw = true; }
+
+    ok("  the blocking one throws at construction", blocking_threw);
+
+    bool async_threw = false;
+
+    try {
+        sys::server s(0, sys::server::async_handler(), "127.0.0.1");
+    }
+    catch(sys::server::exception&) { async_threw = true; }
+
+    ok("  and so does the async one", async_threw);
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -439,6 +473,7 @@ int main() {
 
     if(have_cert) ::setenv("SSL_CERT_FILE", cert.c_str(), 1);
 
+    a_server_with_no_handler_refuses_to_be_built();
     it_serves_a_connection();
     many_at_once_with_no_pool();
     the_connection_cap_holds();
