@@ -403,8 +403,14 @@ token exchange(const client& c,
  * The whole flow: open a browser, wait, exchange.
  *
  * Blocking, on purpose.  The application runs it on a thread; sys::ASServent is
- * the house pattern and ASMailBox and ASImapBox are the precedent.  It cannot
- * be anything else without inventing an event loop jlib does not have.
+ * the house pattern and ASMailBox and ASImapBox are the precedent.
+ *
+ * It used to say here that it could not be anything else without inventing an
+ * event loop jlib does not have.  jlib has one now -- sys::reactor, and the
+ * coroutine layer over it -- so the sentence is no longer true and the choice
+ * is a choice: a flow that opens a browser and waits for a human is not one
+ * that gains anything from suspending instead of blocking, and the thread it
+ * runs on is doing nothing else.
  *
  * @param open  called with the authorization URL.  Opening a browser is the
  *              application's business -- it may be a desktop, a terminal

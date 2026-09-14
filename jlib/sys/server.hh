@@ -107,17 +107,23 @@ struct server_policy {
  * jlib was a client for twenty-six years.  listener gave it an accepting
  * socket; this gives it something to do with one.
  *
- * ## Deliberately small, and deliberately blocking
+ * ## Deliberately small, and blocking or not by which handler it was given
  *
  * It accepts, optionally secures, and dispatches.  There is no connection
  * reuse and no protocol.
  *
- * There *is* an event loop now -- serve_one() waits in a sys::reactor rather
- * than in a poll(2) of its own -- and that changed nothing else.  **This is
- * still a blocking server**: a handler is handed a stream and blocks on it,
- * one connection per job, exactly as before.  What the reactor bought here is
- * one multiplexer instead of a pollfd array rebuilt per call, and a shutdown
- * that wakes one thing rather than three.
+ * **Two modes, chosen at construction.**  Given a `handler`, a connection goes
+ * to a job_queue and a thread blocks on it until it is done -- one connection
+ * per job, which is what this was for twenty-six years of being a client and
+ * then a small server.  Given an `async_handler`, the connection never leaves
+ * the reactor: it is a coroutine suspended at whatever read or write it is
+ * waiting on, `policy::threads` is not used at all, and `max_connections`
+ * bounds it instead.
+ *
+ * The blocking mode is not deprecated and is still the right thing for a
+ * handler that wants a std::iostream.  What the async one buys is that a
+ * connection costs a coroutine frame rather than a thread, and that a handler
+ * can be given a deadline -- see connection::token().
  *
  * The thing that had to survive that change is the *handler contract* -- given
  * a connection, do something with it -- which is why run() is a thin loop over
