@@ -19,6 +19,8 @@
 
 #include <jlib/util/http.hh>
 
+#include <coroutine>
+
 #include <jlib/util/rfc3986.hh>
 #include <jlib/util/rfc9110.hh>
 #include <jlib/util/rfc9112.hh>
@@ -105,35 +107,97 @@ fields::size_type fields::count(std::string_view name) const {
 
 // ---------------------------------------------------------------- read_head
 
+namespace {
+
+/**
+ * Whether the head accumulated so far has reached its blank line.
+ *
+ * Shared by the synchronous read_head and the coroutine one, because it is the
+ * half most likely to drift: two copies of a termination test is two places to
+ * get "\r\n\r\n" wrong and one place to notice.
+ *
+ * One octet at a time, and not getline: a bare LF in the middle of the section
+ * is something the caller has to be able to see and refuse, and getline would
+ * silently make it a line ending.
+ *
+ * "\n\n" ends it as well as "\r\n\r\n" only so that a head sent with bare LFs
+ * is *read* and then *rejected* by the grammar, with a message saying what was
+ * wrong, rather than read until the cap runs out.
+ */
+bool head_complete(const std::string& head) {
+    return head.size() >= 4 &&
+        (head.compare(head.size() - 4, 4, "\r\n\r\n") == 0 ||
+         head.compare(head.size() - 2, 2, "\n\n") == 0);
+}
+
+/** The cap, which both read the same way. */
+void refuse_if_too_long(const std::string& head, std::size_t cap) {
+    if(head.size() > cap) {
+        throw error("no end to the message head within " +
+                    std::to_string(cap) + " octets");
+    }
+}
+
+std::string ended_early(const std::string& head) {
+    return "the connection closed before the message head ended, after " +
+        std::to_string(head.size()) + " octets";
+}
+
+}
+
 std::string read_head(std::istream& is, std::size_t cap) {
     std::string head;
 
-    // One octet at a time, looking for the blank line.  Not getline: a bare LF
-    // in the middle of the section is something this has to be able to see and
-    // refuse, and getline would silently make it a line ending.
-    //
-    // "\n\n" is accepted as an end as well as "\r\n\r\n" only so that a head
-    // sent with bare LFs is *read* and then *rejected* by the grammar, with a
-    // message saying what was wrong, rather than read until the cap runs out.
-    while(head.size() < 4 ||
-          (head.compare(head.size() - 4, 4, "\r\n\r\n") != 0 &&
-           head.compare(head.size() - 2, 2, "\n\n") != 0)) {
+    while(!head_complete(head)) {
         const int c = is.get();
 
-        if(c == std::char_traits<char>::eof()) {
-            throw error("the connection closed before the message head ended, "
-                        "after " + std::to_string(head.size()) + " octets");
+        if(c == std::char_traits<char>::eof()) throw error(ended_early(head));
+
+        head += static_cast<char>(c);
+
+        refuse_if_too_long(head, cap);
+    }
+
+    return head;
+}
+
+/**
+ * The same, suspending instead of blocking.
+ *
+ * **The first framing function to change shape**, and the point of it is how
+ * little changed: the loop is the loop above, `is.get()` became `in.get()`, and
+ * the branch that threw on end of input became "top up, and throw only if
+ * there is nothing more coming".
+ *
+ * What did *not* change is everything downstream.  parse_request_head and
+ * parse_head take a string_view and are untouched, because the framing and the
+ * parsing were already separate -- a split the RFC-grammar work made for
+ * unrelated reasons and which is why #4 costs six functions rather than
+ * fifty-nine.
+ *
+ * A caller that does not want to be a coroutine drives this with
+ * sys::run_until_complete; see the note on it.
+ */
+sys::task<std::string> read_head(sys::async_reader& in, std::size_t cap) {
+    std::string head;
+
+    while(!head_complete(head)) {
+        const int c = in.get();
+
+        if(c == sys::async_reader::empty) {
+            // The one suspension.  False means the peer closed, which is the
+            // eof branch above.
+            if(!co_await in.fill()) throw error(ended_early(head));
+
+            continue;
         }
 
         head += static_cast<char>(c);
 
-        if(head.size() > cap) {
-            throw error("no end to the message head within " +
-                        std::to_string(cap) + " octets");
-        }
+        refuse_if_too_long(head, cap);
     }
 
-    return head;
+    co_return head;
 }
 
 // --------------------------------------------------------------- parse_head

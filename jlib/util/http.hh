@@ -20,6 +20,8 @@
 #ifndef JLIB_UTIL_HTTP_HH
 #define JLIB_UTIL_HTTP_HH
 
+#include <jlib/sys/async_reader.hh>
+#include <jlib/sys/task.hh>
 #include <jlib/util/abnf.hh>
 
 #include <cstddef>
@@ -272,6 +274,16 @@ const abnf::grammar& grammar();
  * @throw error if the stream ends first, or the cap is reached.
  */
 std::string read_head(std::istream& is, std::size_t cap = 8192);
+
+/**
+ * The same, suspending rather than blocking.  See the definition in http.cc.
+ *
+ * **Additive.**  The synchronous one above is unchanged and every existing
+ * caller still uses it; nothing in the tree awaits this yet.  A caller that
+ * does not want to become a coroutine drives it with sys::run_until_complete.
+ */
+sys::task<std::string> read_head(sys::async_reader& in,
+                                 std::size_t cap = 8192);
 
 /**
  * Parse a response head against the grammar.

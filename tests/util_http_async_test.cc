@@ -1,0 +1,277 @@
+/* -*- mode: C++ c-basic-offset: 4  -*-
+ *
+ * Copyright (c) 2026 Joey Yandle <xoloki@gmail.com>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ */
+/*
+ * util_http_async_test -- the first framing function that suspends.
+ *
+ * The subject is not "does it read a head" -- the synchronous one has done
+ * that for a while -- but **do the two agree**, including about what they
+ * refuse and what they say when they refuse it.  A coroutine that reads the
+ * happy path and diverges on a truncated message is worse than no coroutine.
+ */
+
+#include <jlib/sys/async_reader.hh>
+#include <jlib/sys/await.hh>
+#include <jlib/sys/pipe.hh>
+#include <jlib/sys/reactor.hh>
+#include <jlib/util/http.hh>
+
+#include <unistd.h>
+
+#include <chrono>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace sys = jlib::sys;
+namespace http = jlib::util::http;
+
+static int failures = 0;
+
+static void ok(const std::string& what, bool good, const std::string& detail = "") {
+    if(!good) ++failures;
+    std::cout << (good ? "  ok   " : "  FAIL ") << what;
+    if(!detail.empty()) std::cout << ": " << detail;
+    std::cout << "\n";
+}
+
+/** What the synchronous one does with this input: a value, or a message. */
+struct outcome {
+    bool threw = false;
+    std::string value;
+    std::string why;
+
+    bool operator==(const outcome& o) const {
+        return threw == o.threw && value == o.value && why == o.why;
+    }
+};
+
+static outcome sync_read(const std::string& in, std::size_t cap) {
+    outcome o;
+    std::istringstream is(in);
+
+    try { o.value = http::read_head(is, cap); }
+    catch(std::exception& e) { o.threw = true; o.why = e.what(); }
+
+    return o;
+}
+
+/**
+ * The same input through the coroutine, delivered in pieces.
+ *
+ * @param chunk how many octets at a time, so the reader is forced to suspend
+ *              partway through -- which is the whole difference being tested.
+ */
+static outcome async_read(const std::string& in, std::size_t cap,
+                          std::size_t chunk)
+{
+    outcome o;
+
+    sys::reactor r;
+
+    // Raw descriptors rather than sys::pipe, because the write end has to be
+    // *closed* to make a truncated input arrive as end of stream, and pipe
+    // owns both ends and closes them itself.
+    int fds[2];
+
+    if(::pipe(fds) != 0) { o.threw = true; o.why = "pipe() failed"; return o; }
+
+    std::thread feeder([&]{
+        for(std::size_t at = 0; at < in.size(); at += chunk) {
+            const std::string part = in.substr(at, chunk);
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+
+            ::write(fds[1], part.data(), part.size());
+        }
+
+        ::close(fds[1]);
+    });
+
+    sys::async_reader in_r(r, fds[0]);
+    sys::task<std::string> t = http::read_head(in_r, cap);
+
+    try { o.value = sys::run_until_complete(r, t); }
+    catch(std::exception& e) { o.threw = true; o.why = e.what(); }
+
+    feeder.join();
+
+    ::close(fds[0]);
+
+    return o;
+}
+
+static void they_agree(const std::string& what, const std::string& input,
+                       std::size_t cap = 8192)
+{
+    const outcome a = sync_read(input, cap);
+
+    // One octet at a time is the worst case: a suspension between every pair
+    // of characters, so every state of the loop is crossed by a co_await.
+    const outcome b = async_read(input, cap, 1);
+
+    // And in one go, where the buffer never runs dry and fill() is awaited
+    // once.
+    const outcome c = async_read(input, cap, input.empty() ? 1 : input.size());
+
+    ok("  " + what, a == b && a == c,
+       a == b ? (a == c ? "" : "differs when delivered whole")
+              : "differs when delivered one octet at a time");
+
+    if(!(a == b)) {
+        std::cout << "         sync : " << (a.threw ? "threw " + a.why : "\"" + a.value + "\"") << "\n";
+        std::cout << "         async: " << (b.threw ? "threw " + b.why : "\"" + b.value + "\"") << "\n";
+    }
+}
+
+static void the_two_read_heads_agree() {
+    std::cout << "\nthe synchronous and suspending read_head agree:\n";
+
+    they_agree("an ordinary request head",
+               "GET / HTTP/1.1\r\nHost: example.org\r\n\r\n");
+
+    they_agree("one with no fields", "GET / HTTP/1.1\r\n\r\n");
+
+    they_agree("one with several fields",
+               "POST /x HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n"
+               "Accept: */*\r\n\r\n");
+
+    // The bare-LF end, which both accept so that the grammar can refuse it
+    // with a message rather than the cap running out.
+    they_agree("a head ended with bare LFs", "GET / HTTP/1.1\nHost: a\n\n");
+
+    they_agree("a head with a bare LF in the middle",
+               "GET / HTTP/1.1\nHost: a\r\n\r\n");
+
+    // The refusals, which matter more than the successes.
+    they_agree("a truncated head", "GET / HTTP/1.1\r\nHost: exa");
+
+    they_agree("nothing at all", "");
+
+    they_agree("a head that never ends",
+               std::string("GET / HTTP/1.1\r\n") + std::string(400, 'x'), 64);
+
+    they_agree("one exactly at the cap",
+               "GET / HTTP/1.1\r\n\r\n", 18);
+
+    they_agree("one one octet over the cap",
+               "GET / HTTP/1.1\r\n\r\n", 17);
+}
+
+/** The half that did not change: the parser, over what the coroutine produced. */
+static void the_parser_is_untouched() {
+    std::cout << "\nthe parser is untouched:\n";
+
+    sys::reactor r;
+    sys::pipe p(false, false);
+
+    const std::string msg = "GET /thing?q=1 HTTP/1.1\r\nHost: example.org\r\n\r\n";
+
+    ::write(p.get_writer(), msg.data(), msg.size());
+
+    sys::async_reader in(r, p.get_reader());
+    sys::task<std::string> t = http::read_head(in, 8192);
+
+    const std::string head = sys::run_until_complete(r, t);
+
+    // parse_request_head takes a string_view and is not a coroutine.  That
+    // split is why this costs six functions rather than fifty-nine.
+    const http::Request q = http::parse_request_head(head);
+
+    ok("  the coroutine's output parses", q.method() == "GET", q.method());
+
+    ok("  with the target intact", q.target() == "/thing?q=1", q.target());
+
+    ok("  and the fields", jlib::util::http::fold(q.fields().get("Host")) ==
+       "example.org", q.fields().get("Host"));
+}
+
+/** Cancellation reaches a framing function that knows nothing about it. */
+static void a_framing_function_inherits_cancellation() {
+    std::cout << "\na framing function inherits cancellation:\n";
+
+    sys::reactor r;
+    sys::pipe p(false, false);
+    sys::cancel_token token;
+
+    // A head that never ends, from a peer that never says more.
+    const std::string partial = "GET / HTTP/1.1\r\nHost: ex";
+
+    ::write(p.get_writer(), partial.data(), partial.size());
+
+    sys::async_reader in(r, p.get_reader(), token);
+    sys::task<std::string> t = http::read_head(in, 8192);
+
+    t.start();
+
+    ok("  it consumed what was there and suspended", !t.done());
+
+    token.request();
+
+    // Something has to end the wait; a real caller cancels from a timer on
+    // this thread.  See the closing note -- a requested token does not by
+    // itself end a wait on a descriptor that never becomes ready.
+    ::write(p.get_writer(), "x", 1);
+
+    bool cancelled = false;
+
+    try { sys::run_until_complete(r, t); }
+    catch(sys::cancelled&) { cancelled = true; }
+
+    // read_head does not mention cancel_token anywhere.  It inherits it
+    // through async_reader::fill, which inherits it from until_ready.
+    ok("  and cancelling the reader cancels the read", cancelled);
+}
+
+int main() {
+    std::cout << std::unitbuf;
+
+    the_two_read_heads_agree();
+    the_parser_is_untouched();
+    a_framing_function_inherits_cancellation();
+
+    // What a green run does not establish.
+    //
+    // That read_head is representative.  It is the *easy* framing function: a
+    // byte loop over a delimiter with no state to carry across a suspension.
+    // read_body has four cases and one of them interleaves parsing a chunk
+    // size with reading chunk data; imap::read re-parses each line's tail to
+    // find a literal length and then reads exactly that many octets.  Those
+    // are where the shape will hold or not, and neither is converted.
+    //
+    // That anything in jlib awaits this.  Nothing does.  net::http::server
+    // still calls the synchronous read_head, and both remain.
+    //
+    // That a requested token ends a wait.  It does not: the await stays
+    // registered until the descriptor happens to become ready, which is why
+    // the section above has to write a byte to provoke it.  A slow-loris
+    // defence needs the wait to end on the token, and that is the next piece
+    // of cancellation.
+    //
+    // And nothing about TLS.  async_reader reads a descriptor; a TLS stream
+    // answers a second readiness question -- whether the SSL holds buffered
+    // plaintext -- that a descriptor cannot, and #4 records that as the real
+    // work rather than something a reader wraps its way out of.
+    std::cout << "\n" << (failures ? "FAILED" : "PASSED") << ": " << failures
+              << " failure(s)\n";
+
+    return failures ? 1 : 0;
+}
