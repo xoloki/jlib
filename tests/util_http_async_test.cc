@@ -26,6 +26,8 @@
  * happy path and diverges on a truncated message is worse than no coroutine.
  */
 
+#include "feed.hh"
+
 #include <jlib/sys/async_reader.hh>
 #include <jlib/sys/await.hh>
 #include <jlib/sys/pipe.hh>
@@ -100,13 +102,13 @@ static outcome async_read(const std::string& in, std::size_t cap,
 
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
 
-            ::write(fds[1], part.data(), part.size());
+            feed(fds[1], part);
         }
 
         ::close(fds[1]);
     });
 
-    sys::async_reader in_r(r, fds[0]);
+    sys::async_fd_reader in_r(r, fds[0]);
     sys::task<std::string> t = http::read_head(in_r, cap);
 
     try { o.value = sys::run_until_complete(r, t); }
@@ -208,13 +210,13 @@ static outcome async_body(const std::string& in, http::framing how,
 
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
-            ::write(fds[1], part.data(), part.size());
+            feed(fds[1], part);
         }
 
         ::close(fds[1]);
     });
 
-    sys::async_reader in_r(r, fds[0]);
+    sys::async_fd_reader in_r(r, fds[0]);
     sys::task<std::string> t = http::read_body(in_r, how, length, cap);
 
     try { o.value = sys::run_until_complete(r, t); }
@@ -325,9 +327,9 @@ static void the_parser_is_untouched() {
 
     const std::string msg = "GET /thing?q=1 HTTP/1.1\r\nHost: example.org\r\n\r\n";
 
-    ::write(p.get_writer(), msg.data(), msg.size());
+    feed(p.get_writer(), msg);
 
-    sys::async_reader in(r, p.get_reader());
+    sys::async_fd_reader in(r, p.get_reader());
     sys::task<std::string> t = http::read_head(in, 8192);
 
     const std::string head = sys::run_until_complete(r, t);
@@ -355,9 +357,9 @@ static void a_framing_function_inherits_cancellation() {
     // A head that never ends, from a peer that never says more.
     const std::string partial = "GET / HTTP/1.1\r\nHost: ex";
 
-    ::write(p.get_writer(), partial.data(), partial.size());
+    feed(p.get_writer(), partial);
 
-    sys::async_reader in(r, p.get_reader(), token);
+    sys::async_fd_reader in(r, p.get_reader(), token);
     sys::task<std::string> t = http::read_head(in, 8192);
 
     t.start();
@@ -369,7 +371,7 @@ static void a_framing_function_inherits_cancellation() {
     // Something has to end the wait; a real caller cancels from a timer on
     // this thread.  See the closing note -- a requested token does not by
     // itself end a wait on a descriptor that never becomes ready.
-    ::write(p.get_writer(), "x", 1);
+    feed(p.get_writer(), "x", 1);
 
     bool cancelled = false;
 

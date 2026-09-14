@@ -101,6 +101,7 @@ TESTS = \
 	sys_sigpipe_test \
 	sys_tls_sigpipe_test \
 	sys_tls_server_test \
+	sys_async_tls_test \
 	sys_server_test \
 	sys_reactor_test \
 	sys_task_test \
@@ -193,7 +194,7 @@ sys_proxy_live_test_LDADD       = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LI
 net_imap_live_test_SOURCES      = net_imap_live_test.cc
 net_imap_live_test_LDADD        = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
-net_imap_async_test_SOURCES = net_imap_async_test.cc
+net_imap_async_test_SOURCES = net_imap_async_test.cc feed.hh
 net_imap_async_test_LDADD   = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA)
 
 net_imap_test_SOURCES           = net_imap_test.cc
@@ -247,13 +248,16 @@ sys_socket_test_SOURCES = sys_socket_test.cc
 # this failed only in the container.
 sys_socket_test_LDADD   = $(JSYS_LA) $(OPENSSL_LIBS)
 
+sys_async_tls_test_SOURCES = sys_async_tls_test.cc certificate.hh feed.hh
+sys_async_tls_test_LDADD   = $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
+
 sys_tls_server_test_SOURCES = sys_tls_server_test.cc
 sys_tls_server_test_LDADD   = $(JSYS_LA) $(OPENSSL_LIBS)
 
-sys_task_test_SOURCES = sys_task_test.cc
+sys_task_test_SOURCES = sys_task_test.cc feed.hh
 sys_task_test_LDADD   = $(JSYS_LA)
 
-sys_reactor_test_SOURCES  = sys_reactor_test.cc
+sys_reactor_test_SOURCES  = sys_reactor_test.cc feed.hh
 sys_reactor_test_CPPFLAGS = $(AM_CPPFLAGS) $(REACTOR_CPPFLAGS)
 sys_reactor_test_LDADD    = $(JSYS_LA)
 
@@ -263,7 +267,7 @@ sys_server_test_LDADD   = $(JSYS_LA) $(OPENSSL_LIBS)
 util_json_test_SOURCES = util_json_test.cc
 util_json_test_LDADD   = $(JUTIL_LA) $(JSYS_LA) $(JSONC_LIBS)
 
-util_http_async_test_SOURCES = util_http_async_test.cc
+util_http_async_test_SOURCES = util_http_async_test.cc feed.hh
 util_http_async_test_LDADD   = $(JUTIL_LA) $(JSYS_LA)
 
 util_http_test_SOURCES = util_http_test.cc

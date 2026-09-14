@@ -26,7 +26,7 @@
 namespace jlib {
 namespace sys {
 
-task<bool> async_reader::fill() {
+task<bool> async_fd_reader::fill() {
     if(m_closed) co_return false;
 
     for(;;) {
@@ -34,17 +34,16 @@ task<bool> async_reader::fill() {
         // function inherits cancellation without knowing about it.
         co_await until_ready(m_reactor, m_fd, reactor::READ, m_token);
 
-        const ssize_t n = ::read(m_fd, m_buf, sizeof m_buf);
+        const ssize_t n = ::read(m_fd, buf(), buf_size());
 
         if(n > 0) {
-            m_at = 0;
-            m_end = static_cast<std::size_t>(n);
+            filled(static_cast<std::size_t>(n));
 
             co_return true;
         }
 
         if(n == 0) {
-            m_closed = true;
+            ended();
 
             co_return false;
         }
@@ -59,7 +58,7 @@ task<bool> async_reader::fill() {
         // spurious wakeup -- rare, and the answer is the same: wait again.
         if(errno == EAGAIN || errno == EWOULDBLOCK) continue;
 
-        m_closed = true;
+        ended();
 
         co_return false;
     }
