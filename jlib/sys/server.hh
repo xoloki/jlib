@@ -428,6 +428,13 @@ public:
      * stop(true) silently upgrades an earlier stop(false) back to draining.
      * That is why join() does not stop on your behalf: it would have to guess
      * at this, and guessing overwrites what the caller asked for.
+     *
+     * **Asynchronous.  join() is the synchronous half.**  On an async server
+     * this returns before the live connections have been ended: ending one
+     * runs its own code and destroys its frame, which only the reactor's
+     * thread may do, so it is posted there.  run() returns once that job has
+     * run, which makes the thread turning the reactor the thing a caller waits
+     * on -- as it already was.
      */
     void stop(bool drain = true);
 
@@ -490,6 +497,17 @@ private:
 
     /** Drop the connections that have finished.  Called once per pass. */
     void reap();
+
+    /**
+     * End every live connection.  **Reactor thread only.**
+     *
+     * Requesting a token resumes the coroutine parked on it, and it resumes
+     * *here* -- so this runs a connection to its next suspension, or to its
+     * end, on whichever thread calls it.  That thread has to be the reactor's,
+     * because a connection that ends destroys its frame, closes its descriptor
+     * and leaves m_live, all of which the reactor thread is also doing.
+     */
+    void cancel_live();
 
     listener      m_listener;
     handler       m_handler;

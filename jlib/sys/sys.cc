@@ -33,6 +33,9 @@
 #include <cstring>
 
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -93,6 +96,12 @@ namespace jlib {
 
         double get_default_io_timeout() {
             return g_io_timeout.load();
+        }
+
+        void nodelay(int fd) {
+            int on = 1;
+
+            ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
         }
 
         void nosigpipe(int fd) {

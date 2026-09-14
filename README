@@ -28,7 +28,10 @@ coroutines over it, so a read and a request and a timer are all things one
 thread can be waiting for.  The blocking interfaces are all still there and
 still the right answer for a program that wants them -- nothing was migrated,
 and run_until_complete is what lets a synchronous caller drive an
-asynchronous one without becoming one.
+asynchronous one without becoming one.  The first thing that is worth having
+only because of it: the HTTP server answers more than one request per
+connection, where the blocking one would have to hold a thread for every
+client that might ask again.
 
 Errors are thrown rather than returned, and each class nests its own
 exception type.  Everything lives in namespace jlib::<module>.

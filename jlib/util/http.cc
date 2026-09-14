@@ -162,7 +162,7 @@ std::string read_head(std::istream& is, std::size_t cap) {
 }
 
 /**
- * The same, suspending instead of blocking.
+ * The suspending framing loop, which both suspending reads of a head share.
  *
  * **The first framing function to change shape**, and the point of it is how
  * little changed: the loop is the loop above, `is.get()` became `in.get()`, and
@@ -174,20 +174,23 @@ std::string read_head(std::istream& is, std::size_t cap) {
  * parsing were already separate -- a split the RFC-grammar work made for
  * unrelated reasons and which is why #4 costs six functions rather than
  * fifty-nine.
- *
- * A caller that does not want to be a coroutine drives this with
- * sys::run_until_complete; see the note on it.
  */
-sys::task<std::string> read_head(sys::async_reader& in, std::size_t cap) {
-    std::string head;
+sys::task<bool> read_head_if_any(sys::async_reader& in, std::size_t cap,
+                                 std::string& head)
+{
+    head.clear();
 
     while(!head_complete(head)) {
         const int c = in.get();
 
         if(c == sys::async_reader::empty) {
-            // The one suspension.  False means the peer closed, which is the
-            // eof branch above.
-            if(!co_await in.fill()) throw error(ended_early(head));
+            if(!co_await in.fill()) {
+                // Nothing arrived at all: the peer is done, and said so the
+                // way HTTP says it.  Anything else is a message cut in half.
+                if(head.empty()) co_return false;
+
+                throw error(ended_early(head));
+            }
 
             continue;
         }
@@ -196,6 +199,27 @@ sys::task<std::string> read_head(sys::async_reader& in, std::size_t cap) {
 
         refuse_if_too_long(head, cap);
     }
+
+    co_return true;
+}
+
+/**
+ * The same, for a caller to whom a connection that ends is always an error.
+ *
+ * Every suspending read of a head goes through read_head_if_any above; this
+ * adds the throw, and that is the entire difference between the two.
+ *
+ * A caller that does not want to be a coroutine drives this with
+ * sys::run_until_complete; see the note on it.
+ */
+sys::task<std::string> read_head(sys::async_reader& in, std::size_t cap) {
+    std::string head;
+
+    // The loop moved to read_head_if_any, which this is the strict half of:
+    // the two differ only in whether a connection that ended before a head
+    // started is an error, and keeping two copies of a framing loop is how the
+    // two ends of a protocol come to disagree about where a message stops.
+    if(!co_await read_head_if_any(in, cap, head)) throw error(ended_early(head));
 
     co_return head;
 }
@@ -374,6 +398,34 @@ namespace {
         }
     }
 
+}
+
+bool connection_close(const fields& f) {
+    for(const std::string& v : f.all("Connection")) {
+        std::string token;
+
+        // One pass, splitting on commas and dropping the optional whitespace
+        // around each token.  fold() lower-cases but does not trim, which is
+        // why the spaces come out here rather than there.
+        for(std::size_t i = 0; i <= v.size(); ++i) {
+            if(i == v.size() || v[i] == ',') {
+                if(fold(token) == "close") return true;
+
+                token.clear();
+            }
+            else if(v[i] != ' ' && v[i] != '\t') {
+                token += v[i];
+            }
+        }
+    }
+
+    return false;
+}
+
+bool persistent(const Request& q) {
+    if(q.version() != "HTTP/1.1") return false;
+
+    return !connection_close(q.fields());
 }
 
 Request parse_request_head(std::string_view head) {

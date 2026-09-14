@@ -185,16 +185,46 @@ void server::stop(bool drain) {
     // token could not end one.  Requesting it resumes the coroutine, which
     // throws cancelled out of the await and unwinds -- closing the descriptor
     // on the way, because held_fd lives in the frame.
+    //
+    // **On the reactor's thread, and not on this one.**  That unwind is not
+    // bookkeeping: it runs the connection's own code, destroys its frame,
+    // closes its descriptor and takes it out of m_live -- every one of which
+    // the reactor thread is also doing, to the same connection.  Doing it from
+    // whichever thread happened to call stop() is a data race, and this is
+    // what it cost: ThreadSanitizer clean on a server whose connections each
+    // answered one request and finished long before anybody stopped it, and
+    // not clean at all once keep-alive left them parked and waiting.
+    //
+    // The reactor's own stop() goes *inside* the posted job rather than after
+    // it.  Posting and then stopping would be a race the other way: run()
+    // re-reads the flag at the top of every pass, so the pass that would have
+    // run this job may never happen, and the connections would never be ended.
+    if(m_reactor.on_reactor_thread()) {
+        // Either this *is* the reactor's thread -- stop() from a handler -- or
+        // nobody has claimed it and there is no other thread to race with.
+        cancel_live();
+
+        m_reactor.stop();
+    }
+    else {
+        m_reactor.post([this]{
+            cancel_live();
+
+            // And the third way a thread can be blocked in here: one waiting
+            // in the reactor.  It owns the wake pipe now, and the
+            // byte-down-a-pipe this used to write by hand went with it.
+            m_reactor.stop();
+        });
+    }
+}
+
+void server::cancel_live() {
     for(std::list<live>::iterator i = m_live.begin(); i != m_live.end(); ++i) {
         try { i->token.request(); }
         catch(std::exception&) { /* already requested */ }
     }
 
     reap();
-
-    // And the third: a thread waiting in the reactor.  It owns the wake pipe
-    // now, and the byte-down-a-pipe this used to write by hand went with it.
-    m_reactor.stop();
 }
 
 void server::join() {

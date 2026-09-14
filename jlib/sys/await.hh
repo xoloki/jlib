@@ -28,6 +28,7 @@
 #include <exception>
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -121,7 +122,13 @@ public:
     /** Whether this is a token that could ever fire. */
     bool live() const { return bool(m_state); }
 
-    bool requested() const { return m_state && m_state->requested; }
+    bool requested() const {
+        if(!m_state) return false;
+
+        std::lock_guard<std::mutex> guard(m_state->lock);
+
+        return m_state->requested;
+    }
 
     /**
      * Cancel, and **end** every wait suspended on this token.
@@ -155,13 +162,48 @@ public:
         }
     };
 
-    /** Attach a suspended operation.  Called by until_ready. */
-    void join(const std::shared_ptr<detail::waiter>& w) {
-        if(m_state) m_state->waiters.push_back(w);
+    /**
+     * Attach a suspended operation.  Called by until_ready.
+     *
+     * @return false if the token had **already** been requested, in which case
+     *         the waiter was not attached and nothing will ever resume it --
+     *         so the caller must not stay suspended.  await_ready() asks
+     *         first, but between that question and this one another thread can
+     *         answer it differently, and a waiter attached after request() has
+     *         walked the list waits for ever.
+     */
+    bool join(const std::shared_ptr<detail::waiter>& w) {
+        if(!m_state) return true;
+
+        std::lock_guard<std::mutex> guard(m_state->lock);
+
+        if(m_state->requested) return false;
+
+        m_state->waiters.push_back(w);
+
+        return true;
     }
 
 private:
     struct state {
+        /**
+         * Both members below, always.
+         *
+         * **This is shared between threads and did not look it.**  request()
+         * is routinely called from a thread that is not turning the reactor --
+         * sys::server::stop() ends every parked connection from whichever
+         * thread asked it to stop -- while the reactor thread is still running
+         * join() for waits it is registering.  A vector reallocating on one
+         * side while the other reads its size is heap corruption, and that is
+         * exactly what it was: ThreadSanitizer reported forty-six races here,
+         * all of them this.
+         *
+         * Latent until something kept a connection alive across more than one
+         * await, because until then the reactor had finished with a connection
+         * long before anybody stopped the server.
+         */
+        mutable std::mutex lock;
+
         bool requested = false;
 
         // Weak, because a waiter is owned by the coroutine frame it lives in
@@ -176,22 +218,30 @@ private:
 inline void cancel_token::request() {
     if(!m_state) throw misuse();
 
-    if(m_state->requested) return;
-
-    m_state->requested = true;
-
     // Copied out first, and the list cleared, because resuming a coroutine
     // runs it to its next suspension -- which may register a new wait on this
     // same token and invalidate anything held across the loop.
     std::vector<std::shared_ptr<detail::waiter> > live;
 
-    for(std::size_t i = 0; i < m_state->waiters.size(); i++) {
-        if(std::shared_ptr<detail::waiter> s = m_state->waiters[i].lock())
-            live.push_back(s);
+    {
+        std::lock_guard<std::mutex> guard(m_state->lock);
+
+        if(m_state->requested) return;
+
+        m_state->requested = true;
+
+        for(std::size_t i = 0; i < m_state->waiters.size(); i++) {
+            if(std::shared_ptr<detail::waiter> s = m_state->waiters[i].lock())
+                live.push_back(s);
+        }
+
+        m_state->waiters.clear();
     }
 
-    m_state->waiters.clear();
-
+    // **Unlocked before anything is resumed**, and not merely as hygiene:
+    // resuming runs a coroutine to its next suspension, and that suspension
+    // calls join() on this same token -- which would deadlock on this thread
+    // and would park the reactor behind an unrelated resume on any other.
     for(std::size_t i = 0; i < live.size(); i++) {
         detail::waiter& w = *live[i];
 
@@ -200,9 +250,18 @@ inline void cancel_token::request() {
         // Taken out of the reactor before resuming, so the descriptor becoming
         // ready afterwards finds nothing and cannot resume a second time.
         if(w.reg != reactor::token::none) {
-            w.r->remove(w.reg);
+            reactor& r = *w.r;
+            const reactor::token reg = w.reg;
 
             w.reg = reactor::token::none;
+
+            // remove() may only be called from the thread turning the reactor,
+            // and this is routinely not it.  Posting leaves the registration
+            // in place for a moment, which is harmless: finished is already
+            // set above, so a readiness arriving in that window finds the wait
+            // over and resumes nothing.
+            if(r.on_reactor_thread()) r.remove(reg);
+            else r.post([&r, reg]{ r.remove(reg); });
         }
 
         w.h.resume();
@@ -278,7 +337,13 @@ public:
      */
     bool await_ready() const { return m_token.requested(); }
 
-    void await_suspend(std::coroutine_handle<> h) {
+    /**
+     * @return false to resume at once, which happens when the token was
+     *         requested between await_ready() and the join below -- see
+     *         cancel_token::join.  await_resume then throws cancelled, so the
+     *         caller sees a cancellation rather than a wait that never ends.
+     */
+    bool await_suspend(std::coroutine_handle<> h) {
         // **Off the reactor's thread**, which on_pool makes possible.  once()
         // may only be called from the thread turning the reactor, so the
         // registration is posted rather than made -- and the consequence,
@@ -317,9 +382,15 @@ public:
                                 });
             });
 
-            if(m_token.live()) m_token.join(m_waiter);
+            // The posted registration checks finished before it registers, so
+            // setting it is the whole of the undo this path needs.
+            if(!m_token.join(m_waiter)) {
+                m_waiter->finished.store(true);
 
-            return;
+                return false;
+            }
+
+            return true;
         }
 
         if(!m_token.live()) {
@@ -335,7 +406,7 @@ public:
                                    h.resume();
                                });
 
-            return;
+            return true;
         }
 
         m_waiter = std::make_shared<detail::waiter>();
@@ -360,7 +431,21 @@ public:
                                w->h.resume();
                            });
 
-        m_token.join(m_waiter);
+        if(!m_token.join(m_waiter)) {
+            // The same, except the registration was made rather than posted,
+            // so it has to come out -- and this path is on the reactor's own
+            // thread by construction, so remove() is allowed here.
+            if(!m_waiter->finished.exchange(true) &&
+               m_waiter->reg != reactor::token::none) {
+                m_reactor.remove(m_waiter->reg);
+
+                m_waiter->reg = reactor::token::none;
+            }
+
+            return false;
+        }
+
+        return true;
     }
 
     /**

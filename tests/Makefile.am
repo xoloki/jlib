@@ -85,6 +85,7 @@ TESTS = \
 	net_http_test \
 	net_http_server_test \
 	net_http_async_server_test \
+	net_http_keepalive_test \
 	net_oauth_test \
 	net_oauth_authorize_test \
 	net_http_live_test \
@@ -213,6 +214,9 @@ net_oauth_test_LDADD            = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LI
 
 net_http_async_server_test_SOURCES = net_http_async_server_test.cc certificate.hh
 net_http_async_server_test_LDADD   = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
+
+net_http_keepalive_test_SOURCES = net_http_keepalive_test.cc certificate.hh
+net_http_keepalive_test_LDADD   = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
 net_http_server_test_SOURCES    = net_http_server_test.cc
 net_http_server_test_LDADD      = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)

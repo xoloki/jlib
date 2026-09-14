@@ -295,11 +295,28 @@ std::string read_head(std::istream& is, std::size_t cap = 8192);
  * The same, suspending rather than blocking.  See the definition in http.cc.
  *
  * **Additive.**  The synchronous one above is unchanged and every existing
- * caller still uses it; nothing in the tree awaits this yet.  A caller that
- * does not want to become a coroutine drives it with sys::run_until_complete.
+ * caller still uses it.  A caller that does not want to become a coroutine
+ * drives it with sys::run_until_complete.
  */
 sys::task<std::string> read_head(sys::async_reader& in,
                                  std::size_t cap = 8192);
+
+/**
+ * The same, but a connection that ends before a head starts is not an error.
+ *
+ * Returns false, leaving `head` empty, only when the peer closed with **no
+ * octets at all** waiting -- which on a persistent connection is how a client
+ * says it has no more requests, and is the ordinary way such a connection
+ * ends.  A head that stopped halfway is still the truncation error read_head
+ * throws, because that is a broken message rather than a polite goodbye.
+ *
+ * The distinction does not exist for a server that closes after one response:
+ * it never reads again, so it never sees the goodbye.  It is exactly what
+ * keep-alive adds, and getting it wrong means answering 400 down a socket the
+ * peer has already shut.
+ */
+sys::task<bool> read_head_if_any(sys::async_reader& in, std::size_t cap,
+                                 std::string& head);
 
 /**
  * Parse a response head against the grammar.
@@ -347,6 +364,29 @@ std::string read_body(std::istream& is, const Response& head,
 
 /** Lower-cased ASCII, for comparing a field name or a token. */
 std::string fold(std::string_view s);
+
+/**
+ * RFC 9110 7.6.1: does a Connection field list the "close" option?
+ *
+ * The value is a comma-separated list of case-insensitive tokens, and there
+ * may be more than one Connection field, so "close" is not something `get()`
+ * and `==` can answer -- `Connection: keep-alive, close` is a close, and a
+ * server that looked for the whole value would miss it.
+ */
+bool connection_close(const fields& f);
+
+/**
+ * RFC 9112 9.3: may another message follow this request on the connection?
+ *
+ * HTTP/1.1 is persistent unless the request says otherwise; **HTTP/1.0 gets a
+ * close regardless**, because jlib does not implement 1.0's `Connection:
+ * keep-alive` extension.  The hard half of that extension was never the two
+ * ends -- it is that `Connection` is hop-by-hop and a 1.0 proxy that does not
+ * know the field forwards it, so the two machines that *did* understand it
+ * each hold a connection the one in the middle has already reused for
+ * something else.  A close costs a handshake; getting this wrong costs a hang.
+ */
+bool persistent(const Request& q);
 
 }
 }

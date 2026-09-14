@@ -36,6 +36,9 @@
 #include <jlib/sys/sys.hh>
 
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <chrono>
@@ -525,6 +528,51 @@ static void a_failed_flush_keeps_its_place() {
     ::close(fds[0]);
 }
 
+/**
+ * Nagle is off, on both ends and on both paths.
+ *
+ * A direct assertion rather than a timing one, because the thing it guards is
+ * a stall that needs a connection carrying more than one exchange to appear at
+ * all -- it cost a fixed ~44ms per reused TLS connection in the container, and
+ * a test that measured for it here would be measuring the loopback interface.
+ * The socket option either got set or it did not.  See sys::nodelay.
+ *
+ * **Both assertions are load-bearing and the second is the one to watch.**
+ * socketstream::configure covers the client side and the blocking server; an
+ * asynchronous connection never becomes a socketstream, so the descriptor the
+ * listener hands back is a second path that has to be covered separately --
+ * and it is the path the HTTP server reuses connections on.
+ */
+static void nagle_is_off() {
+    std::cout << "\nNagle is off on a connected socket:\n";
+
+    jlib::sys::listener l(0, "127.0.0.1");
+
+    jlib::sys::socketstream c("127.0.0.1", l.port(), -1, 5.0);
+
+    const int accepted = l.accept(2.0);
+
+    ok("  a connection is made", accepted >= 0, std::to_string(accepted));
+
+    if(accepted < 0) return;
+
+    int on = 0;
+    socklen_t len = sizeof on;
+
+    ok("  the connecting side has TCP_NODELAY",
+       ::getsockopt(c.get_socket(), IPPROTO_TCP, TCP_NODELAY, &on, &len) == 0 &&
+       on != 0, std::to_string(on));
+
+    on = 0;
+    len = sizeof on;
+
+    ok("  and so does the descriptor the listener accepted",
+       ::getsockopt(accepted, IPPROTO_TCP, TCP_NODELAY, &on, &len) == 0 &&
+       on != 0, std::to_string(on));
+
+    ::close(accepted);
+}
+
 int main() {
     a_listener_accepts_a_connection();
     a_handshake_against_a_silent_server_gives_up();
@@ -534,6 +582,7 @@ int main() {
     a_pipe_closes_what_it_opened();
     a_read_can_be_bounded();
     a_failed_flush_keeps_its_place();
+    nagle_is_off();
 
     // What a green run does not establish: that the connect timeout is
     // enforced by anything but poll(2) on this one host.  A firewall that
