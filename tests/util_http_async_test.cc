@@ -106,7 +106,7 @@ static outcome async_read(const std::string& in, std::size_t cap,
         ::close(fds[1]);
     });
 
-    sys::async_reader in_r(r, fds[0]);
+    sys::async_fd_reader in_r(r, fds[0]);
     sys::task<std::string> t = http::read_head(in_r, cap);
 
     try { o.value = sys::run_until_complete(r, t); }
@@ -214,7 +214,7 @@ static outcome async_body(const std::string& in, http::framing how,
         ::close(fds[1]);
     });
 
-    sys::async_reader in_r(r, fds[0]);
+    sys::async_fd_reader in_r(r, fds[0]);
     sys::task<std::string> t = http::read_body(in_r, how, length, cap);
 
     try { o.value = sys::run_until_complete(r, t); }
@@ -327,7 +327,7 @@ static void the_parser_is_untouched() {
 
     ::write(p.get_writer(), msg.data(), msg.size());
 
-    sys::async_reader in(r, p.get_reader());
+    sys::async_fd_reader in(r, p.get_reader());
     sys::task<std::string> t = http::read_head(in, 8192);
 
     const std::string head = sys::run_until_complete(r, t);
@@ -357,7 +357,7 @@ static void a_framing_function_inherits_cancellation() {
 
     ::write(p.get_writer(), partial.data(), partial.size());
 
-    sys::async_reader in(r, p.get_reader(), token);
+    sys::async_fd_reader in(r, p.get_reader(), token);
     sys::task<std::string> t = http::read_head(in, 8192);
 
     t.start();

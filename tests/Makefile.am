@@ -101,6 +101,7 @@ TESTS = \
 	sys_sigpipe_test \
 	sys_tls_sigpipe_test \
 	sys_tls_server_test \
+	sys_async_tls_test \
 	sys_server_test \
 	sys_reactor_test \
 	sys_task_test \
@@ -246,6 +247,9 @@ sys_socket_test_SOURCES = sys_socket_test.cc
 # resolved it transitively through libjsys; gcc with --as-needed does not, so
 # this failed only in the container.
 sys_socket_test_LDADD   = $(JSYS_LA) $(OPENSSL_LIBS)
+
+sys_async_tls_test_SOURCES = sys_async_tls_test.cc certificate.hh
+sys_async_tls_test_LDADD   = $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
 sys_tls_server_test_SOURCES = sys_tls_server_test.cc
 sys_tls_server_test_LDADD   = $(JSYS_LA) $(OPENSSL_LIBS)

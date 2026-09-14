@@ -214,7 +214,15 @@ static void starttls_refuses_a_stream_with_bytes_in_it() {
         "a001 OK Begin TLS negotiation now\r\n"
         "* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\n";
 
-    ::write(sv[1], both.data(), both.size());
+    if(::write(sv[1], both.data(), both.size()) !=
+       ssize_t(both.size())) {
+        std::cout << "  skip  the peer write was short\n";
+
+        ::close(sv[0]);
+        ::close(sv[1]);
+
+        return;
+    }
 
     // delay = true: connected, not yet handshaken, which is the STARTTLS
     // state.  No certificate and no context are involved.

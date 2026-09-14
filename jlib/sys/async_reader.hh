@@ -32,7 +32,7 @@ namespace jlib {
 namespace sys {
 
 /**
- * A buffer over a descriptor that can be topped up without blocking a thread.
+ * A buffer that something can top up without blocking a thread.
  *
  * What an async framing function reads from.  `get()` hands back one octet
  * from the buffer; when the buffer is dry it says so, and `fill()` is awaited
@@ -46,41 +46,27 @@ namespace sys {
  * is actually empty.  Reading a message head delivered in three pieces cost
  * thirteen heap allocations end to end, counted rather than estimated.
  *
- * ## The descriptor stays blocking, and that is deliberate
+ * ## Where a descriptor is not the whole story
  *
- * Nothing here sets O_NONBLOCK.  The reactor reports a descriptor readable and
- * a read on a ready descriptor returns without blocking, so the flag is not
- * needed -- and leaving it alone is what keeps listener.cc's unconditional
- * strip intact.  That line exists because BSD and macOS *inherit* the flag on
- * an accepted descriptor and Linux does not, and its comment says the
- * divergence is "the worst way for a difference like this to be found".
+ * fill() is the only virtual, and it is virtual because TLS needs a different
+ * answer to "get me more".  A TLS connection has **two** readiness questions
+ * -- is the socket readable, and does the SSL already hold decrypted plaintext
+ * that nobody has taken -- and a reactor answers only the first.  Anything
+ * that asks the descriptor alone waits for bytes that have already arrived.
  *
- * The cost is that a spurious readiness -- rare on a stream socket, possible
- * in principle -- blocks the reactor's thread in read() rather than returning
- * EAGAIN.  Worth knowing; not worth the flag until something shows it
- * happening.
- *
- * ## What it does not do
- *
- * No TLS.  basic_tlsbuf shares basic_socketbuf's descriptor and buffers by
- * inheritance and answers a *second* readiness question -- whether the SSL has
- * buffered plaintext -- that a descriptor cannot.  #4 records that as the real
- * work behind the issue and not something a reader wraps its way out of.
- *
- * No writing, no seeking, no putback.  It is a read buffer, and it is the
- * least that read_head needs.
+ * The buffer, get() and take() are the same either way, so they live here and
+ * are not virtual.  **No framing function knows which it has**: read_head,
+ * read_body and imap::read all take an async_reader& and were not touched when
+ * the TLS one arrived.
  */
 class async_reader {
 public:
     /** What get() answers when the buffer is empty.  Not a valid octet. */
     static const int empty = -2;
 
-    /**
-     * @param fd  not taken over: this neither closes it nor changes its flags
-     * @param t   cancels a fill() that is waiting; see cancel_token
-     */
-    async_reader(reactor& r, int fd, cancel_token t = cancel_token())
-        : m_reactor(r), m_fd(fd), m_token(t) {}
+    /** Polymorphic base.  The rest are deleted rather than defaulted: a
+     *  half-copied buffer with a live descriptor behind it is not a thing. */
+    virtual ~async_reader() {}
 
     async_reader(const async_reader&) = delete;
     async_reader& operator=(const async_reader&) = delete;
@@ -98,10 +84,8 @@ public:
      * @return how many were taken, which is zero when the buffer is dry.
      *
      * For a caller that knows how much it wants -- a body of a stated length,
-     * a chunk.  get() in a loop would be correct and would cost a call per
-     * octet; a megabyte body is a megabyte of them.
-     *
-     * Never blocks, never suspends, never allocates.
+     * a chunk, a literal.  get() in a loop would be correct and would cost a
+     * call per octet; a megabyte body is a megabyte of them.
      */
     std::size_t take(char* out, std::size_t n) {
         const std::size_t have = m_end - m_at;
@@ -119,32 +103,72 @@ public:
     /** How much is in hand without waiting. */
     std::size_t buffered() const { return m_end - m_at; }
 
-    /** Whether the peer has closed and the buffer is spent. */
+    /** Whether the source has ended and the buffer is spent. */
     bool spent() const { return m_closed && m_at == m_end; }
 
     /**
-     * Wait for the descriptor, then read once.
-     *
-     * The only suspension point in any framing function built on this.
+     * Get more.  The only suspension point in any framing function built on
+     * this, and the only thing an implementation has to supply.
      *
      * @return false at end of stream, so a caller can tell "nothing more is
      *         coming" from "nothing yet" -- which is the distinction the
      *         synchronous path could not make and which cost #204 a bug.
-     * @throws cancelled if the token was set
+     * @throws cancelled if a token was set
      */
+    virtual task<bool> fill() = 0;
+
+protected:
+    async_reader() {}
+
+    /** For an implementation that has just read n octets into buf(). */
+    void filled(std::size_t n) { m_at = 0; m_end = n; }
+
+    void ended() { m_closed = true; }
+
+    // The same 1024 basic_socketbuf uses, and for no better reason than that
+    // nobody has measured either.
+    static const std::size_t BUF_SIZE = 1024;
+
+    char* buf() { return m_buf; }
+    static std::size_t buf_size() { return BUF_SIZE; }
+
+    bool m_closed = false;
+
+private:
+    char        m_buf[BUF_SIZE];
+    std::size_t m_at = 0;
+    std::size_t m_end = 0;
+};
+
+/**
+ * An async_reader over a descriptor.
+ *
+ * ## It does not set O_NONBLOCK, deliberately
+ *
+ * The reactor reports a descriptor readable and a read on a ready descriptor
+ * returns without blocking, so the flag is not needed -- and leaving it alone
+ * is what keeps listener.cc's unconditional strip intact.  That line exists
+ * because BSD and macOS *inherit* the flag on an accepted descriptor and Linux
+ * does not, and its comment calls the divergence "the worst way for a
+ * difference like this to be found".
+ *
+ * async_tls_reader is the one that must set it, and says why.
+ */
+class async_fd_reader : public async_reader {
+public:
+    /**
+     * @param fd not taken over: this neither closes it nor changes its flags
+     * @param t  cancels a fill() that is waiting; see cancel_token
+     */
+    async_fd_reader(reactor& r, int fd, cancel_token t = cancel_token())
+        : m_reactor(r), m_fd(fd), m_token(t) {}
+
     task<bool> fill();
 
 private:
     reactor&     m_reactor;
     int          m_fd;
     cancel_token m_token;
-
-    // The same 1024 basic_socketbuf uses, and for no better reason than that
-    // nobody has measured either.
-    char        m_buf[1024];
-    std::size_t m_at = 0;
-    std::size_t m_end = 0;
-    bool        m_closed = false;
 };
 
 }
