@@ -44,6 +44,9 @@
 
 #include <openssl/ssl.h>
 
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <chrono>
 #include <cstdio>
 #include <iostream>
@@ -180,6 +183,212 @@ static void a_slow_server_is_not_a_finished_one(const std::string& cert,
        "\"" + late + "\"");
 
     server.join();
+}
+
+/**
+ * STARTTLS refuses to upgrade a stream with bytes already in it.
+ *
+ * CVE-2011-0411.  underflow() is only called when the get area is empty, so
+ * plaintext buffered before the handshake is served from the buffer after it
+ * -- delivered to the caller as though it had arrived over TLS.
+ *
+ * No TLS is needed to show it: the guard is in start(), before open_ssl(), so
+ * a socketpair and a delayed buffer are the whole fixture.  What is being
+ * asserted is that start() **refuses**, not that the handshake fails.
+ */
+static void starttls_refuses_a_stream_with_bytes_in_it() {
+    std::cout << "\nSTARTTLS refuses a stream with bytes in it:\n";
+
+    int sv[2];
+
+    if(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        std::cout << "  skip  socketpair failed\n";
+
+        return;
+    }
+
+    // The server's legitimate answer and an injected line, in one write --
+    // which is what an attacker who can write to the socket does, and what
+    // one read(2) then collects together.
+    const std::string both =
+        "a001 OK Begin TLS negotiation now\r\n"
+        "* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\n";
+
+    ::write(sv[1], both.data(), both.size());
+
+    // delay = true: connected, not yet handshaken, which is the STARTTLS
+    // state.  No certificate and no context are involved.
+    sys::basic_sslbuf<char> buf("localhost", true, sys::adopt, sv[0],
+                                "localhost", 0, 10);
+
+    std::istream is(&buf);
+
+    std::string line;
+
+    std::getline(is, line);
+
+    // The honesty guard: TCP does not promise the two lines arrive in one
+    // read, and if they did not there is nothing buffered and nothing to
+    // assert.  On a socketpair with one write they do, but say so rather than
+    // depend on it.
+    if(buf.in_avail() <= 0) {
+        std::cout << "  skip  the two lines did not arrive together\n";
+
+        ::close(sv[1]);
+
+        return;
+    }
+
+    ok("  the injected line is sitting in the buffer",
+       buf.in_avail() > 0, std::to_string(buf.in_avail()) + " octets");
+
+    bool threw = false;
+    std::string why;
+
+    try { buf.start(); }
+    catch(std::exception& e) { threw = true; why = e.what(); }
+
+    // **Weak on its own, and deliberately kept anyway.**  Without the guard
+    // this still passes: start() reaches open_ssl(), the socketpair has no
+    // TLS peer, and SSL_connect throws.  Verified by reverting the guard --
+    // this line went green and only the next one went red.
+    ok("  and start() refuses to hand it over as authenticated", threw);
+
+    // **This is the assertion that tests the fix.**  Matched on text, because
+    // "it threw" is what the vulnerable code does here too, for an unrelated
+    // reason.  Against a real server the handshake would *succeed* and the
+    // buffered line would then be answered as authenticated, which is the
+    // whole bug and which no socketpair can stage.
+    ok("  saying what it found, not just that it failed",
+       why.find("already buffered") != std::string::npos, why);
+
+    ::close(sv[1]);
+}
+
+/**
+ * And the unflushed half of the same guard.
+ *
+ * Plaintext written and not flushed would go out encrypted to a peer that is
+ * not expecting it.  Nothing in the tree produces this -- command() flushes --
+ * which is exactly why it is worth pinning.
+ */
+static void starttls_refuses_a_stream_with_bytes_pending() {
+    std::cout << "\nSTARTTLS refuses a stream with bytes pending:\n";
+
+    int sv[2];
+
+    if(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        std::cout << "  skip  socketpair failed\n";
+
+        return;
+    }
+
+    sys::basic_sslbuf<char> buf("localhost", true, sys::adopt, sv[0],
+                                "localhost", 0, 10);
+
+    std::ostream os(&buf);
+
+    os << "STARTTLS";          // no flush
+
+    bool threw = false;
+    std::string why;
+
+    try { buf.start(); }
+    catch(std::exception& e) { threw = true; why = e.what(); }
+
+    ok("  it refuses", threw);
+
+    ok("  and says the bytes would have gone out encrypted",
+       why.find("not flushed") != std::string::npos, why);
+
+    ::close(sv[1]);
+}
+
+/**
+ * And a legitimate STARTTLS still works, on both ends.
+ *
+ * A guard that refuses the attack and the feature alike is worse than the
+ * bug, so this is the half that matters just as much. It also closes a gap
+ * this file already wrote down by hand: STARTTLS-as-a-server was not
+ * exercised anywhere.
+ */
+static void a_legitimate_starttls_still_works(const std::string& cert,
+                                              const std::string& key)
+{
+    std::cout << "\na legitimate STARTTLS still works:\n";
+
+    sys::tls_context ctx = sys::tls_context::server(cert, key);
+    sys::listener l(0, "127.0.0.1");
+
+    std::string saw_command;
+    std::string saw_secret;
+
+    std::thread server([&l, &ctx, &saw_command, &saw_secret]{
+        try {
+            const int fd = l.accept(10);
+
+            if(fd < 0) return;
+
+            // delay = true: accepted in the clear, handshake deferred.
+            sys::tlsstream s(sys::tls_server, ctx, sys::adopt, fd, "", 0, 10,
+                             true);
+
+            std::getline(s, saw_command);
+
+            if(!saw_command.empty() && saw_command.back() == '\r')
+                saw_command.pop_back();
+
+            s << "a001 OK begin TLS\r\n" << std::flush;
+
+            s.start();
+
+            std::getline(s, saw_secret);
+
+            if(!saw_secret.empty() && saw_secret.back() == '\r')
+                saw_secret.pop_back();
+
+            s << "a002 OK\r\n" << std::flush;
+            s.close();
+        }
+        catch(std::exception& e) {
+            saw_command = std::string("server threw: ") + e.what();
+        }
+    });
+
+    sys::tlsstream client("localhost", l.port(), true, 10.0, 10.0);
+
+    client << "a001 STARTTLS\r\n" << std::flush;
+
+    std::string answer;
+
+    std::getline(client, answer);
+
+    if(!answer.empty() && answer.back() == '\r') answer.pop_back();
+
+    ok("  the server answers in the clear", answer == "a001 OK begin TLS",
+       answer);
+
+    // Nothing buffered either side, so the guard has nothing to object to --
+    // which is the case it must not break.
+    client.start();
+
+    client << "a002 LOGIN secret\r\n" << std::flush;
+
+    std::string done;
+
+    std::getline(client, done);
+
+    if(!done.empty() && done.back() == '\r') done.pop_back();
+
+    ok("  and the handshake goes through afterwards", done == "a002 OK", done);
+
+    server.join();
+
+    ok("  the server read the command in the clear",
+       saw_command == "a001 STARTTLS", saw_command);
+
+    ok("  and the rest over TLS", saw_secret == "a002 LOGIN secret",
+       saw_secret);
 }
 
 static void a_context_reads_a_certificate(const std::string& cert,
@@ -444,6 +653,9 @@ int main() {
     an_untrusted_certificate_is_refused(cert, key);
     a_plaintext_client_does_not_take_the_server_with_it(cert, key);
     a_slow_server_is_not_a_finished_one(cert, key);
+    starttls_refuses_a_stream_with_bytes_in_it();
+    starttls_refuses_a_stream_with_bytes_pending();
+    a_legitimate_starttls_still_works(cert, key);
 
     std::remove(cert.c_str());
     std::remove(key.c_str());

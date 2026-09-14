@@ -245,7 +245,60 @@ namespace jlib {
                 Base::close();
             }
 
+            /**
+             * Begin TLS on a connection that has been speaking in the clear.
+             *
+             * ## Both buffers have to be empty, and this is CVE-2011-0411
+             *
+             * Flipping m_delay changes where the *next* underflow() reads
+             * from.  It does not change what is already in the get area -- and
+             * underflow() is only called when gptr() == egptr(), so plaintext
+             * sitting there is served from the buffer and SSL_read is never
+             * reached.
+             *
+             * Those bytes are not lost.  **They are handed to the caller as
+             * though they had arrived over TLS**, which is the STARTTLS
+             * command-injection bug: an attacker who writes
+             * `a001 OK\r\n* CAPABILITY ... AUTH=PLAIN\r\n` in one segment,
+             * before the handshake, has the second line answered after it.
+             *
+             * Imap4::upgrade is the live path, and the comment above its
+             * second capability() call says exactly why that call exists --
+             * "a man in the middle could have removed STARTTLS from that list
+             * or added an AUTH mechanism to it".  Unchecked, the buffer
+             * defeats the mitigation the comment describes.  Pop3::upgrade has
+             * the same shape.
+             *
+             * So: refuse, rather than discard.  Discarding would lose a
+             * server's legitimate pipelining as silently as it drops an
+             * attacker's injection, and the 2021 "NO STARTTLS" paper is clear
+             * that this is a protocol error.  Errors here are thrown, as
+             * everywhere else in this library.
+             *
+             * The put side is the cheaper half of the same guard: unflushed
+             * plaintext would go out encrypted, which no caller wants and
+             * which nothing currently produces, since command() flushes.
+             *
+             * @throws Base::exception if either buffer is not empty
+             */
             void start() {
+                if(this->gptr() != this->egptr()) {
+                    throw typename Base::exception(
+                        "STARTTLS with " +
+                        std::to_string(this->egptr() - this->gptr()) +
+                        " octets already buffered: everything read before the "
+                        "handshake was unauthenticated, and answering it "
+                        "afterwards is how a command is injected");
+                }
+
+                if(this->pptr() != this->pbase()) {
+                    throw typename Base::exception(
+                        "STARTTLS with " +
+                        std::to_string(this->pptr() - this->pbase()) +
+                        " octets written and not flushed, which would be sent "
+                        "encrypted to a peer that is not expecting them yet");
+                }
+
                 m_delay = false;
                 open_ssl();
             }
