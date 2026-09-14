@@ -224,6 +224,20 @@ namespace jlib {
             ASMailBox();
             virtual ~ASMailBox();
 
+            /**
+             * The no-argument handle() the base declares, which these two
+             * would otherwise hide.
+             *
+             * ASServent's header tells an event loop to watch
+             * get_response_reader() and "call handle() to drain what is behind
+             * it" -- and declaring any overload of that name here hid the one
+             * it means, so the documented call did not compile through a
+             * reference to this class.  Nothing in the tree had ever made it:
+             * the consumer is a GUI that lives outside the repo, so the
+             * contract went twenty-four years without a caller to break.
+             */
+            using sys::ASServent<MailBoxRequest, MailBoxResponse>::handle;
+
             virtual void handle(const MailBoxRequest& r);
             virtual void handle(const MailBoxResponse& r);
 
