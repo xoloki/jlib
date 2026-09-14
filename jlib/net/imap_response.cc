@@ -243,6 +243,108 @@ std::string read(std::istream& is)
     }
 }
 
+namespace {
+
+/**
+ * One line, or false if nothing at all was there.
+ *
+ * **Matching std::getline exactly, including where it is surprising.**
+ * getline fails only when it extracts *no* characters: a partial line at end
+ * of stream succeeds, hands back what there was, and fails on the *next* call.
+ * So a response truncated mid-line is returned as though it were a whole line,
+ * and the caller's literal_size() decides what to make of it.
+ *
+ * That is odd, and it is the behaviour the blocking read() has always had, so
+ * it is the behaviour this has to have -- a suspending version that threw
+ * where the blocking one returned would diverge on exactly the input a broken
+ * server sends.
+ *
+ * The newline is consumed and not stored, as getline does.  Any CR before it
+ * is kept, because the caller takes off exactly one and puts it back.
+ */
+sys::task<bool> read_line(sys::async_reader& in, std::string& line) {
+    line.clear();
+
+    bool any = false;
+
+    for(;;) {
+        const int c = in.get();
+
+        if(c == sys::async_reader::empty) {
+            // End of stream.  True if anything was extracted first, which is
+            // getline's rule and not the obvious one.
+            if(!co_await in.fill()) co_return any;
+
+            continue;
+        }
+
+        any = true;
+
+        if(c == '\n') co_return true;
+
+        line += static_cast<char>(c);
+    }
+}
+
+}
+
+/**
+ * The same, suspending instead of blocking.
+ *
+ * The other hard framing function, and a different shape from HTTP's chunked
+ * body: there the size is a line of its own, here it is the *tail of the line
+ * just read*, found by re-parsing it with a separate grammar.  A suspension
+ * can fall inside the line, inside the introducer, or anywhere in the literal
+ * that follows.
+ *
+ * Everything that decides what the bytes *mean* is untouched: literal_size()
+ * is the same function the blocking version calls, and response::parse() takes
+ * a string_view and is not a coroutine.
+ */
+sys::task<std::string> read(sys::async_reader& in)
+{
+    std::string out;
+
+    for(;;) {
+        std::string line;
+
+        if(!co_await read_line(in, line)) {
+            throw error("connection ended in the middle of a response");
+        }
+
+        // Exactly one CRLF comes off and goes straight back on.  A literal's
+        // octets are message content and a line of them may genuinely end in
+        // CR; getline erases every trailing one.
+        const bool crlf = !line.empty() && line.back() == '\r';
+
+        if(crlf) line.pop_back();
+
+        out += line;
+        out += crlf ? "\r\n" : "\n";
+
+        std::size_t n = 0;
+
+        if(!literal_size(line, n)) co_return out;
+
+        // Exactly n octets, whatever they are -- which is the whole reason
+        // read() exists and why a response is not a line.
+        std::string body(n, '\0');
+
+        std::size_t got = 0;
+
+        while(got < n) {
+            got += in.take(&body[got], n - got);
+
+            if(got == n) break;
+
+            if(!co_await in.fill())
+                throw error("connection ended inside a literal");
+        }
+
+        out += body;
+    }
+}
+
 // ------------------------------------------------------------------ parsing
 
 struct reader {
