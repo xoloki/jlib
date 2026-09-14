@@ -242,6 +242,13 @@ int listener::accept_into(peer* from, double timeout) {
     if(flags != -1 && (flags & O_NONBLOCK))
         ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 
+    // Here as well as in socketstream::configure, because an *asynchronous*
+    // connection never becomes a socketstream -- async_fd_reader and
+    // async_fd_writer work the descriptor directly -- and the async server is
+    // the one that answers more than one request per connection, which is
+    // exactly the case the stall needs.  See sys::nodelay.
+    nodelay(fd);
+
     if(from != 0) {
         from->address = address_of(ss, len);
         from->port = port_of(ss);

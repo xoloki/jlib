@@ -76,6 +76,33 @@ namespace jlib {
         void nosigpipe(int fd);
 
         /**
+         * Turn off Nagle's algorithm on a connected socket.
+         *
+         * **Measured, not assumed.**  Nagle holds a small write until the
+         * previous one is acknowledged; the peer's delayed-ACK timer holds
+         * that acknowledgement for up to ~40ms when it has nothing to send
+         * back yet.  The two together are a stall that only appears once a
+         * connection carries *more than one* exchange -- which is why nothing
+         * in jlib met it for twenty-six years, and why the HTTP server's
+         * keep-alive work met it immediately.
+         *
+         * It cost a fixed ~44ms per reused TLS connection in the Ubuntu
+         * container: 30 requests took 0.051s of which 0.044s was one stall,
+         * which made keep-alive look slower than opening 30 connections.  Past
+         * the stall the marginal cost is 0.164ms a request against 0.900ms for
+         * a fresh TLS connection.
+         *
+         * Every protocol jlib speaks -- HTTP, IMAP, POP3 -- is request and
+         * response, which is the case Nagle's coalescing cannot help and its
+         * waiting can only hurt.  The streambuf layer already coalesces: it
+         * buffers to BUF_SIZE and writes once.
+         *
+         * Best effort, like nosigpipe(): a descriptor that will not take the
+         * option still works.
+         */
+        void nodelay(int fd);
+
+        /**
          * Blocks SIGPIPE for the calling thread, and consumes one if it comes.
          *
          * For platforms without SO_NOSIGPIPE, where the alternatives are worse:

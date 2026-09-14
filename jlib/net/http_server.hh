@@ -57,6 +57,74 @@ struct server_options {
      * cannot see the version.
      */
     std::string server_name = default_server_name();
+
+    /**
+     * Answer more than one request on a connection -- RFC 9112 9.3.
+     *
+     * **Asynchronous server only**, and on by default there, because that is
+     * what HTTP/1.1 means: a client that has not said `Connection: close`
+     * expects the connection to stay open, and a server that closes anyway
+     * charges it a TCP handshake -- and a TLS one -- for every request.  A
+     * peer that wants the old behaviour asks for it, which is exactly what
+     * jlib's own client does and will keep doing.
+     *
+     * **What makes it safe is one layer down, and predates it.**  Keep-alive
+     * framing is where request smuggling lives, and is why this was refused
+     * until now.  The defence is that util::http::decide_framing already
+     * throws on both primitives -- Content-Length together with
+     * Transfer-Encoding, and two Content-Lengths that disagree -- so a message
+     * whose end is arguable never reaches a handler; and that any framing
+     * error closes the connection rather than looking for the next request in
+     * a stream it has just said it cannot parse.
+     */
+    bool keep_alive = true;
+
+    /**
+     * How many requests one connection may ask for before it is closed.
+     *
+     * A bound, not a tuning knob: without one a single client holds a
+     * descriptor -- and a slot against sys::server_policy::max_connections --
+     * for as long as it keeps asking.
+     */
+    std::size_t max_requests = 100;
+
+    /**
+     * How long a *newly accepted* connection may stay silent, in seconds.
+     *
+     * A client that has just connected is about to say something -- in HTTP the
+     * client always speaks first -- so one that connects and then says nothing
+     * is not being slow, it is holding a descriptor for no reason.  Short on
+     * purpose, and much shorter than the two bounds below.
+     *
+     * Note that this bounds *silence*, not the request: once the first octet
+     * arrives the request timeout takes over, so a client that is genuinely
+     * slow is not punished for being prompt.
+     */
+    double initial_idle_timeout = 5;
+
+    /**
+     * How long a *reused* connection may sit between requests, in seconds.
+     *
+     * **Long on purpose, and this is the number that decides whether keep-alive
+     * does anything at all.**  A page that polls every fifteen seconds over a
+     * connection with a five second idle bound gets a new connection every
+     * time and no benefit whatsoever -- keep-alive that silently does nothing
+     * is worse than keep-alive that is switched off, because it looks like a
+     * feature.  Sixty seconds keeps such a client on one connection; nginx's
+     * keepalive_timeout defaults to seventy-five for the same reason.
+     *
+     * The cost is held descriptors and slots against max_connections, which is
+     * why it is a separate number from initial_idle_timeout rather than one
+     * bound applied everywhere: a connection that has never asked for anything
+     * has not earned the benefit of the doubt, and one that has, has.
+     *
+     * **Setting this close to a client's polling interval is the bad case**,
+     * not setting it low.  Well below the interval means a fresh connection
+     * every time, which merely wastes a handshake; near it means the server
+     * decides to close at the same moment the client decides to ask, and the
+     * client sees a connection die under a request it has already sent.
+     */
+    double idle_timeout = 60;
 };
 
 /**
@@ -69,10 +137,17 @@ struct server_options {
  *
  * ## As narrow as the client, and for the same reasons
  *
- * One request per connection and `Connection: close`, always.  No keep-alive:
- * the branch that built the message layer refused it because keep-alive framing
- * is where request smuggling lives, and a server has strictly more to lose there
- * than a client.
+ * `Connection: close` after every response -- **except on the asynchronous
+ * server, which answers more than one request per connection.**  The branch
+ * that built the message layer refused keep-alive outright, because keep-alive
+ * framing is where request smuggling lives and a server has strictly more to
+ * lose there than a client.  What changed is not the risk assessment: it is
+ * that the framing refusals which make the smuggle unreachable are now in
+ * util::http, and that an idle persistent connection costs a coroutine here
+ * where it would cost a thread in serve().  See server_options::keep_alive.
+ *
+ * A streaming response still closes, on either server.  Its body is delimited
+ * by the close, so there is no boundary for a next message to begin at.
  *
  * A response is accumulated whole and written in one go, which is what lets a
  * handler that throws still be answered with a 500, and which means a body has
@@ -108,8 +183,17 @@ public:
         const http::fields& fields() const { return m_fields; }
         const std::string& body() const { return m_body; }
 
-        /** The octets, head and body, as they go on the wire. */
-        std::string str(const std::string& server_name) const;
+        /**
+         * The octets, head and body, as they go on the wire.
+         *
+         * @param persist  whether another message follows this one on the
+         *                 connection, which decides the Connection field when
+         *                 the handler has not set one.  Defaulted to false --
+         *                 close -- so every caller that had no opinion keeps
+         *                 the behaviour it had.
+         */
+        std::string str(const std::string& server_name,
+                        bool persist = false) const;
 
         /**
          * The head alone, with no Content-Length.
@@ -118,10 +202,13 @@ public:
          * follows from responder::write and is delimited by the close.
          */
         std::string head(const std::string& server_name) const;
+        // No persist parameter, and there should not be one: this omits
+        // Content-Length, so the close *is* the framing and the connection
+        // cannot be reused whatever anybody would prefer.
 
     private:
         std::string serialise(const std::string& server_name,
-                              bool with_length) const;
+                              bool with_length, bool persist) const;
 
         int m_status = 200;
         std::string m_reason;
@@ -410,6 +497,16 @@ private:
     /** The coroutine an async server runs per connection. */
     sys::task<void> serve_async(sys::server::connection& c,
                                 const sys::peer& from);
+
+    /**
+     * One request on an async connection.
+     *
+     * @param served  how many have already been answered on this connection
+     * @return        whether the connection may carry another
+     */
+    sys::task<bool> serve_request_async(sys::server::connection& c,
+                                        const sys::peer& from,
+                                        std::size_t served);
 
     /** Shared by both serves: the target as a path, or why it is not one. */
     static bool path_of(const std::string& target, std::string& path,

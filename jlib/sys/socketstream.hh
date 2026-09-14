@@ -349,6 +349,10 @@ namespace jlib {
                 // process outright, so the error checking elsewhere never runs.
                 nosigpipe(fd);
 
+                // Request and response, on every protocol this carries: see
+                // sys::nodelay for the ~40ms stall it measured away.
+                nodelay(fd);
+
                 if(m_io_timeout < 0)
                     m_io_timeout = get_default_io_timeout();
                 apply_timeout(fd, m_io_timeout);

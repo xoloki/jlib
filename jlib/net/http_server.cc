@@ -116,15 +116,17 @@ server::response& server::response::body(std::string body) {
 }
 
 std::string server::response::head(const std::string& server_name) const {
-    return serialise(server_name, false);
+    return serialise(server_name, false, false);
 }
 
-std::string server::response::str(const std::string& server_name) const {
-    return serialise(server_name, true) + m_body;
+std::string server::response::str(const std::string& server_name,
+                                  bool persist) const
+{
+    return serialise(server_name, true, persist) + m_body;
 }
 
 std::string server::response::serialise(const std::string& server_name,
-                                        bool with_length) const
+                                        bool with_length, bool persist) const
 {
     std::ostringstream o;
 
@@ -148,9 +150,12 @@ std::string server::response::serialise(const std::string& server_name,
     if(with_length && !m_fields.has("Content-Length"))
         o << "Content-Length: " << m_body.size() << "\r\n";
 
-    // Always.  One request per connection takes every keep-alive framing
-    // question off the table, and those questions are where smuggling lives.
-    if(!m_fields.has("Connection")) o << "Connection: close\r\n";
+    // Unless the handler said otherwise, and then what the caller decided.
+    // Stated rather than left out: keep-alive is the HTTP/1.1 default, so
+    // saying nothing would also mean persist, but a reader of a capture should
+    // not have to know the version to know what this connection is doing.
+    if(!m_fields.has("Connection"))
+        o << "Connection: " << (persist ? "keep-alive" : "close") << "\r\n";
 
     for(const fields::value_type& f : m_fields) {
         // Checked on the way out, against the grammar rather than a blocklist.
@@ -521,29 +526,148 @@ void server::route(const std::string& method, const std::string& path,
     m_routes.push_back(std::move(e));
 }
 
+namespace {
+
+    /**
+     * The request deadline, disarmed however the request ends.
+     *
+     * cancel() is called explicitly partway through, because a deadline on
+     * *reading the request* must not still be running while a slow handler
+     * produces the answer.  That call was here before this and was sufficient,
+     * because every path that got past the read reached it.
+     *
+     * Keep-alive adds paths that do not.  A connection can now end *inside*
+     * the read -- a client saying goodbye between requests -- and that is the
+     * ordinary way a persistent connection finishes rather than an edge case.
+     * A timer left behind there sits in the reactor holding a copy of the
+     * token for the rest of its bound, once for every connection a client ever
+     * walked away from.
+     *
+     * Hence a destructor, and an idempotent cancel() for the path that still
+     * wants to disarm early.  Between them no timer outlives the request that
+     * armed it on any path the reactor's thread takes, which is what keeps
+     * sys::deadline's own warning -- that an uncancelled timer fires "into the
+     * *next* operation on the same token" -- unreachable on a connection that
+     * now *has* a next operation.
+     *
+     * The exception, and it is not a small one, is in cancel() below: a
+     * destructor can run on a thread that must not touch the reactor, and
+     * there the timer is abandoned rather than cancelled.
+     */
+    class armed_deadline {
+    public:
+        explicit armed_deadline(sys::reactor& r) : m_reactor(&r) {}
+
+        ~armed_deadline() { cancel(); }
+
+        armed_deadline(const armed_deadline&) = delete;
+        armed_deadline& operator=(const armed_deadline&) = delete;
+
+        /** Replaces whatever was armed before; seconds <= 0 arms nothing. */
+        void arm(double seconds, sys::cancel_token t) {
+            cancel();
+
+            if(seconds > 0) {
+                m_timer = sys::deadline(
+                    *m_reactor,
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::duration<double>(seconds)),
+                    t);
+            }
+        }
+
+        void cancel() {
+            if(m_timer == sys::reactor::timer_token::none) return;
+
+            // **Only ever from the reactor's own thread**, and this guard is
+            // the whole reason a destructor here is safe at all.
+            //
+            // A destructor runs wherever the frame is destroyed, and one of
+            // the paths that destroys this frame is a cancellation: stop()
+            // ends a parked connection by requesting its token, and it does
+            // that on the *calling* thread, so the coroutine unwinds there
+            // while the reactor thread is still running a pass.
+            // reactor::cancel() mutates two containers with no lock, so
+            // cancelling from that unwind is a data race -- and the symptom is
+            // heap corruption a long way from the cause, which is how this was
+            // found rather than reasoned about.
+            //
+            // Abandoning the timer instead is safe and cheap: it fires later
+            // into a token that has already been requested, and requesting a
+            // requested token does nothing.  That is also exactly what the
+            // code before this class did on the same path, by not cancelling
+            // at all.
+            if(m_reactor->on_reactor_thread()) m_reactor->cancel(m_timer);
+
+            m_timer = sys::reactor::timer_token::none;
+        }
+
+    private:
+        sys::reactor*             m_reactor;
+        sys::reactor::timer_token m_timer = sys::reactor::timer_token::none;
+    };
+
+}
+
 sys::task<void> server::serve_async(sys::server::connection& c,
-                                    const sys::peer&)
+                                    const sys::peer& from)
+{
+    // **Keep-alive, and why the blocking server does not get it.**
+    //
+    // A persistent connection spends most of its life idle, waiting for a
+    // request that may never come.  In serve() that idle time would be a
+    // *thread*: a handful of clients holding connections open would occupy
+    // every worker in the pool and the server would stop accepting -- so
+    // keep-alive there is a denial of service a server performs on itself.
+    // Here an idle connection is a suspended coroutine and a registration in
+    // the reactor.  It holds a descriptor and no thread.
+    //
+    // So this is something the asynchronous server can do and the blocking one
+    // cannot, rather than a feature missing from the blocking one.  It is also
+    // the first thing in this tree that is *only* worth having because of #4.
+    std::size_t served = 0;
+
+    while(co_await serve_request_async(c, from, served)) {
+        ++served;
+    }
+}
+
+sys::task<bool> server::serve_request_async(sys::server::connection& c,
+                                            const sys::peer&,
+                                            std::size_t served)
 {
     async_responder out(c.writer(), m_options.server_name);
 
     // **The slow-loris bound.**  Every piece of this existed before and
     // nothing armed it: the connection is a coroutine carrying a token, the
     // token now ends a wait rather than merely marking it (#212), and a
-    // deadline is a timer that requests one.  This is the line that uses them.
+    // deadline is a timer that requests one.  This is what uses them.
     //
     // Over the whole request read, not per operation -- which is the
     // difference from the blocking server's SO_RCVTIMEO, and is what makes a
     // client sending one octet every twenty-nine seconds a dropped connection
     // here and an indefinite one there.
-    sys::reactor::timer_token limit = sys::reactor::timer_token::none;
-
-    if(m_request_timeout > 0) {
-        limit = sys::deadline(
-            c.reactor(),
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::duration<double>(m_request_timeout)),
-            c.token());
-    }
+    //
+    // **Waiting for a request to start is a different question from reading
+    // one, and they get different answers.**  Three of them:
+    //
+    //   a new connection, silent           initial_idle_timeout   5s
+    //   a request, once it has started     io_timeout            30s
+    //   a reused connection, between       idle_timeout          60s
+    //
+    // The middle one is the only one that is really a *request* timeout; the
+    // other two bound silence at two points where silence means different
+    // things.  A client that has just connected is about to speak, so five
+    // seconds is generous.  A client that polls every fifteen seconds has a
+    // perfectly good reason to be quiet, and a five second bound there would
+    // hand it a new connection every time and make keep-alive an elaborate way
+    // of changing nothing.
+    //
+    // Collapsing any two of these means one of them is wrong: an earlier draft
+    // used a single timer per request and so applied the *idle* bound to the
+    // whole of every request after the first, which gave a large second POST
+    // five seconds where the first got thirty.
+    armed_deadline limit(c.reactor());
 
     Request q;
 
@@ -555,6 +679,46 @@ sys::task<void> server::serve_async(sys::server::connection& c,
     std::string bad;
 
     try {
+        // Phase one: nothing has arrived yet, so this is silence rather than a
+        // slow request, and which silence it is depends on whether this
+        // connection has ever been used.
+        //
+        // fill() rather than sys::readable() on the descriptor, because for a
+        // TLS connection those are **different questions** -- the socket can be
+        // ready with a record that yields no plaintext, and plaintext can be
+        // waiting with the socket quiet.  async_tls answers the one that
+        // matters and readable() would answer the other.
+        if(c.reader().buffered() == 0) {
+            armed_deadline idle(c.reactor());
+
+            idle.arm(served == 0 ? m_options.initial_idle_timeout
+                                 : m_options.idle_timeout,
+                     c.token());
+
+            // The answer is deliberately dropped.  read_head_if_any below is
+            // the single place that decides what an ended connection means,
+            // and two places deciding that is how they come to disagree.
+            (void) co_await c.reader().fill();
+        }
+
+        // Phase two: something is here, so from now on this is a request being
+        // read and the request bound applies -- the same one the first request
+        // on the connection got, reset per request the way a fresh connection
+        // would have got it.
+        limit.arm(m_request_timeout, c.token());
+
+        // **The polite goodbye**, which a closing server never had to know
+        // about: a peer that shuts the connection between requests has not
+        // sent a broken message, it has finished.  read_head would call that
+        // a head that ended after zero octets and this would answer 400 down
+        // a socket that is already gone.
+        std::string head;
+
+        if(!co_await util::http::read_head_if_any(c.reader(),
+                                                  m_options.max_head, head)) {
+            co_return false;
+        }
+
         // Read on the reactor's thread, because that is where the descriptor
         // is.  **Parsed on a worker**, because it is not: parsing a head of
         // eight fields measures at 59us, and every microsecond of it is a
@@ -564,9 +728,6 @@ sys::task<void> server::serve_async(sys::server::connection& c,
         // read_head and parse_request_head were already separate -- the
         // RFC-grammar work split framing from parsing for its own reasons --
         // so this is a hop between two calls that already existed.
-        const std::string head =
-            co_await util::http::read_head(c.reader(), m_options.max_head);
-
         co_await sys::on_pool(c.pool());
 
         q = util::http::parse_request_head(head);
@@ -579,6 +740,11 @@ sys::task<void> server::serve_async(sys::server::connection& c,
         if(util::http::fold(q.fields().get("Expect")) == "100-continue")
             co_await c.writer().write("HTTP/1.1 100 Continue\r\n\r\n");
 
+        // **Read whole, which is also what leaves the connection at a message
+        // boundary.**  A body this did not consume would still be in the
+        // reader, and the next read_head would parse the client's leftover
+        // octets as a request line -- which is the smuggle, arriving by way
+        // of a server that simply forgot to finish reading.
         q.set_body(co_await util::http::read_body(c.reader(), q.body_framing(),
                                                   q.content_length(),
                                                   m_options.max_body));
@@ -593,14 +759,23 @@ sys::task<void> server::serve_async(sys::server::connection& c,
         // finished asking, and a 408 down a connection whose peer is still
         // mid-request is as likely to be missed as read.  The connection
         // closes when this returns.
-        co_return;
+        co_return false;
     }
 
     // In hand.  A handler that takes a long time to answer is a different
     // question, and leaving this armed would turn a slow reply into a dropped
     // connection.
-    if(limit != sys::reactor::timer_token::none) c.reactor().cancel(limit);
+    limit.cancel();
 
+    // **Every 400 closes, and the framing ones have to.**  Where this message
+    // ended is exactly what failed, so where the next one starts is not
+    // something this can claim to know either -- reading on would mean taking
+    // whatever the client put there as a request, which is the smuggle.
+    //
+    // A bad request-target is a well-framed message and could be answered on a
+    // connection that continues.  It is not, because one rule is easier to be
+    // sure of than two, and a client sending one is not in a conversation
+    // worth the saved handshake.
     if(!bad.empty()) {
         response r;
 
@@ -608,7 +783,7 @@ sys::task<void> server::serve_async(sys::server::connection& c,
 
         co_await out.send(r);
 
-        co_return;
+        co_return false;
     }
 
     std::string path;
@@ -620,7 +795,7 @@ sys::task<void> server::serve_async(sys::server::connection& c,
 
         co_await out.send(r);
 
-        co_return;
+        co_return false;
     }
 
     const entry* chosen = route_for(q.method(), path);
@@ -638,7 +813,7 @@ sys::task<void> server::serve_async(sys::server::connection& c,
 
         co_await out.send(oops);
 
-        co_return;
+        co_return false;
     }
 
     if(chosen && chosen->async_stream) {
@@ -680,7 +855,10 @@ sys::task<void> server::serve_async(sys::server::connection& c,
         // responder gave up in #200 and is no different here.
         if(threw) std::rethrow_exception(threw);
 
-        co_return;
+        // A streaming body is delimited by the close, so there is no boundary
+        // for a next request to start at.  Not a policy choice: chunked output
+        // is what would make this reusable, and there is none.
+        co_return false;
     }
 
     // The buffered case, and the common one.  **The handler is not a
@@ -724,12 +902,28 @@ sys::task<void> server::serve_async(sys::server::connection& c,
         threw = std::current_exception();
     }
 
+    // **Decided from the request, then offered to the handler.**  The request
+    // says whether the client is willing; max_requests says whether this
+    // connection has had its share; and a handler that set its own
+    // `Connection: close` overrides both, because it may know something about
+    // what it just sent that this does not.
+    //
+    // The decision has to be made here rather than after the write, because it
+    // is a field in the very response being serialised: a server that closed a
+    // connection it had just told the client to keep is worse than one that
+    // never offered.
+    bool persist = m_options.keep_alive &&
+                   util::http::persistent(q) &&
+                   served + 1 < m_options.max_requests;
+
+    if(persist && util::http::connection_close(r.fields())) persist = false;
+
     // Serialised here, on the worker, rather than as the argument to write()
     // on the reactor -- which is what it was, and is the half of this that is
     // easy to miss.
     std::string wire;
 
-    if(!threw) wire = r.str(m_options.server_name);
+    if(!threw) wire = r.str(m_options.server_name, persist);
 
     co_await sys::on_reactor(c.reactor());
 
@@ -744,6 +938,8 @@ sys::task<void> server::serve_async(sys::server::connection& c,
     }
 
     co_await out.send_serialised(wire);
+
+    co_return persist;
 }
 
 }
