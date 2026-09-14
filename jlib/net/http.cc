@@ -36,6 +36,16 @@ namespace jlib {
 namespace net {
 namespace http {
 
+/**
+ * "jlib/" and the release, from the build rather than from a literal.
+ *
+ * JLIB_RELEASE_STRING comes from AM_CPPFLAGS, which is why this is here and
+ * not in the header: the header is installed, and a consumer compiling against
+ * it has no such macro.  The literal it replaced said 1.2 for as long as it
+ * took somebody to notice, which was after the 2.0.0 release went out.
+ */
+std::string default_user_agent() { return "jlib/" JLIB_RELEASE_STRING; }
+
 namespace {
 
     const char* const HEX = "0123456789ABCDEF";

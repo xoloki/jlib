@@ -66,7 +66,27 @@ struct server_policy {
      */
     unsigned int threads = 0;
 
-    /** Seconds a handler's reads and writes may block.  Zero is forever. */
+    /**
+     * How long a client has.  Zero is forever.
+     *
+     * **It means two different things, and the difference is the point.**
+     *
+     * On a *blocking* server it is `SO_RCVTIMEO`/`SO_SNDTIMEO` on the
+     * connection: a bound on each read and each write, applied by the kernel.
+     * Per operation, so it resets every time -- and a client that sends one
+     * octet every twenty-nine seconds never trips it and holds a connection
+     * for as long as it cares to.  That is a slow-loris, and this cannot stop
+     * one.
+     *
+     * On an *async* server there is no socket timeout; a handler that wants a
+     * bound arms a deadline on connection::token(), and what it bounds is up
+     * to it.  net::http::server uses this value for one over the whole request
+     * read -- cumulative, not per operation -- so the same client is dropped.
+     *
+     * Same number, same intent, and the async reading is the stricter of the
+     * two.  A caller porting a handler between them should know which it is
+     * getting.
+     */
     double io_timeout = 30;
 
     /**

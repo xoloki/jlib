@@ -615,9 +615,40 @@ static void a_handler_that_throws_mid_stream_cannot_be_answered() {
     t.join();
 }
 
+/**
+ * What jlib calls itself on the wire.
+ *
+ * Both of these were the literal "jlib/1.2" and stayed that way through the
+ * 2.0.0 release, so every request and every response advertised a version the
+ * library had not been for some time.  They are derived from the build now,
+ * which is the actual fix; this asserts the derivation produced something,
+ * because an empty or undefined JLIB_RELEASE_STRING would make them "jlib/"
+ * and nothing would complain.
+ */
+static void it_says_which_jlib_it_is() {
+    std::cout << "\nit says which jlib it is:\n";
+
+    const std::string agent = jlib::net::http::options().user_agent;
+    const std::string server = http::server::options().server_name;
+
+    ok("  the User-Agent names the library", agent.rfind("jlib/", 0) == 0,
+       agent);
+
+    ok("  and carries a version", agent.size() > 5, agent);
+
+    ok("  the Server field too",
+       server.rfind("jlib/", 0) == 0 && server.size() > 5, server);
+
+    // One library, one name.  They were separate literals and could have
+    // drifted apart as easily as they drifted from the version.
+    ok("  and the two agree", agent == server,
+       agent + " vs " + server);
+}
+
 int main() {
     std::cout << std::unitbuf;
 
+    it_says_which_jlib_it_is();
     the_two_halves_meet();
     what_the_handler_sees();
     what_it_refuses();

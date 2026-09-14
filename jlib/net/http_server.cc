@@ -31,6 +31,9 @@ namespace jlib {
 namespace net {
 namespace http {
 
+/** "jlib/" and the release.  See net::http::default_user_agent. */
+std::string default_server_name() { return "jlib/" JLIB_RELEASE_STRING; }
+
 namespace {
 
     /** RFC 9110 5.6.7's IMF-fixdate, which is fixed-format and never localised. */

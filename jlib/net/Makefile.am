@@ -1,4 +1,5 @@
-AM_CPPFLAGS = -I$(top_srcdir) $(OPENSSL_CFLAGS)
+AM_CPPFLAGS = -I$(top_srcdir) $(OPENSSL_CFLAGS) \
+              -DJLIB_RELEASE_STRING=\"$(JLIB_RELEASE)\"
 
 lib_LTLIBRARIES = libjnet.la
 libjnet_la_SOURCES = Email.cc MailBox.cc Imap4Box.cc Pop3.cc MBox.cc \
