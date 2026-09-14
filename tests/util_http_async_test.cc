@@ -352,7 +352,7 @@ static void a_framing_function_inherits_cancellation() {
 
     sys::reactor r;
     sys::pipe p(false, false);
-    sys::cancel_token token;
+    sys::cancel_token token = sys::cancel_token::create();
 
     // A head that never ends, from a peer that never says more.
     const std::string partial = "GET / HTTP/1.1\r\nHost: ex";

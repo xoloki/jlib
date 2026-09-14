@@ -356,6 +356,72 @@ static void the_name_is_still_checked(const std::string& cert,
     ok("  and it is not established", !tls.established());
 }
 
+/**
+ * A handshake against a peer that accepts and then says nothing.
+ *
+ * The shape a slow-loris takes on a TLS port: the connection completes, the
+ * ClientHello goes out, and the server never answers.  SSL_connect returns
+ * WANT_READ and the reader parks on a descriptor that will never be ready.
+ *
+ * Named in the previous commit as untested; this is it.
+ */
+static void a_handshake_can_be_cancelled() {
+    std::cout << "\na handshake can be cancelled:\n";
+
+    sys::listener l(0, "127.0.0.1");
+
+    // Accepts and holds the connection open without speaking TLS at all.
+    std::thread mute([&l]{
+        try {
+            const int fd = l.accept(10);
+
+            if(fd < 0) return;
+
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+
+            ::close(fd);
+        }
+        catch(std::exception&) {}
+    });
+
+    sys::reactor r;
+    sys::socketstream sock("127.0.0.1", l.port());
+
+    sys::cancel_token t = sys::cancel_token::create();
+
+    sys::async_tls tls(r, sock.get_socket(), "localhost", t);
+
+    sys::task<bool> shake = just_handshake(tls);
+
+    shake.start();
+
+    ok("  the handshake is parked", !shake.done());
+
+    sys::deadline(r, std::chrono::milliseconds(100), t);
+
+    const auto start = std::chrono::steady_clock::now();
+
+    bool cancelled = false;
+
+    try { sys::run_until_complete(r, shake); }
+    catch(sys::cancelled&) { cancelled = true; }
+
+    const double took =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+        .count();
+
+    ok("  a deadline ends it", cancelled);
+
+    // Without this it would sit until the peer closed at three seconds, or
+    // forever against one that did not.
+    ok("  well before the peer gives up", took < 1.5,
+       std::to_string(took) + "s");
+
+    ok("  and it never established", !tls.established());
+
+    mute.join();
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -375,6 +441,7 @@ int main() {
     plaintext_the_reactor_cannot_see(cert, key);
     the_framing_functions_do_not_know(cert, key);
     the_name_is_still_checked(cert, key);
+    a_handshake_can_be_cancelled();
 
     std::remove(cert.c_str());
     std::remove(key.c_str());
