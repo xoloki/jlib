@@ -101,6 +101,7 @@ TESTS = \
 	sys_tls_sigpipe_test \
 	sys_tls_server_test \
 	sys_server_test \
+	sys_reactor_test \
  \
 	util_test \
 	util_codec_test \
@@ -242,6 +243,10 @@ sys_socket_test_LDADD   = $(JSYS_LA) $(OPENSSL_LIBS)
 
 sys_tls_server_test_SOURCES = sys_tls_server_test.cc
 sys_tls_server_test_LDADD   = $(JSYS_LA) $(OPENSSL_LIBS)
+
+sys_reactor_test_SOURCES  = sys_reactor_test.cc
+sys_reactor_test_CPPFLAGS = $(AM_CPPFLAGS) $(REACTOR_CPPFLAGS)
+sys_reactor_test_LDADD    = $(JSYS_LA)
 
 sys_server_test_SOURCES = sys_server_test.cc
 sys_server_test_LDADD   = $(JSYS_LA) $(OPENSSL_LIBS)

@@ -346,6 +346,32 @@ AC_ARG_ENABLE([perf],
                   [build the performance measurement tools in tools/perf])],
   [want_perf=$enableval], [want_perf=no])
 
+dnl ------------------------------------------------------------------
+dnl I/O multiplexer.  poll(2) is built everywhere; the native one is extra,
+dnl and JLIB_SYS_REACTOR picks between them at run time so that one `make
+dnl check` covers both on one machine.  A fallback that compiles and is never
+dnl run is a fallback that does not work.
+dnl ------------------------------------------------------------------
+
+AC_CHECK_HEADERS([sys/event.h], [have_kqueue=yes], [have_kqueue=no],
+                 [#include <sys/types.h>])
+AC_CHECK_HEADERS([sys/epoll.h], [have_epoll=yes], [have_epoll=no])
+
+AS_IF([test "x$have_kqueue" = xyes], [have_epoll=no])
+
+AM_CONDITIONAL([HAVE_KQUEUE], [test "x$have_kqueue" = xyes])
+AM_CONDITIONAL([HAVE_EPOLL],  [test "x$have_epoll"  = xyes])
+
+dnl The compiler needs to know too, and AC_CHECK_HEADERS only defines
+dnl HAVE_SYS_EVENT_H.  Substituted rather than AC_DEFINEd because no source in
+dnl jlib/sys includes config.h, and HAVE_METAL already works this way.
+REACTOR_CPPFLAGS=
+AS_IF([test "x$have_kqueue" = xyes],
+      [REACTOR_CPPFLAGS="-DHAVE_KQUEUE"])
+AS_IF([test "x$have_epoll" = xyes],
+      [REACTOR_CPPFLAGS="-DHAVE_EPOLL"])
+AC_SUBST([REACTOR_CPPFLAGS])
+
 AM_CONDITIONAL([HAVE_PERF], [test "x$want_perf" = xyes])
 
 dnl ------------------------------------------------------------------
@@ -420,6 +446,11 @@ AC_MSG_NOTICE([
 
   platform
     linux joystick ....... $have_joystick
+
+  reactor
+    poll ................. yes
+    kqueue ............... $have_kqueue
+    epoll ................ $have_epoll
 
   tools
     tools/perf ........... $want_perf
