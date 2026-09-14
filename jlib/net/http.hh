@@ -62,6 +62,9 @@ using jlib::util::http::Request;
 using jlib::util::http::Response;
 
 /** How to make a request. */
+/** The default User-Agent: "jlib/" and the release.  See options::user_agent. */
+std::string default_user_agent();
+
 struct options {
     /**
      * Seconds to allow the connect, and each read afterwards.  Zero waits.
@@ -91,7 +94,15 @@ struct options {
      */
     unsigned int redirects = 0;
 
-    std::string user_agent = "jlib/1.2";
+    /**
+     * What jlib calls itself on the wire.
+     *
+     * A function rather than a literal, because the literal said "jlib/1.2"
+     * for a while after the library became 2.0.0 -- it is in a header that is
+     * *installed*, so the version cannot reach it as a macro without reaching
+     * every consumer's compile as well.  Defined in http.cc, where it can.
+     */
+    std::string user_agent = default_user_agent();
 };
 
 /**

@@ -50,6 +50,22 @@ Servers
     responses go through, and can stream a response for server-sent events.
     Both are for loopback and a test harness, and both say so in their headers.
 
+Asynchronous I/O
+    jlib::sys::reactor is an I/O multiplexer over kqueue, epoll or poll --
+    the first thing in the library able to wait on more than one descriptor.
+    On it: task<T> and awaitables for C++20 coroutines, cancellation that ends
+    a wait rather than marking it, deadlines, and async_tls, which drives a
+    TLS connection from the reactor.
+
+    Both servers have a suspending mode in which a connection is a coroutine
+    rather than a thread, and net::http::server runs the *same* buffered
+    handlers either way.  The HTTP server bounds a slow-loris; the blocking
+    one's per-operation timeout cannot.
+
+    Nothing was migrated.  Every blocking interface is unchanged and
+    run_until_complete lets a synchronous caller drive an asynchronous one
+    without becoming a coroutine itself.
+
 Machine learning
     A new jlib/ai module runs quantized transformers from GGUF files: llama,
     qwen2 and gemma2 architectures, SentencePiece and GPT-2 byte-level

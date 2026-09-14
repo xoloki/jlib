@@ -36,6 +36,9 @@ namespace jlib {
 namespace net {
 namespace http {
 
+/** The default Server: "jlib/" and the release.  See options::server_name. */
+std::string default_server_name();
+
 /**
  * Caps and the Server field.
  *
@@ -48,7 +51,12 @@ namespace http {
 struct server_options {
     std::size_t max_head = 8192;
     std::size_t max_body = 1 << 20;
-    std::string server_name = "jlib/1.2";
+    /**
+     * What jlib calls itself on the wire.  See net::http::default_user_agent,
+     * which this had the same staleness as: a literal in an installed header
+     * cannot see the version.
+     */
+    std::string server_name = default_server_name();
 };
 
 /**

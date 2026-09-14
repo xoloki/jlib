@@ -6,7 +6,7 @@ something wider: a mail client that speaks OAuth2 to Gmail, a transformer that
 runs quantized models on the GPU, renderers that draw four-dimensional objects
 as solid geometry, and the RFC parsers underneath the first of those.
 
-Two habits hold it together.
+Three habits hold it together.
 
 The older one is that most of it either models an STL container or iterator
 concept, or plugs into std::streambuf and std::iostream.  A socket, a TLS
@@ -21,20 +21,33 @@ find() and substr().  Every departure from the published text is marked at the
 point of use, because the whole value of pasting it in is that a reader can
 check one against the other.
 
+The newest is that where something can wait, it should be able to wait on
+more than one thing at once.  For most of its life jlib had four unrelated
+ways to block and no way to combine them; it has one reactor now, and C++20
+coroutines over it, so a read and a request and a timer are all things one
+thread can be waiting for.  The blocking interfaces are all still there and
+still the right answer for a program that wants them -- nothing was migrated,
+and run_until_complete is what lets a synchronous caller drive an
+asynchronous one without becoming one.
+
 Errors are thrown rather than returned, and each class nests its own
 exception type.  Everything lives in namespace jlib::<module>.
 
 What is in it:
 
     sys      iostream wrappers over OS facilities -- sockets, TLS, subprocesses,
-             serial ports, a listener and a threaded server, a job queue, a
-             lock-free ring buffer
+             serial ports, a listener and a server, a job queue, a lock-free
+             ring buffer.  And an async half: an I/O reactor over kqueue,
+             epoll or poll, C++20 coroutine tasks and awaitables on top of it,
+             cancellation with deadlines, and a server whose connections are
+             coroutines rather than threads
     util     an ABNF parser-combinator core with an RFC 5234 front end, and the
              RFC grammars read through it: 5322, 2045/2047, 3986, 9110/9112.
              Plus JSON, MIME headers, a Jinja2 subset, and an XML parser
     crypt    OpenPGP through GPGME, and ristretto255 curve/Schnorr/Groth proofs
     net      an email client stack -- Email, MBox, POP3, IMAP4 -- with OAuth2,
-             and an HTTP client and server
+             and an HTTP client and server, the server in a blocking flavour
+             and a suspending one that runs the same handlers
     ai       a quantized transformer that runs GGUF files: llama, qwen2 and
              gemma2, with Metal compute where there is one
     media    audio through PortAudio, driven from its callback
