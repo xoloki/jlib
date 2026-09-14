@@ -258,7 +258,7 @@ static void cancellation() {
     {
         sys::reactor r;
         sys::pipe p(false, false);
-        sys::cancel_token t;
+        sys::cancel_token t = sys::cancel_token::create();
 
         sys::task<std::string> task = read_one(r, p.get_reader(), t);
 
@@ -266,27 +266,34 @@ static void cancellation() {
 
         ok("  a task parked on a descriptor is not done", !task.done());
 
-        // Nothing will ever be written to the pipe.  Without cancellation this
-        // waits forever, which is precisely the slow-loris shape.
+        // **Nothing is ever written to this pipe.**  An earlier version had to
+        // write a byte here to wake the pass, because request() only set a
+        // flag and left the wait registered -- so the await did not end until
+        // the descriptor happened to become ready, which for a peer that never
+        // speaks is never.  That is the slow-loris shape, and the write was
+        // the workaround for it.
+        //
+        // request() ends the wait now, so the workaround is gone and its
+        // absence is the assertion.
         t.request();
 
-        // The registration is still armed, so something has to wake the pass.
-        // A real caller cancels from a timer or a callback on this thread; a
-        // write is the test's way of doing the same.
-        feed(p.get_writer(), "x", 1);
+        ok("  cancelling resumes it there and then", task.done());
+
+        ok("  and the reactor has nothing left registered", r.count() == 0,
+           std::to_string(r.count()));
 
         bool threw = false;
 
-        try { sys::run_until_complete(r, task); }
+        try { task.result(); }
         catch(sys::cancelled&) { threw = true; }
 
-        ok("  cancelling it makes the await throw", threw);
+        ok("  with the await throwing cancelled", threw);
     }
 
     {
         sys::reactor r;
         sys::pipe p(false, false);
-        sys::cancel_token t;
+        sys::cancel_token t = sys::cancel_token::create();
 
         // Set *before* the task starts.
         t.request();
@@ -309,7 +316,7 @@ static void cancellation() {
     }
 
     {
-        sys::cancel_token a;
+        sys::cancel_token a = sys::cancel_token::create();
         sys::cancel_token b = a;
 
         a.request();
@@ -319,6 +326,153 @@ static void cancellation() {
         // means.
         ok("  a copied token shares the flag", b.requested());
     }
+}
+
+/**
+ * A deadline against a peer that never speaks.
+ *
+ * The shape #166 asks for -- "Pop3 and Imap4 wait forever by default, and a
+ * wedged server hangs the caller" -- and the one a slow-loris defence takes:
+ * not a timeout threaded through every call, but a timer that cancels what is
+ * in flight.
+ *
+ * Nothing is written to the pipe at any point.  The only thing that ends the
+ * read is the deadline firing.
+ */
+/** A default-constructed token cannot fire, and says so rather than lying. */
+static void a_default_token_refuses_to_pretend() {
+    std::cout << "\na default token refuses to pretend:\n";
+
+    sys::cancel_token none;
+
+    ok("  it is not live", !none.live());
+
+    ok("  and never reads as requested", !none.requested());
+
+    bool threw = false;
+
+    // The alternative was a silent no-op, which is how a caller writes a
+    // cancellation that does nothing and finds out much later.
+    try { none.request(); }
+    catch(sys::cancel_token::misuse&) { threw = true; }
+
+    ok("  and requesting it is an error, not a no-op", threw);
+}
+
+/**
+ * One token, several waits.
+ *
+ * What a connection teardown means: cancelling the outer operation has to end
+ * everything nested below it, and a token is shared rather than copied so that
+ * it does.
+ */
+static void one_cancel_ends_every_wait_on_the_token() {
+    std::cout << "\none cancel ends every wait on the token:\n";
+
+    sys::reactor r;
+    sys::pipe a(false, false);
+    sys::pipe b(false, false);
+    sys::pipe c(false, false);
+
+    sys::cancel_token t = sys::cancel_token::create();
+
+    // A copy, as a nested operation would be handed.
+    sys::cancel_token nested = t;
+
+    sys::task<std::string> one = read_one(r, a.get_reader(), t);
+    sys::task<std::string> two = read_one(r, b.get_reader(), nested);
+    sys::task<std::string> three = read_one(r, c.get_reader(), nested);
+
+    one.start();
+    two.start();
+    three.start();
+
+    ok("  three reads are parked", r.count() == 3, std::to_string(r.count()));
+
+    t.request();
+
+    ok("  one request ends all of them",
+       one.done() && two.done() && three.done());
+
+    ok("  and the reactor is empty", r.count() == 0,
+       std::to_string(r.count()));
+
+    int threw = 0;
+
+    for(sys::task<std::string>* p : { &one, &two, &three }) {
+        try { p->result(); }
+        catch(sys::cancelled&) { threw++; }
+    }
+
+    ok("  each throwing cancelled", threw == 3, std::to_string(threw));
+}
+
+static void a_deadline_ends_a_wait_that_would_not() {
+    std::cout << "\na deadline ends a wait that would not:\n";
+
+    sys::reactor r;
+    sys::pipe p(false, false);
+
+    sys::cancel_token t = sys::cancel_token::create();
+
+    sys::task<std::string> task = read_one(r, p.get_reader(), t);
+
+    task.start();
+
+    ok("  the read is parked on a silent peer", !task.done());
+
+    sys::deadline(r, std::chrono::milliseconds(80), t);
+
+    const auto start = std::chrono::steady_clock::now();
+
+    bool threw = false;
+
+    try { sys::run_until_complete(r, task); }
+    catch(sys::cancelled&) { threw = true; }
+
+    const double took =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+        .count();
+
+    ok("  the deadline ends it", threw);
+
+    // One-sided below, generous above: early would be a bug, late is a loaded
+    // machine.  Before this commit it would not have ended at all.
+    ok("  at about the time it was set for", took >= 0.07 && took < 3.0,
+       std::to_string(took) + "s");
+
+    ok("  and nothing is left registered", r.count() == 0,
+       std::to_string(r.count()));
+}
+
+/** A deadline that does not fire, because the work finished first. */
+static void a_deadline_that_is_not_needed() {
+    std::cout << "\na deadline that is not needed:\n";
+
+    sys::reactor r;
+    sys::pipe p(false, false);
+
+    sys::cancel_token t = sys::cancel_token::create();
+
+    sys::task<std::string> task = read_one(r, p.get_reader(), t);
+
+    task.start();
+
+    const sys::reactor::timer_token timer =
+        sys::deadline(r, std::chrono::seconds(30), t);
+
+    feed(p.get_writer(), "quick", 5);
+
+    const std::string got = sys::run_until_complete(r, task);
+
+    ok("  the read completes normally", got == "quick", got);
+
+    // Cancelled, or a thirty-second timer sits in the reactor holding the
+    // token -- and would fire into whatever uses it next.
+    r.cancel(timer);
+
+    ok("  and the deadline can be taken back off", r.timers() == 0,
+       std::to_string(r.timers()));
 }
 
 static void sleeping() {
@@ -374,6 +528,10 @@ int main() {
     a_task_suspends_on_a_descriptor();
     a_task_destroyed_while_parked_unregisters();
     cancellation();
+    a_default_token_refuses_to_pretend();
+    one_cancel_ends_every_wait_on_the_token();
+    a_deadline_ends_a_wait_that_would_not();
+    a_deadline_that_is_not_needed();
     sleeping();
     a_synchronous_caller_stays_synchronous();
 
