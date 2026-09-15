@@ -367,8 +367,29 @@ public:
      */
     class async_responder {
     public:
-        async_responder(sys::async_writer& w, const std::string& server_name)
-            : m_writer(&w), m_name(server_name) {}
+        async_responder(sys::async_writer& w, const std::string& server_name,
+                        sys::reactor& r, sys::job_queue& pool)
+            : m_writer(&w), m_name(server_name), m_reactor(&r), m_pool(&pool) {}
+
+        /**
+         * The reactor this connection is on, and the pool beside it.
+         *
+         * A streaming handler is the one kind that needs them.  A buffered
+         * handler is hopped to a worker by the server and never sees either;
+         * a streaming one does its own writing, so it stays where the writer
+         * is -- and anything it does that would block has to be got off this
+         * thread by the handler itself.
+         *
+         * `co_await sys::on_pool(out.pool())` for work measured in
+         * microseconds.  **For work measured in seconds -- an inference, a
+         * subprocess, anything external -- neither of these is the answer**:
+         * the pool's threads are there to handle requests, and one held for a
+         * minute is one not handling any.  Give that its own thread and let it
+         * report back through a descriptor this can wait on.
+         */
+        sys::reactor& reactor() { return *m_reactor; }
+
+        sys::job_queue& pool() { return *m_pool; }
 
         /** Send a complete response.  Exactly what a buffered handler does. */
         sys::task<void> send(const response& r);
@@ -439,6 +460,8 @@ public:
         sys::async_writer* m_writer;
         std::string        m_name;
         bool               m_started = false;
+        sys::reactor*      m_reactor = 0;
+        sys::job_queue*    m_pool = 0;
         bool               m_chunked = false;
         bool               m_persist = false;
         bool               m_ended   = false;

@@ -49,6 +49,15 @@
 #include <jlib/ai/openai.hh>
 #include <jlib/ai/sampler.hh>
 #include <jlib/net/http_server.hh>
+#include <jlib/sys/await.hh>
+#include <jlib/sys/relay.hh>
+
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <thread>
+
+#include <unistd.h>
 
 #ifdef HAVE_METAL
 #include <jlib/metal/backend.hh>
@@ -104,7 +113,7 @@ void usage(std::ostream& o, const char* argv0) {
       << "\n"
       << "  --port N        (default 8080)\n"
       << "  --host ADDR     (default 127.0.0.1; see the header before changing)\n"
-      << "  --threads N     connections served at once, 0 for one at a time\n"
+      << "  --threads N     workers for request handling, 0 to do it inline\n"
       << "  --temp F        when a request does not say (default 0.8)\n"
       << "  --top-k N       (default 40)\n"
       << "  --top-p F       (default 0.95)\n"
@@ -290,34 +299,42 @@ public:
 
         s.route("POST", "/v1/chat/completions",
                 [this](const http::server::Request& q,
-                       http::server::responder& out) { complete(q, out); });
+                       http::server::async_responder& out)
+                    -> sys::task<void> { co_await complete(q, out); });
     }
 
 private:
-    void refuse(http::server::responder& out, int code,
-                const std::string& why, const std::string& type)
+    sys::task<void> refuse(http::server::async_responder& out, int code,
+                           const std::string& why, const std::string& type)
     {
         http::server::response r;
 
         r.status(code).type("application/json").body(oa::error(why, type));
 
-        out.send(r);
+        co_await out.send(r);
     }
 
-    void complete(const http::server::Request& q,
-                  http::server::responder& out)
+    sys::task<void> complete(const http::server::Request& q,
+                             http::server::async_responder& out)
     {
         oa::request req;
 
         // Every refusal happens here, before anything is sent -- which is the
         // only window a streaming response has for one.  See responder.
+        //
+        // **co_await cannot appear in a catch handler**, which is a language
+        // rule and shapes every refusal below that follows a throw: the reason
+        // is recorded, the catch ends, and the answer is sent afterwards.
+        std::string bad;
+
         try { req = oa::request::parse(q.body()); }
-        catch(std::exception& e) {
-            return refuse(out, 400, e.what(), "invalid_request_error");
-        }
+        catch(std::exception& e) { bad = e.what(); }
+
+        if(!bad.empty())
+            co_return co_await refuse(out, 400, bad, "invalid_request_error");
 
         if(req.wants_tools)
-            return refuse(out, 400,
+            co_return co_await refuse(out, 400,
                           "this server does not implement tool calling; "
                           "aider's whole edit format needs none",
                           "invalid_request_error");
@@ -325,7 +342,7 @@ private:
         const std::string name = req.model.empty() ? m_default : req.model;
 
         if(!m_engine.has(name))
-            return refuse(out, 404, "no model called \"" + name + "\"",
+            co_return co_await refuse(out, 404, "no model called \"" + name + "\"",
                           "invalid_request_error");
 
         // Blocks until the model is free.  One conversation at a time per
@@ -351,19 +368,20 @@ private:
             // sent, unchanged, and this never runs.
             std::vector<ai::message> folded = fold_system(req.messages);
 
-            if(folded.empty())
-                return refuse(out, 400, first.what(),
-                              "invalid_request_error");
-
-            try { plan = lay_out<T>(s, folded, req.max_tokens); }
-            catch(std::exception& again) {
-                return refuse(out, 400, again.what(),
-                              "invalid_request_error");
+            if(folded.empty()) {
+                bad = first.what();
+            }
+            else {
+                try { plan = lay_out<T>(s, folded, req.max_tokens); }
+                catch(std::exception& again) { bad = again.what(); }
             }
         }
 
+        if(!bad.empty())
+            co_return co_await refuse(out, 400, bad, "invalid_request_error");
+
         if(!plan.fits)
-            return refuse(out, 400,
+            co_return co_await refuse(out, 400,
                           "the conversation leaves no room for a reply in a "
                           "context of " + std::to_string(s.context()),
                           "context_length_exceeded");
@@ -379,15 +397,54 @@ private:
         const std::string id = oa::new_id();
         const std::int64_t now = std::int64_t(std::time(0));
 
-        if(req.stream) stream(out, s, plan, sampler, ends, req, id, now, name);
-        else whole(out, s, plan, sampler, ends, req, id, now, name);
+        if(req.stream)
+            co_await stream(out, s, plan, sampler, ends, req, id, now, name);
+        else
+            co_await whole(out, s, plan, sampler, ends, req, id, now, name);
+    }
+
+    /**
+     * Start a generation on its own thread.
+     *
+     * Everything captured is either owned by the caller's coroutine frame --
+     * which outlives this, because sys::relay::join() is in its destructor
+     * -- or by the engine session the caller holds.
+     */
+    template<typename Session>
+    void launch(sys::relay<std::string>& ts, Session& s, const laid_out& plan,
+                ai::sampler& sampler, const ai::stops& ends,
+                unsigned int& made)
+    {
+        ts.start([this, &s, &plan, &sampler, &ends, &made]
+                 (sys::relay<std::string>& b) {
+            ai::generate<T>(s.model(), m_backend, plan.ids, plan.budget,
+                            sampler, ends, [&](int token) {
+                // Asked between tokens, and the only thing that travels this
+                // way: a client that has gone should not hold the model for
+                // the whole length of a reply nobody will read.
+                if(!b.wanted()) return false;
+
+                made++;
+
+                // Empty pieces are real -- some tokens decode to nothing --
+                // and emitting one would wake the reader for no text.  Dropped
+                // here rather than in the relay, which has no opinion about
+                // what an item means.
+                const std::string piece = s.tok().piece(token);
+
+                if(!piece.empty()) b.emit(piece);
+
+                return true;
+            });
+        });
     }
 
     template<typename Session>
-    void stream(http::server::responder& out, Session& s, const laid_out& plan,
-                ai::sampler& sampler, const ai::stops& ends,
-                const oa::request& req, const std::string& id,
-                std::int64_t now, const std::string& name)
+    sys::task<void> stream(http::server::async_responder& out, Session& s,
+                           const laid_out& plan, ai::sampler& sampler,
+                           const ai::stops& ends, const oa::request& req,
+                           const std::string& id, std::int64_t now,
+                           const std::string& name)
     {
         http::server::response head;
 
@@ -397,70 +454,104 @@ private:
             .field("Cache-Control", "no-cache")
             .field("X-Accel-Buffering", "no");
 
-        out.begin(head);
+        co_await out.begin(head);
 
         {
             oa::delta d;
 
             d.role = true;
 
-            out.write(oa::event(oa::chunk(id, name, now, d)));
+            co_await out.write(oa::event(oa::chunk(id, name, now, d)));
         }
 
         unsigned int made = 0;
 
-        const std::vector<int> got = ai::generate<T>(
-            s.model(), m_backend, plan.ids, plan.budget, sampler, ends,
-            [&](int token) {
-                made++;
+        sys::relay<std::string> ts;
 
-                // Stop producing for a client that has gone: otherwise an
-                // abandoned request holds the model for its whole length.
-                if(!out.live()) return false;
+        launch(ts, s, plan, sampler, ends, made);
 
-                const std::string piece = s.tok().piece(token);
+        // A write that throws is the client having gone.  There is no live()
+        // to ask here and there does not need to be: the answer arrives as a
+        // failed write, which is the same thing one layer earlier.
+        const bool whole_reply = co_await sys::pump(
+            ts, out.reactor(),
+            [&](const std::string& piece) -> sys::task<bool> {
+                oa::delta d;
 
-                if(!piece.empty()) {
-                    oa::delta d;
+                d.content = piece;
 
-                    d.content = piece;
+                try {
+                    co_await out.write(oa::event(oa::chunk(id, name, now, d)));
+                }
+                catch(std::exception&) {
+                    // Stops the generation as well, through the bridge -- and
+                    // the destructor would anyway, but not until the reply had
+                    // been produced in full for nobody.
+                    ts.stop();
 
-                    out.write(oa::event(oa::chunk(id, name, now, d)));
+                    co_return false;
                 }
 
-                return true;
+                co_return true;
             });
 
-        (void)got;
+        ts.join();
 
-        if(!out.live()) return;
+        // Nobody to tell.  Returning without the terminating chunk is also
+        // right: the response is not finished and should not claim to be.
+        if(!whole_reply) co_return;
+
+        const std::string why = ts.why();
+
+        // The generation itself failed.  The 200 left long ago, so the only
+        // thing left to say is to stop without terminating -- which is what
+        // http::server does with a streaming handler that throws, and this is
+        // the same thing said deliberately.
+        if(!why.empty()) throw std::runtime_error(why);
 
         oa::delta last;
 
         last.done = true;
         last.why = made >= plan.budget ? oa::finish::length : oa::finish::stop;
 
-        out.write(oa::event(oa::chunk(id, name, now, last)));
-        out.write(oa::done());
+        co_await out.write(oa::event(oa::chunk(id, name, now, last)));
+        co_await out.write(oa::done());
     }
 
     template<typename Session>
-    void whole(http::server::responder& out, Session& s, const laid_out& plan,
-               ai::sampler& sampler, const ai::stops& ends,
-               const oa::request& req, const std::string& id,
-               std::int64_t now, const std::string& name)
+    sys::task<void> whole(http::server::async_responder& out, Session& s,
+                          const laid_out& plan, ai::sampler& sampler,
+                          const ai::stops& ends, const oa::request& req,
+                          const std::string& id, std::int64_t now,
+                          const std::string& name)
     {
         std::string body;
 
         unsigned int made = 0;
 
-        ai::generate<T>(s.model(), m_backend, plan.ids, plan.budget,
-                        sampler, ends, [&](int token) {
-            made++;
-            body += s.tok().piece(token);
+        sys::relay<std::string> ts;
 
-            return true;
-        });
+        launch(ts, s, plan, sampler, ends, made);
+
+        // The same pump, collecting instead of writing.  Nothing has been sent
+        // yet, so a failure here can still be answered -- which is the whole
+        // difference between this path and the streaming one.
+        co_await sys::pump(ts, out.reactor(),
+                      [&body](const std::string& piece) -> sys::task<bool> {
+                          body += piece;
+
+                          co_return true;
+                      });
+
+        ts.join();
+
+        const std::string why = ts.why();
+
+        if(!why.empty()) {
+            co_await refuse(out, 500, why, "internal_error");
+
+            co_return;
+        }
 
         // The leading space the marker convention adds belongs to the prompt,
         // not to the reply; decode() strips it and piece() does not.
@@ -474,7 +565,7 @@ private:
                                                   : oa::finish::stop,
                               unsigned(plan.ids.size()), made));
 
-        out.send(r);
+        co_await out.send(r);
     }
 
     // Declared before the engine, which is handed the same reference.
@@ -493,14 +584,29 @@ int run(ai::backend<T>& b, const options& o) {
 
     sys::server::policy p;
 
+    // **Not connections.**  A connection is a coroutine on the reactor now,
+    // not a thread, so this bounds nothing about how many clients can be
+    // served at once -- it is the pool that parses requests and runs buffered
+    // handlers, and 0 runs them on the reactor's thread.
+    //
+    // A generation is on neither: it gets its own thread and reports back
+    // through a pipe.  See sys::relay.
     p.threads = o.threads;
 
-    // Long, because a reply is produced over seconds and a client that asked
-    // for one is not idle while it waits.  The default would cut a stream off
-    // mid-token.
-    p.io_timeout = 0;
+    // **The default, which this used to have to turn off.**
+    //
+    // On the blocking server io_timeout is SO_RCVTIMEO and SO_SNDTIMEO, per
+    // operation, so a reply produced over seconds could trip it mid-token and
+    // the only way out was to disable the bound entirely.  The async server
+    // arms a deadline over reading the *request* and cancels it before the
+    // handler runs, so a long reply was never in its reach -- and leaving it
+    // at 0 now would give up the slow-loris bound for nothing.
+    //
+    // What bounds a reply instead is nothing, deliberately: a generation takes
+    // as long as it takes, and the client asking for it is not idle.
 
-    http::server s(o.port, o.host, sys::tls_context(), p);
+    http::server s(http::server::async_t(), o.port, o.host,
+                   sys::tls_context(), p);
 
     e.wire(s);
 
