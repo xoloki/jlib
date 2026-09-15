@@ -196,6 +196,17 @@ public:
                         bool persist = false) const;
 
         /**
+         * The same octets a GET would have produced, without the body.
+         *
+         * Which is what a HEAD is owed -- RFC 9110 9.3.2 says the headers
+         * SHOULD be those of the GET, and that includes the Content-Length
+         * the body *would* have had.  Computing it any other way would make a
+         * HEAD a different question from the GET it is supposed to preview.
+         */
+        std::string without_body(const std::string& server_name,
+                                 bool persist = false) const;
+
+        /**
          * The head alone, with no Content-Length.
          *
          * For a response whose length is not known when it starts; the body
@@ -335,6 +346,17 @@ public:
 
         bool chunked() const { return m_chunked; }
 
+        /**
+         * Write the head and nothing after it.
+         *
+         * Set by the server for a HEAD request, before the handler runs,
+         * because by the time one has called begin() the head has gone.  The
+         * handler is not told and does not need to be: it produces what it
+         * would have produced and write() drops it, which is what keeps a
+         * HEAD's headers identical to the GET's.
+         */
+        void suppress_body();
+
         /** Send a complete response.  Exactly what a buffered handler does. */
         void send(const response& r);
 
@@ -389,6 +411,7 @@ public:
         bool m_started = false;
         bool m_chunked = false;
         bool m_ended = false;
+        bool m_no_body = false;
     };
 
     /**
@@ -478,6 +501,9 @@ public:
 
         bool chunked() const { return m_chunked; }
 
+        /** Write the head and nothing after it.  See responder. */
+        void suppress_body();
+
         /**
          * Whether the connection can carry another request after this body.
          *
@@ -531,6 +557,7 @@ public:
         bool               m_persist = false;
         bool               m_begun   = false;
         bool               m_ended   = false;
+        bool               m_no_body = false;
     };
 
     /**

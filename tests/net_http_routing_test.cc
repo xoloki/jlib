@@ -33,6 +33,7 @@
 
 #include <jlib/net/http.hh>
 #include <jlib/net/http_server.hh>
+#include <jlib/sys/socketstream.hh>
 #include <jlib/util/URL.hh>
 
 #include <iostream>
@@ -84,6 +85,25 @@ static void furnish(http::server& s) {
         r.status(200).type("text/plain").body("the index itself");
     });
 
+    s.route("GET", "/tagged", [](const http::server::Request&,
+                                 http::server::response& r) {
+        r.status(200).type("text/plain").field("ETag", "\"v1\"")
+         .body("tagged body\n");
+    });
+
+    s.route("GET", "/dated", [](const http::server::Request&,
+                                http::server::response& r) {
+        r.status(200).type("text/plain")
+         .field("Last-Modified", "Sun, 06 Nov 1994 08:49:37 GMT")
+         .body("dated body\n");
+    });
+
+    s.route("POST", "/tagged", [](const http::server::Request&,
+                                  http::server::response& r) {
+        r.status(200).type("text/plain").field("ETag", "\"v1\"")
+         .body("posted\n");
+    });
+
     // Same path, another method -- what makes 405 possible.
     s.route("POST", "/exact", [](const http::server::Request&,
                                  http::server::response& r) {
@@ -100,6 +120,18 @@ static util::http::Response ask(http::server& s, const std::string& method,
                                 const std::string& path)
 {
     return http::request(method, util::URL(s.url(path)));
+}
+
+static util::http::Response ask_with(http::server& s, const std::string& method,
+                                     const std::string& path,
+                                     const std::string& name,
+                                     const std::string& value)
+{
+    util::http::fields f;
+
+    f.add(name, value);
+
+    return http::request(method, util::URL(s.url(path)), f);
 }
 
 /** Both servers, the same table, the same questions. */
@@ -210,6 +242,126 @@ static void run_against(http::server& s, const std::string& which) {
     }
 
     {
+        // **HEAD is a GET that stops at the headers.**  No HEAD route is
+        // registered anywhere in this table; the GET one answers it.
+        const util::http::Response g = ask(s, "GET", "/exact");
+        const util::http::Response h = ask(s, "HEAD", "/exact");
+
+        ok("  HEAD is answered by the GET route", h.status() == 200,
+           std::to_string(h.status()));
+
+        ok("  with no body", h.body().empty(), "\"" + h.body() + "\"");
+
+        // The assertion that makes it a preview of the GET rather than a
+        // different question: the length is what the body *would* have been.
+        ok("  and the Content-Length the GET would have sent",
+           h.fields().get("Content-Length") ==
+           std::to_string(g.body().size()),
+           h.fields().get("Content-Length") + " vs " +
+           std::to_string(g.body().size()));
+    }
+
+    {
+        const util::http::Response r = ask(s, "HEAD", "/nowhere");
+
+        ok("  and an unrouted path is still 404 for HEAD", r.status() == 404,
+           std::to_string(r.status()));
+    }
+
+    {
+        // If-None-Match against the ETag the handler set.
+        const util::http::Response r =
+            ask_with(s, "GET", "/tagged", "If-None-Match", "\"v1\"");
+
+        ok("  a matching If-None-Match is 304", r.status() == 304,
+           std::to_string(r.status()));
+
+        ok("  with no body", r.body().empty(), "\"" + r.body() + "\"");
+
+        // **A 304 must not claim a length.**  On a reused connection a
+        // Content-Length with no body is the next response being read as one.
+        ok("  and no Content-Length, which would promise a body",
+           !r.fields().has("Content-Length"),
+           r.fields().get("Content-Length"));
+    }
+
+    {
+        const util::http::Response r =
+            ask_with(s, "GET", "/tagged", "If-None-Match", "W/\"v1\"");
+
+        ok("  a weak tag matches the strong one it was made from",
+           r.status() == 304, std::to_string(r.status()));
+    }
+
+    {
+        const util::http::Response r =
+            ask_with(s, "GET", "/tagged", "If-None-Match", "\"other\", \"v1\"");
+
+        ok("  and so does one named among several", r.status() == 304,
+           std::to_string(r.status()));
+    }
+
+    {
+        const util::http::Response r =
+            ask_with(s, "GET", "/tagged", "If-None-Match", "\"v2\"");
+
+        ok("  a tag that does not match is the whole response",
+           r.status() == 200 && r.body() == "tagged body\n", r.body());
+    }
+
+    {
+        // A POST is not safe, and 13.1 does not give a 304 a meaning there.
+        const util::http::Response r =
+            ask_with(s, "POST", "/tagged", "If-None-Match", "\"v1\"");
+
+        ok("  an unsafe method is never turned into a 304",
+           r.status() == 200 && r.body() == "posted\n",
+           std::to_string(r.status()) + " " + r.body());
+    }
+
+    {
+        // **All three date formats**, which is what parsing by the grammar in
+        // rfc9110.hh bought over counting characters.  The resource's
+        // Last-Modified is 06 Nov 1994 08:49:37 GMT; each of these says the
+        // client already has something at least that new.
+        const char* const same[] = {
+            "Sun, 06 Nov 1994 08:49:37 GMT",        // IMF-fixdate
+            "Sunday, 06-Nov-94 08:49:37 GMT",       // RFC 850
+            "Sun Nov  6 08:49:37 1994"              // asctime
+        };
+
+        for(std::size_t i = 0; i < 3; i++) {
+            const util::http::Response r =
+                ask_with(s, "GET", "/dated", "If-Modified-Since", same[i]);
+
+            ok(std::string("  If-Modified-Since is read as ") +
+               (i == 0 ? "IMF-fixdate" : i == 1 ? "RFC 850" : "asctime"),
+               r.status() == 304,
+               std::string(same[i]) + " -> " + std::to_string(r.status()));
+        }
+    }
+
+    {
+        const util::http::Response r =
+            ask_with(s, "GET", "/dated", "If-Modified-Since",
+                     "Sat, 05 Nov 1994 08:49:37 GMT");
+
+        ok("  an older If-Modified-Since gets the whole response",
+           r.status() == 200 && r.body() == "dated body\n",
+           std::to_string(r.status()));
+    }
+
+    {
+        // Unreadable, so nothing can be shown to hold -- and the safe way to
+        // be wrong is to send everything.
+        const util::http::Response r =
+            ask_with(s, "GET", "/dated", "If-Modified-Since", "nonsense");
+
+        ok("  an unparseable date is ignored, not believed",
+           r.status() == 200, std::to_string(r.status()));
+    }
+
+    {
         // A path that *does* match for this method must not collect an Allow
         // from the other routes it passed on the way.
         const util::http::Response r = ask(s, "POST", "/exact");
@@ -219,6 +371,105 @@ static void run_against(http::server& s, const std::string& which) {
 
         ok("  and carries no Allow", !r.fields().has("Allow"),
            r.fields().get("Allow"));
+    }
+}
+
+/**
+ * A HEAD sends the head and stops, proved on the connection.
+ *
+ * **The obvious assertion cannot see this.**  util::http::parse_head takes a
+ * `head_request` flag, so jlib's own client frames a HEAD response as bodyless
+ * whatever the server actually sent -- ask it for r.body() and it is empty
+ * either way.  Breaking the server's suppression and watching that assertion
+ * stay green is how this section came to exist.
+ *
+ * What a stray body does is corrupt the *next* thing on the connection, so
+ * that is what to ask: a HEAD, then a GET, on one socket.  If anything
+ * followed the head, the GET's status line is read out of the middle of it.
+ */
+static void a_head_sends_nothing_after_the_head() {
+    std::cout << "\na HEAD sends the head and stops:\n";
+
+    http::server s(http::server::async_t(), 0, "127.0.0.1");
+
+    furnish(s);
+    s.transport().on_error([](const std::exception&, const sys::peer&) {});
+
+    std::thread t([&s]{ s.run(); });
+
+    {
+        sys::socketstream c("127.0.0.1", s.port(), -1, 10.0);
+
+        c << "HEAD /exact HTTP/1.1\r\nHost: x\r\n\r\n" << std::flush;
+
+        // Read the head only -- deliberately not read_body, which would be
+        // told this was a HEAD and skip the very octets in question.
+        const std::string head = util::http::read_head(c, 8192);
+        const util::http::Response r = util::http::parse_head(head, true);
+
+        ok("  it is answered", r.status() == 200, std::to_string(r.status()));
+
+        ok("  and says how long the body would have been",
+           r.fields().get("Content-Length") == "5",
+           r.fields().get("Content-Length"));
+
+        // Nothing was consumed after the head, so if the server wrote a body
+        // it is sitting here and this parse lands inside it.
+        c << "GET /second HTTP/1.1\r\nHost: x\r\n\r\n" << std::flush;
+
+        bool ok_next = false;
+        std::string why;
+
+        try {
+            const std::string h2 = util::http::read_head(c, 8192);
+            const util::http::Response r2 = util::http::parse_head(h2);
+
+            ok_next = r2.status() == 404;
+            why = std::to_string(r2.status());
+        }
+        catch(std::exception& e) { why = e.what(); }
+
+        // /second is not routed here, so 404 is the right answer -- what
+        // matters is that it parsed as a response at all.
+        ok("  and the next request on the connection parses cleanly",
+           ok_next, why);
+    }
+
+    s.stop();
+    t.join();
+
+    // The blocking server closes after one response, so there is no "next
+    // request" to corrupt -- read to the close instead and require silence.
+    {
+        http::server b(0, "127.0.0.1");
+
+        furnish(b);
+        b.transport().on_error([](const std::exception&, const sys::peer&) {});
+
+        std::thread bt([&b]{ b.run(); });
+
+        {
+            sys::socketstream c("127.0.0.1", b.port(), -1, 10.0);
+
+            c << "HEAD /exact HTTP/1.1\r\nHost: x\r\n\r\n" << std::flush;
+
+            const std::string head = util::http::read_head(c, 8192);
+            const util::http::Response r = util::http::parse_head(head, true);
+
+            ok("  the blocking server answers a HEAD too", r.status() == 200,
+               std::to_string(r.status()));
+
+            std::string after;
+            char ch;
+
+            while(c.get(ch)) after += ch;
+
+            ok("  and writes nothing at all after the head", after.empty(),
+               "\"" + after + "\"");
+        }
+
+        b.stop();
+        bt.join();
     }
 }
 
@@ -283,6 +534,7 @@ int main() {
             t.join();
         }
 
+        a_head_sends_nothing_after_the_head();
         a_bad_pattern_is_refused_at_registration();
     }
     catch(std::exception& e) {
