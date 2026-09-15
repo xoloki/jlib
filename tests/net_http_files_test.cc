@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -330,6 +331,233 @@ static void a_file_bigger_than_a_block(http::server& s, const tree& t) {
        r.fields().get("Transfer-Encoding"));
 }
 
+/**
+ * Byte ranges: what is answered, what is refused, and what is ignored.
+ *
+ * The arithmetic is inclusive on both ends -- `bytes=0-0` is one octet, not
+ * none -- and the three forms mean different things, so each is asked for
+ * against a file whose contents are known exactly.
+ *
+ * The ignoring is as much a decision as the answering.  RFC 9110 14.2 lets a
+ * server ignore a Range outright, and this one does for a unit it does not
+ * know and for more than one range at a time; both come back as the whole
+ * file, not as an error.
+ */
+static void byte_ranges(http::server& s, const tree& t) {
+    std::cout << "\nbyte ranges:\n";
+
+    const std::string& all = t.big_text;
+    const long long size = (long long)t.big_size;
+
+    {
+        const util::http::Response r = ask(s, "GET", "/static/big.txt");
+
+        ok("  a full response advertises that ranges are possible",
+           util::http::fold(r.fields().get("Accept-Ranges")) == "bytes",
+           r.fields().get("Accept-Ranges"));
+    }
+
+    {
+        const util::http::Response r =
+            ask_with(s, "GET", "/static/big.txt", "Range", "bytes=200-999");
+
+        ok("  a middle range is 206", r.status() == 206,
+           std::to_string(r.status()));
+
+        ok("  with exactly those octets",
+           r.body() == all.substr(200, 800), std::to_string(r.body().size()));
+
+        std::ostringstream want;
+
+        want << "bytes 200-999/" << size;
+
+        ok("  and a Content-Range saying which, of how many",
+           r.fields().get("Content-Range") == want.str(),
+           r.fields().get("Content-Range"));
+
+        ok("  the length is the range, not the file",
+           r.fields().get("Content-Length") == "800",
+           r.fields().get("Content-Length"));
+    }
+
+    {
+        // Inclusive on both ends: one octet, not zero.
+        const util::http::Response r =
+            ask_with(s, "GET", "/static/big.txt", "Range", "bytes=0-0");
+
+        ok("  bytes=0-0 is one octet, because both ends are inclusive",
+           r.status() == 206 && r.body() == all.substr(0, 1),
+           std::to_string(r.body().size()));
+    }
+
+    {
+        const util::http::Response r =
+            ask_with(s, "GET", "/static/big.txt", "Range", "bytes=-500");
+
+        ok("  a suffix range is the last N octets",
+           r.status() == 206 && r.body() == all.substr(all.size() - 500),
+           std::to_string(r.body().size()));
+    }
+
+    {
+        std::ostringstream ask_from;
+
+        ask_from << "bytes=" << (size - 10) << "-";
+
+        const util::http::Response r =
+            ask_with(s, "GET", "/static/big.txt", "Range", ask_from.str());
+
+        ok("  an open-ended range runs to the end",
+           r.status() == 206 && r.body() == all.substr(all.size() - 10),
+           std::to_string(r.body().size()));
+    }
+
+    {
+        // Past the end is clamped, not refused -- 14.1.2.
+        std::ostringstream past;
+
+        past << "bytes=" << (size - 5) << "-" << (size + 1000);
+
+        const util::http::Response r =
+            ask_with(s, "GET", "/static/big.txt", "Range", past.str());
+
+        ok("  a last-pos past the end is clamped to it",
+           r.status() == 206 && r.body() == all.substr(all.size() - 5),
+           std::to_string(r.body().size()));
+    }
+
+    {
+        // A first-pos past the end is a different thing: the client's offset
+        // is wrong and it needs to be told, not quietly handed everything.
+        std::ostringstream beyond;
+
+        beyond << "bytes=" << (size + 100) << "-";
+
+        const util::http::Response r =
+            ask_with(s, "GET", "/static/big.txt", "Range", beyond.str());
+
+        ok("  a first-pos past the end is 416, not the whole file",
+           r.status() == 416, std::to_string(r.status()));
+
+        std::ostringstream want;
+
+        want << "bytes */" << size;
+
+        ok("  with the length, so the next ask can be right",
+           r.fields().get("Content-Range") == want.str(),
+           r.fields().get("Content-Range"));
+    }
+
+    {
+        const util::http::Response r =
+            ask_with(s, "GET", "/static/big.txt", "Range", "bytes=-0");
+
+        ok("  a zero-length suffix is 416 rather than an empty 206",
+           r.status() == 416, std::to_string(r.status()));
+    }
+
+    {
+        const util::http::Response r =
+            ask_with(s, "GET", "/static/big.txt", "Range", "items=1-2");
+
+        ok("  a unit that is not bytes is ignored, giving the whole file",
+           r.status() == 200 && r.body().size() == t.big_size,
+           std::to_string(r.status()));
+    }
+
+    {
+        // Answering two means multipart/byteranges, which this declines to
+        // implement; 14.2 permits ignoring the field entirely.
+        const util::http::Response r =
+            ask_with(s, "GET", "/static/big.txt", "Range", "bytes=0-99,200-299");
+
+        ok("  more than one range is ignored, giving the whole file",
+           r.status() == 200 && r.body().size() == t.big_size,
+           std::to_string(r.status()));
+    }
+
+    {
+        const util::http::Response r =
+            ask_with(s, "GET", "/static/big.txt", "Range", "bytes=nonsense");
+
+        ok("  and so is anything the grammar refuses",
+           r.status() == 200 && r.body().size() == t.big_size,
+           std::to_string(r.status()));
+    }
+}
+
+/**
+ * If-Range, and the honest validator that cannot satisfy it.
+ *
+ * `files()` sends a weak ETag on purpose -- mtime at second resolution plus a
+ * size cannot promise the bytes are identical -- and a weak tag can never pass
+ * the strong comparison If-Range requires (13.1.5).  So a conditional range
+ * against a served file comes back whole.
+ *
+ * **That is the intended answer, not a gap.**  Splicing a piece of one
+ * representation onto a client's copy of another is the failure If-Range
+ * exists to prevent, and a validator that cannot rule it out should not be
+ * used to authorise it.  The cost is a re-read; the alternative is corruption.
+ */
+static void if_range_against_a_weak_validator(http::server& s, const tree& t) {
+    std::cout << "\nIf-Range against the weak validator files() sends:\n";
+
+    const util::http::Response first = ask(s, "GET", "/static/big.txt");
+
+    ok("  the validator is weak", first.fields().get("ETag")
+       .compare(0, 2, "W/") == 0, first.fields().get("ETag"));
+
+    {
+        util::http::fields f;
+
+        f.add("Range", "bytes=0-99");
+        f.add("If-Range", first.fields().get("ETag"));
+
+        util::http::Response r;
+
+        try { r = http::request("GET", util::URL(s.url("/static/big.txt")), f); }
+        catch(std::exception&) {}
+
+        ok("  a weak tag cannot authorise a range, so the whole file comes back",
+           r.status() == 200 && r.body().size() == t.big_size,
+           std::to_string(r.status()) + " " + std::to_string(r.body().size()));
+    }
+
+    {
+        // A date matches exactly, and Last-Modified is what a client holding a
+        // weak tag will have used instead.
+        util::http::fields f;
+
+        f.add("Range", "bytes=0-99");
+        f.add("If-Range", first.fields().get("Last-Modified"));
+
+        util::http::Response r;
+
+        try { r = http::request("GET", util::URL(s.url("/static/big.txt")), f); }
+        catch(std::exception&) {}
+
+        ok("  a matching Last-Modified does authorise one",
+           r.status() == 206 && r.body() == t.big_text.substr(0, 100),
+           std::to_string(r.status()) + " " + std::to_string(r.body().size()));
+    }
+
+    {
+        util::http::fields f;
+
+        f.add("Range", "bytes=0-99");
+        f.add("If-Range", "Sun, 06 Nov 1994 08:49:37 GMT");
+
+        util::http::Response r;
+
+        try { r = http::request("GET", util::URL(s.url("/static/big.txt")), f); }
+        catch(std::exception&) {}
+
+        ok("  and one that does not match gives the whole file back",
+           r.status() == 200 && r.body().size() == t.big_size,
+           std::to_string(r.status()));
+    }
+}
+
 static void a_root_that_is_not_there() {
     std::cout << "\na root that cannot be resolved:\n";
 
@@ -365,6 +593,8 @@ int main() {
             what_it_refuses(s, t);
             the_conditional_and_head_paths(s);
             a_file_bigger_than_a_block(s, t);
+            byte_ranges(s, t);
+            if_range_against_a_weak_validator(s, t);
         }
 
         {
@@ -380,6 +610,8 @@ int main() {
             what_it_refuses(s, t);
             the_conditional_and_head_paths(s);
             a_file_bigger_than_a_block(s, t);
+            byte_ranges(s, t);
+            if_range_against_a_weak_validator(s, t);
         }
 
         a_root_that_is_not_there();

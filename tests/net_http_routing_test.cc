@@ -104,6 +104,15 @@ static void furnish(http::server& s) {
          .body("posted\n");
     });
 
+    // A handler with a *strong* validator, which files() never has: its ETag
+    // comes from mtime and size and so can only be weak.  This is the only way
+    // to reach the If-Range paths that require strong comparison.
+    s.route("GET", "/strong", [](const http::server::Request&,
+                                 http::server::response& r) {
+        r.status(200).type("text/plain").field("ETag", "\"strong-v1\"")
+         .body("0123456789abcdefghij");
+    });
+
     // Same path, another method -- what makes 405 possible.
     s.route("POST", "/exact", [](const http::server::Request&,
                                  http::server::response& r) {
@@ -133,6 +142,8 @@ static util::http::Response ask_with(http::server& s, const std::string& method,
 
     return http::request(method, util::URL(s.url(path)), f);
 }
+
+static void ranges_on_an_ordinary_handler(http::server& s);
 
 /** Both servers, the same table, the same questions. */
 static void run_against(http::server& s, const std::string& which) {
@@ -361,6 +372,8 @@ static void run_against(http::server& s, const std::string& which) {
            r.status() == 200, std::to_string(r.status()));
     }
 
+    ranges_on_an_ordinary_handler(s);
+
     {
         // A path that *does* match for this method must not collect an Allow
         // from the other routes it passed on the way.
@@ -387,6 +400,107 @@ static void run_against(http::server& s, const std::string& which) {
  * that is what to ask: a HEAD, then a GET, on one socket.  If anything
  * followed the head, the GET's status line is read out of the middle of it.
  */
+/**
+ * Range on an ordinary handler, and the If-Range comparison that needs a
+ * strong validator.
+ *
+ * **These assertions did not exist until the guards could not be broken.**
+ * Range began as a thing only `files()` did, and `files()` sends a weak ETag on
+ * purpose -- so the two halves of If-Range's strong comparison (refuse a weak
+ * tag from the client, refuse a weak one of our own) were redundant with each
+ * other and neither could be shown to matter.  A handler with a strong tag is
+ * what separates them, and answering a range for any buffered body rather than
+ * only a file is what makes such a handler reachable.
+ */
+static void ranges_on_an_ordinary_handler(http::server& s) {
+    std::cout << "\nranges on a handler, and If-Range's strong comparison:\n";
+
+    const std::string all = "0123456789abcdefghij";
+
+    {
+        const util::http::Response r =
+            ask_with(s, "GET", "/strong", "Range", "bytes=2-5");
+
+        ok("  a handler's body can be ranged, not just a file",
+           r.status() == 206 && r.body() == all.substr(2, 4),
+           std::to_string(r.status()) + " \"" + r.body() + "\"");
+
+        ok("  with a Content-Range over the whole body",
+           r.fields().get("Content-Range") == "bytes 2-5/20",
+           r.fields().get("Content-Range"));
+    }
+
+    {
+        const util::http::Response r =
+            ask_with(s, "GET", "/strong", "Range", "bytes=100-200");
+
+        ok("  and an unsatisfiable one is 416 here too", r.status() == 416,
+           std::to_string(r.status()));
+    }
+
+    {
+        // A range of something that is not there is not a thing.  Without the
+        // status check this would be a 416 about a 404's body, which tells a
+        // client its offset was wrong rather than that the path was.
+        const util::http::Response r =
+            ask_with(s, "GET", "/nowhere", "Range", "bytes=0-3");
+
+        ok("  a Range on a 404 leaves it a 404", r.status() == 404,
+           std::to_string(r.status()));
+    }
+
+    {
+        // **The positive case, which nothing could reach before.**  A strong
+        // tag on both sides is what If-Range is for.
+        util::http::fields f;
+
+        f.add("Range", "bytes=0-3");
+        f.add("If-Range", "\"strong-v1\"");
+
+        util::http::Response r;
+
+        try { r = http::request("GET", util::URL(s.url("/strong")), f); }
+        catch(std::exception&) {}
+
+        ok("  a strong If-Range that matches authorises the range",
+           r.status() == 206 && r.body() == all.substr(0, 4),
+           std::to_string(r.status()) + " \"" + r.body() + "\"");
+    }
+
+    {
+        // The client's tag is weak, the server's is strong: refused, because
+        // weak comparison is not good enough to splice on.
+        util::http::fields f;
+
+        f.add("Range", "bytes=0-3");
+        f.add("If-Range", "W/\"strong-v1\"");
+
+        util::http::Response r;
+
+        try { r = http::request("GET", util::URL(s.url("/strong")), f); }
+        catch(std::exception&) {}
+
+        ok("  a weak tag from the client does not, even against a strong one",
+           r.status() == 200 && r.body() == all,
+           std::to_string(r.status()) + " \"" + r.body() + "\"");
+    }
+
+    {
+        util::http::fields f;
+
+        f.add("Range", "bytes=0-3");
+        f.add("If-Range", "\"something-else\"");
+
+        util::http::Response r;
+
+        try { r = http::request("GET", util::URL(s.url("/strong")), f); }
+        catch(std::exception&) {}
+
+        ok("  and a strong tag that does not match gives the whole body",
+           r.status() == 200 && r.body() == all, std::to_string(r.status()));
+    }
+}
+
 static void a_head_sends_nothing_after_the_head() {
     std::cout << "\na HEAD sends the head and stops:\n";
 
