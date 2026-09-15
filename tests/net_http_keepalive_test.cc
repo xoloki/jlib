@@ -679,6 +679,91 @@ static void a_stream_that_fails_is_visibly_unfinished() {
 }
 
 /**
+ * A streaming route that answers whole, and the connection after it.
+ *
+ * **Both bugs this guards were live and neither was visible.**  A route
+ * registered as an async_stream_handler may still decide, once it has seen the
+ * request, to answer with one complete response -- jserve does exactly that
+ * for a non-streaming completion and for every refusal.  Two things went wrong
+ * on that path and each hid the other:
+ *
+ *   - send() serialised with str()'s default, which is `Connection: close`, so
+ *     the connection shut after every whole answer from a streaming route
+ *   - end() fired on started() rather than begun(), so a zero-length chunk was
+ *     written after a body that already had a Content-Length
+ *
+ * The second is only dangerous if something follows it on the connection, and
+ * the first guaranteed nothing ever did.  Asking for a second request is what
+ * separates them: it fails on the first bug by never being answered, and on
+ * the second by being read as starting inside the stray chunk.
+ *
+ * Found by pointing curl at two of jserve's completions and noticing the
+ * second reply said close.
+ */
+static void a_streaming_route_that_answers_whole() {
+    std::cout << "\na streaming route that answers whole, and what follows it:\n";
+
+    http::server s(http::server::async_t(), 0, "127.0.0.1");
+
+    furnish(s);
+
+    // Registered as a streaming handler, but it sends a complete response --
+    // which is legal, and is what a refusal looks like.
+    s.route("GET", "/whole",
+            [](const http::server::Request&,
+               http::server::async_responder& out) -> sys::task<void> {
+                http::server::response r;
+
+                r.status(200).type("text/plain").body("whole answer\n");
+
+                co_await out.send(r);
+            });
+
+    s.transport().on_error([](const std::exception&, const sys::peer&) {});
+
+    std::thread t([&s]{ s.run(); });
+
+    {
+        sys::socketstream c("127.0.0.1", s.port(), -1, 10.0);
+
+        c << "GET /whole HTTP/1.1\r\nHost: x\r\n\r\n" << std::flush;
+
+        util::http::Response r;
+
+        const bool got = reply(c, r);
+
+        ok("  it is answered", got && r.status() == 200, r.body());
+
+        ok("  with a Content-Length, not chunked",
+           got && r.fields().has("Content-Length") &&
+           !r.fields().has("Transfer-Encoding"),
+           r.fields().get("Transfer-Encoding"));
+
+        ok("  and the connection is kept, because a whole body can be followed",
+           got && connection_of(r) != "close", connection_of(r));
+
+        ok("  the body is what the handler sent",
+           got && r.body() == "whole answer\n", "\"" + r.body() + "\"");
+
+        // **The assertion that catches both.**  If send() said close there is
+        // nothing to ask; if end() wrote a terminator after a counted body,
+        // this parses the leftover "0" as a status line and fails.
+        c << "GET /second HTTP/1.1\r\nHost: x\r\n\r\n" << std::flush;
+
+        util::http::Response next;
+
+        const bool again = reply(c, next);
+
+        ok("  and the next request on that connection is answered cleanly",
+           again && next.status() == 200 && next.body() == "second\n",
+           again ? next.body() : std::string("nothing came back"));
+    }
+
+    s.stop();
+    t.join();
+}
+
+/**
  * Connect a raw descriptor, so the write side can be closed on its own.
  *
  * socketstream cannot half-close, and a half-close is the only way to *watch*
@@ -1210,6 +1295,7 @@ int main() {
         a_streaming_response_is_chunked_and_reusable();
         a_streaming_response_to_http_1_0();
         a_stream_that_fails_is_visibly_unfinished();
+        a_streaming_route_that_answers_whole();
         the_polite_goodbye();
         what_it_costs_and_saves();
     }
