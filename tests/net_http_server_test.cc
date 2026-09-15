@@ -201,8 +201,10 @@ static void the_two_halves_meet() {
     ok("and a method that was not routed is 405, not the fallback",
        wrong.status() == 405, std::to_string(wrong.status()));
 
+    // GET *and* HEAD: a path that takes a GET takes the HEAD of it, and an
+    // Allow that named only GET would be telling a client something untrue.
     ok("with the Allow that makes a 405 worth sending",
-       jlib::util::http::fold(wrong.fields().get("Allow")) == "get",
+       jlib::util::http::fold(wrong.fields().get("Allow")) == "get, head",
        wrong.fields().get("Allow"));
 }
 

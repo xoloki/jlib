@@ -19,6 +19,11 @@
 
 #include <jlib/net/http_server.hh>
 
+#include <jlib/util/abnf.hh>
+
+#include <cstring>
+#include <cstdlib>
+
 #include <jlib/sys/await.hh>
 
 #include <exception>
@@ -64,6 +69,222 @@ namespace {
 namespace {
 
     /** RFC 9110 5.6.7's IMF-fixdate, which is fixed-format and never localised. */
+    int month_of(const std::string& name) {
+        static const char* const MON[] = { "Jan", "Feb", "Mar", "Apr", "May",
+                                           "Jun", "Jul", "Aug", "Sep", "Oct",
+                                           "Nov", "Dec" };
+
+        for(int i = 0; i < 12; i++) {
+            if(name == MON[i]) return i;
+        }
+
+        return -1;
+    }
+
+    /** Digits the grammar has already vouched for. */
+    long number(const std::string& s) {
+        return std::strtol(s.c_str(), 0, 10);
+    }
+
+    /**
+     * Parse an HTTP-date, against RFC 9110 5.6.7's grammar.
+     *
+     * **All three forms**, because the grammar is pasted in rfc9110.hh and
+     * says so: IMF-fixdate, and the two obsolete ones a recipient MUST still
+     * accept -- RFC 850's `Sunday, 06-Nov-94` and asctime's `Sun Nov  6`.
+     *
+     * The first version of this counted characters -- `s[3] != ','`,
+     * `s.compare(25, 4, " GMT")` -- and accepted only the modern form, with a
+     * note explaining why the other two were a safe thing to get wrong.  That
+     * note was unnecessary: the grammar was already in the tree, already
+     * compiled into util::http::grammar(), and reading it is both more correct
+     * and less code than the offsets were.
+     *
+     * The three alternatives are tried separately rather than through the
+     * `HTTP-date` rule above them, because their captures do not line up: a
+     * two-digit year has no rule of its own in `date2`, and asctime keeps its
+     * day inside `date3`.  Each branch below takes what its own shape names.
+     */
+    bool parse_http_date(const std::string& s, std::time_t& out) {
+        const util::abnf::grammar& g = util::http::grammar();
+
+        std::tm tm;
+
+        std::memset(&tm, 0, sizeof tm);
+
+        long year = -1;
+        long day = -1;
+
+        const util::abnf::parse_result imf = g.at("IMF-fixdate").try_parse(s);
+
+        if(imf) {
+            const util::abnf::match m = imf.root();
+
+            day = number(m["day"].str());
+            year = number(m["year"].str());
+            tm.tm_mon = month_of(m["month"].str());
+            tm.tm_hour = int(number(m["hour"].str()));
+            tm.tm_min = int(number(m["minute"].str()));
+            tm.tm_sec = int(number(m["second"].str()));
+        }
+        else {
+            const util::abnf::parse_result old = g.at("rfc850-date").try_parse(s);
+
+            if(old) {
+                const util::abnf::match m = old.root();
+                const std::string d2 = m["date2"].str();
+
+                // `date2 = day "-" month "-" 2DIGIT`, and that last 2DIGIT is
+                // the one piece of any of these with no rule to name it.  Taken
+                // from the end of a string the grammar has already shaped,
+                // which is a different thing from indexing into input nobody
+                // has checked.
+                if(d2.size() < 2) return false;
+
+                day = number(m["day"].str());
+                tm.tm_mon = month_of(m["month"].str());
+                tm.tm_hour = int(number(m["hour"].str()));
+                tm.tm_min = int(number(m["minute"].str()));
+                tm.tm_sec = int(number(m["second"].str()));
+
+                const long two = number(d2.substr(d2.size() - 2));
+
+                // RFC 6265 5.1.1's rule, which is the only one anybody wrote
+                // down: a two-digit year is 20xx below 70 and 19xx otherwise.
+                year = two < 70 ? 2000 + two : 1900 + two;
+            }
+            else {
+                const util::abnf::parse_result asc = g.at("asctime-date").try_parse(s);
+
+                if(!asc) return false;
+
+                const util::abnf::match m = asc.root();
+                const std::string d3 = m["date3"].str();
+
+                // `date3 = month SP ( 2DIGIT / ( SP DIGIT ) )` -- the day is
+                // whatever follows the month and a space, with the single-digit
+                // form padded rather than shortened.
+                const std::size_t sp = d3.find(' ');
+
+                if(sp == std::string::npos) return false;
+
+                day = number(d3.substr(sp + 1));
+                year = number(m["year"].str());
+                tm.tm_mon = month_of(m["month"].str());
+                tm.tm_hour = int(number(m["hour"].str()));
+                tm.tm_min = int(number(m["minute"].str()));
+                tm.tm_sec = int(number(m["second"].str()));
+            }
+        }
+
+        if(tm.tm_mon < 0 || day < 1 || day > 31 || year < 1900) return false;
+
+        tm.tm_mday = int(day);
+        tm.tm_year = int(year) - 1900;
+
+        const std::time_t when = ::timegm(&tm);
+
+        if(when == std::time_t(-1)) return false;
+
+        out = when;
+
+        return true;
+    }
+
+    /** Split a field value on commas, trimming each part. */
+    std::vector<std::string> comma_list(const std::string& v) {
+        std::vector<std::string> out;
+        std::string cur;
+
+        for(std::size_t i = 0; i <= v.size(); i++) {
+            if(i == v.size() || v[i] == ',') {
+                std::size_t a = 0, b = cur.size();
+
+                while(a < b && (cur[a] == ' ' || cur[a] == '\t')) a++;
+                while(b > a && (cur[b - 1] == ' ' || cur[b - 1] == '\t')) b--;
+
+                if(b > a) out.push_back(cur.substr(a, b - a));
+
+                cur.clear();
+            }
+            else {
+                cur += v[i];
+            }
+        }
+
+        return out;
+    }
+
+    /**
+     * RFC 9110 8.8.3.2, the weak comparison, which is the one If-None-Match
+     * uses: `W/"x"` and `"x"` are the same entity-tag for this purpose.
+     *
+     * Only If-Match and If-Range want the strong one, and neither is here.
+     */
+    bool same_etag_weakly(const std::string& a, const std::string& b) {
+        const std::string x = a.compare(0, 2, "W/") == 0 ? a.substr(2) : a;
+        const std::string y = b.compare(0, 2, "W/") == 0 ? b.substr(2) : b;
+
+        return x == y;
+    }
+
+    /**
+     * Should this response become a 304?  RFC 9110 13.1.
+     *
+     * If-None-Match wins outright where both are present -- 13.1.3 says a
+     * recipient MUST ignore If-Modified-Since when If-None-Match is there,
+     * because an entity-tag says more than a second-resolution timestamp can.
+     */
+    bool not_modified(const util::http::Request& q,
+                      const server::response& r)
+    {
+        if(q.fields().has("If-None-Match")) {
+            const std::string want = q.fields().get("If-None-Match");
+
+            // "*" means "if any representation exists", and one does: this is
+            // being asked about a response the handler has already produced.
+            if(util::http::fold(want) == "*") return true;
+
+            if(!r.fields().has("ETag")) return false;
+
+            const std::string have = r.fields().get("ETag");
+
+            for(const std::string& one : comma_list(want)) {
+                if(same_etag_weakly(one, have)) return true;
+            }
+
+            return false;
+        }
+
+        if(q.fields().has("If-Modified-Since") && r.fields().has("Last-Modified")) {
+            std::time_t since = 0;
+            std::time_t last = 0;
+
+            if(!parse_http_date(q.fields().get("If-Modified-Since"), since))
+                return false;
+
+            if(!parse_http_date(r.fields().get("Last-Modified"), last))
+                return false;
+
+            // Not *newer* than: equal counts as unmodified, which is what
+            // makes a second request with the value just handed out a 304.
+            return last <= since;
+        }
+
+        return false;
+    }
+
+    /**
+     * Turn a response into a 304, keeping only what one may carry.
+     *
+     * RFC 9110 15.4.5: a 304 has no content, and sends the metadata that would
+     * have gone with a 200 -- the validators above all, because a client that
+     * got a 304 and lost its ETag would have to ask again without one.
+     */
+    void make_not_modified(server::response& r) {
+        r.status(304).body(std::string());
+    }
+
     std::string http_date() {
         static const char* const DAY[] = { "Sun", "Mon", "Tue", "Wed", "Thu",
                                            "Fri", "Sat" };
@@ -152,6 +373,12 @@ std::string server::response::str(const std::string& server_name,
     return serialise(server_name, true, persist) + m_body;
 }
 
+std::string server::response::without_body(const std::string& server_name,
+                                           bool persist) const
+{
+    return serialise(server_name, true, persist);
+}
+
 std::string server::response::serialise(const std::string& server_name,
                                         bool with_length, bool persist,
                                         bool chunked) const
@@ -176,7 +403,13 @@ std::string server::response::serialise(const std::string& server_name,
     // Omitted entirely when the body is not yet known -- a streaming response
     // is framed by Transfer-Encoding or by the close instead.  See
     // responder::begin.
-    if(with_length && !m_fields.has("Content-Length"))
+    // RFC 9110 15.3.5 and 15.4.5: a 204 and a 304 have no content, and a
+    // Content-Length on one is a promise of a body that is not coming -- which
+    // on a reused connection is the next response being read as that body.
+    const bool no_content = m_status == 204 || m_status == 304 ||
+                            (m_status >= 100 && m_status < 200);
+
+    if(with_length && !no_content && !m_fields.has("Content-Length"))
         o << "Content-Length: " << m_body.size() << "\r\n";
 
     // RFC 9112 6.1 forbids both at once and util::http::decide_framing refuses
@@ -295,6 +528,10 @@ void server::responder::send(const response& r) {
     *m_s << r.str(m_name) << std::flush;
 }
 
+void server::responder::suppress_body() { m_no_body = true; }
+
+void server::async_responder::suppress_body() { m_no_body = true; }
+
 void server::responder::framing(bool chunked) {
     if(m_started)
         throw error("a responder was told how to frame a response it has "
@@ -314,6 +551,10 @@ void server::responder::begin(const response& head) {
     // what tells a client the difference between a body that ended and a
     // server that died.  See the responder class comment.
     *m_s << head.head(m_name, m_chunked, false) << std::flush;
+
+    // Nothing follows a HEAD, including the terminating chunk: the head said
+    // how the body *would* have been framed, and then there is no body.
+    if(m_no_body) m_ended = true;
 }
 
 void server::responder::write(const std::string& piece) {
@@ -322,7 +563,7 @@ void server::responder::write(const std::string& piece) {
 
     // A zero-length chunk is the terminator, so writing one here would end the
     // body early and the client would believe it complete.  Nothing to send.
-    if(piece.empty()) return;
+    if(m_no_body || piece.empty()) return;
 
     if(m_chunked) *m_s << chunk(piece) << std::flush;
     else          *m_s << piece << std::flush;
@@ -549,6 +790,31 @@ const server::entry* server::route_for(const std::string& method,
         }
     }
 
+    // **A HEAD is a GET that stops at the headers** -- RFC 9110 9.3.2 -- so a
+    // table with a GET route and no HEAD one answers HEAD with it.  A route
+    // registered for HEAD explicitly still wins, because it was found above.
+    if(best == 0 && method == "HEAD") {
+        for(const entry& e : m_routes) {
+            params got;
+
+            if(e.method != "GET" || !matches(e, parts, got)) continue;
+
+            if(best == 0 || e.literals > best->literals) {
+                best = &e;
+                best_params = got;
+            }
+        }
+    }
+
+    // And Allow says HEAD wherever it says GET, for the same reason: a client
+    // told the path takes GET and not HEAD would be told something untrue.
+    for(std::size_t i = 0; i < allowed.size(); i++) {
+        if(allowed[i] == "GET") {
+            allowed.push_back("HEAD");
+            break;
+        }
+    }
+
     if(best != 0) into = best_params;
 
     // `allowed` is deliberately *not* cleared here.  It is meaningful only
@@ -657,8 +923,12 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
         return;
     }
 
+    const bool head_only = q.method() == "HEAD";
+
     if(chosen && (chosen->stream || chosen->param_stream)) {
         responder out(s, m_options.server_name);
+
+        if(head_only) out.suppress_body();
 
         // Chunked for an HTTP/1.1 client, the close for anything older.  This
         // server closes after one response either way, so what chunked buys
@@ -720,7 +990,21 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
         if(chosen && chosen->param_run) chosen->param_run(q, captured, r);
         else (chosen ? chosen->run : m_otherwise)(q, r);
 
-        answer = r.str(m_options.server_name);
+        // **After the handler, because only then is there anything to
+        // compare.**  A handler sets ETag or Last-Modified describing what it
+        // produced; whether the client already has that is a question about
+        // the pair, and nothing the handler should have to ask.
+        //
+        // Only for a safe method and only for a 200: a 404 with an ETag is not
+        // a thing a client is holding, and turning a POST's answer into a 304
+        // would be inventing a meaning RFC 9110 13.1 does not give it.
+        if((q.method() == "GET" || q.method() == "HEAD") &&
+           r.status() == 200 && not_modified(q, r)) {
+            make_not_modified(r);
+        }
+
+        answer = head_only ? r.without_body(m_options.server_name)
+                           : r.str(m_options.server_name);
     }
     catch(...) {
         response oops;
@@ -754,7 +1038,8 @@ sys::task<void> server::async_responder::send(const response& r) {
     // curl at two of them and watching the second say close.
     m_persist = m_want_persist;
 
-    co_await m_writer->write(r.str(m_name, m_persist));
+    co_await m_writer->write(m_no_body ? r.without_body(m_name, m_persist)
+                                       : r.str(m_name, m_persist));
 }
 
 sys::task<void> server::async_responder::send_serialised(const std::string& wire) {
@@ -793,6 +1078,9 @@ sys::task<void> server::async_responder::begin(const response& head) {
     m_persist = m_want_persist && m_chunked;
 
     co_await m_writer->write(head.head(m_name, m_chunked, m_persist));
+
+    // See responder::begin: a HEAD gets the head and stops there.
+    if(m_no_body) m_ended = true;
 }
 
 sys::task<void> server::async_responder::write(const std::string& piece) {
@@ -800,7 +1088,7 @@ sys::task<void> server::async_responder::write(const std::string& piece) {
         throw error("a responder wrote a body piece before begin()");
 
     // A zero-length chunk is the terminator; see the note on the declaration.
-    if(piece.empty()) co_return;
+    if(m_no_body || piece.empty()) co_return;
 
     co_await m_writer->write(m_chunked ? chunk(piece) : piece);
 }
@@ -1217,6 +1505,8 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
 
         out.framing(can_chunk, persist);
 
+        if(q.method() == "HEAD") out.suppress_body();
+
         // Held rather than rethrown with a bare `throw;` outside the catch:
         // by then there is no exception in flight and a bare throw calls
         // std::terminate.  That is the sharp edge the co_await-in-a-catch rule
@@ -1313,6 +1603,19 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     try {
         if(chosen && chosen->param_run) chosen->param_run(q, captured, r);
         else (chosen ? chosen->run : m_otherwise)(q, r);
+
+        // **After the handler, because only then is there anything to
+        // compare.**  A handler sets ETag or Last-Modified describing what it
+        // produced; whether the client already has that is a question about
+        // the pair, and nothing the handler should have to ask.
+        //
+        // Only for a safe method and only for a 200: a 404 with an ETag is not
+        // a thing a client is holding, and turning a POST's answer into a 304
+        // would be inventing a meaning RFC 9110 13.1 does not give it.
+        if((q.method() == "GET" || q.method() == "HEAD") &&
+           r.status() == 200 && not_modified(q, r)) {
+            make_not_modified(r);
+        }
     }
     catch(...) {
         threw = std::current_exception();
@@ -1339,7 +1642,11 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     // easy to miss.
     std::string wire;
 
-    if(!threw) wire = r.str(m_options.server_name, persist);
+    if(!threw) {
+        wire = q.method() == "HEAD"
+               ? r.without_body(m_options.server_name, persist)
+               : r.str(m_options.server_name, persist);
+    }
 
     co_await sys::on_reactor(c.reactor());
 
