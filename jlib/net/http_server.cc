@@ -24,6 +24,7 @@
 
 #include <cerrno>
 #include <fstream>
+#include <vector>
 
 #include <limits.h>
 #include <sys/stat.h>
@@ -402,60 +403,100 @@ namespace {
         r.status(404).type("text/plain").body("not found\n");
     }
 
-    void serve_file(const std::string& root, const std::string& rest,
-                    server::response& r)
-    {
+    /** How much of a file is held at once.  See stream_file. */
+    const std::size_t FILE_BLOCK = 64 * 1024;
+
+    struct located {
+        std::string real;
+        struct stat st;
+    };
+
+    /**
+     * Resolve a request into a file under the root, or refuse.
+     *
+     * Containment is decided by realpath, not by inspecting the path: a string
+     * check catches ".." and misses a symlink, and resolving first catches
+     * both because what comes back is where the kernel would actually go.
+     */
+    bool locate(const std::string& root, const std::string& rest, located& f) {
         const std::string candidate = root + "/" + rest;
 
-        // **realpath is the containment check**, and it is the only one worth
-        // trusting.  Comparing strings before resolving catches "..", and
-        // misses a symlink; resolving first catches both, because what comes
-        // back is where the kernel would actually go.
-        //
-        // It also fails for a path that does not exist, which is the common
-        // 404 and costs nothing extra.
         char resolved[PATH_MAX];
 
-        if(::realpath(candidate.c_str(), resolved) == 0)
-            return nothing_there(r);
+        if(::realpath(candidate.c_str(), resolved) == 0) return false;
 
-        const std::string real(resolved);
+        f.real = resolved;
 
         // Under the root, or the root itself.  The trailing separator matters:
         // without it "/srv/wwwroot-evil" is inside "/srv/www".
-        if(real != root && real.compare(0, root.size() + 1, root + "/") != 0)
-            return nothing_there(r);
+        if(f.real != root &&
+           f.real.compare(0, root.size() + 1, root + "/") != 0) {
+            return false;
+        }
 
-        struct stat st;
+        // Regular files only.  This is also what refuses the prefix itself: an
+        // empty rest resolves to the root, which is a directory, so there is
+        // no listing and no index.html -- both being decisions a caller should
+        // make out loud rather than ones this makes quietly.
+        if(::stat(f.real.c_str(), &f.st) != 0 || !S_ISREG(f.st.st_mode))
+            return false;
 
-        // Regular files only.  This is also what refuses the prefix itself:
-        // an empty rest resolves to the root, which is a directory, so there
-        // is no listing and no index.html -- both being decisions a caller
-        // should make out loud rather than ones this makes quietly.
-        //
-        // An explicit check for the empty case was here and was removed: it
-        // could not be made to fail, because this line had already caught
-        // everything it was meant to.
-        if(::stat(real.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
-            return nothing_there(r);
-
-        std::ifstream in(real.c_str(), std::ios::binary);
-
-        if(!in) return nothing_there(r);
-
-        std::ostringstream body;
-
-        body << in.rdbuf();
-
-        if(!in && !in.eof()) return nothing_there(r);
-
-        r.status(200)
-         .type(type_by_extension(real))
-         .field("Last-Modified", http_date(st.st_mtime))
-         .field("ETag", etag_for(st))
-         .body(body.str());
+        return true;
     }
 
+    /**
+     * The head for a located file -- everything but the bytes.
+     *
+     * **Content-Length is set here, from stat, before anything is read.**  A
+     * streamed response normally has no length and is framed by the chunked
+     * terminator; a file is the case where the length is known in advance, and
+     * saying so is better on both ends -- the client can show progress, and
+     * nothing pays a chunk header per block.
+     */
+    void file_head(const located& f, server::response& r) {
+        std::ostringstream len;
+
+        len << static_cast<long long>(f.st.st_size);
+
+        r.status(200)
+         .type(type_by_extension(f.real))
+         .field("Content-Length", len.str())
+         .field("Last-Modified", http_date(f.st.st_mtime))
+         .field("ETag", etag_for(f.st));
+    }
+
+    /**
+     * Everything that can fail, before a byte goes out.
+     *
+     * A streaming response gives up the promise the buffered one makes -- that
+     * a handler which fails is still answered -- because the status has
+     * already gone.  For a file that promise is kept anyway, by doing all the
+     * deciding first: the path resolves or it does not, and the validators
+     * come from stat() rather than from the body, so a 404 and a 304 are both
+     * still available here.
+     *
+     * @return false if `r` is the whole answer and nothing should be streamed
+     */
+    bool file_decided(const std::string& root, const std::string& rest,
+                      const util::http::Request& q, located& f,
+                      server::response& r)
+    {
+        if(!locate(root, rest, f)) {
+            nothing_there(r);
+
+            return false;
+        }
+
+        file_head(f, r);
+
+        if(not_modified(q, r)) {
+            make_not_modified(r);
+
+            return false;
+        }
+
+        return true;
+    }
 
     const char* reason_for(int status) {
         switch(status) {
@@ -655,8 +696,8 @@ void server::route(const std::string& method, const std::string& path,
 void server::files(const std::string& pattern, const std::string& root) {
     // Resolved once, at registration: a root that does not exist is a mistake
     // in the program rather than a 404 repeated per request, and resolving it
-    // here is also what makes the containment check below a string compare
-    // against something already canonical.
+    // here is also what makes the containment check a string compare against
+    // something already canonical.
     char resolved[PATH_MAX];
 
     if(::realpath(root.c_str(), resolved) == 0) {
@@ -666,10 +707,99 @@ void server::files(const std::string& pattern, const std::string& root) {
 
     const std::string real_root(resolved);
 
-    route("GET", pattern,
-          [real_root](const Request&, const params& p, response& r) {
-              serve_file(real_root, p.rest(), r);
-          });
+    // **Both kinds on one route**, which is why the two serves refuse the
+    // other's handler only when their own is missing.  A file is streamed
+    // either way and the two servers stream differently, so one registration
+    // has to carry one of each or `files()` would work on whichever server the
+    // caller did not have.
+    entry e;
+
+    e.method = "GET";
+    e.path = pattern;
+
+    e.param_stream =
+        [real_root](const Request& q, const params& p, responder& out) {
+            located f;
+            response head;
+
+            if(!file_decided(real_root, p.rest(), q, f, head)) {
+                out.send(head);
+
+                return;
+            }
+
+            out.begin(head);
+
+            std::ifstream in(f.real.c_str(), std::ios::binary);
+
+            if(!in) return;
+
+            std::vector<char> block(FILE_BLOCK);
+
+            // **This is the whole point of the branch.**  One block is held at
+            // a time rather than the file, so what a request costs is
+            // FILE_BLOCK and not st_size.
+            while(in) {
+                in.read(&block[0], std::streamsize(block.size()));
+
+                const std::streamsize got = in.gcount();
+
+                if(got <= 0) break;
+
+                out.write(std::string(&block[0], std::size_t(got)));
+
+                // Nobody is reading; stop producing.  A large file to a client
+                // that has gone is otherwise read in full for nothing.
+                if(!out.live()) return;
+            }
+        };
+
+    e.async_param_stream =
+        [real_root](const Request& q, const params& p,
+                    async_responder& out) -> sys::task<void> {
+            located f;
+            response head;
+
+            if(!file_decided(real_root, p.rest(), q, f, head)) {
+                co_await out.send(head);
+
+                co_return;
+            }
+
+            co_await out.begin(head);
+
+            std::ifstream in(f.real.c_str(), std::ios::binary);
+
+            if(!in) co_return;
+
+            std::vector<char> block(FILE_BLOCK);
+
+            for(;;) {
+                // **Read on a worker, write on the reactor.**  A file read is
+                // microseconds when the page is cached and a disk seek when it
+                // is not, and the reactor's thread is the wrong place to find
+                // out which.  This is what the pool is for -- short work with
+                // a syscall in it -- as against a generation, which gets a
+                // thread of its own; see sys::relay.
+                co_await sys::on_pool(out.pool());
+
+                in.read(&block[0], std::streamsize(block.size()));
+
+                const std::streamsize got = in.gcount();
+
+                co_await sys::on_reactor(out.reactor());
+
+                if(got <= 0) break;
+
+                co_await out.write(std::string(&block[0], std::size_t(got)));
+
+                if(!in) break;
+            }
+        };
+
+    compile_route(e);
+
+    m_routes.push_back(std::move(e));
 }
 
 void server::otherwise(handler h) {
@@ -713,6 +843,12 @@ void server::responder::begin(const response& head) {
         throw error("a responder began a response twice");
 
     m_started = true;
+
+    // **A handler that knows the length says so, and then nothing needs
+    // chunking.**  A body with a Content-Length already has an end; chunking
+    // one would frame it twice and cost a header per piece for nothing.  This
+    // is what lets a file be streamed and still tell the client how big it is.
+    if(head.fields().has("Content-Length")) m_chunked = false;
 
     // The blocking server closes after one response whatever happens, so
     // persist is false here and chunked buys only the terminator -- which is
@@ -1079,7 +1215,12 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
     // -- cannot be kept once bytes have gone.
     // Registered for an async server, reached on a blocking one.  Refused
     // where it is reached, so one route table can be built for both modes.
-    if(chosen && (chosen->async_stream || chosen->async_param_stream)) {
+    // **Only when there is no blocking one beside it.**  A route may carry a
+    // handler of each kind -- server::files registers both, so one
+    // registration serves either server -- and refusing because the other kind
+    // exists would make carrying both useless.
+    if(chosen && (chosen->async_stream || chosen->async_param_stream) &&
+       !(chosen->stream || chosen->param_stream)) {
         response oops;
 
         oops.status(500).type("text/plain")
@@ -1241,9 +1382,15 @@ sys::task<void> server::async_responder::begin(const response& head) {
     m_started = true;
     m_begun = true;
 
-    // Only now: a streamed body is followable exactly when chunked gives it an
-    // end.  framing() deliberately does not decide this.
-    m_persist = m_want_persist && m_chunked;
+    // See responder::begin: a length the handler already knows beats chunking.
+    const bool counted = head.fields().has("Content-Length");
+
+    if(counted) m_chunked = false;
+
+    // Only now: a streamed body is followable exactly when it has an end, and
+    // it has one either from the chunked terminator or from a Content-Length.
+    // framing() deliberately does not decide this.
+    m_persist = m_want_persist && (m_chunked || counted);
 
     co_await m_writer->write(head.head(m_name, m_chunked, m_persist));
 
@@ -1646,7 +1793,10 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     // responder writes to a socketstream and there is not one.  Refused where
     // it is reached rather than where it was registered, so one route table
     // can be built for both modes.
-    if(chosen && (chosen->stream || chosen->param_stream)) {
+    // As above, the other way round: refused only when there is no suspending
+    // handler on the same route.
+    if(chosen && (chosen->stream || chosen->param_stream) &&
+       !(chosen->async_stream || chosen->async_param_stream)) {
         response oops;
 
         oops.status(500).type("text/plain")

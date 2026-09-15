@@ -67,6 +67,8 @@ struct tree {
     std::string base;
     std::string root;
     std::string secret;
+    std::size_t big_size = 0;
+    std::string big_text;
 
     tree() {
         char pattern[] = "/tmp/jlib_files_XXXXXX";
@@ -82,6 +84,20 @@ struct tree {
         write_file(root + "/app.js", "console.log(1)\n");
         write_file(root + "/sub/deep.txt", "deep\n");
         write_file(root + "/nosuffix", "no extension here\n");
+
+        // Larger than one read block, so serving it has to loop -- and
+        // deliberately not a multiple of it, so the last read is short.
+        std::string big;
+
+        big.reserve(300000);
+
+        for(int i = 0; big.size() < 300000; i++)
+            big += "line " + std::to_string(i) + " of a file that does not fit in one block\n";
+
+        write_file(root + "/big.txt", big);
+
+        big_size = big.size();
+        big_text = big;
         write_file(secret, "you should never see this\n");
 
         // Two symlinks: one that stays inside, one that leaves.
@@ -97,10 +113,49 @@ struct tree {
     }
 };
 
+/**
+ * Stop and join a server however the block is left.
+ *
+ * Without this, an assertion path that throws -- which is what a *broken*
+ * server does to a client, not what a working one does -- skips the stop()
+ * and join() below it, and ~thread on a joinable thread calls terminate.
+ * The test then dies with no output at all.
+ *
+ * That is not hypothetical: three of the four breaks written against this file
+ * aborted at exit 134 with zero FAIL lines, and a harness grepping for "FAIL"
+ * read that as success.  A test whose failure mode is silence is worse than no
+ * test, so the thread is joined on the way out whatever happened.
+ */
+struct running {
+    http::server& s;
+    std::thread th;
+
+    explicit running(http::server& server)
+        : s(server), th([&server]{ server.run(); }) {}
+
+    ~running() {
+        s.stop();
+
+        if(th.joinable()) th.join();
+    }
+
+    running(const running&) = delete;
+    running& operator=(const running&) = delete;
+};
+
+/**
+ * Ask, and turn a refusal into an answer rather than an escape.
+ *
+ * A malformed response makes the client throw -- correctly; that is what the
+ * framing work was for.  But a *test* wants the assertion below it to fail
+ * with a name, not the run to end here, so a throw becomes status 0 and every
+ * assertion then says which expectation it was.
+ */
 static util::http::Response ask(http::server& s, const std::string& method,
                                 const std::string& path)
 {
-    return http::request(method, util::URL(s.url(path)));
+    try { return http::request(method, util::URL(s.url(path))); }
+    catch(std::exception&) { return util::http::Response(); }
 }
 
 static util::http::Response ask_with(http::server& s, const std::string& method,
@@ -112,7 +167,8 @@ static util::http::Response ask_with(http::server& s, const std::string& method,
 
     f.add(name, value);
 
-    return http::request(method, util::URL(s.url(path)), f);
+    try { return http::request(method, util::URL(s.url(path)), f); }
+    catch(std::exception&) { return util::http::Response(); }
 }
 
 static void what_it_serves(http::server& s) {
@@ -239,6 +295,41 @@ static void the_conditional_and_head_paths(http::server& s) {
     }
 }
 
+/**
+ * A file larger than one block, and how it is framed.
+ *
+ * The body is read a block at a time rather than whole, so what a request
+ * costs is the block and not the file.  **That is structural and this cannot
+ * assert it** -- nothing here counts allocations.  What it can assert is that
+ * the looping works: a file several blocks long, not a multiple of the block,
+ * arrives byte for byte.
+ *
+ * The framing is assertable and worth pinning.  A streamed response normally
+ * has no length and ends at the chunked terminator; a file is the case where
+ * stat() knows the length in advance, so it is sent as a counted body -- which
+ * is better on both ends and is what lets the connection be reused without
+ * chunking.
+ */
+static void a_file_bigger_than_a_block(http::server& s, const tree& t) {
+    std::cout << "\na file larger than one read block:\n";
+
+    const util::http::Response r = ask(s, "GET", "/static/big.txt");
+
+    ok("  it is served", r.status() == 200, std::to_string(r.status()));
+
+    ok("  every byte of it, in order",
+       r.body().size() == t.big_size && r.body() == t.big_text,
+       std::to_string(r.body().size()) + " of " + std::to_string(t.big_size));
+
+    ok("  counted, because stat knew the length before anything was read",
+       r.fields().get("Content-Length") == std::to_string(t.big_size),
+       r.fields().get("Content-Length"));
+
+    ok("  and not chunked, which would frame it a second time",
+       !r.fields().has("Transfer-Encoding"),
+       r.fields().get("Transfer-Encoding"));
+}
+
 static void a_root_that_is_not_there() {
     std::cout << "\na root that cannot be resolved:\n";
 
@@ -267,15 +358,13 @@ int main() {
             s.files("/static/*", t.root);
             s.transport().on_error([](const std::exception&, const sys::peer&) {});
 
-            std::thread th([&s]{ s.run(); });
+            running go(s);
 
             std::cout << "\n-- the blocking server --\n";
             what_it_serves(s);
             what_it_refuses(s, t);
             the_conditional_and_head_paths(s);
-
-            s.stop();
-            th.join();
+            a_file_bigger_than_a_block(s, t);
         }
 
         {
@@ -284,15 +373,13 @@ int main() {
             s.files("/static/*", t.root);
             s.transport().on_error([](const std::exception&, const sys::peer&) {});
 
-            std::thread th([&s]{ s.run(); });
+            running go(s);
 
             std::cout << "\n-- the async server --\n";
             what_it_serves(s);
             what_it_refuses(s, t);
             the_conditional_and_head_paths(s);
-
-            s.stop();
-            th.join();
+            a_file_bigger_than_a_block(s, t);
         }
 
         a_root_that_is_not_there();
