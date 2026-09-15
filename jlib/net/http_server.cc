@@ -22,6 +22,7 @@
 #include <jlib/util/abnf.hh>
 #include <jlib/util/MimeType.hh>
 
+#include <algorithm>
 #include <cerrno>
 #include <fstream>
 #include <vector>
@@ -403,6 +404,233 @@ namespace {
         r.status(404).type("text/plain").body("not found\n");
     }
 
+    /**
+     * What a client asked for, once the arithmetic is done.
+     *
+     * `first` and `last` are inclusive, as they are on the wire: RFC 9110 14.1
+     * counts `bytes=0-0` as one octet, not none.
+     */
+    struct byte_range {
+        long long first = 0;
+        long long last = 0;
+
+        long long length() const { return last - first + 1; }
+    };
+
+    enum range_outcome {
+        range_absent,        // no Range, or one deliberately ignored
+        range_ok,            // 206, and `out` says which octets
+        range_unsatisfiable  // 416
+    };
+
+    /**
+     * Read a Range against RFC 9110 14.1's grammar and work out what it means.
+     *
+     * ## What is deliberately ignored, and why that is allowed
+     *
+     * 14.2: "A server MAY ignore the Range header field."  Three things are
+     * ignored here, and each becomes a plain 200 rather than an error:
+     *
+     *   - a unit that is not `bytes`.  There are no others in practice and
+     *     `other-range` exists in the grammar precisely because the RFC
+     *     declines to define any.
+     *   - **more than one range.**  Answering two means multipart/byteranges,
+     *     a whole body format with its own boundaries, to save a round trip
+     *     for a client that could have asked twice.  The cost is not in
+     *     proportion to the benefit and the RFC's permission is explicit.
+     *   - anything the grammar refuses.
+     *
+     * ## What is not ignored
+     *
+     * A single satisfiable range is answered, and a single *unsatisfiable* one
+     * is refused with 416 rather than quietly answered with the whole file --
+     * 14.4 requires that, and it is the difference between a client learning
+     * its offset is past the end and a client silently re-reading everything.
+     *
+     * A zero-length file has no satisfiable range at all, which is why the
+     * suffix case tests it separately.
+     */
+    range_outcome decide_range(const util::http::Request& q, long long size,
+                               byte_range& out)
+    {
+        if(!q.fields().has("Range")) return range_absent;
+
+        const util::abnf::grammar& g = util::http::grammar();
+        const std::string value = q.fields().get("Range");
+
+        const util::abnf::parse_result p =
+            g.at("ranges-specifier").try_parse(value);
+
+        if(!p) return range_absent;
+
+        const util::abnf::match m = p.root();
+
+        if(util::http::fold(m["range-unit"].str()) != "bytes")
+            return range_absent;
+
+        // One only.  A comma in the set means the client asked for several,
+        // and the answer to that is the whole representation.
+        if(m["range-set"].str().find(',') != std::string::npos)
+            return range_absent;
+
+        const std::string spec = m["range-spec"].str();
+
+        if(spec.empty()) return range_absent;
+
+        if(spec[0] == '-') {
+            // suffix-range: the last N octets.  N of zero asks for nothing,
+            // which is unsatisfiable rather than empty -- 14.1.2.
+            const long long want = number(spec.substr(1));
+
+            if(want <= 0 || size == 0) return range_unsatisfiable;
+
+            out.first = want >= size ? 0 : size - want;
+            out.last = size - 1;
+
+            return range_ok;
+        }
+
+        const std::size_t dash = spec.find('-');
+
+        if(dash == std::string::npos) return range_absent;
+
+        out.first = number(spec.substr(0, dash));
+
+        const std::string tail = spec.substr(dash + 1);
+
+        // "first-" means to the end.  Clamped rather than refused when the
+        // client asks past it, because 14.1.2 says a last-pos beyond the
+        // representation is the representation's end.
+        out.last = tail.empty() ? size - 1 : number(tail);
+
+        if(out.last >= size) out.last = size - 1;
+
+        // A first-pos past the end lands here rather than in a test of its
+        // own: clamping has already pulled last-pos back to the last octet, so
+        // it is now below first-pos.  An explicit `first >= size` check was
+        // written and could not be broken -- this line had caught every case
+        // it was meant to.
+        if(out.last < out.first) return range_unsatisfiable;
+
+        return range_ok;
+    }
+
+    /**
+     * Does If-Range allow the range to be answered?  RFC 9110 13.1.5.
+     *
+     * **Strong comparison, which is the whole point of the field.**  A client
+     * sends the validator it holds and asks for a piece only if the thing has
+     * not changed underneath it; a weak tag says two representations are
+     * equivalent for display, which is not good enough to staple half of one
+     * onto half of another.
+     *
+     * A consequence worth stating plainly: `files()` sends `W/"mtime-size"`,
+     * deliberately, because mtime at second resolution and a size cannot
+     * promise the bytes are identical.  A weak tag can never satisfy strong
+     * comparison, so **a conditional range against a served file always gets
+     * the whole file back**.  That is correct and conservative -- the client
+     * re-reads rather than splicing two different files together -- and it is
+     * the cost of the honest validator.  Plain Range, which is what a media
+     * player seeking actually sends, is unaffected.
+     */
+    bool range_still_current(const util::http::Request& q,
+                             const server::response& r)
+    {
+        if(!q.fields().has("If-Range")) return true;
+
+        const std::string want = q.fields().get("If-Range");
+
+        // A date, not an entity-tag.  Compared exactly: 13.1.5 allows it only
+        // when the origin can be sure the representation has not changed
+        // within the second, and equality is the strongest thing available
+        // here.
+        if(!want.empty() && want[0] != '"' && want.compare(0, 2, "W/") != 0) {
+            std::time_t asked = 0;
+            std::time_t have = 0;
+
+            if(!parse_http_date(want, asked)) return false;
+
+            if(!r.fields().has("Last-Modified")) return false;
+
+            if(!parse_http_date(r.fields().get("Last-Modified"), have))
+                return false;
+
+            return asked == have;
+        }
+
+        if(!r.fields().has("ETag")) return false;
+
+        const std::string have = r.fields().get("ETag");
+
+        // **Strong comparison, as one test rather than two.**  Written as a
+        // check per side at first, and neither could be broken on its own:
+        // a weak tag differs from a strong one by the `W/` it carries, so the
+        // exact compare below already separates those.  What the compare
+        // cannot catch is two *weak* tags that are equal -- which is precisely
+        // the files() case, and precisely what 8.8.3.2 says must not authorise
+        // a range.  One condition, one thing it is for.
+        if(want.compare(0, 2, "W/") == 0 || have.compare(0, 2, "W/") == 0)
+            return false;
+
+        return want == have;
+    }
+
+    /**
+     * Apply a Range to a response a handler has already produced.
+     *
+     * **Range is not only for files.**  A buffered handler has its whole body
+     * in hand, so answering a range is slicing it -- and a client seeking in
+     * something generated has the same right to ask as one seeking in a file.
+     * `files()` does not come through here: it seeks instead of slicing, which
+     * is the point of streaming it.
+     *
+     * Only for a 200 with a body, and only for a safe method, for the reason
+     * 13.1 gives about conditional requests generally: a range of a 404 is not
+     * a thing, and a range of a POST's answer is not a meaning the RFC
+     * defines.
+     */
+    void apply_range(const util::http::Request& q, server::response& r) {
+        if(r.status() != 200) return;
+
+        const long long size = static_cast<long long>(r.body().size());
+
+        if(size == 0) return;
+
+        if(!range_still_current(q, r)) return;
+
+        byte_range span;
+
+        const range_outcome what = decide_range(q, size, span);
+
+        if(what == range_absent) return;
+
+        if(what == range_unsatisfiable) {
+            std::ostringstream cr;
+
+            cr << "bytes */" << size;
+
+            r = server::response();
+
+            r.status(416).type("text/plain")
+             .field("Content-Range", cr.str())
+             .field("Accept-Ranges", "bytes")
+             .body("that range is not satisfiable\n");
+
+            return;
+        }
+
+        std::ostringstream cr;
+
+        cr << "bytes " << span.first << "-" << span.last << "/" << size;
+
+        // The body is replaced, and the Content-Length with it -- which is
+        // computed from the body at serialisation, so slicing is enough.
+        r.status(206)
+         .field("Content-Range", cr.str())
+         .body(r.body().substr(std::size_t(span.first),
+                               std::size_t(span.length())));
+    }
+
     /** How much of a file is held at once.  See stream_file. */
     const std::size_t FILE_BLOCK = 64 * 1024;
 
@@ -445,41 +673,30 @@ namespace {
     }
 
     /**
-     * The head for a located file -- everything but the bytes.
-     *
-     * **Content-Length is set here, from stat, before anything is read.**  A
-     * streamed response normally has no length and is framed by the chunked
-     * terminator; a file is the case where the length is known in advance, and
-     * saying so is better on both ends -- the client can show progress, and
-     * nothing pays a chunk header per block.
-     */
-    void file_head(const located& f, server::response& r) {
-        std::ostringstream len;
-
-        len << static_cast<long long>(f.st.st_size);
-
-        r.status(200)
-         .type(type_by_extension(f.real))
-         .field("Content-Length", len.str())
-         .field("Last-Modified", http_date(f.st.st_mtime))
-         .field("ETag", etag_for(f.st));
-    }
-
-    /**
-     * Everything that can fail, before a byte goes out.
+     * Everything that can fail, and everything that shapes the head, before a
+     * byte goes out.
      *
      * A streaming response gives up the promise the buffered one makes -- that
      * a handler which fails is still answered -- because the status has
-     * already gone.  For a file that promise is kept anyway, by doing all the
-     * deciding first: the path resolves or it does not, and the validators
-     * come from stat() rather than from the body, so a 404 and a 304 are both
-     * still available here.
+     * already gone.  For a file that promise is kept anyway by deciding first:
+     * the path resolves or it does not, the validators come from `stat()`
+     * rather than from the body, and the range arithmetic needs only the size.
+     * So 404, 304, 416 and 206 are all still decided here.
      *
-     * @return false if `r` is the whole answer and nothing should be streamed
+     * **The response is built once, at the end.**  The first version of this
+     * set Content-Length while building a 200 head and then set it again for a
+     * 206 -- and `fields::add` appends, so that response carried two
+     * Content-Lengths that disagreed, which is exactly the shape
+     * `util::http::decide_framing` refuses as a smuggling primitive.  The
+     * server would have been emitting what its own reader throws out.
+     *
+     * @param span  which octets to stream; the whole file unless a range said
+     *              otherwise
+     * @return      false if `r` is the whole answer and nothing should follow
      */
     bool file_decided(const std::string& root, const std::string& rest,
                       const util::http::Request& q, located& f,
-                      server::response& r)
+                      server::response& r, byte_range& span)
     {
         if(!locate(root, rest, f)) {
             nothing_there(r);
@@ -487,15 +704,88 @@ namespace {
             return false;
         }
 
-        file_head(f, r);
+        const long long size = static_cast<long long>(f.st.st_size);
 
-        if(not_modified(q, r)) {
+        // The validators alone, for the two conditional questions below.  They
+        // are also what a 304 has to carry, which is why this is the object
+        // that becomes one.
+        server::response probe;
+
+        probe.field("Last-Modified", http_date(f.st.st_mtime))
+             .field("ETag", etag_for(f.st));
+
+        // **Before the range**, because 13.1 orders them that way and because
+        // the answers differ: a client whose copy is current wants a 304, not
+        // a piece of something it already has.
+        if(not_modified(q, probe)) {
+            r = probe;
+
             make_not_modified(r);
 
             return false;
         }
 
-        return true;
+        span.first = 0;
+        span.last = size > 0 ? size - 1 : 0;
+
+        bool partial = false;
+
+        // If-Range says "only if it has not changed".  A no turns the request
+        // back into a plain one for the whole representation rather than an
+        // error -- 13.1.5.
+        if(range_still_current(q, probe)) {
+            byte_range asked;
+
+            const range_outcome what = decide_range(q, size, asked);
+
+            if(what == range_unsatisfiable) {
+                std::ostringstream cr;
+
+                // 14.4's unsatisfied-range form, which tells the client how
+                // long the representation actually is so its next ask can be
+                // right.
+                cr << "bytes */" << size;
+
+                r = server::response();
+
+                r.status(416).type("text/plain")
+                 .field("Content-Range", cr.str())
+                 .field("Accept-Ranges", "bytes")
+                 .body("that range is not satisfiable\n");
+
+                return false;
+            }
+
+            if(what == range_ok) {
+                span = asked;
+                partial = true;
+            }
+        }
+
+        std::ostringstream len;
+
+        len << (partial ? span.length() : size);
+
+        r = server::response();
+
+        r.status(partial ? 206 : 200)
+         .type(type_by_extension(f.real))
+         .field("Content-Length", len.str())
+         .field("Last-Modified", http_date(f.st.st_mtime))
+         .field("ETag", etag_for(f.st))
+         // RFC 9110 14.3: advertised where a client looks before deciding
+         // whether seeking is possible at all.
+         .field("Accept-Ranges", "bytes");
+
+        if(partial) {
+            std::ostringstream cr;
+
+            cr << "bytes " << span.first << "-" << span.last << "/" << size;
+
+            r.field("Content-Range", cr.str());
+        }
+
+        return size > 0;
     }
 
     const char* reason_for(int status) {
@@ -721,8 +1011,9 @@ void server::files(const std::string& pattern, const std::string& root) {
         [real_root](const Request& q, const params& p, responder& out) {
             located f;
             response head;
+            byte_range span;
 
-            if(!file_decided(real_root, p.rest(), q, f, head)) {
+            if(!file_decided(real_root, p.rest(), q, f, head, span)) {
                 out.send(head);
 
                 return;
@@ -734,19 +1025,33 @@ void server::files(const std::string& pattern, const std::string& root) {
 
             if(!in) return;
 
+            // **Seek, rather than read and discard.**  This is what the
+            // streaming branch bought: a range costs the range, not the file.
+            in.seekg(std::streamoff(span.first));
+
+            if(!in) return;
+
             std::vector<char> block(FILE_BLOCK);
 
-            // **This is the whole point of the branch.**  One block is held at
-            // a time rather than the file, so what a request costs is
-            // FILE_BLOCK and not st_size.
-            while(in) {
-                in.read(&block[0], std::streamsize(block.size()));
+            // One block is held at a time rather than the file, so what a
+            // request costs is FILE_BLOCK and not st_size.
+            long long left = span.length();
+
+            while(left > 0 && in) {
+                const std::size_t want =
+                    static_cast<std::size_t>(
+                        std::min<long long>(left,
+                                            static_cast<long long>(block.size())));
+
+                in.read(&block[0], std::streamsize(want));
 
                 const std::streamsize got = in.gcount();
 
                 if(got <= 0) break;
 
                 out.write(std::string(&block[0], std::size_t(got)));
+
+                left -= got;
 
                 // Nobody is reading; stop producing.  A large file to a client
                 // that has gone is otherwise read in full for nothing.
@@ -759,8 +1064,9 @@ void server::files(const std::string& pattern, const std::string& root) {
                     async_responder& out) -> sys::task<void> {
             located f;
             response head;
+            byte_range span;
 
-            if(!file_decided(real_root, p.rest(), q, f, head)) {
+            if(!file_decided(real_root, p.rest(), q, f, head, span)) {
                 co_await out.send(head);
 
                 co_return;
@@ -772,18 +1078,30 @@ void server::files(const std::string& pattern, const std::string& root) {
 
             if(!in) co_return;
 
+            // See the blocking half: a range costs the range.
+            in.seekg(std::streamoff(span.first));
+
+            if(!in) co_return;
+
             std::vector<char> block(FILE_BLOCK);
 
-            for(;;) {
+            long long left = span.length();
+
+            while(left > 0) {
                 // **Read on a worker, write on the reactor.**  A file read is
                 // microseconds when the page is cached and a disk seek when it
                 // is not, and the reactor's thread is the wrong place to find
                 // out which.  This is what the pool is for -- short work with
                 // a syscall in it -- as against a generation, which gets a
                 // thread of its own; see sys::relay.
+                const std::size_t want =
+                    static_cast<std::size_t>(
+                        std::min<long long>(left,
+                                            static_cast<long long>(block.size())));
+
                 co_await sys::on_pool(out.pool());
 
-                in.read(&block[0], std::streamsize(block.size()));
+                in.read(&block[0], std::streamsize(want));
 
                 const std::streamsize got = in.gcount();
 
@@ -792,6 +1110,8 @@ void server::files(const std::string& pattern, const std::string& root) {
                 if(got <= 0) break;
 
                 co_await out.write(std::string(&block[0], std::size_t(got)));
+
+                left -= got;
 
                 if(!in) break;
             }
@@ -1311,6 +1631,11 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
            r.status() == 200 && not_modified(q, r)) {
             make_not_modified(r);
         }
+
+        // After the conditional, because 13.1 orders them that way: a client
+        // whose copy is current wants a 304 rather than a piece of what it
+        // already has.
+        if(q.method() == "GET" || q.method() == "HEAD") apply_range(q, r);
 
         answer = head_only ? r.without_body(m_options.server_name)
                            : r.str(m_options.server_name);
@@ -1934,6 +2259,11 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
            r.status() == 200 && not_modified(q, r)) {
             make_not_modified(r);
         }
+
+        // After the conditional, because 13.1 orders them that way: a client
+        // whose copy is current wants a 304 rather than a piece of what it
+        // already has.
+        if(q.method() == "GET" || q.method() == "HEAD") apply_range(q, r);
     }
     catch(...) {
         threw = std::current_exception();
