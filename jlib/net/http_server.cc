@@ -20,6 +20,14 @@
 #include <jlib/net/http_server.hh>
 
 #include <jlib/util/abnf.hh>
+#include <jlib/util/MimeType.hh>
+
+#include <cerrno>
+#include <fstream>
+
+#include <limits.h>
+#include <sys/stat.h>
+#include <stdlib.h>
 
 #include <cstring>
 #include <cstdlib>
@@ -285,14 +293,14 @@ namespace {
         r.status(304).body(std::string());
     }
 
-    std::string http_date() {
+    std::string http_date(std::time_t when) {
         static const char* const DAY[] = { "Sun", "Mon", "Tue", "Wed", "Thu",
                                            "Fri", "Sat" };
         static const char* const MONTH[] = { "Jan", "Feb", "Mar", "Apr", "May",
                                              "Jun", "Jul", "Aug", "Sep", "Oct",
                                              "Nov", "Dec" };
 
-        const std::time_t now = std::time(0);
+        const std::time_t now = when;
 
         std::tm tm;
 
@@ -308,6 +316,146 @@ namespace {
 
         return buf;
     }
+
+    /**
+     * The media type for a name, by extension.
+     *
+     * **Not util::MimeType**, which exists and is the obvious thing to reach
+     * for -- it runs file(1) as a subprocess.  That is right for classifying
+     * an attachment somebody mailed you and wrong for answering a request:
+     * a fork and an exec per file, on a path where the answer is already
+     * determined by three characters at the end of the name.
+     *
+     * Content sniffing is also less accurate here rather than more.  An empty
+     * .js is "inode/x-empty" to file(1) and application/javascript to a
+     * browser, and the browser is the one being answered.
+     *
+     * Unknown means application/octet-stream, which is the one answer that
+     * cannot be wrong in a dangerous direction: a browser will not execute it.
+     */
+    std::string type_by_extension(const std::string& name) {
+        static const struct { const char* ext; const char* type; } TABLE[] = {
+            { ".html", "text/html; charset=utf-8" },
+            { ".htm",  "text/html; charset=utf-8" },
+            { ".css",  "text/css; charset=utf-8" },
+            { ".js",   "application/javascript; charset=utf-8" },
+            { ".mjs",  "application/javascript; charset=utf-8" },
+            { ".json", "application/json" },
+            { ".txt",  "text/plain; charset=utf-8" },
+            { ".md",   "text/markdown; charset=utf-8" },
+            { ".xml",  "application/xml" },
+            { ".svg",  "image/svg+xml" },
+            { ".png",  "image/png" },
+            { ".jpg",  "image/jpeg" },
+            { ".jpeg", "image/jpeg" },
+            { ".gif",  "image/gif" },
+            { ".webp", "image/webp" },
+            { ".ico",  "image/vnd.microsoft.icon" },
+            { ".woff", "font/woff" },
+            { ".woff2","font/woff2" },
+            { ".wasm", "application/wasm" },
+            { ".pdf",  "application/pdf" },
+            { ".wav",  "audio/wav" },
+            { ".mp3",  "audio/mpeg" },
+            { ".mp4",  "video/mp4" }
+        };
+
+        const std::size_t dot = name.find_last_of('.');
+
+        if(dot != std::string::npos) {
+            const std::string ext = util::http::fold(name.substr(dot));
+
+            for(std::size_t i = 0; i < sizeof TABLE / sizeof TABLE[0]; i++) {
+                if(ext == TABLE[i].ext) return TABLE[i].type;
+            }
+        }
+
+        return "application/octet-stream";
+    }
+
+    /**
+     * A validator from what stat() knows.
+     *
+     * **Weak, and that is not timidity.**  RFC 9110 8.8.1: a strong validator
+     * changes whenever the bytes do.  Modification time at one-second
+     * resolution and a size do not: a generated file rewritten twice in the
+     * same second to the same length has the same pair and different content.
+     * nginx and Apache send this as strong anyway; jlib says what it can
+     * actually promise, which is equivalence rather than identity.
+     *
+     * Weak costs nothing here.  If-None-Match compares weakly (8.8.3.2), which
+     * is what this is for.  It would matter for If-Range, which needs a strong
+     * one -- and If-Range is not implemented, so when it is, this is where the
+     * conversation about hashing starts.
+     */
+    std::string etag_for(const struct stat& st) {
+        std::ostringstream o;
+
+        o << "W/\"" << std::hex << static_cast<long long>(st.st_mtime) << "-"
+          << std::hex << static_cast<long long>(st.st_size) << "\"";
+
+        return o.str();
+    }
+
+    /** 404 for everything, deliberately; see server::files. */
+    void nothing_there(server::response& r) {
+        r.status(404).type("text/plain").body("not found\n");
+    }
+
+    void serve_file(const std::string& root, const std::string& rest,
+                    server::response& r)
+    {
+        const std::string candidate = root + "/" + rest;
+
+        // **realpath is the containment check**, and it is the only one worth
+        // trusting.  Comparing strings before resolving catches "..", and
+        // misses a symlink; resolving first catches both, because what comes
+        // back is where the kernel would actually go.
+        //
+        // It also fails for a path that does not exist, which is the common
+        // 404 and costs nothing extra.
+        char resolved[PATH_MAX];
+
+        if(::realpath(candidate.c_str(), resolved) == 0)
+            return nothing_there(r);
+
+        const std::string real(resolved);
+
+        // Under the root, or the root itself.  The trailing separator matters:
+        // without it "/srv/wwwroot-evil" is inside "/srv/www".
+        if(real != root && real.compare(0, root.size() + 1, root + "/") != 0)
+            return nothing_there(r);
+
+        struct stat st;
+
+        // Regular files only.  This is also what refuses the prefix itself:
+        // an empty rest resolves to the root, which is a directory, so there
+        // is no listing and no index.html -- both being decisions a caller
+        // should make out loud rather than ones this makes quietly.
+        //
+        // An explicit check for the empty case was here and was removed: it
+        // could not be made to fail, because this line had already caught
+        // everything it was meant to.
+        if(::stat(real.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+            return nothing_there(r);
+
+        std::ifstream in(real.c_str(), std::ios::binary);
+
+        if(!in) return nothing_there(r);
+
+        std::ostringstream body;
+
+        body << in.rdbuf();
+
+        if(!in && !in.eof()) return nothing_there(r);
+
+        r.status(200)
+         .type(type_by_extension(real))
+         .field("Last-Modified", http_date(st.st_mtime))
+         .field("ETag", etag_for(st))
+         .body(body.str());
+    }
+
 
     const char* reason_for(int status) {
         switch(status) {
@@ -392,7 +540,7 @@ std::string server::response::serialise(const std::string& server_name,
     // Supplied unless the handler said otherwise, so a handler that wants to
     // lie about Content-Length -- which no correct one does -- has to say so.
     if(!m_fields.has("Date")) {
-        const std::string when = http_date();
+        const std::string when = http_date(std::time(0));
 
         if(!when.empty()) o << "Date: " << when << "\r\n";
     }
@@ -502,6 +650,26 @@ void server::route(const std::string& method, const std::string& path,
     compile_route(e);
 
     m_routes.push_back(std::move(e));
+}
+
+void server::files(const std::string& pattern, const std::string& root) {
+    // Resolved once, at registration: a root that does not exist is a mistake
+    // in the program rather than a 404 repeated per request, and resolving it
+    // here is also what makes the containment check below a string compare
+    // against something already canonical.
+    char resolved[PATH_MAX];
+
+    if(::realpath(root.c_str(), resolved) == 0) {
+        throw error("cannot serve files from \"" + root + "\": " +
+                    std::strerror(errno));
+    }
+
+    const std::string real_root(resolved);
+
+    route("GET", pattern,
+          [real_root](const Request&, const params& p, response& r) {
+              serve_file(real_root, p.rest(), r);
+          });
 }
 
 void server::otherwise(handler h) {
