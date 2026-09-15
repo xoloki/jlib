@@ -158,10 +158,18 @@ struct server_policy {
  * unaltered.
  *
  * It is a server for a loopback OAuth2 redirect and a test harness.  **It is
- * not hardened for a public port**: nothing here defends against a slow-loris,
- * a flood, or a client that connects and never speaks, beyond a thread count, a
- * queue depth, a listen backlog and a read timeout.  Saying so is the only
- * thing that keeps a narrow thing narrow.
+ * not hardened for a public port**: what it has against a slow-loris, a flood,
+ * or a client that connects and never speaks is a thread count, a queue depth,
+ * a listen backlog, a read timeout and max_connections -- and, on the async
+ * side, a cancel_token per connection, which is what makes a deadline over a
+ * whole read possible at all.  net::http::server arms one; this does not arm
+ * it for you.
+ *
+ * That list has grown and the sentence above has not changed, which is the
+ * point of it.  Saying so is the only thing that keeps a narrow thing narrow,
+ * and net::http::server -- which started here and now routes, caches and
+ * serves a directory -- is the worked example of how fast that stops being
+ * automatic.
  *
  * ## One reference covers both transports
  *

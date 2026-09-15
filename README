@@ -28,10 +28,15 @@ coroutines over it, so a read and a request and a timer are all things one
 thread can be waiting for.  The blocking interfaces are all still there and
 still the right answer for a program that wants them -- nothing was migrated,
 and run_until_complete is what lets a synchronous caller drive an
-asynchronous one without becoming one.  The first thing that is worth having
-only because of it: the HTTP server answers more than one request per
-connection, where the blocking one would have to hold a thread for every
-client that might ask again.
+asynchronous one without becoming one.
+
+What came of it was a server.  The HTTP server answers more than one request
+per connection now, where the blocking one would have to hold a thread for
+every client that might ask again -- and once connections were reusable, the
+things a reusable connection makes worth having followed: chunked output so a
+streamed body has an end, route patterns, HEAD, conditional requests, byte
+ranges, and a handler for serving a directory.  It is still not hardened for a
+public port and the header still says so, at rather more length than before.
 
 Errors are thrown rather than returned, and each class nests its own
 exception type.  Everything lives in namespace jlib::<module>.
@@ -49,8 +54,11 @@ What is in it:
              Plus JSON, MIME headers, a Jinja2 subset, and an XML parser
     crypt    OpenPGP through GPGME, and ristretto255 curve/Schnorr/Groth proofs
     net      an email client stack -- Email, MBox, POP3, IMAP4 -- with OAuth2,
-             and an HTTP client and server, the server in a blocking flavour
-             and a suspending one that runs the same handlers
+             and an HTTP client and server: the client deliberately narrow, the
+             server less so than it was -- keep-alive, chunked output, route
+             patterns, HEAD, conditional requests, byte ranges and static
+             files, in a blocking flavour and a suspending one that runs the
+             same handlers
     ai       a quantized transformer that runs GGUF files: llama, qwen2 and
              gemma2, with Metal compute where there is one
     media    audio through PortAudio, driven from its callback

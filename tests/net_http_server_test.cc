@@ -182,7 +182,11 @@ static void the_two_halves_meet() {
        r.fields().has("Date") && r.fields().has("Server") &&
        r.content_length() == r.body().size());
 
-    // Always, so no keep-alive framing question ever arises.
+    // The *blocking* server, which answers one request and closes -- so this is
+    // still true and no longer for the reason it used to give.  It said "so no
+    // keep-alive framing question ever arises", and keep-alive arrived on the
+    // async server; what keeps this one closing is that it holds a thread per
+    // connection, not that the framing was left unsolved.
     ok("and Connection: close",
        jlib::util::http::fold(r.fields().get("Connection")) == "close",
        r.fields().get("Connection"));
