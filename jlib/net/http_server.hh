@@ -695,6 +695,47 @@ public:
     void route(const std::string& method, const std::string& path,
                async_param_stream_handler h);
 
+    /**
+     * Serve files under `root` on a wildcard pattern.
+     *
+     *     s.files("/static/*", "/srv/www");
+     *
+     * Registers a GET route, which HEAD then answers too.  The file's
+     * modification time and size become `Last-Modified` and a **weak** `ETag`,
+     * so `If-None-Match` and `If-Modified-Since` work without the caller doing
+     * anything -- this is the first thing in the server that *produces* the
+     * validators the conditional code could until now only read.
+     *
+     * ## What it refuses, and how
+     *
+     * Every refusal is a **404**, including the ones that are really "you may
+     * not": a 403 would confirm that something is there, and the whole point
+     * of the checks below is to say nothing about what is outside the root.
+     *
+     * Containment is decided by `realpath`, not by inspecting the path.  A
+     * string check catches `..` and misses a symlink; resolving first catches
+     * both, because what comes back is where the kernel would actually go.
+     * The root is resolved once, here, so a caller passing a path that does
+     * not exist finds out at registration.
+     *
+     * Only regular files.  A directory is a 404: there is no listing and no
+     * index.html, because both are decisions a caller should make out loud.
+     *
+     * ## What it is still not
+     *
+     * The file is read whole into memory, like every other buffered response.
+     * That is fine for the pages and scripts this is for and wrong for a large
+     * download; chunked output exists now, so a streaming variant is possible
+     * and is not here.
+     *
+     * And the header above still says this server is not hardened for a public
+     * port.  A file server is the feature most likely to make somebody forget
+     * that, so: it is still true, and this does not change it.
+     *
+     * @throws error if `root` cannot be resolved
+     */
+    void files(const std::string& pattern, const std::string& root);
+
     /** What runs when no route matched.  The default answers 404. */
     void otherwise(handler h);
 
