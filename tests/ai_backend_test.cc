@@ -1477,8 +1477,48 @@ static void a_tensor_from_the_wrong_backend_is_refused() {
 #endif
 }
 
+/**
+ * Every activation survives being named and read back.
+ *
+ * `name_of` handled four of the six and let silu and gelu fall through to
+ * "sigmoid", which `activation_from_name` would then refuse -- so the two
+ * newest activations could not round-trip at all, and one of them is what
+ * llama uses.  Nothing in the tree calls either function today, which is why
+ * it went unnoticed; the Xcode 27 -Wswitch warning is what found it.
+ */
+static void every_activation_round_trips() {
+    std::cout << "\nevery activation round-trips through its name:\n";
+
+    const ai::activation all[] = {
+        ai::activation::sigmoid, ai::activation::tanh,
+        ai::activation::relu,    ai::activation::leaky_relu,
+        ai::activation::silu,    ai::activation::gelu
+    };
+
+    for(std::size_t i = 0; i < sizeof all / sizeof all[0]; i++) {
+        const std::string name = ai::name_of(all[i]);
+
+        bool back = false;
+        std::string why;
+
+        try { back = ai::activation_from_name(name) == all[i]; }
+        catch(std::exception& e) { why = e.what(); }
+
+        ok("  " + name + " names itself and reads back", back,
+           why.empty() ? name : why);
+    }
+
+    // The specific shape of the bug: two different activations sharing a name.
+    ok("  and no two share a name",
+       ai::name_of(ai::activation::silu) != ai::name_of(ai::activation::sigmoid),
+       ai::name_of(ai::activation::silu) + " vs " +
+       ai::name_of(ai::activation::sigmoid));
+}
+
 int main() {
     std::cout << std::unitbuf;
+
+    every_activation_round_trips();
 
     {
         ai::host_backend<float> h;

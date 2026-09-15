@@ -209,6 +209,15 @@ namespace jlib {
 
         void ASMailBox::handle(const MailBoxResponse& r) {
             switch(r.type) {
+            // Named rather than swept up by a default, so that adding a
+            // response type still gets the warning this pair came from.  A
+            // default would silence the next real omission along with these
+            // two: NONE is the sentinel a default-constructed response has,
+            // and MESSAGE_APPENDED is declared, never pushed, and has no
+            // signal to emit -- neither has anything to do here.
+            case MailBoxResponse::NONE:
+            case MailBoxResponse::MESSAGE_APPENDED:
+                break;
             case MailBoxResponse::ERROR:
                 error.emit(r.text);
                 break;

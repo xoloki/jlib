@@ -118,6 +118,7 @@ TESTS = \
 	util_date_test \
 	util_rfc2047_test \
 	util_headers_test \
+	util_headers_set_test \
 	util_headers_manual_test \
 	util_headers_fold_test \
 	util_headers_angie_test \
@@ -310,6 +311,9 @@ util_url_test_LDADD             = $(JUTIL_LA)
 
 util_codec_test_SOURCES         = util_codec_test.cc
 util_codec_test_LDADD           = $(JUTIL_LA)
+
+util_headers_set_test_SOURCES = util_headers_set_test.cc
+util_headers_set_test_LDADD   = $(JUTIL_LA) $(JSYS_LA)
 
 util_headers_test_SOURCES = util_headers_test.cc
 util_headers_test_LDADD   = $(JUTIL_LA)

@@ -52,16 +52,22 @@ void init(const std::string& data) {
 
 std::string make_checker2d() {
     std::string data(RES*RES*DEPTH, 0);
-    int c;
+    char c;
     int dv = 0x08;
     int pix = 0x40 / dv;
     
     for(int i=0; i<RES; i++) {
         for(int j=0; j<RES; j++) {
-            c = 255 * ( ( ( i & pix ) == 0 ) ^ ( ( j & pix ) == 0 ) );
+            // The cast is the whole point: data is a std::string, so its
+            // value_type is char, and 255 does not fit in a signed one.  The
+            // octet wanted is 0xFF and that is what this stores; saying so
+            // explicitly is the difference between meaning it and the
+            // compiler noticing on your behalf.
+            c = char(255 * ( ( ( i & pix ) == 0 ) ^ ( ( j & pix ) == 0 ) ));
             for(int k=0; k<DEPTH-1; k++)
                 data[i*RES*DEPTH + j*DEPTH + k] = c;
-            data[i*RES*DEPTH + j*DEPTH + (DEPTH-1)] = 255;
+            // Alpha, opaque -- and the same cast, for the same reason.
+            data[i*RES*DEPTH + j*DEPTH + (DEPTH-1)] = char(255);
         }
     }
     

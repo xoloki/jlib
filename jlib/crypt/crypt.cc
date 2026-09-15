@@ -313,7 +313,12 @@ namespace jlib {
                 std::size_t n = gpgme_data_write(m_data, data.data(), data.length());
                 if(n != data.size()) {
                     std::ostringstream os;
-                    os << "Only wrote " << n << " of " + data.size();
+                    // `<< " of " << data.size()`, not `" of " + size`:
+                    // the latter advances a pointer into a six-byte literal
+                    // and streams whatever follows it as a C string, which is
+                    // out of bounds for any payload over five octets -- in the
+                    // path that exists to report a failed write.
+                    os << "Only wrote " << n << " of " << data.size();
                     throw std::runtime_error(os.str());
                 }
                     
