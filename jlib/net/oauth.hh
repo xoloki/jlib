@@ -325,6 +325,10 @@ struct callback {
  * stops.  Calling it a server is what turns eighty lines into eight hundred:
  * there is no routing, no second request, no keep-alive, and no configuration.
  *
+ * That estimate has since been tested.  net::http::server acquired all four,
+ * and this still does none of them -- which is the argument working rather
+ * than an argument against it.
+ *
  * 127.0.0.1 explicitly, never INADDR_ANY -- what arrives here is an
  * authorization code, and a receiver reachable from the network receives it
  * from the network.  RFC 8252 7.3 also says to use the address literal rather

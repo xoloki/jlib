@@ -135,29 +135,46 @@ struct server_options {
  * that claim, and every existing client caller would start including
  * <jlib/sys/server.hh>, <thread> and OpenSSL to get it.
  *
- * ## As narrow as the client, and for the same reasons
+ * ## It was a harness; it is a small server now
  *
- * `Connection: close` after every response -- **except on the asynchronous
- * server, which answers more than one request per connection.**  The branch
- * that built the message layer refused keep-alive outright, because keep-alive
- * framing is where request smuggling lives and a server has strictly more to
- * lose there than a client.  What changed is not the risk assessment: it is
- * that the framing refusals which make the smuggle unreachable are now in
- * util::http, and that an idle persistent connection costs a coroutine here
- * where it would cost a thread in serve().  See server_options::keep_alive.
+ * This header said "as narrow as the client" for most of its life, and that
+ * stopped being true one branch at a time.  What it does now:
  *
- * A streaming response still closes, on either server.  Its body is delimited
- * by the close, so there is no boundary for a next message to begin at.
+ *   - **keep-alive** on the asynchronous server, with three separate bounds --
+ *     see server_options.  The blocking one still answers once and closes, and
+ *     should: an idle persistent connection is a suspended coroutine here and
+ *     would be a held thread there.
+ *   - **chunked output**, so a streamed body has an end a client can find.
+ *     It used to be delimited by the close, which meant a handler that died
+ *     halfway produced the same octets as one that finished.
+ *   - **route patterns** -- `/users/{id}`, `/static/*` -- with the most
+ *     specific match winning, and 405 with `Allow` where a path exists for
+ *     another method.
+ *   - **HEAD**, answered by the GET route with the body suppressed and the
+ *     Content-Length a GET would have sent.
+ *   - **conditional requests**: `If-None-Match` and `If-Modified-Since` become
+ *     304, with the HTTP-date read against RFC 9110's own grammar.
+ *   - **byte ranges** for any body, and `files()` for serving a directory --
+ *     which seeks rather than reading, so a range costs the range.
  *
- * A response is accumulated whole and written in one go, which is what lets a
- * handler that throws still be answered with a 500, and which means a body has
- * to fit in memory.  **Unless the handler asks otherwise** -- see `responder`,
- * added for server-sent events, where a body produced over seconds has to
- * reach the client as it appears.  That path gives up the 500, knowingly and
- * only for the handlers that take it.
+ * A buffered response is still accumulated whole, which is what lets a handler
+ * that throws be answered with a 500 anyway.  A streaming one gives that up
+ * knowingly; `files()` keeps it regardless by deciding everything -- 404, 304,
+ * 416 -- before a byte goes out.
  *
- * It exists to receive an OAuth2 redirect on loopback and to be a test harness.
- * **It is not hardened for a public port** -- see the note on sys::server.
+ * ## What it is still not
+ *
+ * No HTTP/2 or /3.  No compression.  No `multipart/byteranges`, so a
+ * multi-range request gets the whole body.  No `If-Match` or
+ * `If-Unmodified-Since`, so a precondition can only succeed -- 412 is
+ * unreachable.  No `Cache-Control`, no authentication, no rate limiting, no
+ * per-address anything.
+ *
+ * **It is not hardened for a public port** -- see the note on sys::server --
+ * and that sentence has more to protect now than when it was written.  It
+ * began as a thing to receive an OAuth2 redirect on loopback and to be a test
+ * harness; a server that routes, caches and serves a directory is a much
+ * easier thing to point at the internet by mistake.
  */
 class server {
 public:
