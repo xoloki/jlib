@@ -534,7 +534,14 @@ sys::task<void> server::async_responder::send(const response& r) {
 
     m_started = true;
 
-    co_await m_writer->write(r.str(m_name));
+    // **A whole response carries its own length, so it can be followed.**
+    // This used to serialise with str()'s default, which is close -- so every
+    // route that could stream but answered whole shut the connection, and
+    // jserve's non-streaming completions did exactly that.  Found by pointing
+    // curl at two of them and watching the second say close.
+    m_persist = m_want_persist;
+
+    co_await m_writer->write(r.str(m_name, m_persist));
 }
 
 sys::task<void> server::async_responder::send_serialised(const std::string& wire) {
@@ -554,22 +561,23 @@ void server::async_responder::framing(bool chunked, bool persist) {
 
     m_chunked = chunked;
 
-    // A close-delimited body ends at the close, so there is nothing after it
-    // to keep the connection for.
-    //
-    // **No caller can currently reach this**, and it is worth saying so rather
-    // than letting it look load-bearing: chunked needs HTTP/1.1 and so does
-    // util::http::persistent, so the server asks one question twice and the
-    // two answers cannot disagree.  It stays because framing() is public and
-    // the failure it prevents is a silent one -- a client waiting out its own
-    // timeout for a response that ended at the close it was not told about.
-    m_persist = persist && chunked;
+    // Recorded, not resolved.  Whether the connection can carry another
+    // request depends on how *this* response turns out to be framed, and that
+    // is not known until the handler chooses between begin() and send():
+    // a streamed body needs chunked to have an end, a whole one has a
+    // Content-Length and needs nothing.
+    m_want_persist = persist;
 }
 
 sys::task<void> server::async_responder::begin(const response& head) {
     if(m_started) throw error("a responder began a response twice");
 
     m_started = true;
+    m_begun = true;
+
+    // Only now: a streamed body is followable exactly when chunked gives it an
+    // end.  framing() deliberately does not decide this.
+    m_persist = m_want_persist && m_chunked;
 
     co_await m_writer->write(head.head(m_name, m_chunked, m_persist));
 }
@@ -585,7 +593,14 @@ sys::task<void> server::async_responder::write(const std::string& piece) {
 }
 
 sys::task<void> server::async_responder::end() {
-    if(!m_started || m_ended) co_return;
+    // **begun(), not started().**  send() also marks a responder started, and
+    // a whole response has already ended -- terminating it again would put a
+    // zero-length chunk after a body with a Content-Length, which the next
+    // response on the connection would then be read as starting inside.
+    //
+    // That was live and invisible: the same bug that made send() say close
+    // also guaranteed nothing came after the stray chunk to be corrupted by it.
+    if(!m_begun || m_ended) co_return;
 
     m_ended = true;
 

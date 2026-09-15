@@ -432,6 +432,9 @@ public:
          */
         bool persist() const { return m_persist; }
 
+        /** Whether begin() was called, as opposed to send().  See end(). */
+        bool begun() const { return m_begun; }
+
         /**
          * One piece of the body.
          *
@@ -463,7 +466,15 @@ public:
         sys::reactor*      m_reactor = 0;
         sys::job_queue*    m_pool = 0;
         bool               m_chunked = false;
+
+        // What framing() was told the *client* would accept, before the
+        // question of how this particular response is framed.  A body with a
+        // Content-Length can be followed by another request; one delimited by
+        // the close cannot -- so the two paths out of here answer differently
+        // from the same wish, and m_persist is the answer rather than the wish.
+        bool               m_want_persist = false;
         bool               m_persist = false;
+        bool               m_begun   = false;
         bool               m_ended   = false;
     };
 
