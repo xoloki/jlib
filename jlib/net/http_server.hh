@@ -224,7 +224,58 @@ public:
         std::string m_body;
     };
 
+    /**
+     * What a route pattern captured out of the target.
+     *
+     * A pattern is matched segment by segment against the path, and two kinds
+     * of segment capture rather than compare:
+     *
+     *     /users/{id}        {id} matches one segment, by that name
+     *     /static/*          * matches the rest, whatever its depth
+     *
+     * **A capture is already decoded**, because the path is: path_of() runs
+     * util::uri::decode over the target before anything is matched, so `%65`
+     * arrives as `e`.
+     *
+     * It therefore cannot contain a separator.  `%2F` and `%5C` are refused
+     * outright, with a 400, before routing is reached -- decoding one would
+     * change how many segments the path has, which is the shape of a traversal
+     * bug -- and a literal `/` ends the segment.  So a parameter is one
+     * segment's worth of decoded text and nothing more, which is the property
+     * a handler building a filename off one is relying on whether it knows it
+     * or not.
+     */
+    class params {
+    public:
+        bool has(const std::string& name) const;
+
+        /** The capture, or empty if the pattern had no such name. */
+        std::string get(const std::string& name) const;
+
+        /**
+         * What `*` matched, with no leading slash, or empty for a pattern
+         * without one.
+         *
+         * Note that it may contain slashes, and **may contain `..`**: this is
+         * the raw remainder, not a file path, and a handler turning one into a
+         * path is the thing that has to say so.
+         */
+        const std::string& rest() const { return m_rest; }
+
+        std::size_t size() const { return m_named.size(); }
+
+    private:
+        friend class server;
+
+        std::vector<std::pair<std::string, std::string> > m_named;
+        std::string m_rest;
+    };
+
     typedef std::function<void(const Request&, response&)> handler;
+
+    /** The same, for a route whose pattern captures something. */
+    typedef std::function<void(const Request&, const params&, response&)>
+        param_handler;
 
     /**
      * A response written as it is produced, rather than accumulated.
@@ -351,6 +402,10 @@ public:
      * it in the body and clients disagree about sending the header.
      */
     typedef std::function<void(const Request&, responder&)> stream_handler;
+
+    /** The same, for a route whose pattern captures something. */
+    typedef std::function<void(const Request&, const params&, responder&)>
+        param_stream_handler;
 
     /**
      * A response written as it is produced, without blocking a thread.
@@ -490,6 +545,11 @@ public:
     typedef std::function<sys::task<void>(const Request&, async_responder&)>
         async_stream_handler;
 
+    /** The same, for a route whose pattern captures something. */
+    typedef std::function<sys::task<void>(const Request&, const params&,
+                                          async_responder&)>
+        async_param_stream_handler;
+
     /** Tag for the constructors that serve on a reactor.  See the class note. */
     struct async_t { explicit async_t() = default; };
 
@@ -538,12 +598,33 @@ public:
     std::string url(const std::string& path = "/") const;
 
     /**
-     * Route an exact method and an exact path.
+     * Route a method and a path pattern.
      *
-     * The path is the target's path component with the query removed.  Matching
-     * is exact: no prefixes, no wildcards, no trailing-slash equivalence, and
-     * routes are tried in the order they were added so a later one can never
-     * shadow an earlier one.
+     * The path is the target's path component with the query removed.  A
+     * pattern is matched segment by segment, and a segment is one of three
+     * things:
+     *
+     *     /hello             a literal, compared
+     *     /users/{id}        one segment, captured by that name
+     *     /static/*          the rest, however deep, captured as params::rest
+     *
+     * `*` may only be the last segment, a parameter must be named, and a brace
+     * in a literal is a typo -- all three are **refused at registration**,
+     * where the caller is, rather than at match time where the only symptom
+     * would be a route that never fires.
+     *
+     * **The most specific match wins**, counted in literal segments, so
+     * `/static/index.html` beats `/static/*` however they were registered.
+     * A tie goes to whichever was added first, which is what the old
+     * exact-match scan did for the only case it had.
+     *
+     * Empty segments are dropped, so `/a//b/` and `/a/b` are one route.  RFC
+     * 3986 makes them different resources; this makes them the same, because
+     * the alternative is a table where a trailing slash silently 404s.
+     *
+     * A pattern without a `*` must account for **every** segment: `/exact`
+     * does not answer `/exact/extra`.  Without that every route would quietly
+     * be a prefix.
      *
      * Percent-encoding *is* decoded first, because RFC 3986 2.1 makes "%65" and
      * "e" the same character -- but a target whose path contains an encoded
@@ -569,6 +650,23 @@ public:
      */
     void route(const std::string& method, const std::string& path,
                async_stream_handler h);
+
+    /**
+     * The three above again, for a pattern that captures.
+     *
+     * Registering `/users/{id}` or `/static/*` with a handler that takes no
+     * params is legal and loses the captures, which is occasionally what a
+     * caller wants -- a prefix route that serves one thing regardless of the
+     * rest.  These are for when it is not.
+     */
+    void route(const std::string& method, const std::string& path,
+               param_handler h);
+
+    void route(const std::string& method, const std::string& path,
+               param_stream_handler h);
+
+    void route(const std::string& method, const std::string& path,
+               async_param_stream_handler h);
 
     /** What runs when no route matched.  The default answers 404. */
     void otherwise(handler h);
@@ -609,16 +707,49 @@ private:
     // Ahead of the methods that name it: a member declaration is not a
     // complete-class context, so route_for() cannot return a type the class
     // declares further down.
+    /** One segment of a route pattern. */
+    struct segment {
+        enum kind { literal, named, rest };
+
+        kind        what = literal;
+        std::string text;   // the literal, or the parameter's name
+    };
+
     struct entry {
         std::string method;
         std::string path;
 
-        // One or the other, never both.  A route is registered by whichever
+        // The pattern, parsed once at registration.  Empty `segs` with a
+        // non-empty path cannot happen: "/" parses to no segments and matches
+        // only itself.
+        std::vector<segment> segs;
+        bool wild = false;          // the pattern ends in *
+        int literals = 0;           // how specific it is; see route_for
+
+        // One of these, never more.  A route is registered by whichever
         // overload of route() was called.
         handler run;
         stream_handler stream;
         async_stream_handler async_stream;
+        param_handler param_run;
+        param_stream_handler param_stream;
+        async_param_stream_handler async_param_stream;
     };
+
+    /** Split a pattern or a path into segments, ignoring empty ones. */
+    static std::vector<std::string> split_path(const std::string& path);
+
+    /** Parse a pattern into `e`, or throw if it cannot be one. */
+    static void compile_route(entry& e);
+
+    /**
+     * Does this entry's pattern match `parts`?  If so, fill `into`.
+     *
+     * Method is not considered: route_for asks about the path first so that a
+     * path known for another method can be answered 405 rather than 404.
+     */
+    static bool matches(const entry& e, const std::vector<std::string>& parts,
+                        params& into);
 
     void serve(sys::socketstream& s, const sys::peer& from);
 
@@ -641,8 +772,27 @@ private:
                         std::string& why);
 
     /** Shared by both serves: the route table lookup. */
-    const entry* route_for(const std::string& method,
-                           const std::string& path) const;
+    /**
+     * The route for this request, and what its pattern captured.
+     *
+     * **The most specific match wins**, where specific means the most literal
+     * segments -- so `/static/index.html` beats `/static/*`, and `/users/me`
+     * beats `/users/{id}`.  Ties go to whichever was registered first, which
+     * is the old behaviour and the only part of this a caller could already
+     * depend on.
+     *
+     * @param allowed  the methods that *would* have matched this path.  That
+     *                 is the difference between 405 and 404, and it is a
+     *                 question about routes rather than status codes, which is
+     *                 why it is answered here.
+     *
+     *                 **Meaningful only when this returns null.**  When a
+     *                 route did match it may hold whatever was collected on
+     *                 the way past other routes, and a caller has no business
+     *                 reading it.
+     */
+    const entry* route_for(const std::string& method, const std::string& path,
+                           params& into, std::vector<std::string>& allowed) const;
 
     bool m_async = false;
 

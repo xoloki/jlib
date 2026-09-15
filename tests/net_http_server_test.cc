@@ -192,12 +192,18 @@ static void the_two_halves_meet() {
     ok("an unrouted path gets the fallback", missing.status() == 404,
        std::to_string(missing.status()));
 
-    // Exact matching, in the order routes were added.  A GET route does not
-    // answer a POST.
+    // A GET route does not answer a POST -- but it does say so.  This asserted
+    // 404 until routing learned the difference: a path nobody has heard of and
+    // a path that exists for another method are different answers, and only
+    // one of them tells a client what to do instead.
     const http::Response wrong = exchange(s, "POST", "/hello");
 
-    ok("and a method that was not routed does too", wrong.status() == 404,
-       std::to_string(wrong.status()));
+    ok("and a method that was not routed is 405, not the fallback",
+       wrong.status() == 405, std::to_string(wrong.status()));
+
+    ok("with the Allow that makes a 405 worth sending",
+       jlib::util::http::fold(wrong.fields().get("Allow")) == "get",
+       wrong.fields().get("Allow"));
 }
 
 static void what_the_handler_sees() {
