@@ -112,8 +112,21 @@ namespace jlib {
                 m_keys.push_back(k);
             }
             else {
+                // set() leaves one value, so the key belongs in the ordered
+                // list once -- and add() puts it there every time it is
+                // called, so there may be several.  Drop the ones after the
+                // first.
+                //
+                // **Two mistakes lived on this line.**  std::remove shifts
+                // and returns the new end; it cannot shorten a container, so
+                // discarding the result removed nothing.  And it looked for
+                // `key`, the caller's spelling, in a list that holds only
+                // upper(key) -- so it would have matched nothing even if the
+                // result had been used.  Xcode 27 warning about the discarded
+                // [[nodiscard]] is what found it.
                 i++;
-                std::remove(i,m_keys.end(),key);
+
+                m_keys.erase(std::remove(i, m_keys.end(), k), m_keys.end());
             }
         }
 

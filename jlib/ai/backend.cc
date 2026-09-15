@@ -31,8 +31,14 @@ std::string name_of(activation a) {
     case activation::tanh:       return "tanh";
     case activation::relu:       return "relu";
     case activation::leaky_relu: return "leaky_relu";
+    case activation::silu:       return "silu";
+    case activation::gelu:       return "gelu";
     }
 
+    // Unreachable for any value of the enum, and kept because a compiler that
+    // cannot see that still wants a return.  It used to be reachable: silu and
+    // gelu fell through to here and were *named* sigmoid, which
+    // activation_from_name would then refuse to read back.
     return "sigmoid";
 }
 
@@ -41,6 +47,8 @@ activation activation_from_name(const std::string& s) {
     if(s == "tanh")       return activation::tanh;
     if(s == "relu")       return activation::relu;
     if(s == "leaky_relu") return activation::leaky_relu;
+    if(s == "silu")       return activation::silu;
+    if(s == "gelu")       return activation::gelu;
 
     throw backend_error("unknown activation '" + s + "'");
 }
