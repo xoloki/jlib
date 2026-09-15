@@ -252,6 +252,8 @@ void server::route(const std::string& method, const std::string& path, handler h
     e.path = path;
     e.run = std::move(h);
 
+    compile_route(e);
+
     m_routes.push_back(std::move(e));
 }
 
@@ -263,6 +265,8 @@ void server::route(const std::string& method, const std::string& path,
     e.method = method;
     e.path = path;
     e.stream = std::move(h);
+
+    compile_route(e);
 
     m_routes.push_back(std::move(e));
 }
@@ -376,14 +380,206 @@ bool server::path_of(const std::string& target, std::string& path,
     return true;
 }
 
-const server::entry* server::route_for(const std::string& method,
-                                       const std::string& path) const
-{
-    for(const entry& e : m_routes) {
-        if(e.method == method && e.path == path) return &e;
+bool server::params::has(const std::string& name) const {
+    for(std::size_t i = 0; i < m_named.size(); i++) {
+        if(m_named[i].first == name) return true;
     }
 
-    return 0;
+    return false;
+}
+
+std::string server::params::get(const std::string& name) const {
+    for(std::size_t i = 0; i < m_named.size(); i++) {
+        if(m_named[i].first == name) return m_named[i].second;
+    }
+
+    return std::string();
+}
+
+std::vector<std::string> server::split_path(const std::string& path) {
+    std::vector<std::string> out;
+    std::string seg;
+
+    // Empty segments are dropped, so "/a//b/" and "/a/b" are the same route.
+    // That is a choice rather than an obligation -- RFC 3986 says the two are
+    // different resources -- and it is made because the alternative is a table
+    // where a trailing slash silently 404s.
+    for(std::size_t i = 0; i <= path.size(); i++) {
+        if(i == path.size() || path[i] == '/') {
+            if(!seg.empty()) out.push_back(seg);
+
+            seg.clear();
+        }
+        else {
+            seg += path[i];
+        }
+    }
+
+    return out;
+}
+
+void server::compile_route(entry& e) {
+    const std::vector<std::string> parts = split_path(e.path);
+
+    for(std::size_t i = 0; i < parts.size(); i++) {
+        const std::string& s = parts[i];
+
+        segment seg;
+
+        if(s == "*") {
+            // Only last, because anything after it could never be reached --
+            // and a pattern with unreachable parts is a mistake worth refusing
+            // at registration, where the caller is, rather than at match time.
+            if(i + 1 != parts.size())
+                throw error("a route pattern has * before its end: \"" +
+                            e.path + "\"");
+
+            seg.what = segment::rest;
+            e.wild = true;
+        }
+        else if(s.size() > 1 && s.front() == '{' && s.back() == '}') {
+            seg.what = segment::named;
+            seg.text = s.substr(1, s.size() - 2);
+
+            if(seg.text.empty())
+                throw error("a route pattern has an unnamed parameter: \"" +
+                            e.path + "\"");
+        }
+        else {
+            // A stray brace is a typo that would otherwise route nothing and
+            // say nothing about why.
+            if(s.find('{') != std::string::npos ||
+               s.find('}') != std::string::npos) {
+                throw error("a route pattern has a brace in a literal "
+                            "segment: \"" + e.path + "\"");
+            }
+
+            seg.what = segment::literal;
+            seg.text = s;
+
+            e.literals++;
+        }
+
+        e.segs.push_back(seg);
+    }
+}
+
+bool server::matches(const entry& e, const std::vector<std::string>& parts,
+                     params& into)
+{
+    params got;
+
+    for(std::size_t i = 0; i < e.segs.size(); i++) {
+        const segment& seg = e.segs[i];
+
+        if(seg.what == segment::rest) {
+            // Everything left, joined back up.  Zero segments is a match: an
+            // application serving /static/* should answer /static the way it
+            // answers /static/, and refusing here would make that a 404 the
+            // caller cannot see the reason for.
+            std::string rest;
+
+            for(std::size_t j = i; j < parts.size(); j++) {
+                if(!rest.empty()) rest += "/";
+
+                rest += parts[j];
+            }
+
+            got.m_rest = rest;
+
+            into = got;
+
+            return true;
+        }
+
+        if(i >= parts.size()) return false;
+
+        if(seg.what == segment::literal) {
+            if(seg.text != parts[i]) return false;
+        }
+        else {
+            got.m_named.push_back(std::make_pair(seg.text, parts[i]));
+        }
+    }
+
+    // A pattern with no * must account for every segment, or /a would match
+    // /a/b and a prefix would have been registered by accident.
+    if(parts.size() != e.segs.size()) return false;
+
+    into = got;
+
+    return true;
+}
+
+const server::entry* server::route_for(const std::string& method,
+                                       const std::string& path,
+                                       params& into,
+                                       std::vector<std::string>& allowed) const
+{
+    const std::vector<std::string> parts = split_path(path);
+
+    const entry* best = 0;
+    params best_params;
+
+    for(const entry& e : m_routes) {
+        params got;
+
+        if(!matches(e, parts, got)) continue;
+
+        if(e.method != method) {
+            // The path exists, for something else.  Collected rather than
+            // returned, because a later route may still match the method --
+            // and because Allow is a list.
+            bool seen = false;
+
+            for(std::size_t i = 0; i < allowed.size(); i++) {
+                if(allowed[i] == e.method) seen = true;
+            }
+
+            if(!seen) allowed.push_back(e.method);
+
+            continue;
+        }
+
+        // Most literal segments wins; first registered breaks a tie, which is
+        // what the old exact-match scan did for the only case it had.
+        if(best == 0 || e.literals > best->literals) {
+            best = &e;
+            best_params = got;
+        }
+    }
+
+    if(best != 0) into = best_params;
+
+    // `allowed` is deliberately *not* cleared here.  It is meaningful only
+    // when this returns null -- that is the contract, and it is written on the
+    // declaration -- and clearing it would be a guard with nothing behind it:
+    // every caller tests the return first, so a stale list cannot be read.
+    // Tried as a break; nothing failed, which is what dead code looks like.
+    return best;
+}
+
+/**
+ * 405, with the Allow a client is owed.
+ *
+ * RFC 9110 15.5.6 requires Allow on a 405 -- a bare one tells a client the
+ * path exists and nothing about what to do instead, which is worse than the
+ * 404 it replaces.
+ */
+static void method_not_allowed(server::response& r,
+                               const std::string& method,
+                               const std::vector<std::string>& allowed)
+{
+    std::string list;
+
+    for(std::size_t i = 0; i < allowed.size(); i++) {
+        if(!list.empty()) list += ", ";
+
+        list += allowed[i];
+    }
+
+    r.status(405).field("Allow", list).type("text/plain")
+     .body("that path does not take " + method + "; it takes " + list + "\n");
 }
 
 void server::serve(sys::socketstream& s, const sys::peer&) {
@@ -427,14 +623,29 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
         return;
     }
 
-    const entry* chosen = route_for(q.method(), path);
+    params captured;
+    std::vector<std::string> allowed;
+
+    const entry* chosen = route_for(q.method(), path, captured, allowed);
+
+    // The path is known, for other methods.  405 rather than 404, because the
+    // two say different things and a client can act on only one of them.
+    if(chosen == 0 && !allowed.empty()) {
+        response r;
+
+        method_not_allowed(r, q.method(), allowed);
+
+        s << r.str(m_options.server_name) << std::flush;
+
+        return;
+    }
 
     // A streaming route takes a different path entirely, because the promise
     // the buffered one makes -- that a handler which throws is still answered
     // -- cannot be kept once bytes have gone.
     // Registered for an async server, reached on a blocking one.  Refused
     // where it is reached, so one route table can be built for both modes.
-    if(chosen && chosen->async_stream) {
+    if(chosen && (chosen->async_stream || chosen->async_param_stream)) {
         response oops;
 
         oops.status(500).type("text/plain")
@@ -446,7 +657,7 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
         return;
     }
 
-    if(chosen && chosen->stream) {
+    if(chosen && (chosen->stream || chosen->param_stream)) {
         responder out(s, m_options.server_name);
 
         // Chunked for an HTTP/1.1 client, the close for anything older.  This
@@ -456,7 +667,8 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
         out.framing(q.version() == "HTTP/1.1");
 
         try {
-            chosen->stream(q, out);
+            if(chosen->param_stream) chosen->param_stream(q, captured, out);
+            else                     chosen->stream(q, out);
         }
         catch(...) {
             if(!out.started()) {
@@ -505,7 +717,8 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
     std::string answer;
 
     try {
-        (chosen ? chosen->run : m_otherwise)(q, r);
+        if(chosen && chosen->param_run) chosen->param_run(q, captured, r);
+        else (chosen ? chosen->run : m_otherwise)(q, r);
 
         answer = r.str(m_options.server_name);
     }
@@ -637,6 +850,50 @@ void server::route(const std::string& method, const std::string& path,
     e.method = method;
     e.path = path;
     e.async_stream = std::move(h);
+
+    compile_route(e);
+
+    m_routes.push_back(std::move(e));
+}
+
+void server::route(const std::string& method, const std::string& path,
+                   param_handler h)
+{
+    entry e;
+
+    e.method = method;
+    e.path = path;
+    e.param_run = std::move(h);
+
+    compile_route(e);
+
+    m_routes.push_back(std::move(e));
+}
+
+void server::route(const std::string& method, const std::string& path,
+                   param_stream_handler h)
+{
+    entry e;
+
+    e.method = method;
+    e.path = path;
+    e.param_stream = std::move(h);
+
+    compile_route(e);
+
+    m_routes.push_back(std::move(e));
+}
+
+void server::route(const std::string& method, const std::string& path,
+                   async_param_stream_handler h)
+{
+    entry e;
+
+    e.method = method;
+    e.path = path;
+    e.async_param_stream = std::move(h);
+
+    compile_route(e);
 
     m_routes.push_back(std::move(e));
 }
@@ -914,13 +1171,26 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
         co_return false;
     }
 
-    const entry* chosen = route_for(q.method(), path);
+    params captured;
+    std::vector<std::string> allowed;
+
+    const entry* chosen = route_for(q.method(), path, captured, allowed);
+
+    if(chosen == 0 && !allowed.empty()) {
+        response r;
+
+        method_not_allowed(r, q.method(), allowed);
+
+        co_await out.send(r);
+
+        co_return false;
+    }
 
     // A route registered for the blocking streaming handler cannot run here:
     // responder writes to a socketstream and there is not one.  Refused where
     // it is reached rather than where it was registered, so one route table
     // can be built for both modes.
-    if(chosen && chosen->stream) {
+    if(chosen && (chosen->stream || chosen->param_stream)) {
         response oops;
 
         oops.status(500).type("text/plain")
@@ -932,7 +1202,7 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
         co_return false;
     }
 
-    if(chosen && chosen->async_stream) {
+    if(chosen && (chosen->async_stream || chosen->async_param_stream)) {
         // Chunked needs an HTTP/1.1 client; anything older gets the close, and
         // gets it as the framing rather than as an afterthought.
         const bool can_chunk = q.version() == "HTTP/1.1";
@@ -954,7 +1224,10 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
         std::exception_ptr threw;
 
         try {
-            co_await chosen->async_stream(q, out);
+            if(chosen->async_param_stream)
+                co_await chosen->async_param_stream(q, captured, out);
+            else
+                co_await chosen->async_stream(q, out);
         }
         catch(...) {
             threw = std::current_exception();
@@ -1038,7 +1311,8 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     std::exception_ptr threw;
 
     try {
-        (chosen ? chosen->run : m_otherwise)(q, r);
+        if(chosen && chosen->param_run) chosen->param_run(q, captured, r);
+        else (chosen ? chosen->run : m_otherwise)(q, r);
     }
     catch(...) {
         threw = std::current_exception();
