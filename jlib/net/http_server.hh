@@ -719,6 +719,14 @@ public:
      *
      *     s.files("/static/*", "/srv/www");
      *
+     * Optionally with a `Cache-Control` value, which is the whole of the
+     * freshness story; the two obvious answers are opposites, so they are two
+     * registrations:
+     *
+     *     s.files("/assets/*", "/srv/www/assets",
+     *             "max-age=31536000, immutable");   // fingerprinted names
+     *     s.files("/*",        "/srv/www", "no-cache");  // revalidate always
+     *
      * Registers a GET route, which HEAD then answers too.  The file's
      * modification time and size become `Last-Modified` and a **weak** `ETag`,
      * so `If-None-Match` and `If-Modified-Since` work without the caller doing
@@ -757,6 +765,31 @@ public:
      * (#232).  No compression (#233).  No directory listing and no index.html,
      * which is deliberate -- both are decisions a caller should make out loud.
      *
+     * ## Freshness
+     *
+     * `cache_control` is sent verbatim as `Cache-Control` on every response
+     * that describes the file -- the 200, a 206, **and the 304** -- and
+     * omitted entirely when empty, which is the default.
+     *
+     * Per registration rather than per server, because the two obvious answers
+     * are opposites: a fingerprinted bundle wants `max-age=31536000,
+     * immutable` and an index.html wants `no-cache`.  A caller with both
+     * registers `files()` twice.
+     *
+     * **On the 304 as well** -- RFC 9110 15.4.5 requires a 304 to carry the
+     * fields a 200 would have, `Cache-Control` among them, because a client
+     * that revalidated and got back a bare 304 would lose the freshness it was
+     * told last time and have to ask again immediately.
+     *
+     * Nothing is invented.  A caller that says nothing gets no `Cache-Control`
+     * at all, which is what this did before the parameter existed; a client
+     * then caches by heuristic, which is its business rather than this
+     * server's guess.  `Vary` is not set either, and matters only once
+     * something is negotiated -- see #233.
+     *
+     * The value is checked against the field grammar **at registration**,
+     * where the caller is, rather than failing on the way out of a response.
+     *
      * There is a time-of-check-to-time-of-use window between the `realpath`
      * that decides containment and the `stat` that sizes the file (#234).  It
      * can only ever serve something that was inside the root at both moments,
@@ -768,7 +801,8 @@ public:
      *
      * @throws error if `root` cannot be resolved
      */
-    void files(const std::string& pattern, const std::string& root);
+    void files(const std::string& pattern, const std::string& root,
+               const std::string& cache_control = std::string());
 
     /** What runs when no route matched.  The default answers 404. */
     void otherwise(handler h);
