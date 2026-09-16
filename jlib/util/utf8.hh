@@ -107,10 +107,16 @@ public:
     /** Bytes currently held back.  For a test to look at; nothing else needs it. */
     std::size_t pending() const { return m_held.size(); }
 
-private:
-    /** How many bytes a character starting with this one has, or 0 if none can. */
+    /**
+     * How many bytes a character starting with this one has, or 0 if none can.
+     *
+     * Public because the same table answers a question a stream does not:
+     * whether a finished string ends on a character boundary.  See
+     * utf8_ends_mid_character() below.
+     */
     static std::size_t promised(unsigned char c);
 
+private:
     std::string m_held;
     std::size_t m_need = 0;
 };
@@ -171,6 +177,24 @@ inline std::string utf8_stream::feed(const std::string& bytes) {
     return out;
 }
 
+/**
+ * Whether a string stops in the middle of a character.
+ *
+ * The chunk-boundary question, which is not the same as "is this valid
+ * UTF-8": a caller handing over a fragment of a stream needs to know that the
+ * fragment can stand alone, and that is decided entirely at its tail.
+ *
+ * `jserve` needs it because an SSE event carries its content inside a JSON
+ * string, and a JSON text that is not valid UTF-8 is not valid JSON (#249).
+ * A refusal there is cheap and a client's decode error is not.
+ *
+ * A tail that is not a boundary at all -- four continuation bytes with no lead
+ * in front of them, or a lone continuation -- answers **true** as well. The
+ * question being asked is "may this be handed on", and the answer for those is
+ * no, whatever else is wrong with them.
+ */
+inline bool utf8_ends_mid_character(const std::string& s);
+
 inline std::size_t utf8_stream::end() {
     const std::size_t n = m_held.size();
 
@@ -178,6 +202,30 @@ inline std::size_t utf8_stream::end() {
     m_need = 0;
 
     return n;
+}
+
+inline bool utf8_ends_mid_character(const std::string& s) {
+    std::size_t back = 0;
+
+    while(back < 4 && back < s.size()) {
+        const unsigned char c = static_cast<unsigned char>(s[s.size() - 1 - back]);
+
+        if((c & 0xC0) == 0x80) {
+            back++;              // a continuation; the lead is further back
+
+            continue;
+        }
+
+        const std::size_t n = utf8_stream::promised(c);
+
+        // n == 0 is a byte that cannot start a character at all, so whatever
+        // this tail is, it is not a completed one.
+        return n == 0 || n != back + 1;
+    }
+
+    // Either the string is empty -- which ends on a boundary, vacuously -- or
+    // it is nothing but continuation bytes, which is not a character.
+    return !s.empty();
 }
 
 }
