@@ -383,7 +383,179 @@ static void a_framing_function_inherits_cancellation() {
     ok("  and cancelling the reader cancels the read", cancelled);
 }
 
+// ---- a sink, and one that suspends (#242) ---------------------------------
+
+/**
+ * The same body through both sinks, with the async one **suspending inside
+ * the sink**.
+ *
+ * That is the assertion the whole `task<bool>` signature exists for.  A sink
+ * returning bool would compile, deliver the same bytes, and be unable to do
+ * this -- and "unable to do this" is what a server streaming a request body
+ * onward needs, so it would have been discovered by somebody trying to write
+ * that, one design later.  See #218 for the same lesson learned the other way.
+ */
+static void a_sink_may_suspend() {
+    std::cout << "\na sink that suspends between blocks:\n";
+
+    const std::string wire = "6\r\nGET /a\r\n5\r\n HTTP\r\n0\r\n\r\n";
+
+    sys::reactor r;
+
+    int fds[2], gate[2];
+
+    if(::pipe(fds) != 0 || ::pipe(gate) != 0) {
+        ok("pipes", false);
+
+        return;
+    }
+
+    std::thread feeder([&]{
+        for(std::size_t at = 0; at < wire.size(); at += 3) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+            feed(fds[1], wire.substr(at, 3));
+        }
+
+        ::close(fds[1]);
+    });
+
+    sys::async_fd_reader in_r(r, fds[0]);
+
+    std::string got;
+    std::size_t suspensions = 0;
+
+    // The sink writes a byte to a pipe and waits for it to come back readable
+    // -- a real suspension, on the reactor, in the middle of reading a body.
+    sys::task<void> t = http::read_body(
+        in_r, http::framing::chunked, 0,
+        [&](std::string_view piece) -> sys::task<bool> {
+            got.append(piece);
+
+            const char one = 'x';
+
+            if(::write(gate[1], &one, 1) == 1) {
+                co_await sys::readable(r, gate[0]);
+
+                char back = 0;
+
+                if(::read(gate[0], &back, 1) == 1) suspensions++;
+            }
+
+            co_return true;
+        });
+
+    bool threw = false;
+
+    try { sys::run_until_complete(r, t); }
+    catch(std::exception& e) { threw = true; got = e.what(); }
+
+    feeder.join();
+
+    ::close(fds[0]);
+    ::close(gate[0]);
+    ::close(gate[1]);
+
+    ok("the body arrives through a sink that suspends", !threw && got == "GET /a HTTP",
+       threw ? got : "\"" + got + "\"");
+
+    ok("  and it really did suspend, once per block", suspensions >= 2,
+       std::to_string(suspensions) + " suspensions");
+}
+
+/** The two sinks see the same octets, which is this file's whole subject. */
+static void the_two_sinks_agree() {
+    std::cout << "\nthe blocking and suspending sinks agree:\n";
+
+    const std::string wire = "4\r\nabcd\r\n4\r\nefgh\r\n0\r\n\r\n";
+
+    std::string sync_got;
+
+    {
+        std::istringstream is(wire);
+
+        http::read_body(is, http::framing::chunked, 0,
+                        [&](std::string_view piece) {
+                            sync_got.append(piece);
+
+                            return true;
+                        });
+    }
+
+    sys::reactor r;
+
+    int fds[2];
+
+    if(::pipe(fds) != 0) { ok("pipe", false); return; }
+
+    std::thread feeder([&]{ feed(fds[1], wire); ::close(fds[1]); });
+
+    sys::async_fd_reader in_r(r, fds[0]);
+
+    std::string async_got;
+
+    // A temporary lambda, which is how anybody will call this -- and what
+    // crashed until the sink was taken by value.
+    sys::task<void> t = http::read_body(
+        in_r, http::framing::chunked, 0,
+        [&](std::string_view piece) -> sys::task<bool> {
+            async_got.append(piece);
+
+            co_return true;
+        });
+
+    sys::run_until_complete(r, t);
+
+    feeder.join();
+
+    ::close(fds[0]);
+
+    ok("both sinks see the same body", sync_got == async_got && sync_got == "abcdefgh",
+       sync_got + " vs " + async_got);
+}
+
+/** A sink that stops, which ends the read wherever it had got to. */
+static void a_suspending_sink_may_stop() {
+    std::cout << "\na suspending sink that says stop:\n";
+
+    const std::string wire = "4\r\nabcd\r\n4\r\nefgh\r\n0\r\n\r\n";
+
+    sys::reactor r;
+
+    int fds[2];
+
+    if(::pipe(fds) != 0) { ok("pipe", false); return; }
+
+    std::thread feeder([&]{ feed(fds[1], wire); ::close(fds[1]); });
+
+    sys::async_fd_reader in_r(r, fds[0]);
+
+    std::string got;
+    std::size_t calls = 0;
+
+    sys::task<void> t = http::read_body(
+        in_r, http::framing::chunked, 0,
+        [&](std::string_view piece) -> sys::task<bool> {
+            calls++;
+            got.append(piece);
+
+            co_return false;
+        });
+
+    sys::run_until_complete(r, t);
+
+    feeder.join();
+
+    ::close(fds[0]);
+
+    ok("the read ends at the first refusal", calls == 1 && got == "abcd",
+       std::to_string(calls) + " calls, \"" + got + "\"");
+}
+
 int main() {
+    the_two_sinks_agree();
+    a_sink_may_suspend();
+    a_suspending_sink_may_stop();
     std::cout << std::unitbuf;
 
     the_two_read_heads_agree();

@@ -518,7 +518,156 @@ static void a_relative_reference_parses_now() {
        URL::valid("https://x/y"));
 }
 
+// ---- a body handed over as it arrives (#242) ------------------------------
+
+/** Every block a sink was called with, and how many calls that was. */
+struct poured {
+    std::string body;
+    std::size_t calls = 0;
+    std::size_t largest = 0;
+};
+
+static poured pour_it(const std::string& wire, http::framing how,
+                      std::size_t length, std::size_t cap = http::no_cap,
+                      std::size_t stop_after = 0)
+{
+    poured p;
+
+    std::istringstream is(wire);
+
+    http::read_body(is, how, length,
+                    [&](std::string_view piece) {
+                        p.calls++;
+                        p.body.append(piece);
+
+                        if(piece.size() > p.largest) p.largest = piece.size();
+
+                        return !stop_after || p.calls < stop_after;
+                    },
+                    cap);
+
+    return p;
+}
+
+static void a_body_reaches_a_sink() {
+    std::cout << "\na body handed over as it arrives:\n";
+
+    {
+        const poured p = pour_it("hello there", http::framing::length, 11);
+
+        ok("a body of a stated length arrives whole", p.body == "hello there",
+           p.body);
+
+        ok("  in one block, being short", p.calls == 1,
+           std::to_string(p.calls) + " calls");
+    }
+
+    {
+        // The contract the header states: a block is not a chunk.  This chunk
+        // is larger than the block size, so it cannot arrive in one call, and
+        // a caller that assumed one-call-per-chunk would be wrong here.
+        const std::string big(10000, 'z');
+
+        std::ostringstream wire;
+
+        wire << std::hex << big.size() << "\r\n" << big << "\r\n"
+             << "3\r\nend\r\n0\r\n\r\n";
+
+        const poured p = pour_it(wire.str(), http::framing::chunked, 0);
+
+        ok("a chunked body arrives complete", p.body == big + "end",
+           std::to_string(p.body.size()) + " octets");
+
+        ok("  in blocks rather than chunks", p.calls > 2,
+           std::to_string(p.calls) + " calls for 2 chunks");
+
+        ok("  none larger than the block size", p.largest <= 4096,
+           std::to_string(p.largest));
+    }
+
+    {
+        // Stopping inside a *chunked* body is its own path: the chunk loop has
+        // to notice and give up rather than go round for the next chunk size.
+        // Asserted separately because the length case above does not reach it
+        // -- removing the check in the chunk loop broke nothing until this
+        // case existed.
+        std::ostringstream wire;
+
+        wire << "4\r\nabcd\r\n4\r\nefgh\r\n0\r\n\r\n";
+
+        const poured p = pour_it(wire.str(), http::framing::chunked, 0,
+                                 http::no_cap, 1);
+
+        ok("a stop inside a chunked body ends the read",
+           p.calls == 1 && p.body == "abcd",
+           std::to_string(p.calls) + " calls, \"" + p.body + "\"");
+    }
+
+    {
+        // Nothing here can put the octets back, which is why the header says
+        // the connection cannot be reused after this.
+        const poured p = pour_it(std::string(20000, 'a'), http::framing::length,
+                                 20000, http::no_cap, 2);
+
+        ok("a sink that says stop is not called again", p.calls == 2,
+           std::to_string(p.calls));
+
+        ok("  and read_body returns rather than throwing",
+           p.body.size() == 8192, std::to_string(p.body.size()) + " octets read");
+    }
+}
+
+static void a_cap_is_still_a_cap() {
+    std::cout << "\nwhat a cap still bounds:\n";
+
+    const std::string big(2 * 1024 * 1024, 'x');
+
+    {
+        // A streaming caller means it, and says so.
+        const poured p = pour_it(big, http::framing::length, big.size(),
+                                 http::no_cap);
+
+        ok("no_cap reads a body past the old default",
+           p.body.size() == big.size(), std::to_string(p.body.size()));
+    }
+
+    {
+        bool threw = false;
+
+        std::istringstream is(big);
+
+        // And the refusal still happens before an octet is read, which is the
+        // whole value of a declared length.
+        try {
+            http::read_body(is, http::framing::length, big.size(),
+                            [](std::string_view) { return true; },
+                            1 << 20);
+        }
+        catch(http::error&) { threw = true; }
+
+        ok("a declared length past the cap is still refused", threw);
+
+        ok("  before anything was read from the stream",
+           is.tellg() == std::streampos(0), std::to_string(long(is.tellg())));
+    }
+
+    {
+        // The accumulating overload is now this one with a sink that appends,
+        // and it has to behave exactly as it did.
+        bool threw = false;
+
+        std::istringstream is(big);
+
+        try { http::read_body(is, http::framing::length, big.size(), 1 << 20); }
+        catch(http::error&) { threw = true; }
+
+        ok("and the accumulating overload refuses the same body", threw);
+    }
+}
+
 int main() {
+    a_body_reaches_a_sink();
+    a_cap_is_still_a_cap();
     std::cout << std::unitbuf;
 
     the_grammar_is_the_whole_rfc();
