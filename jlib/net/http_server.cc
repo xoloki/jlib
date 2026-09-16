@@ -1472,6 +1472,164 @@ bool server::matches(const entry& e, const std::vector<std::string>& parts,
     return true;
 }
 
+/**
+ * Compare two tokens the way RFC 9110 compares an auth-scheme: ASCII
+ * case-insensitively.  `Basic`, `basic` and `BASIC` are one scheme.
+ */
+static bool same_scheme(const std::string& a, const std::string& b) {
+    if(a.size() != b.size()) return false;
+
+    for(std::size_t i = 0; i < a.size(); i++) {
+        const char x = a[i] | 0x20;
+        const char y = b[i] | 0x20;
+
+        if(x != y) return false;
+    }
+
+    return true;
+}
+
+/**
+ * Take an `Authorization` value apart, or say it is not one.
+ *
+ * Read by the grammar rather than by find(":") and substr(), which is the
+ * house norm and here also the difference between accepting `Basic x` and
+ * accepting anything with a space in it.  The rules had to be reordered to
+ * make this possible at all; see rfc9110.hh at `credentials`.
+ */
+static bool read_credentials(const std::string& value,
+                             server::credentials& into)
+{
+    const util::abnf::parse_result r =
+        util::http::grammar().at("credentials").try_parse(value);
+
+    if(!r) return false;
+
+    const util::abnf::match m = r.root();
+
+    into.scheme = m["auth-scheme"].str();
+    into.token = m["token68"].str();
+
+    // Basic is base64 of user:pass, and the decode is the strict one.
+    // base64::decode is deliberately lenient -- RFC 2045 says to ignore
+    // characters outside the alphabet so that MIME line breaks work -- and
+    // that leniency is wrong for a credential: it would quietly accept
+    // `dXNl cjpw YXNz` and, worse, drop a short final group rather than
+    // refusing it.  A password is not a MIME body.
+    if(same_scheme(into.scheme, "Basic") && !into.token.empty()) {
+        bool clean = true;
+
+        const std::string flat = util::base64::decode(into.token, clean);
+
+        if(!clean) return false;
+
+        const std::string::size_type colon = flat.find(':');
+
+        // RFC 7617 2: the user-id cannot contain a colon, so the first one is
+        // the separator and everything after it is the password, colons and
+        // all.  No colon at all is not a Basic credential.
+        if(colon == std::string::npos) return false;
+
+        into.user = flat.substr(0, colon);
+        into.password = flat.substr(colon + 1);
+    }
+
+    return true;
+}
+
+/** A 401, carrying the challenge that says what would have worked. */
+static void unauthorized(server::response& r, const std::string& challenge) {
+    r = server::response();
+
+    r.status(401).type("text/plain")
+     .field("WWW-Authenticate", challenge)
+     .body("authentication required\n");
+}
+
+void server::protect(const std::string& pattern, const std::string& challenge,
+                     verifier v)
+{
+    // Empty first, and separately, because `WWW-Authenticate` is
+    // `[ challenge *( ... ) ]` -- the whole field is optional, so the empty
+    // string parses.  A 401 carrying an empty challenge is a refusal that
+    // says nothing about what would work, which is precisely what the field
+    // exists to prevent, so the grammar cannot be the only check.
+    if(challenge.empty()) {
+        throw error("cannot protect \"" + pattern +
+                    "\": a challenge is required, and an empty one tells a "
+                    "client nothing");
+    }
+
+    if(!util::http::grammar().at("WWW-Authenticate").try_parse(challenge)) {
+        throw error("cannot protect \"" + pattern + "\": \"" + challenge +
+                    "\" is not a usable challenge");
+    }
+
+    if(!v) throw error("cannot protect \"" + pattern + "\": no verifier");
+
+    guard g;
+
+    // Method is not part of a guard: a protected prefix is protected for every
+    // method, including the ones no route answers.  `entry::method` is left
+    // empty and `matches()` never reads it.
+    g.where.path = pattern;
+    g.challenge = challenge;
+    g.check = std::move(v);
+
+    compile_route(g.where);
+
+    m_guards.push_back(std::move(g));
+}
+
+const server::guard* server::guard_for(const std::string& path) const {
+    const std::vector<std::string> parts = split_path(path);
+
+    const guard* best = 0;
+
+    for(const guard& g : m_guards) {
+        params ignored;
+
+        if(!matches(g.where, parts, ignored)) continue;
+
+        // Most literal segments wins, exactly as route_for decides, so that
+        // /admin/api/* can carry a different challenge from /admin/*.  A tie
+        // goes to whichever was registered first, which is also route_for's
+        // answer and is only reachable by registering the same pattern twice.
+        if(best == 0 || g.where.literals > best->where.literals) best = &g;
+    }
+
+    return best;
+}
+
+bool server::allowed_through(const util::http::Request& q,
+                             const std::string& path, response& r) const
+{
+    const guard* g = guard_for(path);
+
+    if(g == 0) return true;
+
+    const std::string sent = q.fields().get("Authorization");
+
+    if(sent.empty()) {
+        unauthorized(r, g->challenge);
+
+        return false;
+    }
+
+    credentials c;
+
+    // Unparseable and wrong are the same answer on purpose.  Telling a client
+    // *why* its credentials were rejected is telling an attacker which half to
+    // keep working on.
+    if(!read_credentials(sent, c) || !g->check(c)) {
+        unauthorized(r, g->challenge);
+
+        return false;
+    }
+
+    return true;
+}
+
 const server::entry* server::route_for(const std::string& method,
                                        const std::string& path,
                                        params& into,
@@ -1607,6 +1765,19 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
         s << r.str(m_options.server_name) << std::flush;
 
         return;
+    }
+
+    // **Before routing**, so a protected path that does not exist answers 401
+    // rather than 404.  Routing first would make the status a directory
+    // listing for anyone willing to ask twice.
+    {
+        response denied;
+
+        if(!allowed_through(q, path, denied)) {
+            s << denied.str(m_options.server_name) << std::flush;
+
+            return;
+        }
     }
 
     params captured;
@@ -2193,6 +2364,19 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
         co_await out.send(r);
 
         co_return false;
+    }
+
+    // **Before routing**, so a protected path that does not exist answers 401
+    // rather than 404.  Routing first would make the status a directory
+    // listing for anyone willing to ask twice.
+    {
+        response denied;
+
+        if(!allowed_through(q, path, denied)) {
+            co_await out.send(denied);
+
+            co_return false;
+        }
     }
 
     params captured;

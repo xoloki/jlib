@@ -167,10 +167,15 @@ struct server_options {
  * No HTTP/2 or /3.  No compression (#233).  No `multipart/byteranges`, so a
  * multi-range request gets the whole body (#232).  No `If-Match` or
  * `If-Unmodified-Since`, so a precondition can only succeed -- 412 is
- * unreachable (#231).  No `Cache-Control` and no `Vary` (#230).  No
- * authentication, no rate limiting, no per-address anything, and those three
- * are not filed because they are what "not for a public port" means rather
- * than gaps in a plan.
+ * unreachable (#231).  No `Vary`, which stays empty until something is
+ * negotiated (#233); `Cache-Control` is per `files()` route.
+ *
+ * Authentication is `protect()` -- Basic and Bearer, per prefix.  No Digest,
+ * no sessions, no login form, and **no authorisation**: a verifier says
+ * whether credentials are good, never what they may do.
+ *
+ * No rate limiting and no per-address cap (#238), so one client can still
+ * take every connection slot.
  *
  * **It is not hardened for a public port** -- see the note on sys::server --
  * and that sentence has more to protect now than when it was written.  It
@@ -790,10 +795,15 @@ public:
      * The value is checked against the field grammar **at registration**,
      * where the caller is, rather than failing on the way out of a response.
      *
-     * There is a time-of-check-to-time-of-use window between the `realpath`
-     * that decides containment and the `stat` that sizes the file (#234).  It
-     * can only ever serve something that was inside the root at both moments,
-     * which is why it is recorded rather than fixed.
+     * The file is opened once and every later answer comes from that
+     * descriptor -- the type, the validators, the length, and the bytes.  The
+     * name is resolved afterwards and bound to the descriptor by device and
+     * inode, so the file that passed the containment check and the file that
+     * is read are the same file (#234).
+     *
+     * That was not a theoretical window.  Checking the name and then opening
+     * it again served a file from outside the root, measurably, on every run
+     * of a test that flips a symlink while requests are in flight.
      *
      * And the header above still says this server is not hardened for a public
      * port.  A file server is the feature most likely to make somebody forget
@@ -803,6 +813,76 @@ public:
      */
     void files(const std::string& pattern, const std::string& root,
                const std::string& cache_control = std::string());
+
+    /**
+     * What a client sent in `Authorization`, taken apart.
+     *
+     * `scheme` is as sent and **must be compared case-insensitively** -- it is
+     * a token, and RFC 9110 11.1 says so.  `Basic` and `basic` are the same
+     * scheme, and a verifier that uses `==` will be bypassed by lowercasing.
+     */
+    struct credentials {
+        std::string scheme;
+
+        /** The token68, when that is what was sent.  Bearer's whole content. */
+        std::string token;
+
+        /** Basic only, decoded from `token`; empty for every other scheme. */
+        std::string user;
+        std::string password;
+    };
+
+    /** True if these credentials are acceptable.  Called on the serving thread. */
+    typedef std::function<bool(const credentials&)> verifier;
+
+    /**
+     * Require credentials on every path matching `pattern`.
+     *
+     *     s.protect("/admin/*", "Basic realm=\"jlib\"",
+     *               [](const server::credentials& c) {
+     *                   return c.user == "root" && check(c.password);
+     *               });
+     *
+     * `challenge` is sent verbatim as `WWW-Authenticate` on the 401, and is
+     * checked against the grammar **at registration**, where the caller is --
+     * the same argument `files()` makes for its `Cache-Control`.  A 401 whose
+     * challenge a client cannot parse is a refusal that does not say what to
+     * do instead, which is the whole reason the field exists.
+     *
+     * ## Checked before routing, deliberately
+     *
+     * A protected path that does not exist answers 401, not 404.  Routing
+     * first would make the 404 a directory listing for anyone patient enough
+     * to ask -- the status alone says which paths are real.  The cost is that
+     * a typo under a protected prefix looks like a credentials problem.
+     *
+     * Where several patterns match, the most specific wins, by the same count
+     * of literal segments `route()` uses.  So `/admin/*` can be Basic while
+     * `/admin/api/*` is Bearer.
+     *
+     * ## What this is not
+     *
+     * - **Not authorisation.** The verifier says whether the credentials are
+     *   good, not what they may do.  A verifier that wants per-path rules gets
+     *   no path, on purpose: that is a second decision and it belongs to a
+     *   handler that knows what it is guarding.
+     * - **No Digest** (RFC 7616): effectively dead, and its nonce bookkeeping
+     *   is server-side state for a scheme nothing uses over TLS.
+     * - **No session, no cookie, no login form.**  Those are an application's,
+     *   and every one of them is built on top of this rather than beside it.
+     *
+     * ## Basic is cleartext
+     *
+     * `Basic` is base64, which is not encryption: anyone who can read the
+     * connection can read the password. It is only ever safe over TLS, and
+     * this server will not stop you using it without.  Bearer is no better --
+     * a token in a header is a password with a different name.
+     *
+     * @throws error if the pattern is not a usable route pattern, if
+     *         `challenge` is empty, or if it is not a usable challenge
+     */
+    void protect(const std::string& pattern, const std::string& challenge,
+                 verifier v);
 
     /** What runs when no route matched.  The default answers 404. */
     void otherwise(handler h);
@@ -877,6 +957,31 @@ private:
 
     /** Parse a pattern into `e`, or throw if it cannot be one. */
     static void compile_route(entry& e);
+
+    /**
+     * One protected prefix.
+     *
+     * The pattern lives in an `entry` so that `compile_route` and `matches`
+     * are the same code routes use -- a guard whose patterns behaved subtly
+     * differently from the routes they guard is the bug this avoids.  Its
+     * handler fields are all empty and never read.
+     */
+    struct guard {
+        entry       where;
+        std::string challenge;
+        verifier    check;
+    };
+
+    /** The most specific guard matching `path`, or null. */
+    const guard* guard_for(const std::string& path) const;
+
+    /**
+     * Decide the 401, if there is one.
+     *
+     * @return true if the request may proceed; otherwise `r` is the answer.
+     */
+    bool allowed_through(const util::http::Request& q, const std::string& path,
+                         response& r) const;
 
     /**
      * Does this entry's pattern match `parts`?  If so, fill `into`.
@@ -954,6 +1059,7 @@ private:
 
     options m_options;
     std::vector<entry> m_routes;
+    std::vector<guard> m_guards;
     handler m_otherwise;
     std::unique_ptr<sys::server> m_transport;
     bool m_tls = false;
