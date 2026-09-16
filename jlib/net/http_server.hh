@@ -27,8 +27,11 @@
 #include <jlib/sys/task.hh>
 #include <jlib/sys/tls.hh>
 
+#include <chrono>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -174,8 +177,10 @@ struct server_options {
  * no sessions, no login form, and **no authorisation**: a verifier says
  * whether credentials are good, never what they may do.
  *
- * No rate limiting and no per-address cap (#238), so one client can still
- * take every connection slot.
+ * Requests are rate-limited per address by `rate_limit()`, off by default.
+ * There is still **no per-address connection cap** (#238), so one client can
+ * hold every slot `sys::server_policy::max_connections` allows -- the limit
+ * above bounds how fast a connection may ask, not how many a client may open.
  *
  * **It is not hardened for a public port** -- see the note on sys::server --
  * and that sentence has more to protect now than when it was written.  It
@@ -884,6 +889,154 @@ public:
     void protect(const std::string& pattern, const std::string& challenge,
                  verifier v);
 
+    /**
+     * Refuse more than `per_second` requests from one address, 429.
+     *
+     *     s.rate_limit(10, 20);   // ten a second, twenty may arrive at once
+     *
+     * A token bucket per address: `burst` tokens to start, one spent per
+     * request, refilled at `per_second`.  So a client may arrive all at once
+     * up to `burst` and then settles to `per_second`, which is the behaviour
+     * anything bursty -- a page and its dozen assets -- needs to not be broken
+     * by a limit meant for an attacker.
+     *
+     * Zero `per_second` turns it off, and off is the default: a limit is a
+     * policy about who is calling, and a library that guessed one would be
+     * wrong for a loopback receiver and for a public port in opposite
+     * directions.
+     *
+     * The refusal is a **429 with `Retry-After`**, in seconds, rounded up --
+     * the counterpart of 401's `WWW-Authenticate` and 405's `Allow`: a
+     * refusal that says what to do instead. The connection stays open, so a
+     * client that backs off does not pay for a new one.
+     *
+     * ## Per request, and after the head is read
+     *
+     * Checked once the request head has been parsed, so a refused request has
+     * already cost a parse. Refusing before that would mean refusing per
+     * *connection*, which is a different limit -- and the thing this exists to
+     * stop, a thousand password guesses, fits comfortably down one connection.
+     *
+     * It runs **before** `protect()`, so a 429 can be reached without
+     * credentials. A rate limit that only applied to requests which got past
+     * authentication would be no protection for the thing most worth
+     * protecting.
+     *
+     * ## The address is the peer, and only the peer
+     *
+     * `X-Forwarded-For` is **not** read. It is client-supplied, so believing
+     * it unconditionally lets anybody be any address, which is worse than no
+     * limit at all -- it is a limit an attacker can aim at somebody else.
+     *
+     * The consequence is the one to know before deploying: **behind a proxy,
+     * every client is one address**, so this limits the proxy. A list of
+     * proxies whose forwarded headers are believed -- nginx's
+     * `set_real_ip_from` -- is what fixes it, and it belongs with jhttpd's
+     * configuration rather than here (#239).
+     *
+     * Loopback is not exempt. An exemption would be untestable, since every
+     * test in this tree connects over loopback.
+     *
+     * @param per_second requests per second per address; 0 turns it off
+     * @param burst      how many may arrive at once; clamped to at least 1
+     */
+    void rate_limit(double per_second, double burst);
+
+    /**
+     * A token bucket per address.
+     *
+     * **Public so it can be tested at all.**  Per-address separation is the
+     * whole of what this does, and it cannot be reached through the server:
+     * every client in this tree connects over loopback, and both platforms
+     * hand the server 127.0.0.1 as the peer whichever loopback address is
+     * dialled -- measured, not assumed.  So the algorithm is tested here
+     * directly, with addresses supplied as strings, and the server tests cover
+     * the wiring.  It is a small enough thing to be useful on its own.
+     *
+     * Locked, because the two servers reach it from different threads: a
+     * blocking server from whichever worker took the connection, an async one
+     * from the reactor thread. One mutex over a small map, held for the
+     * arithmetic and nothing else.
+     */
+    class limiter {
+    public:
+        void configure(double per_second, double burst);
+
+        /**
+         * How many addresses are currently remembered.
+         *
+         * Public because it is the only externally visible consequence of the
+         * sweep, and a table that grows without bound is the failure mode this
+         * component has.  An operator watching one number should watch this.
+         */
+        std::size_t tracked() const;
+
+        /**
+         * Spend a token for `who`, or say how long until there is one.
+         *
+         * @return true if the request may proceed; otherwise `retry_after` is
+         *         set to whole seconds, at least 1
+         */
+        bool allow(const std::string& who, long& retry_after);
+
+    private:
+        struct bucket {
+            double                                tokens = 0;
+            std::chrono::steady_clock::time_point when;
+        };
+
+        /**
+         * Drop every bucket that is full, and then, if that was not enough,
+         * the fullest of what is left.
+         *
+         * The first pass is **exact, not an approximation**: a bucket refilled
+         * to `burst` is indistinguishable from an address never seen before --
+         * both start the next request with a full bucket -- so erasing it
+         * changes no answer this will ever give.
+         *
+         * The first pass alone does not bound anything, which is the part that
+         * had to be measured rather than assumed. It frees a bucket only once
+         * that bucket has had time to refill, so when addresses arrive faster
+         * than a token is worth, **nothing is ever full and nothing is ever
+         * freed**. 50,000 distinct addresses at a slow rate kept 50,000
+         * buckets, and every request past `sweep_at` walked all of them. A
+         * rate limiter that an attacker turns into unbounded memory and an
+         * O(n) scan per request by varying a source address -- trivial with a
+         * v6 allocation -- is worse than no rate limiter.
+         *
+         * So there is a hard bound. Over `max_tracked`, the **fullest**
+         * buckets go first: evicting a bucket grants its address a fresh
+         * allowance, and the fullest is the one closest to having that anyway,
+         * so it is the least that can be given away. Under address flooding
+         * the limit degrades toward permissive rather than growing without
+         * bound, and that is a choice -- the other way, refusing to track a
+         * new address, denies service to everybody the attacker is not.
+         *
+         * Runs only when the table is over `max_tracked`, and clears it down
+         * to three quarters of that rather than to exactly the bound. The
+         * hysteresis is what makes the cost amortised: without it, every
+         * request past the bound would pay for a full scan and a sort, which
+         * is a worse version of the problem being fixed.
+         */
+        void sweep(std::chrono::steady_clock::time_point now);
+
+        /**
+         * The hard bound on the table, whatever the first pass freed.
+         *
+         * Not measured -- the kind of constant #235 is about -- and it is a
+         * policy rather than a tuning knob: it is how many addresses an
+         * attacker must flood before the limit begins to give way, and how
+         * much memory that costs.
+         */
+        static const std::size_t max_tracked = 4096;
+
+        mutable std::mutex             m_lock;
+        double                         m_rate = 0;
+        double                         m_burst = 0;
+        std::map<std::string, bucket>  m_buckets;
+    };
+
+
     /** What runs when no route matched.  The default answers 404. */
     void otherwise(handler h);
 
@@ -976,6 +1129,13 @@ private:
     const guard* guard_for(const std::string& path) const;
 
     /**
+     * Decide the 429, if there is one.
+     *
+     * @return true if the request may proceed; otherwise `r` is the answer.
+     */
+    bool within_rate(const sys::peer& from, response& r);
+
+    /**
      * Decide the 401, if there is one.
      *
      * @return true if the request may proceed; otherwise `r` is the answer.
@@ -1060,6 +1220,7 @@ private:
     options m_options;
     std::vector<entry> m_routes;
     std::vector<guard> m_guards;
+    limiter m_limits;
     handler m_otherwise;
     std::unique_ptr<sys::server> m_transport;
     bool m_tls = false;
