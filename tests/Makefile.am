@@ -138,6 +138,7 @@ TESTS = \
 	util_jinja_test \
 	util_abnf_compile_test \
 	util_utf8_test \
+	app_jserve_test \
  \
 	$(X_TESTS) \
 	$(METAL_TESTS) \
@@ -396,6 +397,12 @@ app_jchat_test_LDADD    = $(JSYS_LA)
 # Header-only, and deliberately so: the rule about where a character ends is
 # testable with no terminal, where the drawing it feeds is not.
 util_utf8_test_SOURCES  = util_utf8_test.cc
+
+# jserve's endpoint with a fake engine: the real server, the real client, the
+# real wire format, and a scripted model (#236).
+app_jserve_test_SOURCES  = app_jserve_test.cc
+app_jserve_test_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)
+app_jserve_test_LDADD    = $(JAI_LA) $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) $(METAL_LA)
 
 ai_chat_test_SOURCES  = ai_chat_test.cc
 ai_chat_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)

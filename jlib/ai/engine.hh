@@ -22,10 +22,12 @@
 #define JLIB_AI_ENGINE_HH
 
 #include <jlib/ai/chat.hh>
+#include <jlib/ai/generate.hh>
 #include <jlib/ai/gguf.hh>
 #include <jlib/ai/model.hh>
 #include <jlib/ai/tokenizer.hh>
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -157,6 +159,30 @@ public:
 
         /** What the file says it can hold, or what the engine capped it to. */
         unsigned int context() const { return m_m->context; }
+
+        /**
+         * Run a generation on this session's model.
+         *
+         * A forwarder to ai::generate, and worth having for two reasons.  A
+         * session already knows which model it holds, so pairing one with
+         * somebody else's is a mistake that cannot be made through here --
+         * the caller used to reach in for model() and supply a backend
+         * alongside it.  And it is the seam a test drives: `endpoint` is
+         * templated on the engine, so a fake session answers this with a
+         * fixed sequence of tokens and the whole HTTP path runs with no model
+         * file (#236).
+         *
+         * The backend is still the caller's, because the engine does not own
+         * one -- it is passed to the constructor and shared by every model.
+         */
+        std::vector<int> generate(backend<T>& b, const std::vector<int>& prompt,
+                                  unsigned int max_new, sampler& s,
+                                  const stops& ends = stops(),
+                                  std::function<bool(int)> on_token = nullptr)
+        {
+            return ai::generate<T>(model(), b, prompt, max_new, s, ends,
+                                   on_token);
+        }
 
         const std::string& name() const { return m_m->name; }
 
