@@ -20,6 +20,8 @@
 
 #include <jlib/ai/openai.hh>
 
+#include <jlib/util/utf8.hh>
+
 #include <jlib/util/json.hh>
 
 #include <atomic>
@@ -166,11 +168,45 @@ util::json::object::ptr envelope(const std::string& id,
 
 }
 
+namespace {
+
+/**
+ * Refuse content that stops in the middle of a character.
+ *
+ * There is no escape for half a character: `\uXXXX` needs a codepoint and
+ * half of one does not have it, so what goes out is a raw byte inside a JSON
+ * string -- and a JSON text that is not valid UTF-8 is not valid JSON (RFC
+ * 8259 8.1).  Every client decodes the SSE line as text *before* parsing it,
+ * so the failure lands as an exception in somebody else's program, a long way
+ * from the endpoint that caused it.
+ *
+ * jserve streamed one event per token and a byte-fallback vocabulary gives one
+ * byte per token, which made twelve broken events out of one three-emoji reply
+ * (#249).  It holds whole characters now; this is here so that the next
+ * caller to stream a fragment finds out at the point the format is defined
+ * rather than in a client's traceback.
+ *
+ * json::exception because the statement is exactly that: this cannot be a
+ * JSON string.
+ */
+void refuse_a_partial_character(const std::string& content, const char* what) {
+    if(!jlib::util::utf8_ends_mid_character(content))
+        return;
+
+    throw util::json::exception(std::string("a chat ") + what +
+                                " whose content ends in the middle of a UTF-8 "
+                                "character, which no JSON string can hold");
+}
+
+}
+
 std::string completion(const std::string& id, const std::string& model,
                        std::int64_t created, const std::string& content,
                        finish why, unsigned int prompt_tokens,
                        unsigned int completion_tokens)
 {
+    refuse_a_partial_character(content, "completion");
+
     util::json::object::ptr root = envelope(id, model, created,
                                             "chat.completion");
 
@@ -205,6 +241,8 @@ std::string completion(const std::string& id, const std::string& model,
 std::string chunk(const std::string& id, const std::string& model,
                   std::int64_t created, const delta& d)
 {
+    refuse_a_partial_character(d.content, "completion chunk");
+
     util::json::object::ptr root = envelope(id, model, created,
                                             "chat.completion.chunk");
 

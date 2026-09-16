@@ -291,6 +291,97 @@ static void errors_are_unwrappable() {
        std::string(o->obj("error")->get("type")) == "invalid_request_error");
 }
 
+/** U+1F355, which a byte-fallback vocabulary hands over one byte at a time. */
+static const std::string PIZZA = "\xf0\x9f\x8d\x95";
+
+static void a_partial_character_is_refused() {
+    std::cout << "\na fragment that is not a whole string:\n";
+
+    // The shape of #249: jserve sent one event per token and the vocabulary
+    // gave one byte per token, so this is what reached chunk() four times.
+    for(std::size_t n = 1; n < 4; n++) {
+        oa::delta d;
+
+        d.content = PIZZA.substr(0, n);
+
+        bool threw = false;
+
+        try { oa::chunk("id", "m", 1, d); }
+        catch(json::exception&) { threw = true; }
+
+        ok("  " + std::to_string(n) + " byte(s) of a character is refused", threw);
+    }
+
+    {
+        oa::delta d;
+
+        d.content = PIZZA;
+
+        bool threw = false;
+
+        try { oa::chunk("id", "m", 1, d); }
+        catch(json::exception&) { threw = true; }
+
+        ok("  and the whole character is not", !threw);
+    }
+
+    // The tail is the only thing that decides it: a character in the middle of
+    // a longer fragment was never the question.
+    {
+        oa::delta d;
+
+        d.content = "a " + PIZZA + " b";
+
+        bool threw = false;
+
+        try { oa::chunk("id", "m", 1, d); }
+        catch(json::exception&) { threw = true; }
+
+        ok("  a character inside a longer fragment is fine", !threw);
+    }
+
+    {
+        oa::delta d;
+
+        d.content = "hi " + PIZZA.substr(0, 2);
+
+        bool threw = false;
+
+        try { oa::chunk("id", "m", 1, d); }
+        catch(json::exception&) { threw = true; }
+
+        ok("  but good text in front of a broken tail does not save it", threw);
+    }
+
+    // A whole reply ends mid-character too, when the generation stops between
+    // two byte-fallback tokens -- so the non-streaming path needs the same
+    // refusal and it is easy to give it only to the streaming one.
+    {
+        bool threw = false;
+
+        try {
+            oa::completion("id", "m", 1, "the answer is " + PIZZA.substr(0, 3),
+                           oa::finish::length, 3, 4);
+        }
+        catch(json::exception&) { threw = true; }
+
+        ok("  and a completion is refused on the same grounds", threw);
+    }
+
+    // What the refusal must not do is reject text that is merely not ASCII.
+    {
+        bool threw = false;
+
+        try {
+            oa::completion("id", "m", 1, "caf\xc3\xa9 " + PIZZA,
+                           oa::finish::stop, 3, 4);
+        }
+        catch(json::exception&) { threw = true; }
+
+        ok("  while whole multi-byte text goes through untouched", !threw);
+    }
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -301,6 +392,7 @@ int main() {
     what_it_refuses();
     it_writes_a_completion();
     it_writes_chunks();
+    a_partial_character_is_refused();
     it_frames_events();
     it_lists_models();
     ids_are_unique();

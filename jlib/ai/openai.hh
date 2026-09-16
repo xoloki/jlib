@@ -123,13 +123,37 @@ struct delta {
  *
  * @param created seconds since the epoch, taken by the caller so a test can
  *        be deterministic
+ *
+ * @throws util::json::exception if `content` stops in the middle of a UTF-8
+ *         character.  See chunk() below, which is where that happens -- but a
+ *         whole reply ends mid-character too when a generation stops between
+ *         two byte-fallback tokens.
  */
 std::string completion(const std::string& id, const std::string& model,
                        std::int64_t created, const std::string& content,
                        finish why, unsigned int prompt_tokens,
                        unsigned int completion_tokens);
 
-/** One `chat.completion.chunk`, for a request that did. */
+/**
+ * One `chat.completion.chunk`, for a request that did.
+ *
+ * @throws util::json::exception if the delta's content stops in the middle of
+ *         a UTF-8 character.
+ *
+ * **A fragment of a stream still has to be a whole string.**  There is no
+ * escape for half a character -- `\uXXXX` needs a codepoint and half of one
+ * does not have it -- so the byte goes out raw, and a JSON text that is not
+ * valid UTF-8 is not valid JSON.  The client decodes the event as text before
+ * parsing it, so the failure surfaces as an exception in *its* code with
+ * nothing pointing back here.
+ *
+ * A real thing that happened rather than a precaution: a byte-fallback
+ * vocabulary returns one byte per token, jserve sent one event per token, and
+ * three emoji made twelve unparseable events (#249).  Whoever decides chunk
+ * boundaries has to hold a character until it is whole -- `util::utf8_stream`
+ * is that -- and this refuses so the next caller finds out here rather than
+ * from a stranger's traceback.
+ */
 std::string chunk(const std::string& id, const std::string& model,
                   std::int64_t created, const delta& d);
 

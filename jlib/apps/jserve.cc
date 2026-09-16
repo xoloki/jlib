@@ -49,6 +49,7 @@
 #include <jlib/ai/openai.hh>
 #include <jlib/ai/sampler.hh>
 #include <jlib/net/http_server.hh>
+#include <jlib/util/utf8.hh>
 #include <jlib/sys/await.hh>
 #include <jlib/sys/relay.hh>
 
@@ -74,6 +75,7 @@
 
 namespace ai = jlib::ai;
 namespace oa = jlib::ai::openai;
+namespace util = jlib::util;
 namespace http = jlib::net::http;
 namespace sys = jlib::sys;
 
@@ -417,6 +419,15 @@ private:
     {
         ts.start([this, &s, &plan, &sampler, &ends, &made]
                  (sys::relay<std::string>& b) {
+            // A byte-fallback vocabulary hands over one byte per token, and an
+            // SSE event carries its content inside a JSON string -- so a
+            // four-byte character emitted a piece at a time became four JSON
+            // texts that do not parse (#249).  Held here, at the producer,
+            // rather than in the streaming path: the non-streaming reply is
+            // built from the same relay, and it ends mid-character too when a
+            // generation stops between byte-fallback tokens.
+            util::utf8_stream chars;
+
             ai::generate<T>(s.model(), m_backend, plan.ids, plan.budget,
                             sampler, ends, [&](int token) {
                 // Asked between tokens, and the only thing that travels this
@@ -432,10 +443,22 @@ private:
                 // what an item means.
                 const std::string piece = s.tok().piece(token);
 
-                if(!piece.empty()) b.emit(piece);
+                const std::string whole = chars.feed(piece);
+
+                if(!whole.empty()) b.emit(whole);
 
                 return true;
             });
+
+            // Whatever is still waiting for continuation bytes is not going to
+            // get them.  Dropped, and said: the protocol has no way to spell
+            // "this reply stopped mid-character" -- finish_reason is length or
+            // stop and neither is this -- so the log is the only place it can
+            // be recorded.
+            if(const std::size_t partial = chars.end())
+                std::cerr << "jserve: dropped " << partial
+                          << " byte(s) of an unfinished character at the end "
+                          << "of a reply\n";
         });
     }
 
@@ -480,8 +503,16 @@ private:
 
                 d.content = piece;
 
+                // Framed outside the try, which exists for a failed *write*.
+                // chunk() refuses content that stops mid-character (#249), and
+                // inside the try that refusal was indistinguishable from the
+                // client hanging up: the stream ended, without its [DONE], and
+                // nothing said why.  A caller's bug should not be able to
+                // impersonate a disconnect.
+                const std::string ev = oa::event(oa::chunk(id, name, now, d));
+
                 try {
-                    co_await out.write(oa::event(oa::chunk(id, name, now, d)));
+                    co_await out.write(ev);
                 }
                 catch(std::exception&) {
                     // Stops the generation as well, through the bridge -- and

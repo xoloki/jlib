@@ -181,6 +181,41 @@ static void a_lead_byte_that_is_never_finished() {
        two == "\xe2\x98\x83", hex(two));
 }
 
+static void where_a_fragment_may_be_cut() {
+    std::cout << "\nwhether a fragment ends on a character boundary:\n";
+
+    // The other question the same table answers, and the one jserve needs
+    // (#249): not "is this valid" but "may this be handed on as it stands".
+    using jlib::util::utf8_ends_mid_character;
+
+    ok("an empty string ends on a boundary, vacuously",
+       !utf8_ends_mid_character(""));
+
+    ok("so does ASCII", !utf8_ends_mid_character("hello"));
+
+    ok("and a complete character", !utf8_ends_mid_character("hi " + SMILE));
+
+    for(std::size_t n = 1; n < 4; n++)
+        ok("  " + std::to_string(n) + " byte(s) of one does not",
+           utf8_ends_mid_character(SMILE.substr(0, n)));
+
+    // Only the tail decides.  A broken sequence earlier in the string is not
+    // this function's business -- it is not a validator, and saying so is
+    // cheaper than pretending otherwise.
+    ok("a broken sequence in the middle is not asked about",
+       !utf8_ends_mid_character("\xf0\x9f" "ok"));
+
+    ok("a lone continuation byte is not a boundary",
+       utf8_ends_mid_character("\x9f"));
+
+    ok("  nor are four of them", utf8_ends_mid_character("\x9f\x9f\x9f\x9f"));
+
+    // A two-byte character ends after two bytes, and a naive "is the last byte
+    // a continuation" test would call this unfinished.
+    ok("a two-byte character is complete at two bytes",
+       !utf8_ends_mid_character("caf\xc3\xa9"));
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -190,6 +225,7 @@ int main() {
     a_reply_that_stops_mid_character();
     bytes_that_cannot_start_a_character();
     a_lead_byte_that_is_never_finished();
+    where_a_fragment_may_be_cut();
 
     // What a green run does not establish.
     //
