@@ -408,6 +408,14 @@ void object::add(const std::string& key, const std::string& val) {
     json_object_object_add(m_obj, key.data(), json_object_new_string(const_cast<char*>(val.data())));
 }
     
+void object::add(const std::string& key, const char* val) {
+    add(key, std::string(val ? val : ""));
+}
+
+void object::add(const std::string& key, bool val) {
+    json_object_object_add(m_obj, key.data(), json_object_new_boolean(val));
+}
+
 void object::add(const std::string& key, int val) {
     json_object_object_add(m_obj, key.data(), json_object_new_int(val));
 }
@@ -521,6 +529,14 @@ void array::add(const std::string& val) {
     json_object_array_add(m_obj, json_object_new_string(const_cast<char*>(val.data())));
 }
     
+void array::add(const char* val) {
+    add(std::string(val ? val : ""));
+}
+
+void array::add(bool val) {
+    json_object_array_add(m_obj, json_object_new_boolean(val));
+}
+
 void array::add(int val) {
     json_object_array_add(m_obj, json_object_new_int(val));
 }

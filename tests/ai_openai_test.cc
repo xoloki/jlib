@@ -21,6 +21,7 @@
 #include <jlib/ai/openai.hh>
 #include <jlib/util/json.hh>
 
+#include <cmath>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -382,6 +383,286 @@ static void a_partial_character_is_refused() {
     }
 }
 
+static void a_request_survives_the_round_trip() {
+    std::cout << "\na request written and read back:\n";
+
+    // The reason the client half belongs in this file: neither direction can
+    // check itself, and together they can.  A field that str() forgets or
+    // parse() misreads shows up here as a difference and nowhere else.
+    oa::request r;
+
+    r.model = "tiny";
+    r.messages.push_back({ "system", "be brief" });
+    r.messages.push_back({ "user", "capital of France?" });
+    r.stream = true;
+    r.has_temperature = true;
+    r.temperature = 0.25f;
+    r.max_tokens = 64;
+    r.stop.push_back("\n\n");
+    r.stop.push_back("END");
+
+    const oa::request back = oa::request::parse(r.str());
+
+    ok("the model comes back", back.model == r.model, back.model);
+
+    ok("  and both turns, in order",
+       back.messages.size() == 2 &&
+       back.messages[0].role == "system" && back.messages[0].content == "be brief" &&
+       back.messages[1].role == "user" && back.messages[1].content == "capital of France?",
+       std::to_string(back.messages.size()) + " turns");
+
+    // Asserted on the **bytes**, not on the round trip.  json-c reads an int
+    // 1 as true, so parse() accepts either and back.stream cannot tell them
+    // apart -- while a server with a schema, or a client library that checks
+    // types, can.  Writing `"stream": 1` passed this test until the
+    // assertion stopped going through jlib's own parser to answer it.
+    ok("  stream is written as a JSON boolean, not a 1",
+       r.str().find("\"stream\": true") != std::string::npos, r.str());
+
+    ok("  and reads back as asked for", back.stream);
+
+    ok("  the temperature that was set",
+       back.has_temperature && std::fabs(back.temperature - 0.25f) < 1e-6,
+       std::to_string(back.temperature));
+
+    ok("  the cap", back.max_tokens == 64, std::to_string(back.max_tokens));
+
+    // This is the one the round trip earned.  parse() asked str_or() first,
+    // which on an array returns the array's own serialised text -- so a list
+    // of stop strings arrived as one string spelled `[ "\n\n", "END" ]`, the
+    // array branch below it was unreachable, and a client's stop sequences
+    // were silently ignored.  Nothing had ever written a request to notice.
+    ok("  and both stop strings, as strings",
+       back.stop.size() == 2 && back.stop[0] == "\n\n" && back.stop[1] == "END",
+       std::to_string(back.stop.size()) + ": " +
+       (back.stop.empty() ? std::string() : back.stop[0]));
+
+    // The protocol allows a bare string too, and that path still works.
+    const oa::request one = oa::request::parse(
+        R"({"model":"m","messages":[{"role":"user","content":"x"}],"stop":"END"})");
+
+    ok("  a bare string is still one stop string",
+       one.stop.size() == 1 && one.stop[0] == "END",
+       std::to_string(one.stop.size()));
+}
+
+static void absent_stays_absent() {
+    std::cout << "\nwhat a bare request does not say:\n";
+
+    // Writing the struct's defaults would be asking for greedy sampling and a
+    // zero-token reply, neither of which the caller said anything about.
+    oa::request r;
+
+    r.model = "tiny";
+    r.messages.push_back({ "user", "hi" });
+
+    const std::string body = r.str();
+
+    ok("no temperature", body.find("temperature") == std::string::npos, body);
+    ok("no max_tokens", body.find("max_tokens") == std::string::npos, body);
+    ok("no stop", body.find("stop") == std::string::npos, body);
+    ok("no stream", body.find("stream") == std::string::npos, body);
+
+    const oa::request back = oa::request::parse(body);
+
+    ok("and it reads back as nothing asked for",
+       !back.has_temperature && back.max_tokens == 0 &&
+       back.stop.empty() && !back.stream);
+
+    // A temperature of zero is a request for greedy, and it has to survive.
+    oa::request greedy = r;
+
+    greedy.has_temperature = true;
+    greedy.temperature = 0;
+
+    const oa::request gback = oa::request::parse(greedy.str());
+
+    ok("a temperature of zero is not the same as no temperature",
+       gback.has_temperature && gback.temperature == 0, greedy.str());
+}
+
+static void a_completion_read_back() {
+    std::cout << "\na whole completion, written and read:\n";
+
+    const std::string body = oa::completion("id-1", "tiny", 1789, "Paris.",
+                                            oa::finish::length, 11, 3);
+
+    const oa::answer a = oa::answer::parse(body);
+
+    ok("the text", a.content == "Paris.", a.content);
+    ok("  the id and model", a.id == "id-1" && a.model == "tiny");
+    ok("  why it stopped", a.why == oa::finish::length);
+    ok("  and both token counts",
+       a.prompt_tokens == 11 && a.completion_tokens == 3,
+       std::to_string(a.prompt_tokens) + "/" + std::to_string(a.completion_tokens));
+
+    // Several servers omit usage; a reply without it is still a reply.
+    const oa::answer none = oa::answer::parse(
+        R"({"id":"x","model":"m","choices":[{"index":0,)"
+        R"("message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]})");
+
+    ok("a reply with no usage block is still read",
+       none.content == "hi" && none.prompt_tokens == 0);
+
+    bool threw = false;
+
+    try { oa::answer::parse(R"({"id":"x"})"); }
+    catch(json::exception&) { threw = true; }
+
+    ok("but one with no choices is refused", threw);
+}
+
+static void chunks_read_back() {
+    std::cout << "\nchunks, written and read:\n";
+
+    {
+        oa::delta d;
+
+        d.role = true;
+
+        const oa::delta back = oa::delta::parse(oa::chunk("i", "m", 1, d));
+
+        ok("the first chunk says role and nothing else",
+           back.role && back.content.empty() && !back.done);
+    }
+
+    {
+        oa::delta d;
+
+        d.content = "Par";
+
+        const oa::delta back = oa::delta::parse(oa::chunk("i", "m", 1, d));
+
+        ok("a content chunk carries its text",
+           back.content == "Par" && !back.done && !back.role, back.content);
+    }
+
+    {
+        oa::delta d;
+
+        d.done = true;
+        d.why = oa::finish::length;
+
+        const oa::delta back = oa::delta::parse(oa::chunk("i", "m", 1, d));
+
+        ok("the last chunk is finished, and says why",
+           back.done && back.why == oa::finish::length);
+    }
+
+    // An absent finish_reason is null is "not finished", and that is the one
+    // a hand-written parser gets wrong -- json-c cannot tell absent from null
+    // and neither reading changes what it means.
+    const oa::delta mid = oa::delta::parse(
+        R"({"choices":[{"index":0,"delta":{"content":"x"}}]})");
+
+    ok("an absent finish_reason means not finished", !mid.done && mid.content == "x");
+}
+
+static void a_stream_arriving_in_pieces() {
+    std::cout << "\nevents, unframed as they arrive:\n";
+
+    oa::event_reader r;
+
+    // The whole reason this holds state: a read returns whatever bytes have
+    // arrived, and the split falls wherever the network put it.
+    const std::string whole =
+        oa::event(R"({"a":1})") + oa::event(R"({"b":2})") + oa::done();
+
+    std::vector<std::string> got;
+
+    for(std::size_t i = 0; i < whole.size(); i++) {
+        const std::vector<std::string> some = r.feed(whole.substr(i, 1));
+
+        for(const std::string& e : some) got.push_back(e);
+    }
+
+    ok("a stream fed one byte at a time still yields whole events",
+       got.size() == 2 && got[0] == R"({"a":1})" && got[1] == R"({"b":2})",
+       std::to_string(got.size()) + " events");
+
+    ok("  and [DONE] is reported rather than returned", r.done());
+
+    ok("  leaving nothing held", r.pending() == 0,
+       std::to_string(r.pending()));
+}
+
+static void what_a_stream_may_contain() {
+    std::cout << "\nwhat else a stream may carry:\n";
+
+    {
+        // A heartbeat during a long generation is a comment line, and reading
+        // one as data would be reading a keep-alive as a token.
+        oa::event_reader r;
+
+        const std::vector<std::string> got = r.feed(": ping\n\ndata: {\"a\":1}\n\n");
+
+        ok("a comment is not an event", got.size() == 1 && got[0] == R"({"a":1})",
+           std::to_string(got.size()) + " events");
+    }
+
+    {
+        // CRLF, which a proxy may produce where jserve writes LF.
+        oa::event_reader r;
+
+        const std::vector<std::string> got = r.feed("data: {\"a\":1}\r\n\r\n");
+
+        ok("CRLF frames an event as LF does", got.size() == 1 && got[0] == R"({"a":1})",
+           got.empty() ? "none" : got[0]);
+    }
+
+    {
+        // The SSE grammar joins several data lines with a newline.  Nothing
+        // in this protocol sends one, which is why a client that assumed a
+        // single line would look right until it met something else.
+        oa::event_reader r;
+
+        const std::vector<std::string> got = r.feed("data: one\ndata: two\n\n");
+
+        ok("two data lines are one payload, joined by a newline",
+           got.size() == 1 && got[0] == "one\ntwo",
+           got.empty() ? "none" : got[0]);
+    }
+
+    {
+        // event:, id: and retry: carry the framing's own meaning, not the
+        // protocol's.
+        oa::event_reader r;
+
+        const std::vector<std::string> got =
+            r.feed("event: message\nid: 7\nretry: 100\ndata: {\"a\":1}\n\n");
+
+        ok("the other SSE fields are skipped",
+           got.size() == 1 && got[0] == R"({"a":1})",
+           got.empty() ? "none" : got[0]);
+    }
+}
+
+static void a_refusal_read_back() {
+    std::cout << "\na refusal, written and read:\n";
+
+    oa::failure f;
+
+    ok("an error body is recognised",
+       oa::failure::parse(oa::error("no model called \"x\"",
+                                    "invalid_request_error"), f));
+
+    ok("  with the message the server wrote",
+       f.message == "no model called \"x\"", f.message);
+
+    ok("  and its type", f.type == "invalid_request_error", f.type);
+
+    oa::failure other;
+
+    ok("a completion is not an error",
+       !oa::failure::parse(oa::completion("i", "m", 1, "hi",
+                                          oa::finish::stop, 1, 1), other));
+
+    // A proxy's HTML, or an empty response: not an error object, and saying
+    // so is more use than an exception about JSON.
+    ok("and neither is something that is not JSON at all",
+       !oa::failure::parse("<html>502 Bad Gateway</html>", other));
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -397,6 +678,13 @@ int main() {
     it_lists_models();
     ids_are_unique();
     errors_are_unwrappable();
+    a_request_survives_the_round_trip();
+    absent_stays_absent();
+    a_completion_read_back();
+    chunks_read_back();
+    a_stream_arriving_in_pieces();
+    what_a_stream_may_contain();
+    a_refusal_read_back();
 
     // What a green run does not establish.
     //

@@ -140,6 +140,23 @@ public:
     virtual ~object();
     
     void add(const std::string& key, const std::string& val);
+
+    /**
+     * A string literal, which would otherwise be a boolean.
+     *
+     * `const char*` converts to `bool` by a standard conversion and to
+     * `std::string` only by a user-defined one, so without this overload
+     * `add("model", "tiny")` would resolve to add(key, bool) and write
+     * **true**.  Every call in the tree wraps its literals in std::string,
+     * which is what that hazard looks like from the outside; this removes it
+     * instead.
+     */
+    void add(const std::string& key, const char* val);
+
+    /** A real JSON boolean.  json-c stores 1 and 0 for an int and neither is
+     *  what a protocol field like "stream" means. */
+    void add(const std::string& key, bool val);
+
     void add(const std::string& key, int val);
     void add(const std::string& key, unsigned int val);
     void add(const std::string& key, double val);
@@ -206,6 +223,12 @@ public:
     virtual ~array();
     
     void add(const std::string& val);
+
+    /** See object::add -- a literal would otherwise be a boolean. */
+    void add(const char* val);
+
+    void add(bool val);
+
     void add(int val);
     void add(unsigned int val);
     void add(double val);
