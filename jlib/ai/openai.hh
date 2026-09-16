@@ -99,6 +99,26 @@ struct request {
      * text parts are joined and anything else in it is dropped.
      */
     static request parse(const std::string& body);
+
+    /**
+     * The body to POST, which is the mirror of parse().
+     *
+     * Absent rather than defaulted wherever the protocol distinguishes the
+     * two: no `temperature` unless one was set, no `max_tokens` at zero, no
+     * `stop` when the list is empty.  A server reads an absent field as "you
+     * decide" and a present one as an instruction, and sending 0.0 because
+     * that is what the struct was initialised to is how a client silently
+     * asks for greedy sampling.
+     *
+     * `stream` is written only when true, for the same reason -- and it is
+     * why util::json grew a boolean: json-c stores 1 for an int and no
+     * OpenAI-compatible server reads 1 as true.
+     *
+     * `wants_tools` is **not** written.  It is a flag saying a request asked
+     * for tools, not a description of which ones, and this namespace models
+     * neither.
+     */
+    std::string str() const;
 };
 
 /** What ends a reply, as the protocol spells it. */
@@ -116,6 +136,19 @@ struct delta {
     /** Set on the last chunk, which carries no content. */
     bool done = false;
     finish why = finish::stop;
+
+    /**
+     * Read one `chat.completion.chunk`.
+     *
+     * @throws util::json::exception if it is not an object with a choices
+     *         array
+     *
+     * **An absent `finish_reason` means not finished**, which is how the
+     * protocol spells null -- json-c stores a JSON null as no value at all,
+     * so the two are indistinguishable from here and both mean the same
+     * thing.  A chunk that carries one is the last.
+     */
+    static delta parse(const std::string& json);
 };
 
 /**
@@ -175,6 +208,100 @@ std::string models(const std::vector<std::string>& names,
 
 /** An `id`, which the protocol wants unique per completion. */
 std::string new_id();
+
+/**
+ * A whole `chat.completion`, read.
+ *
+ * The mirror of completion() above, and the reply to a request that did not
+ * ask to stream.
+ */
+struct answer {
+    std::string id;
+    std::string model;
+    std::string content;
+
+    finish why = finish::stop;
+
+    unsigned int prompt_tokens = 0;
+    unsigned int completion_tokens = 0;
+
+    /**
+     * @throws util::json::exception if the body is not an object, or has no
+     *         choices array
+     *
+     * Lenient about the rest: a reply with no usage block is a reply, and
+     * several servers omit it.  `content` may be absent on a choice that was
+     * a tool call, and comes back empty rather than throwing -- this
+     * namespace does not model tool calls and a caller that asked for none
+     * will not receive one.
+     */
+    static answer parse(const std::string& body);
+};
+
+/**
+ * What a refusal says, when the status was not 2xx.
+ *
+ * Separate from answer because it is a different shape, and a caller that
+ * treats a 400 body as a completion gets an exception where the useful thing
+ * is the message the server wrote.
+ */
+struct failure {
+    std::string message;
+    std::string type;
+
+    /**
+     * @return whether `body` is an error object, in which case f holds it
+     *
+     * Does not throw.  A body that is neither a completion nor an error --
+     * a proxy's HTML, an empty response -- is not an error *object*, and
+     * saying so is more use to a caller than an exception about JSON.
+     */
+    static bool parse(const std::string& body, failure& f);
+};
+
+/**
+ * Server-sent events, unframed as they arrive.
+ *
+ * The mirror of event() above, and incremental because that is what a stream
+ * is: a read returns whatever bytes have arrived, which may be half an event,
+ * or three of them, and the split falls wherever the network put it.
+ *
+ * ## What it handles, and why each one is here
+ *
+ * - **A payload split across reads.** The whole reason this holds state.
+ * - **Both line endings.** The SSE grammar allows CRLF, LF and CR; jserve
+ *   writes LF and a server behind a proxy may not.
+ * - **Comment lines.** A line beginning with `:` is a comment, which is what
+ *   a heartbeat is -- and an endpoint that sends one during a long generation
+ *   is doing the right thing, so treating it as data would be reading a
+ *   keep-alive as a token.
+ * - **More than one `data:` line in an event**, joined with a newline, as the
+ *   SSE grammar says. Nothing in the OpenAI protocol sends multi-line data,
+ *   which is exactly why a client that assumed one line would look correct
+ *   until it met something else.
+ * - **`event:`, `id:` and `retry:`**, which are skipped: the protocol carries
+ *   its meaning in the payload.
+ *
+ * `[DONE]` is **not** SSE, it is OpenAI's sentinel, and it is reported
+ * through done() rather than returned as a payload -- a caller that had to
+ * string-compare each payload against it would be one forgotten check away
+ * from parsing it as JSON.
+ */
+class event_reader {
+public:
+    /** The complete event payloads in what has arrived so far. */
+    std::vector<std::string> feed(const std::string& bytes);
+
+    /** Whether the stream said `[DONE]`.  It may arrive mid-feed. */
+    bool done() const { return m_done; }
+
+    /** Bytes held because an event is incomplete.  For a test to look at. */
+    std::size_t pending() const { return m_held.size(); }
+
+private:
+    std::string m_held;
+    bool m_done = false;
+};
 
 /**
  * An error, in the shape the OpenAI clients unwrap.

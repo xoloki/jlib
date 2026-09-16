@@ -101,18 +101,33 @@ request request::parse(const std::string& body) {
     r.wants_tools = root->has("tools") || root->has("functions");
 
     if(root->has("stop")) {
-        // A string or an array of them, both of which the protocol allows.
-        const std::string one = root->get("stop").str_or("");
+        // A string or an array of them, both of which the protocol allows --
+        // and the array is asked about **first**.
+        //
+        // It used to be the other way round, and the array branch was dead
+        // code: str_or() on an array returns the array's own serialised text,
+        // which is not empty, so `["\n\n","END"]` became one stop string
+        // spelled `[ "\n\n", "END" ]` and matched nothing.  A client's stop
+        // sequences were silently ignored.  arr() throws when it is not an
+        // array, so this order cannot make the mirror-image mistake.
+        bool listed = false;
 
-        if(!one.empty()) r.stop.push_back(one);
-        else {
-            try {
-                util::json::array::ptr s = root->arr("stop");
+        try {
+            util::json::array::ptr s = root->arr("stop");
 
+            if(s) {
                 for(int i = 0; i < s->size(); i++)
                     r.stop.push_back(std::string(s->get(unsigned(i))));
+
+                listed = true;
             }
-            catch(util::json::exception&) {}
+        }
+        catch(util::json::exception&) {}
+
+        if(!listed) {
+            const std::string one = root->get("stop").str_or("");
+
+            if(!one.empty()) r.stop.push_back(one);
         }
     }
 
@@ -272,6 +287,235 @@ std::string chunk(const std::string& id, const std::string& model,
     root->add("choices", choices);
 
     return root->str();
+}
+
+std::string request::str() const {
+    util::json::object::ptr root = util::json::object::create();
+
+    root->add("model", model);
+
+    util::json::array::ptr turns = util::json::array::create();
+
+    for(const message& m : messages) {
+        util::json::object::ptr t = util::json::object::create();
+
+        t->add("role", m.role);
+        t->add("content", m.content);
+
+        turns->add(t);
+    }
+
+    root->add("messages", turns);
+
+    // Every one of these is written only when it was asked for.  A server
+    // reads an absent field as "you decide"; writing the struct's zero would
+    // be asking for greedy sampling and a one-token reply.
+    if(stream) root->add("stream", true);
+
+    if(has_temperature) root->add("temperature", double(temperature));
+
+    if(max_tokens) root->add("max_tokens", max_tokens);
+
+    if(!stop.empty()) {
+        util::json::array::ptr s = util::json::array::create();
+
+        for(const std::string& one : stop) s->add(one);
+
+        root->add("stop", s);
+    }
+
+    return root->str();
+}
+
+delta delta::parse(const std::string& json) {
+    delta d;
+
+    util::json::object::ptr root = util::json::object::create(json);
+
+    if(!root)
+        throw util::json::exception("a chat completion chunk that is not an "
+                                    "object");
+
+    util::json::array::ptr choices;
+
+    try { choices = root->arr("choices"); }
+    catch(util::json::exception&) {}
+
+    if(!choices || !choices->size())
+        throw util::json::exception("a chat completion chunk with no choices");
+
+    util::json::object::ptr choice = choices->obj(0);
+
+    // Absent is null is "not finished".  json-c stores a JSON null as no
+    // value at all, so there is nothing here to tell the two apart -- and
+    // nothing that needs to, since they mean the same thing.
+    const std::string why = choice->get("finish_reason").str_or("");
+
+    if(!why.empty()) {
+        d.done = true;
+        d.why = why == "length" ? finish::length : finish::stop;
+    }
+
+    util::json::object::ptr dj;
+
+    try { dj = choice->obj("delta"); }
+    catch(util::json::exception&) {}
+
+    if(dj) {
+        d.role = !dj->get("role").str_or("").empty();
+        d.content = dj->get("content").str_or("");
+    }
+
+    return d;
+}
+
+answer answer::parse(const std::string& body) {
+    answer a;
+
+    util::json::object::ptr root = util::json::object::create(body);
+
+    if(!root)
+        throw util::json::exception("a chat completion that is not an object");
+
+    a.id = root->get("id").str_or("");
+    a.model = root->get("model").str_or("");
+
+    util::json::array::ptr choices;
+
+    try { choices = root->arr("choices"); }
+    catch(util::json::exception&) {}
+
+    if(!choices || !choices->size())
+        throw util::json::exception("a chat completion with no choices");
+
+    util::json::object::ptr choice = choices->obj(0);
+
+    const std::string why = choice->get("finish_reason").str_or("");
+
+    a.why = why == "length" ? finish::length : finish::stop;
+
+    util::json::object::ptr m;
+
+    try { m = choice->obj("message"); }
+    catch(util::json::exception&) {}
+
+    // A choice with no content is a tool call, which this namespace does not
+    // model.  Empty rather than an exception: a caller that asked for no
+    // tools will not be given one, and a caller that did was told this
+    // server refuses them.
+    if(m) a.content = content_of(m);
+
+    util::json::object::ptr usage;
+
+    try { usage = root->obj("usage"); }
+    catch(util::json::exception&) {}
+
+    // Several servers omit it, and a reply without a token count is still a
+    // reply.
+    if(usage) {
+        a.prompt_tokens = unsigned(usage->get("prompt_tokens").int_or(0));
+        a.completion_tokens = unsigned(usage->get("completion_tokens").int_or(0));
+    }
+
+    return a;
+}
+
+bool failure::parse(const std::string& body, failure& f) {
+    util::json::object::ptr root;
+
+    // A proxy's HTML or an empty response is not an error *object*, and
+    // create() throws on it rather than returning null.  Saying "not an
+    // error" is more use to a caller than an exception about JSON: it still
+    // has a status code, and that is what it will report.
+    try { root = util::json::object::create(body); }
+    catch(util::json::exception&) { return false; }
+
+    if(!root) return false;
+
+    util::json::object::ptr e;
+
+    try { e = root->obj("error"); }
+    catch(util::json::exception&) { return false; }
+
+    if(!e) return false;
+
+    f.message = e->get("message").str_or("");
+    f.type = e->get("type").str_or("");
+
+    return true;
+}
+
+std::vector<std::string> event_reader::feed(const std::string& bytes) {
+    std::vector<std::string> out;
+
+    m_held += bytes;
+
+    for(;;) {
+        // An event ends at a blank line, in whichever spelling arrived.  CRLF
+        // is checked first: "\r\n\r\n" contains "\n\n" at an offset, and
+        // taking the shorter match would leave a stray CR at the head of the
+        // next event.
+        std::string::size_type at = m_held.find("\r\n\r\n");
+        std::size_t skip = 4;
+
+        const std::string::size_type lf = m_held.find("\n\n");
+
+        if(lf != std::string::npos && (at == std::string::npos || lf < at)) {
+            at = lf;
+            skip = 2;
+        }
+
+        if(at == std::string::npos) break;
+
+        const std::string one = m_held.substr(0, at);
+
+        m_held.erase(0, at + skip);
+
+        std::string data;
+        bool any = false;
+
+        std::string::size_type from = 0;
+
+        while(from <= one.size()) {
+            std::string::size_type end = one.find_first_of("\r\n", from);
+
+            if(end == std::string::npos) end = one.size();
+
+            std::string line = one.substr(from, end - from);
+
+            from = end + 1;
+
+            // A CR followed by an LF is one terminator, not two empty lines.
+            if(from < one.size() && one[end] == '\r' && one[from] == '\n')
+                from++;
+
+            if(line.empty() || line[0] == ':') continue;   // blank, or a comment
+
+            if(line.compare(0, 5, "data:") != 0) continue; // event:, id:, retry:
+
+            std::string value = line.substr(5);
+
+            // One optional space after the colon belongs to the framing.
+            if(!value.empty() && value[0] == ' ') value.erase(0, 1);
+
+            data += any ? "\n" + value : value;
+            any = true;
+        }
+
+        if(!any) continue;
+
+        // OpenAI's sentinel rather than SSE's: reported, never returned, so a
+        // caller cannot feed it to a JSON parser by forgetting to check.
+        if(data == "[DONE]") {
+            m_done = true;
+
+            continue;
+        }
+
+        out.push_back(data);
+    }
+
+    return out;
 }
 
 std::string event(const std::string& json) {
