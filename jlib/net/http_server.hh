@@ -164,11 +164,13 @@ struct server_options {
  *
  * ## What it is still not
  *
- * No HTTP/2 or /3.  No compression.  No `multipart/byteranges`, so a
- * multi-range request gets the whole body.  No `If-Match` or
+ * No HTTP/2 or /3.  No compression (#233).  No `multipart/byteranges`, so a
+ * multi-range request gets the whole body (#232).  No `If-Match` or
  * `If-Unmodified-Since`, so a precondition can only succeed -- 412 is
- * unreachable.  No `Cache-Control`, no authentication, no rate limiting, no
- * per-address anything.
+ * unreachable (#231).  No `Cache-Control` and no `Vary` (#230).  No
+ * authentication, no rate limiting, no per-address anything, and those three
+ * are not filed because they are what "not for a public port" means rather
+ * than gaps in a plan.
  *
  * **It is not hardened for a public port** -- see the note on sys::server --
  * and that sentence has more to protect now than when it was written.  It
@@ -738,12 +740,27 @@ public:
      * Only regular files.  A directory is a 404: there is no listing and no
      * index.html, because both are decisions a caller should make out loud.
      *
+     * ## How a file is sent
+     *
+     * A block at a time, so a request costs the block and not the file, and
+     * **counted rather than chunked**: `stat` knows the length before anything
+     * is read, so the body carries a `Content-Length` and the connection stays
+     * reusable without a chunk header per block.
+     *
+     * A range seeks rather than reading and discarding, which is what streaming
+     * bought: `bytes=9500-` on a large file reads from 9500.
+     *
      * ## What it is still not
      *
-     * The file is read whole into memory, like every other buffered response.
-     * That is fine for the pages and scripts this is for and wrong for a large
-     * download; chunked output exists now, so a streaming variant is possible
-     * and is not here.
+     * No `Cache-Control`, so a client caches by heuristic (#230).  No
+     * `multipart/byteranges`, so asking for two ranges gets the whole file
+     * (#232).  No compression (#233).  No directory listing and no index.html,
+     * which is deliberate -- both are decisions a caller should make out loud.
+     *
+     * There is a time-of-check-to-time-of-use window between the `realpath`
+     * that decides containment and the `stat` that sizes the file (#234).  It
+     * can only ever serve something that was inside the root at both moments,
+     * which is why it is recorded rather than fixed.
      *
      * And the header above still says this server is not hardened for a public
      * port.  A file server is the feature most likely to make somebody forget
