@@ -35,6 +35,8 @@
 #include <jlib/sys/server.hh>
 #include <jlib/sys/sync.hh>
 #include <jlib/sys/socketstream.hh>
+
+#include <memory>
 #include <jlib/sys/sslstream.hh>
 #include <jlib/sys/tls.hh>
 
@@ -423,6 +425,203 @@ static void a_busy_pool_is_not_a_full_queue() {
     second.join();
 }
 
+/**
+ * The counter, on its own.
+ *
+ * Per-address separation is the whole point of the cap and it cannot be
+ * reached through a server: every client here connects over loopback, and both
+ * platforms report the peer as 127.0.0.1 whichever loopback address is dialled
+ * -- measured on macOS, where 127.0.0.2 does not route, and in the Linux
+ * container, where it routes but the kernel still picks 127.0.0.1 as the
+ * source.  So the bookkeeping is tested here with addresses supplied as
+ * strings, and the section after it tests the wiring over real connections.
+ */
+static void counting_connections_per_address() {
+    std::cout << "\ncounting connections per address:\n";
+
+    {
+        sys::server::address_count c;
+
+        sys::server::address_count::hold a = c.take("10.0.0.1", 2);
+        sys::server::address_count::hold b = c.take("10.0.0.1", 2);
+
+        ok("two fit under a cap of two", a.engaged() && b.engaged());
+
+        {
+            sys::server::address_count::hold third = c.take("10.0.0.1", 2);
+
+            ok("and a third does not", !third.engaged());
+        }
+
+        // The whole point: one address at its limit is not everybody's limit.
+        sys::server::address_count::hold other = c.take("10.0.0.2", 2);
+
+        ok("while another address is unaffected", other.engaged());
+
+        ok("and they are counted apart",
+           c.count("10.0.0.1") == 2 && c.count("10.0.0.2") == 1,
+           std::to_string(c.count("10.0.0.1")) + " and " +
+           std::to_string(c.count("10.0.0.2")));
+    }
+
+    {
+        sys::server::address_count c;
+
+        {
+            sys::server::address_count::hold a = c.take("10.0.0.1", 1);
+
+            ok("one is at the cap", c.count("10.0.0.1") == 1 &&
+               !c.take("10.0.0.1", 1).engaged());
+        }
+
+        // A count that drifts upward refuses that address forever, which is
+        // the failure this RAII exists to make impossible.
+        ok("and releasing it lets the next one in",
+           c.take("10.0.0.1", 1).engaged());
+    }
+
+    {
+        sys::server::address_count c;
+
+        {
+            sys::server::address_count::hold a = c.take("10.0.0.7", 0);
+            sys::server::address_count::hold b = c.take("10.0.0.7", 0);
+            sys::server::address_count::hold d = c.take("10.0.0.7", 0);
+
+            ok("a cap of zero is no cap at all",
+               a.engaged() && b.engaged() && d.engaged());
+        }
+
+        // Bounded by construction: an entry exists only while a connection
+        // does.  There is nothing here to sweep, which is the difference from
+        // the rate limiter's table.
+        ok("and the table empties itself as connections end",
+           c.tracked() == 0, std::to_string(c.tracked()));
+    }
+
+    {
+        sys::server::address_count c;
+
+        sys::server::address_count::hold a = c.take("10.0.0.9", 4);
+        sys::server::address_count::hold moved(std::move(a));
+
+        ok("moving a hold moves the count, it does not copy it",
+           c.count("10.0.0.9") == 1 && moved.engaged() && !a.engaged(),
+           std::to_string(c.count("10.0.0.9")));
+    }
+}
+
+/** Connect and read the greeting the handler sends.  "" if refused. */
+static std::string greeted(unsigned short port,
+                           std::unique_ptr<sys::socketstream>& into)
+{
+    try {
+        into.reset(new sys::socketstream("127.0.0.1", port, 5));
+
+        into->set_timeout(5);
+
+        std::string line;
+
+        std::getline(*into, line);
+
+        while(!line.empty() && line.back() == '\r') line.pop_back();
+
+        return line;
+    }
+    catch(std::exception&) {
+        return std::string();
+    }
+}
+
+/** Wait, briefly and one-sidedly, for the server to agree. */
+static bool settles_to(sys::server& srv, const char* who, std::size_t want) {
+    for(int i = 0; i < 200; i++) {
+        if(srv.connections_from(who) == want) return true;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    return false;
+}
+
+static void one_address_may_not_have_every_slot(bool async) {
+    std::cout << "\none address may not have every slot ("
+              << (async ? "async" : "blocking") << "):\n";
+
+    sys::server::policy p;
+
+    p.threads = 4;
+    p.max_connections = 16;
+    p.max_per_address = 2;
+
+    // Greets, then waits: the connection stays up until the client goes away,
+    // which is what lets the cap be observed rather than raced.
+    std::unique_ptr<sys::server> srv;
+
+    if(async) {
+        srv.reset(new sys::server(
+            0,
+            [](sys::server::connection& c, const sys::peer&) -> sys::task<void> {
+                co_await c.writer().write("hello\r\n");
+
+                (void) co_await c.reader().fill();
+            },
+            "127.0.0.1", sys::tls_context(), p));
+    }
+    else {
+        srv.reset(new sys::server(
+            0,
+            [](sys::socketstream& s, const sys::peer&) {
+                s << "hello\r\n" << std::flush;
+
+                std::string line;
+
+                std::getline(s, line);
+            },
+            "127.0.0.1", sys::tls_context(), p));
+    }
+
+    std::thread th([&srv] { srv->run(); });
+
+    std::unique_ptr<sys::socketstream> a, b, third, fourth;
+
+    ok("  the first connection is served", greeted(srv->port(), a) == "hello");
+    ok("  and so is the second", greeted(srv->port(), b) == "hello");
+
+    // Accepted and closed, silently: there is no protocol at this layer to
+    // refuse in, so what the client sees is end of stream.
+    ok("  the third is refused, with nothing said",
+       greeted(srv->port(), third).empty());
+
+    ok("  and the server counts two, not three",
+       settles_to(*srv, "127.0.0.1", 2),
+       std::to_string(srv->connections_from("127.0.0.1")));
+
+    // Closing lets the handler return, which releases the hold.  A count that
+    // did not come back down would refuse this address forever.
+    a.reset();
+
+    ok("  closing one brings the count back down",
+       settles_to(*srv, "127.0.0.1", 1),
+       std::to_string(srv->connections_from("127.0.0.1")));
+
+    ok("  and the slot it freed is usable",
+       greeted(srv->port(), fourth) == "hello");
+
+    b.reset();
+    fourth.reset();
+    third.reset();
+
+    ok("  and when they all go, nothing is left counted",
+       settles_to(*srv, "127.0.0.1", 0),
+       std::to_string(srv->connections_from("127.0.0.1")));
+
+    srv->stop();
+    srv->join();
+
+    th.join();
+}
+
 static void stopping() {
     std::cout << "\nstopping:\n";
 
@@ -689,6 +888,9 @@ int main() {
     a_handler_that_throws_does_not_stop_the_server();
     several_at_once_when_asked();
     the_cap_holds_at_two();
+    counting_connections_per_address();
+    one_address_may_not_have_every_slot(false);
+    one_address_may_not_have_every_slot(true);
     the_two_paths_became_one();
     a_busy_pool_is_not_a_full_queue();
     stopping();
