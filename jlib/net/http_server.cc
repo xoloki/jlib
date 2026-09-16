@@ -687,6 +687,39 @@ namespace {
      * check catches ".." and misses a symlink, and resolving first catches
      * both because what comes back is where the kernel would actually go.
      */
+    /**
+     * The requested remainder as the filesystem would spell it: empty and "."
+     * segments dropped, nothing else changed.
+     *
+     * `realpath` drops those too, so without this a legitimate
+     * `/static/./page.html` or `/static//page.html` would not match its own
+     * resolved name and would be refused as a case variant.
+     */
+    std::string tidy_path(const std::string& rest) {
+        std::string out;
+
+        std::string::size_type at = 0;
+
+        while(at <= rest.size()) {
+            const std::string::size_type slash = rest.find('/', at);
+            const std::string piece =
+                rest.substr(at, slash == std::string::npos ? std::string::npos
+                                                           : slash - at);
+
+            if(!piece.empty() && piece != ".") {
+                if(!out.empty()) out += "/";
+
+                out += piece;
+            }
+
+            if(slash == std::string::npos) break;
+
+            at = slash + 1;
+        }
+
+        return out;
+    }
+
     bool locate(const std::string& root, const std::string& rest, located& f) {
         const std::string candidate = root + "/" + rest;
 
@@ -749,6 +782,39 @@ namespace {
         if(::stat(f.real.c_str(), &named) != 0) return false;
 
         if(named.st_dev != f.st.st_dev || named.st_ino != f.st.st_ino)
+            return false;
+
+        // **And the name asked for must be the name on disk, in the case it
+        // is on disk.**
+        //
+        // macOS and Windows have case-insensitive filesystems.  Every check
+        // above this line -- and every check *before* this function, including
+        // `protect()` -- compares path text case-sensitively, because that is
+        // what an HTTP path is.  The filesystem does not agree, and where they
+        // disagree the filesystem wins, because it is the one that opens the
+        // file.
+        //
+        // That is an authentication bypass, and it was measured rather than
+        // imagined: with `protect("/static/private/*")` over
+        // `files("/static/*")`, a request for `/static/PRIVATE/key.txt` missed
+        // the guard, matched the route, and returned 200 with the guarded
+        // file in it.  `/static/private/key.txt` correctly returned 401.
+        //
+        // `realpath` resolves to the canonical on-disk spelling, so comparing
+        // its tail against what was asked for catches exactly this.  The
+        // comparison is deliberately narrow: only a difference that vanishes
+        // under case folding is refused.  Anything else that differs is a
+        // symlink -- which `files()` supports on purpose, and whose target
+        // legitimately has another name.
+        //
+        // On a case-sensitive filesystem the two are always identical and this
+        // costs a compare.
+        const std::string want = tidy_path(rest);
+        const std::string got = f.real.size() > root.size() + 1
+                              ? f.real.substr(root.size() + 1)
+                              : std::string();
+
+        if(want != got && util::http::fold(want) == util::http::fold(got))
             return false;
 
         return true;
@@ -1339,6 +1405,29 @@ bool server::path_of(const std::string& target, std::string& path,
         return false;
     }
 
+    // **A decoded control character is refused, and NUL is why.**
+    //
+    // Everything above works on std::string, which holds a NUL happily; every
+    // filesystem call below takes c_str(), which stops at one.  So
+    // `/static/page.html%00.jpg` is one name to the router and a different,
+    // shorter name to open() -- the router matched a route, decided a guard,
+    // and chose a content type for a name that was never opened.  Measured:
+    // it returned 200 and the contents of page.html.
+    //
+    // Nothing else in a path needs a control character either, so the rule is
+    // the wider one rather than a NUL check that the next such bug walks
+    // around.  DEL is included: it is not printable and has no business in a
+    // target.
+    for(std::size_t i = 0; i < path.size(); i++) {
+        const unsigned char c = static_cast<unsigned char>(path[i]);
+
+        if(c < 0x20 || c == 0x7F) {
+            why = "a control character in the request target\n";
+
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -1537,6 +1626,28 @@ static bool read_credentials(const std::string& value,
 
     return true;
 }
+
+/**
+ * What a client is told when its message could not be framed.
+ *
+ * **Deliberately says nothing.**  The exceptions from `util::http` build
+ * useful messages by quoting the offending value -- `Content-Length is not a
+ * number: "..."` -- and sending one back reflects attacker-chosen bytes into a
+ * response body.  Measured during #240: a request with
+ * `Content-Length: REFLECT<script>alert(1)</script>ME` had all of it returned
+ * verbatim.  `text/plain` makes that hard to weaponise in a modern browser and
+ * "hard" is not the standard for something this cheap to not do.
+ *
+ * The status is still sent, and the connection still closes, so a client
+ * learns it sent something unframeable -- which is the part the comment at the
+ * catch site was protecting.  What it does not learn is which of its own bytes
+ * caused it, and a legitimate client already knows what it sent.
+ *
+ * The diagnosis is lost to the operator too, which is a real cost and not an
+ * oversight: a log is the place for it, and jhttpd (#239) is where logging
+ * belongs rather than in a library that does not know where its output goes.
+ */
+static const char* const UNFRAMABLE = "bad request\n";
 
 /** A 429, carrying the delay that says when to come back. */
 static void too_many_requests(server::response& r, long retry_after) {
@@ -1899,7 +2010,11 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
     catch(util::http::error& e) {
         // A message this cannot read at all.  Answer, so a client learns
         // something rather than seeing a bare close, and stop.
-        r.status(400).type("text/plain").body(std::string(e.what()) + "\n");
+        r.status(400).type("text/plain").body(UNFRAMABLE);
+
+        // The diagnosis goes to the operator instead of to the client, which
+        // is the only reason withholding it from the client costs nothing.
+        m_transport->report(e, from);
 
         s << r.str(m_options.server_name) << std::flush;
 
@@ -2485,7 +2600,9 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     catch(util::http::error& e) {
         // A message this cannot read at all.  Answer, so a client learns
         // something rather than seeing a bare close, and stop.
-        bad = std::string(e.what()) + "\n";
+        bad = UNFRAMABLE;
+
+        m_transport->report(e, from);
     }
     catch(sys::cancelled&) {
         // The deadline, or a shutdown.  Nothing is sent: the client has not

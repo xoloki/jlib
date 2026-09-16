@@ -492,6 +492,20 @@ public:
     void on_error(error_handler h);
 
     /**
+     * Hand something to the error handler that this did not catch itself.
+     *
+     * A handler that throws already reaches `on_error`. A request this server
+     * *refused* did not, and that was a gap the #240 audit found rather than a
+     * design: a smuggling attempt, an unparseable head, a target with a
+     * control character in it -- every one of them answered 400 and vanished.
+     * An operator had no way to see an attack in progress, because the only
+     * account of it went to the attacker in the response body.
+     *
+     * Always safe to call: there is a default handler and it is never null.
+     */
+    void report(const std::exception& e, const peer& from) const;
+
+    /**
      * Accept at most one connection and serve it.
      *
      * @param timeout seconds to wait; zero waits until a connection arrives or
@@ -654,7 +668,7 @@ private:
 
     listener      m_listener;
     handler       m_handler;
-    error_handler m_on_error;
+    mutable error_handler m_on_error;
     tls_context   m_tls;
     policy        m_policy;
 
