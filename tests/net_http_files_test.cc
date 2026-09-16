@@ -50,6 +50,10 @@ using namespace jlib::net;
 
 static int failures = 0;
 
+// One value, used by the registration and by every assertion about it, so a
+// test cannot agree with itself about a string neither end actually sent.
+static const char* const CACHE = "max-age=31536000, immutable";
+
 static void ok(const std::string& what, bool good, const std::string& detail = "") {
     if(!good) ++failures;
     std::cout << (good ? "  ok   " : "  FAIL ") << what;
@@ -558,6 +562,69 @@ static void if_range_against_a_weak_validator(http::server& s, const tree& t) {
     }
 }
 
+/**
+ * Freshness, which is the half of caching the validators do not cover.
+ *
+ * An ETag says *whether* a copy is still good and costs a round trip to find
+ * out.  `Cache-Control` says *how long* not to ask, which is the part that
+ * makes the second visit free.  Both routes below serve the same tree, so any
+ * difference between them is the registration and nothing else.
+ */
+static void freshness(http::server& s) {
+    std::cout << "\nfreshness:\n";
+
+    {
+        const util::http::Response r = ask(s, "GET", "/cached/index.html");
+
+        ok("  a route registered with one sends it",
+           r.status() == 200 && r.fields().get("Cache-Control") == CACHE,
+           r.fields().get("Cache-Control"));
+    }
+
+    {
+        const util::http::Response r = ask(s, "GET", "/static/index.html");
+
+        // The server invents no freshness of its own.  A caller who says
+        // nothing gets nothing, and the client falls back on its own
+        // heuristics -- which is its business rather than this server's guess.
+        ok("  a route registered without one sends nothing",
+           r.status() == 200 && r.fields().get("Cache-Control").empty(),
+           r.fields().get("Cache-Control"));
+    }
+
+    {
+        const util::http::Response r =
+            ask_with(s, "GET", "/cached/index.html", "Range", "bytes=0-3");
+
+        ok("  a 206 carries it too", r.status() == 206 &&
+           r.fields().get("Cache-Control") == CACHE,
+           std::to_string(r.status()) + " " + r.fields().get("Cache-Control"));
+    }
+
+    {
+        const util::http::Response first = ask(s, "GET", "/cached/index.html");
+        const util::http::Response r =
+            ask_with(s, "GET", "/cached/index.html", "If-None-Match",
+                     first.fields().get("ETag"));
+
+        // RFC 9110 15.4.5.  The 304 path builds its answer from a different
+        // response object than the 200 path, so this is a separate place that
+        // has to remember -- and the cost of forgetting is a client that
+        // revalidates every time despite having been told for a year.
+        ok("  and so does the 304, per 9110 15.4.5", r.status() == 304 &&
+           r.fields().get("Cache-Control") == CACHE,
+           std::to_string(r.status()) + " " + r.fields().get("Cache-Control"));
+    }
+
+    {
+        const util::http::Response r = ask(s, "HEAD", "/cached/index.html");
+
+        ok("  and a HEAD, which is the 200 without the body",
+           r.status() == 200 && r.fields().get("Cache-Control") == CACHE,
+           r.fields().get("Cache-Control"));
+    }
+}
+
 static void a_root_that_is_not_there() {
     std::cout << "\na root that cannot be resolved:\n";
 
@@ -574,6 +641,32 @@ static void a_root_that_is_not_there() {
     ok("  is refused when the route is registered", threw, why);
 }
 
+static void a_cache_control_that_is_not_one(const tree& t) {
+    std::cout << "\na Cache-Control value that would not survive the wire:\n";
+
+    http::server s(0, "127.0.0.1");
+
+    bool threw = false;
+    std::string why;
+
+    // A newline in a field value is header injection if it ever reaches a
+    // socket.  The serialiser would refuse it -- but on every response rather
+    // than here, with no caller left to point at.
+    try { s.files("/bad/*", t.root, "max-age=60\r\nX-Injected: yes"); }
+    catch(std::exception& e) { threw = true; why = e.what(); }
+
+    ok("  is refused when the route is registered", threw, why);
+
+    bool empty_threw = false;
+
+    // Empty is not an error, it is the way to ask for no directive -- and it
+    // is the default, so a throw here would break every existing caller.
+    try { s.files("/fine/*", t.root, ""); }
+    catch(std::exception&) { empty_threw = true; }
+
+    ok("  but empty is how you ask for none, and is fine", !empty_threw);
+}
+
 int main() {
     std::cout << "net_http_files_test\n";
 
@@ -584,6 +677,7 @@ int main() {
             http::server s(0, "127.0.0.1");
 
             s.files("/static/*", t.root);
+            s.files("/cached/*", t.root, CACHE);
             s.transport().on_error([](const std::exception&, const sys::peer&) {});
 
             running go(s);
@@ -595,12 +689,14 @@ int main() {
             a_file_bigger_than_a_block(s, t);
             byte_ranges(s, t);
             if_range_against_a_weak_validator(s, t);
+            freshness(s);
         }
 
         {
             http::server s(http::server::async_t(), 0, "127.0.0.1");
 
             s.files("/static/*", t.root);
+            s.files("/cached/*", t.root, CACHE);
             s.transport().on_error([](const std::exception&, const sys::peer&) {});
 
             running go(s);
@@ -612,9 +708,11 @@ int main() {
             a_file_bigger_than_a_block(s, t);
             byte_ranges(s, t);
             if_range_against_a_weak_validator(s, t);
+            freshness(s);
         }
 
         a_root_that_is_not_there();
+        a_cache_control_that_is_not_one(t);
     }
     catch(std::exception& e) {
         std::cerr << "net_http_files_test: " << e.what() << "\n";

@@ -690,11 +690,17 @@ namespace {
      * `util::http::decide_framing` refuses as a smuggling primitive.  The
      * server would have been emitting what its own reader throws out.
      *
+     * @param cache what to send as `Cache-Control`, or empty for none.  It
+     *              goes on the 304 as well as the 200 and the 206, because
+     *              RFC 9110 15.4.5 says a 304 carries the fields a 200 would
+     *              have and freshness is one of them -- a client that gets a
+     *              bare 304 has to revalidate again next time.
      * @param span  which octets to stream; the whole file unless a range said
      *              otherwise
      * @return      false if `r` is the whole answer and nothing should follow
      */
-    bool file_decided(const std::string& root, const std::string& rest,
+    bool file_decided(const std::string& root, const std::string& cache,
+                      const std::string& rest,
                       const util::http::Request& q, located& f,
                       server::response& r, byte_range& span)
     {
@@ -713,6 +719,11 @@ namespace {
 
         probe.field("Last-Modified", http_date(f.st.st_mtime))
              .field("ETag", etag_for(f.st));
+
+        // Carried by whichever answer this becomes.  `probe` is copied into
+        // `r` on the 304 path and discarded on the others, which rebuild from
+        // scratch, so this has to be repeated below rather than set once.
+        if(!cache.empty()) probe.field("Cache-Control", cache);
 
         // **Before the range**, because 13.1 orders them that way and because
         // the answers differ: a client whose copy is current wants a 304, not
@@ -776,6 +787,8 @@ namespace {
          // RFC 9110 14.3: advertised where a client looks before deciding
          // whether seeking is possible at all.
          .field("Accept-Ranges", "bytes");
+
+        if(!cache.empty()) r.field("Cache-Control", cache);
 
         if(partial) {
             std::ostringstream cr;
@@ -983,7 +996,20 @@ void server::route(const std::string& method, const std::string& path,
     m_routes.push_back(std::move(e));
 }
 
-void server::files(const std::string& pattern, const std::string& root) {
+void server::files(const std::string& pattern, const std::string& root,
+                   const std::string& cache_control)
+{
+    // Checked here rather than on the way out of a response, because a value
+    // with a newline in it is a program bug and this is where the program is.
+    // Deferring it would turn one wrong registration into a throw on every
+    // request it ever serves, at a point with no caller to blame.  Empty
+    // passes -- `field-value = *field-content` matches it, and empty is the
+    // documented way to ask for no directive at all.
+    if(!util::http::grammar().at("field-value").try_parse(cache_control)) {
+        throw error("cannot serve \"" + pattern + "\": \"" + cache_control +
+                    "\" is not a usable Cache-Control value");
+    }
+
     // Resolved once, at registration: a root that does not exist is a mistake
     // in the program rather than a 404 repeated per request, and resolving it
     // here is also what makes the containment check a string compare against
@@ -1008,12 +1034,13 @@ void server::files(const std::string& pattern, const std::string& root) {
     e.path = pattern;
 
     e.param_stream =
-        [real_root](const Request& q, const params& p, responder& out) {
+        [real_root, cache_control](const Request& q, const params& p,
+                                   responder& out) {
             located f;
             response head;
             byte_range span;
 
-            if(!file_decided(real_root, p.rest(), q, f, head, span)) {
+            if(!file_decided(real_root, cache_control, p.rest(), q, f, head, span)) {
                 out.send(head);
 
                 return;
@@ -1060,13 +1087,13 @@ void server::files(const std::string& pattern, const std::string& root) {
         };
 
     e.async_param_stream =
-        [real_root](const Request& q, const params& p,
-                    async_responder& out) -> sys::task<void> {
+        [real_root, cache_control](const Request& q, const params& p,
+                                   async_responder& out) -> sys::task<void> {
             located f;
             response head;
             byte_range span;
 
-            if(!file_decided(real_root, p.rest(), q, f, head, span)) {
+            if(!file_decided(real_root, cache_control, p.rest(), q, f, head, span)) {
                 co_await out.send(head);
 
                 co_return;
