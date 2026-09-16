@@ -107,6 +107,19 @@ struct laid_out {
     std::vector<int> ids;
     unsigned int budget = 0;
     bool fits = true;
+
+    /**
+     * What the trimmer had to give up, so somebody can be told.
+     *
+     * The client owns the conversation here -- it sends the whole thing every
+     * turn -- so unlike jalpaca, where a person watches the transcript, it has
+     * no way to learn that jserve answered a shorter one.  `usage.prompt_tokens`
+     * reflects the trimmed prompt and is the only in-band signal there is, and
+     * reading it means counting your own tokens first (#256).
+     */
+    std::size_t turns = 0;      ///< how many were sent
+    std::size_t dropped = 0;    ///< how many of them went
+    unsigned int reserved = 0;  ///< what they were given up for
 };
 
 template<typename Session>
@@ -115,11 +128,15 @@ laid_out lay_out(Session& s, std::vector<ai::message> turns,
 {
     laid_out out;
 
+    out.turns = turns.size();
+
     const unsigned int context = s.context();
 
     // What to keep free while trimming: the caller's cap when it gave one,
     // since asking for a short answer should let more history survive.
     const unsigned int want = req_cap ? req_cap : DEFAULT_RESERVE;
+
+    out.reserved = want;
 
     for(;;) {
         if(!context) break;
@@ -134,6 +151,8 @@ laid_out lay_out(Session& s, std::vector<ai::message> turns,
         if(at == turns.size()) break;
 
         turns.erase(turns.begin() + long(at));
+
+        out.dropped++;
     }
 
     out.ids = s.templ().encode(turns, s.tok());
@@ -314,6 +333,16 @@ private:
 
         if(!bad.empty())
             co_return co_await refuse(out, 400, bad, "invalid_request_error");
+
+        // The one place this is recorded.  A client that sends its whole
+        // conversation every turn cannot tell that jserve answered a shorter
+        // one -- there is no field in a chat completion for "I dropped your
+        // history", and inventing one would be worse than the silence.  So it
+        // goes where the other thing jserve gives up already goes (#256).
+        if(plan.dropped)
+            std::cerr << "jserve: trimmed " << plan.dropped << " of "
+                      << plan.turns << " turns to reserve " << plan.reserved
+                      << " tokens for the reply\n";
 
         if(!plan.fits)
             co_return co_await refuse(out, 400,
