@@ -126,6 +126,84 @@ server::server(listener l, async_handler h, tls_context tls, const policy& p)
     if(!m_async) throw exception("a server with no handler");
 }
 
+server::address_count::hold::~hold() {
+    if(m_owner) m_owner->release(m_who);
+}
+
+server::address_count::hold&
+server::address_count::hold::operator=(hold&& o) {
+    if(this != &o) {
+        if(m_owner) m_owner->release(m_who);
+
+        m_owner = o.m_owner;
+        m_who = std::move(o.m_who);
+        o.m_owner = 0;
+    }
+
+    return *this;
+}
+
+server::address_count::hold
+server::address_count::take(const std::string& who, std::size_t cap) {
+    std::lock_guard<std::mutex> got(m_lock);
+
+    if(cap != 0) {
+        const std::map<std::string, std::size_t>::const_iterator i =
+            m_counts.find(who);
+
+        if(i != m_counts.end() && i->second >= cap) return hold();
+    }
+
+    m_counts[who]++;
+
+    return hold(*this, who);
+}
+
+void server::address_count::release(const std::string& who) {
+    std::lock_guard<std::mutex> got(m_lock);
+
+    const std::map<std::string, std::size_t>::iterator i = m_counts.find(who);
+
+    if(i == m_counts.end()) return;
+
+    // Erased at zero rather than left holding one, which is what keeps the
+    // table the size of the live connections instead of the size of everyone
+    // who has ever connected.
+    if(--i->second == 0) m_counts.erase(i);
+}
+
+std::size_t server::address_count::count(const std::string& who) const {
+    std::lock_guard<std::mutex> got(m_lock);
+
+    const std::map<std::string, std::size_t>::const_iterator i =
+        m_counts.find(who);
+
+    return i == m_counts.end() ? 0 : i->second;
+}
+
+std::size_t server::address_count::tracked() const {
+    std::lock_guard<std::mutex> got(m_lock);
+
+    return m_counts.size();
+}
+
+std::size_t server::connections_from(const std::string& address) const {
+    return m_addresses.count(address);
+}
+
+bool server::admit(int fd, const peer& from, address_count::hold& into) {
+    into = m_addresses.take(from.address, m_policy.max_per_address);
+
+    if(into.engaged()) return true;
+
+    // Accepted and closed, because there is no way to know who is calling
+    // without accepting the call -- see policy::max_per_address.  Silent: this
+    // layer has no protocol to refuse in.
+    ::close(fd);
+
+    return false;
+}
+
 bool server::full() const {
     return m_live.size() >= (m_policy.max_connections != 0
                              ? m_policy.max_connections : 1);
@@ -235,7 +313,12 @@ void server::join() {
     m_jobs.join();
 }
 
-void server::serve(int fd, const peer& from) {
+void server::serve(int fd, const peer& from, address_count::hold slot) {
+    // `slot` is taken **by value and never touched again**, which is the whole
+    // of the bookkeeping: it is destroyed when this returns, on every path it
+    // can return by.  A local copy of it was here until a break harness showed
+    // that removing the local broke nothing -- because the parameter was
+    // already doing the work.
     held_fd held(fd);
 
     // A pooled thread keeps OpenSSL's per-thread error queue between
@@ -321,6 +404,13 @@ bool server::accept_and_post() {
 
     if(fd < 0) return false;
 
+    address_count::hold slot;
+
+    // Refused before anything else touches the descriptor -- no TLS handshake,
+    // no job posted, no stream built.  A flood should cost an accept and a
+    // close and nothing more.
+    if(!admit(fd, from, slot)) return true;
+
     // A shared_ptr, and it is not shared: refcount one for its whole life,
     // except while job_queue copies the std::function around.  The indirection
     // is doing two jobs.  post() takes a std::function, which requires a
@@ -336,7 +426,14 @@ bool server::accept_and_post() {
     // post is exactly that race.
     std::shared_ptr<held_fd> held = std::make_shared<held_fd>(fd);
 
-    m_jobs.post([this, held, from] { serve(held->release(), from); });
+    // The same indirection, and for the first of the same two reasons: post()
+    // takes a std::function, which must be copyable, and a hold is move-only.
+    std::shared_ptr<address_count::hold> kept =
+        std::make_shared<address_count::hold>(std::move(slot));
+
+    m_jobs.post([this, held, from, kept] {
+        serve(held->release(), from, std::move(*kept));
+    });
 
     return true;
 }
@@ -363,6 +460,10 @@ bool server::accept_and_start() {
 
     if(fd < 0) return false;
 
+    address_count::hold slot;
+
+    if(!admit(fd, from, slot)) return true;
+
     // Its own, so stop() can end this connection without ending every other,
     // and so a handler can hang a deadline on it.
     const cancel_token t = cancel_token::create();
@@ -371,7 +472,7 @@ bool server::accept_and_start() {
     // afterwards.  Lazy, so nothing runs until start() below -- which matters,
     // because a coroutine that ran on creation would run before anything held
     // its frame.
-    m_live.push_back(live{ serve_async(fd, from, t), t });
+    m_live.push_back(live{ serve_async(fd, from, t, std::move(slot)), t });
 
     m_live.back().work.start();
 
@@ -398,7 +499,13 @@ void server::reap() {
     }
 }
 
-task<void> server::serve_async(int fd, peer from, cancel_token t) {
+task<void> server::serve_async(int fd, peer from, cancel_token t,
+                               address_count::hold slot) {
+    // By value again, and here that means *in the coroutine frame*: a
+    // coroutine's parameters are moved into the frame and destroyed with it,
+    // so the count is released when the connection's frame is -- which reap()
+    // does, on every path the connection can end on.
+
     // Owns the descriptor for the whole coroutine, including the paths where
     // it is destroyed while suspended -- a stop(), or the task being dropped
     // -- because destroying the frame destroys this.

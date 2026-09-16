@@ -34,6 +34,9 @@
 
 #include <atomic>
 #include <list>
+#include <map>
+#include <mutex>
+#include <utility>
 #include <cstddef>
 #include <exception>
 #include <functional>
@@ -126,6 +129,39 @@ struct server_policy {
      * max_queued.
      */
     std::size_t max_connections = 256;
+
+    /**
+     * How many connections one address may hold at once.  Zero is no limit,
+     * and no limit is the default.
+     *
+     * `max_connections` bounds the server; this bounds each client. Without
+     * it, one address holds every slot the server has and everybody else waits
+     * in the backlog behind it -- which is the difference between a server and
+     * a target.
+     *
+     * **Enforced by accepting and closing**, which is the opposite of what
+     * `max_connections` does and is not a choice. That one disarms the
+     * listener so the overflow waits in the kernel's backlog; this one cannot,
+     * because there is no way to know who is calling without accepting the
+     * call. The cost is one accept and one close per refused connection, paid
+     * by the address doing the flooding.
+     *
+     * The refusal is silent: no bytes, no status. There is no protocol here to
+     * say anything in -- this layer does not know it is speaking HTTP -- and a
+     * server that answered would be doing work on behalf of the flood.
+     * `net::http::server::rate_limit()` is where a refusal that explains
+     * itself lives.
+     *
+     * Applies to both servers. A blocking one bounds its *concurrency* with
+     * threads and max_queued, but that is a bound on the server again rather
+     * than on one client: a single address can fill the queue and every other
+     * client waits behind it.
+     *
+     * The address is the peer and nothing else. See the note on
+     * `net::http::server::rate_limit()` about why no forwarded header is
+     * believed, and what that means behind a proxy.
+     */
+    std::size_t max_per_address = 0;
 };
 
 /**
@@ -191,6 +227,95 @@ struct server_policy {
  */
 class server {
 public:
+    /**
+     * How many connections each address is holding.
+     *
+     * **Bounded by construction, which is the difference from the rate
+     * limiter's table.** An entry exists only while a connection does, and
+     * goes when the count reaches zero -- so the table cannot be larger than
+     * the connections the server is already carrying, and those are bounded by
+     * policy. There is nothing to sweep and no way for an address flood to
+     * grow it: a flood that is refused was never counted, and one that is
+     * admitted is a connection like any other.
+     *
+     * Public so that per-address separation can be tested at all. It cannot be
+     * reached through a server -- every client in this tree connects over
+     * loopback and both platforms report the peer as 127.0.0.1 whichever
+     * loopback address is dialled, measured rather than assumed.
+     */
+    class address_count {
+    public:
+        /**
+         * One counted connection, released when this is destroyed.
+         *
+         * RAII rather than a matching call, because the decrement has to
+         * happen on every path a connection can end on -- returned, thrown
+         * out of, cancelled, or the job dropped before it ran -- and a count
+         * that misses one drifts upward and refuses that address forever.
+         *
+         * Move-only. Two holds for one connection is exactly the
+         * double-decrement this exists to prevent.
+         */
+        class hold {
+        public:
+            hold() : m_owner(0) {}
+            ~hold();
+
+            hold(hold&& o) : m_owner(o.m_owner), m_who(std::move(o.m_who)) {
+                o.m_owner = 0;
+            }
+
+            hold& operator=(hold&& o);
+
+            hold(const hold&) = delete;
+            hold& operator=(const hold&) = delete;
+
+            /** Whether this counts anything. */
+            bool engaged() const { return m_owner != 0; }
+
+        private:
+            friend class address_count;
+
+            hold(address_count& c, const std::string& who)
+                : m_owner(&c), m_who(who) {}
+
+            address_count* m_owner;
+            std::string    m_who;
+        };
+
+        /**
+         * Count one more connection from `who`, unless that would exceed
+         * `cap`.
+         *
+         * The test and the increment are one operation under the lock. They
+         * are serialised anyway today -- both accept loops are
+         * single-threaded -- but the *releases* are not, and a cap that was
+         * only accidentally atomic is one that breaks the first time
+         * somebody accepts on two threads.
+         *
+         * @param cap  0 for no limit, in which case this always succeeds
+         * @return     engaged when the connection may proceed
+         */
+        hold take(const std::string& who, std::size_t cap);
+
+        /** How many connections `who` is holding right now. */
+        std::size_t count(const std::string& who) const;
+
+        /** How many addresses are being counted. */
+        std::size_t tracked() const;
+
+    private:
+        friend class hold;
+
+        void release(const std::string& who);
+
+        mutable std::mutex                 m_lock;
+        std::map<std::string, std::size_t> m_counts;
+    };
+
+    /** How many connections `address` is holding.  See policy::max_per_address. */
+    std::size_t connections_from(const std::string& address) const;
+
     class exception : public std::exception {
     public:
         exception(const std::string& msg = "") {
@@ -488,11 +613,18 @@ private:
 
     server(deferred_handler_t, listener l, tls_context tls, const policy& p);
 
-    void serve(int fd, const peer& from);
+    void serve(int fd, const peer& from, address_count::hold slot);
     std::size_t cap() const;
 
     /** One accept and one post.  What the reactor calls the listener ready for. */
     bool accept_and_post();
+
+    /**
+     * Take a slot for `from` if policy allows, closing `fd` if it does not.
+     *
+     * @return engaged when the connection may proceed
+     */
+    bool admit(int fd, const peer& from, address_count::hold& into);
 
     /** Whether an async server is carrying all the connections it will. */
     bool full() const;
@@ -501,7 +633,8 @@ private:
     bool accept_and_start();
 
     /** The coroutine one connection runs in. */
-    task<void> serve_async(int fd, peer from, cancel_token t);
+    task<void> serve_async(int fd, peer from, cancel_token t,
+                           address_count::hold slot);
 
     /** Drop the connections that have finished.  Called once per pass. */
     void reap();
@@ -516,6 +649,8 @@ private:
      * and leaves m_live, all of which the reactor thread is also doing.
      */
     void cancel_live();
+
+    address_count m_addresses;
 
     listener      m_listener;
     handler       m_handler;
