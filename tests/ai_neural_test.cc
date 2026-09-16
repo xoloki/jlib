@@ -456,6 +456,106 @@ static void a_mismatched_batch_is_refused() {
     ok("inputs and targets must agree about the batch size", threw);
 }
 
+/** Every weight in a network of any depth, flattened, straight from json(). */
+static std::vector<double> all_weights(json::object::ptr p) {
+    std::vector<double> out;
+
+    std::vector<uint> n;
+    json::object::ptr nh = p->obj("nhidden");
+
+    for(std::size_t i = 0; i < nh->size(); i++)
+        n.push_back(uint(nh->get(i)));
+
+    const uint ni = p->get("ninput"), no = p->get("noutput");
+
+    for(uint i = 0; i < n.front() * ni; i++)
+        out.push_back(double(p->obj("wih")->get(i)));
+
+    for(std::size_t d = 0; d + 1 < n.size(); d++)
+        for(uint i = 0; i < n[d+1] * n[d]; i++)
+            out.push_back(double(p->obj("deep")->obj(d)->get(i)));
+
+    for(uint i = 0; i < no * n.back(); i++)
+        out.push_back(double(p->obj("who")->get(i)));
+
+    return out;
+}
+
+/**
+ * Any number of hidden layers, of any size (#7).
+ *
+ * m_nhidden and m_deep have taken both since before the backend existed, and
+ * the fan-in assertions above already build an uneven network -- but they stop
+ * at the initial weights.  Nothing said such a network *works*: that a batch
+ * goes through it, that query() answers through it, and that it survives
+ * json(), which is the only way a trained network leaves the process.
+ *
+ * The widths are all different on purpose, and that is the load-bearing part.
+ * A deep weight matrix is read back as `r * n[i-1] + c`, and a reading that
+ * takes the width from the wrong side of the gap is **the same expression**
+ * when the two are equal -- so a uniform network cannot fail that way no
+ * matter how wrong the code is.  Verified by writing `n[i]` there: with 6, 3
+ * and 5 the read runs off the end of the array and says so; with equal widths
+ * nothing happens at all.  Same reason the fan-in assertions above are uneven
+ * (#131).
+ */
+static void depth_with_uneven_widths() {
+    std::cout << "\ndepth with uneven widths:\n";
+
+    const std::vector<uint> deep{ 6, 3, 5 };
+
+    NeuralNetwork<double> nn(0.1, I, deep, O);
+
+    const matrix<double> e = nn.train(input(0, 4), target(0, 4));
+
+    ok("a batch trains through three hidden layers", e.M == O && e.N == 4,
+       std::to_string(e.M) + "x" + std::to_string(e.N));
+
+    const matrix<double> q = nn.query(input(1, 2));
+
+    ok("  and query answers through them", q.M == O && q.N == 2,
+       std::to_string(q.M) + "x" + std::to_string(q.N));
+
+    json::object::ptr p = nn.json();
+
+    bool widths = p->obj("nhidden")->size() == deep.size();
+
+    for(std::size_t i = 0; widths && i < deep.size(); i++)
+        widths = uint(p->obj("nhidden")->get(i)) == deep[i];
+
+    ok("json records the widths as given", widths);
+
+    ok("  with one deep matrix per gap between them",
+       p->obj("deep")->size() == deep.size() - 1,
+       std::to_string(p->obj("deep")->size()) + " for " +
+       std::to_string(deep.size()) + " layers");
+
+    NeuralNetwork<double> back(p);
+
+    ok("every weight survives the round trip",
+       worst(all_weights(p), all_weights(back.json())) == 0);
+
+    // The weights being equal does not establish they were read back into the
+    // same *places*: this is the assertion that would fail on a transposed
+    // deep layer, because it puts the numbers through the shapes.
+    const matrix<double> qb = back.query(input(1, 2));
+
+    ok("  and the reloaded network answers identically",
+       worst(std::vector<double>{ q(0, 0), q(1, 0), q(2, 0), q(0, 1), q(1, 1), q(2, 1) },
+             std::vector<double>{ qb(0, 0), qb(1, 0), qb(2, 0), qb(0, 1), qb(1, 1), qb(2, 1) }) == 0);
+
+    // The variadic constructor takes the hidden widths as a pack -- and takes
+    // the output count *before* them, where the vector form takes it after.
+    NeuralNetwork<double> pack(0.1, I, O, 6u, 3u, 5u);
+
+    bool same = pack.json()->obj("nhidden")->size() == deep.size();
+
+    for(std::size_t i = 0; same && i < deep.size(); i++)
+        same = uint(pack.json()->obj("nhidden")->get(i)) == deep[i];
+
+    ok("the variadic constructor builds the same shape", same);
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -463,6 +563,7 @@ int main() {
     the_gradient_is_a_mean();
     it_is_the_mean_of_the_samples();
     weights_are_scaled_by_the_fan_in();
+    depth_with_uneven_widths();
     each_activation_and_its_slope();
     the_activation_survives_a_round_trip();
     the_backend_can_be_replaced();
