@@ -62,6 +62,7 @@
 #include <jlib/sys/relay.hh>
 #include <jlib/util/utf8.hh>
 
+#include <algorithm>
 #include <ctime>
 #include <iostream>
 #include <string>
@@ -142,11 +143,25 @@ laid_out lay_out(Session& s, std::vector<ai::message> turns,
         ? (context > out.ids.size() ? unsigned(context - out.ids.size()) : 0u)
         : DEFAULT_RESERVE;
 
-    // Asked **before** the caller's cap is applied.  A request saying
-    // `max_tokens: 5` wants a five-token answer and must get one; refusing it
-    // for being under MIN_REPLY would be reading a deliberate choice as a
-    // context that does not fit, which is a different thing entirely.
-    out.fits = room >= MIN_REPLY;
+    // Enough room for what the caller asked for, or for MIN_REPLY when the
+    // caller asked for more than that.
+    //
+    // `room >= MIN_REPLY` alone was wrong, and the comment that stood here
+    // said why while the code did the opposite: a request saying
+    // `max_tokens: 5` wants a five-token answer and must get one, and
+    // refusing it for being under MIN_REPLY reads a deliberate choice as a
+    // context that does not fit.  A prompt that nearly fills the context --
+    // a file pasted into a harness -- was refused with twelve tokens free to
+    // a caller that wanted one (#253).
+    //
+    // MIN_REPLY still decides every case it was written for (#169), because a
+    // caller that asks for more than is there is still refused: at
+    // `max_tokens: 16` with twelve free this is false, as it was before.
+    //
+    // What is **not** fixed here is the other end of the same line: `want` is
+    // the caller's ceiling, so a generous `max_tokens` makes the trimmer drop
+    // history to reserve room the reply will never use (#256).
+    out.fits = room >= std::min(want, MIN_REPLY);
 
     out.budget = room;
 
