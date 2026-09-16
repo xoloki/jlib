@@ -54,6 +54,13 @@ METAL_CPPFLAGS =
 METAL_LA       =
 endif
 
+# jneural-alpha is built only where ImageMagick++ is, so the test that drives
+# it is gated the same way.  app_jchat_test needs no such guard because jchat
+# is unconditional.
+if HAVE_MAGICK
+APP_TESTS = app_jneural_alpha_test
+endif
+
 TESTS = \
 	math_test \
 	math_value_test \
@@ -133,7 +140,8 @@ TESTS = \
 	$(X_TESTS) \
 	$(METAL_TESTS) \
 	$(MEDIA_TESTS) \
-	$(CURVE_TESTS)
+	$(CURVE_TESTS) \
+	$(APP_TESTS)
 
 check_PROGRAMS = $(TESTS)
 
@@ -352,6 +360,9 @@ math_dump_test_LDADD   = $(JUTIL_LA)
 
 ai_neural_test_SOURCES = ai_neural_test.cc
 ai_neural_test_LDADD   = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
+
+app_jneural_alpha_test_SOURCES = app_jneural_alpha_test.cc
+app_jneural_alpha_test_LDADD   = $(JSYS_LA)
 
 math_object_test_SOURCES = math_object_test.cc
 math_object_test_LDADD   = $(JUTIL_LA)

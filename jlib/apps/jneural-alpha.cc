@@ -71,6 +71,27 @@ char swap_case(char c);
 
 std::tuple<uint,double> getmax(math::matrix<T> m);
 
+/**
+ * Whether a CSV row is as wide as the network is.
+ *
+ * The file's row count *is* the input dimension the data has; INODES comes
+ * from -r and -c, which default to the **image** mode's 90x120.  Nothing
+ * compared the two, and the training loop copies INODES elements out of a
+ * sample that has `size` of them through an unchecked math::matrix -- so with
+ * the defaults an MNIST row is read 10016 doubles past its end, silently, once
+ * per sample (#243).
+ *
+ * It used to be loud: the pre-batch code multiplied the sample straight in and
+ * libjmath refused the shape.  The batch path copies element by element, so
+ * there is no longer a shape to disagree with, and the run completes and
+ * prints a success rate for a network trained on the heap.
+ *
+ * Checked per row rather than once, because that also catches a file that is
+ * ragged rather than merely the wrong width, and an int compare per row is
+ * nothing beside parsing it.
+ */
+bool wide_enough(const std::string& path, int size, int inodes, uint r, uint c);
+
 int main(int argc, char** argv) {
     uint R = 90;
     uint C = 120;
@@ -224,9 +245,10 @@ int main(int argc, char** argv) {
             if(ifs) {
                 std::vector<std::string> inlist = util::tokenize(line, ",");
                 int size = inlist.size() - 1;
-		
-                //std::cout << "Got " << size << " elements" << std::endl;
-		
+
+                if(!wide_enough(train_mnist_path, size, INODES, R, C))
+                    return 1;
+
                 int label = util::int_value(inlist.front());
                 math::matrix<T> input(size, 1);
 		
@@ -313,9 +335,10 @@ int main(int argc, char** argv) {
             if(tfs) {
                 std::vector<std::string> inlist = util::tokenize(line, ",");
                 int size = inlist.size() - 1;
-  
-                //std::cout << "Got " << size << " elements" << std::endl;
-      
+
+                if(!wide_enough(test_mnist_path, size, INODES, R, C))
+                    return 1;
+
                 int label = util::int_value(inlist.front());
                 math::matrix<T> input(size, 1);
       
@@ -533,6 +556,19 @@ int convert(char c) {
         return 10 + (c - 'A');
     else
         return 36 + (c - 'a');
+}
+
+bool wide_enough(const std::string& path, int size, int inodes, uint r, uint c) {
+    if(size == inodes)
+        return true;
+
+    std::cerr << "jneural-alpha: " << path << " has " << size
+              << " inputs per row, but the network takes " << inodes
+              << " (" << r << " x " << c << " from -r and -c, which default to"
+              << " the image mode).  MNIST wants -r 28 -c 28 --output-nodes 10."
+              << std::endl;
+
+    return false;
 }
 
 char swap_case(char c) {
