@@ -49,6 +49,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <mutex>
 #include <thread>
 
 #include <arpa/inet.h>
@@ -314,7 +315,19 @@ static void a_framing_error_closes() {
     http::server s(http::server::async_t(), 0, "127.0.0.1");
 
     furnish(s);
-    s.transport().on_error([](const std::exception&, const sys::peer&) {});
+
+    // What the server told its operator about the refusal.  Written on the
+    // reactor thread and read here after the exchange has completed, which the
+    // reply() below orders.
+    std::mutex said;
+    std::string complaint;
+
+    s.transport().on_error([&said, &complaint](const std::exception& e,
+                                               const sys::peer&) {
+        std::lock_guard<std::mutex> hold(said);
+
+        complaint = e.what();
+    });
 
     std::thread t([&s]{ s.run(); });
 
@@ -335,9 +348,21 @@ static void a_framing_error_closes() {
         ok("  it is refused with a 400", reply(c, r) && r.status() == 400,
            std::to_string(r.status()) + " " + r.body());
 
+        // **The reason went to the operator, not to the client.**  It used
+        // to be asserted on the response body; the #240 audit stopped the
+        // server quoting a client back to itself, because the same messages
+        // name the offending value and a request can choose what that is.
+        //
+        // The assertion is not weakened by moving: what it checks is that the
+        // *smuggling* rule fired rather than some other 400, and on_error
+        // carries that where a generic body cannot.
+        std::string seen;
+
+        { std::lock_guard<std::mutex> hold(said); seen = complaint; }
+
         ok("  the refusal says where the message ends is in doubt",
-           r.body().find("depends on who is reading it") != std::string::npos,
-           r.body());
+           seen.find("depends on who is reading it") != std::string::npos,
+           seen);
 
         ok("  the connection closes rather than reading on", closed(c));
     }

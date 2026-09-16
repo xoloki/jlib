@@ -204,6 +204,10 @@ bool server::admit(int fd, const peer& from, address_count::hold& into) {
     return false;
 }
 
+void server::report(const std::exception& e, const peer& from) const {
+    m_on_error(e, from);
+}
+
 bool server::full() const {
     return m_live.size() >= (m_policy.max_connections != 0
                              ? m_policy.max_connections : 1);
