@@ -898,6 +898,7 @@ namespace {
         case 403: return "Forbidden";
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
+        case 429: return "Too Many Requests";
         case 413: return "Content Too Large";
         case 414: return "URI Too Long";
         case 431: return "Request Header Fields Too Large";
@@ -1537,6 +1538,18 @@ static bool read_credentials(const std::string& value,
     return true;
 }
 
+/** A 429, carrying the delay that says when to come back. */
+static void too_many_requests(server::response& r, long retry_after) {
+    r = server::response();
+
+    r.status(429).type("text/plain")
+     // RFC 9110 10.2.3 allows delay-seconds or an HTTP-date.  Seconds,
+     // because the client wants a duration and a date makes it subtract two
+     // clocks that disagree.
+     .field("Retry-After", std::to_string(retry_after))
+     .body("too many requests\n");
+}
+
 /** A 401, carrying the challenge that says what would have worked. */
 static void unauthorized(server::response& r, const std::string& challenge) {
     r = server::response();
@@ -1544,6 +1557,145 @@ static void unauthorized(server::response& r, const std::string& challenge) {
     r.status(401).type("text/plain")
      .field("WWW-Authenticate", challenge)
      .body("authentication required\n");
+}
+
+void server::limiter::configure(double per_second, double burst) {
+    std::lock_guard<std::mutex> hold(m_lock);
+
+    m_rate = per_second > 0 ? per_second : 0;
+
+    // At least one, or a bucket can never hold a whole token and every request
+    // is refused -- a limit of "none" spelled as if it were a number.
+    m_burst = burst >= 1 ? burst : 1;
+
+    // Configuring clears: the buckets describe the old rate, and carrying them
+    // across would let a client's credit from a loose limit spend against a
+    // tight one.
+    m_buckets.clear();
+}
+
+std::size_t server::limiter::tracked() const {
+    std::lock_guard<std::mutex> hold(m_lock);
+
+    return m_buckets.size();
+}
+
+void server::limiter::sweep(std::chrono::steady_clock::time_point now) {
+    // Pass one, exact: a full bucket says nothing a fresh one would not.
+    for(std::map<std::string, bucket>::iterator i = m_buckets.begin();
+        i != m_buckets.end(); )
+    {
+        const double idle =
+            std::chrono::duration<double>(now - i->second.when).count();
+
+        if(i->second.tokens + idle * m_rate >= m_burst) i = m_buckets.erase(i);
+        else ++i;
+    }
+
+    // Down to three quarters, not to the bound, so the next request does
+    // not pay for this again.
+    const std::size_t keep = max_tracked - max_tracked / 4;
+
+    if(m_buckets.size() <= keep) return;
+
+    // Pass two, lossy and bounded.  Nothing above was full, so every eviction
+    // here hands back an allowance -- take it from whoever was closest to
+    // having one, which is the least that can be given away.
+    std::vector<std::pair<double, const std::string*> > order;
+
+    order.reserve(m_buckets.size());
+
+    for(std::map<std::string, bucket>::const_iterator i = m_buckets.begin();
+        i != m_buckets.end(); ++i)
+    {
+        const double idle =
+            std::chrono::duration<double>(now - i->second.when).count();
+
+        order.push_back(std::make_pair(i->second.tokens + idle * m_rate,
+                                       &i->first));
+    }
+
+    std::sort(order.begin(), order.end(),
+              [](const std::pair<double, const std::string*>& a,
+                 const std::pair<double, const std::string*>& b) {
+                  return a.first > b.first;
+              });
+
+    const std::size_t drop = m_buckets.size() - keep;
+
+    // Collected first, erased after: erasing invalidates nothing else in a
+    // map, but the keys above are pointers into it and dropping one frees the
+    // string the next comparison would have read.
+    std::vector<std::string> doomed;
+
+    doomed.reserve(drop);
+
+    for(std::size_t i = 0; i < drop && i < order.size(); i++)
+        doomed.push_back(*order[i].second);
+
+    for(std::size_t i = 0; i < doomed.size(); i++) m_buckets.erase(doomed[i]);
+}
+
+bool server::limiter::allow(const std::string& who, long& retry_after) {
+    std::lock_guard<std::mutex> hold(m_lock);
+
+    if(m_rate <= 0) return true;
+
+    const std::chrono::steady_clock::time_point now =
+        std::chrono::steady_clock::now();
+
+    if(m_buckets.size() > max_tracked) sweep(now);
+
+    std::map<std::string, bucket>::iterator i = m_buckets.find(who);
+
+    if(i == m_buckets.end()) {
+        // An address not seen before starts full, which is what makes the
+        // sweep above exact.
+        bucket fresh;
+
+        fresh.tokens = m_burst;
+        fresh.when = now;
+
+        i = m_buckets.insert(std::make_pair(who, fresh)).first;
+    }
+    else {
+        const double idle =
+            std::chrono::duration<double>(now - i->second.when).count();
+
+        i->second.tokens = std::min(m_burst, i->second.tokens + idle * m_rate);
+        i->second.when = now;
+    }
+
+    if(i->second.tokens >= 1) {
+        i->second.tokens -= 1;
+
+        return true;
+    }
+
+    // Rounded up, and never zero: a Retry-After of 0 invites an immediate
+    // retry that cannot succeed, which costs both ends a round trip to learn
+    // nothing.
+    const double wait = (1 - i->second.tokens) / m_rate;
+
+    retry_after = long(wait) + (wait > double(long(wait)) ? 1 : 0);
+
+    if(retry_after < 1) retry_after = 1;
+
+    return false;
+}
+
+void server::rate_limit(double per_second, double burst) {
+    m_limits.configure(per_second, burst);
+}
+
+bool server::within_rate(const sys::peer& from, response& r) {
+    long retry_after = 1;
+
+    if(m_limits.allow(from.address, retry_after)) return true;
+
+    too_many_requests(r, retry_after);
+
+    return false;
 }
 
 void server::protect(const std::string& pattern, const std::string& challenge,
@@ -1726,7 +1878,7 @@ static void method_not_allowed(server::response& r,
      .body("that path does not take " + method + "; it takes " + list + "\n");
 }
 
-void server::serve(sys::socketstream& s, const sys::peer&) {
+void server::serve(sys::socketstream& s, const sys::peer& from) {
     response r;
 
     Request q;
@@ -1765,6 +1917,19 @@ void server::serve(sys::socketstream& s, const sys::peer&) {
         s << r.str(m_options.server_name) << std::flush;
 
         return;
+    }
+
+    // **Before protect()**, so a 429 is reachable without credentials.  A
+    // rate limit that only applied to requests which got past authentication
+    // would be no protection for the thing most worth protecting.
+    {
+        response slow;
+
+        if(!within_rate(from, slow)) {
+            s << slow.str(m_options.server_name) << std::flush;
+
+            return;
+        }
     }
 
     // **Before routing**, so a protected path that does not exist answers 401
@@ -2200,7 +2365,7 @@ sys::task<void> server::serve_async(sys::server::connection& c,
 }
 
 sys::task<bool> server::serve_request_async(sys::server::connection& c,
-                                            const sys::peer&,
+                                            const sys::peer& from,
                                             std::size_t served)
 {
     async_responder out(c.writer(), m_options.server_name, c.reactor(),
@@ -2364,6 +2529,19 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
         co_await out.send(r);
 
         co_return false;
+    }
+
+    // **Before protect()**, so a 429 is reachable without credentials.  A
+    // rate limit that only applied to requests which got past authentication
+    // would be no protection for the thing most worth protecting.
+    {
+        response slow;
+
+        if(!within_rate(from, slow)) {
+            co_await out.send(slow);
+
+            co_return true;
+        }
     }
 
     // **Before routing**, so a protected path that does not exist answers 401
