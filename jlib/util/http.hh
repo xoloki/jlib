@@ -244,6 +244,89 @@ sys::task<Request> read_request_head(sys::async_reader& in,
                                      std::size_t cap = 8192);
 
 /**
+ * For a caller that means to stream: no bound on how much body it will take.
+ *
+ * Spelled rather than left as a magic number, because "0" would read as "none"
+ * and the largest size_t as a mistake.
+ */
+const std::size_t no_cap = static_cast<std::size_t>(-1);
+
+/**
+ * Where a body goes as it arrives, a block at a time.
+ *
+ * @return false to stop reading
+ *
+ * The block size is an implementation detail and not a message boundary: a
+ * sink is called with whatever arrived, which for a chunked body is **not**
+ * one call per chunk. Anything that needs to see a unit of the payload has to
+ * reassemble it, the way ai::openai::event_reader does for server-sent
+ * events.
+ */
+typedef std::function<bool(std::string_view)> body_sink;
+
+/**
+ * The same, for the suspending reader -- and it may suspend.
+ *
+ * **A `bool` here would have been a design error**, and the tree has already
+ * paid for that one: #218 records that a callback cannot `co_await`, which is
+ * why ai::generate taking one forced jserve's token loop onto a thread of its
+ * own with a relay to report back. A sink that cannot await cannot write what
+ * it was given anywhere that suspends, so a server streaming a request body
+ * onward would have to buffer the whole thing -- which is the exercise.
+ *
+ * It costs a coroutine frame per block: **20.2 ns**, measured against 2.8 ns
+ * for the plain form. A token from jserve takes ~19 ms to produce, so the
+ * frame is one part in a million of what delivered the block to it.
+ */
+typedef std::function<sys::task<bool>(std::string_view)> async_body_sink;
+
+/**
+ * Read a body whose framing is already known, handing it over as it arrives.
+ *
+ * For a body that should not be held whole: an event stream, or an upload
+ * larger than memory. The accumulating overload below is this one with a sink
+ * that appends, and every existing caller still uses that.
+ *
+ * `cap` still bounds what a *declared* length or a chunked body may claim,
+ * because refusing a gigabyte before reading it is the whole value of a
+ * declared length. A streaming caller that means it passes `no_cap`.
+ *
+ * **When the sink returns false the stream is not at a message boundary.**
+ * Nothing here can put the octets back, so the connection cannot be reused --
+ * a caller that stops early has to close it. That is the price of stopping and
+ * it is not paid by anything that reads to the end.
+ *
+ * @throws error on a body that ends early, a chunk without its CRLF, or a
+ *         chunk size that is not one -- the same errors as the overload below,
+ *         from the same code
+ */
+void read_body(std::istream& is, framing how, std::size_t length,
+               const body_sink& sink, std::size_t cap = no_cap);
+
+/**
+ * The same, suspending, with a sink that may suspend.  See async_body_sink.
+ *
+ * **The sink is taken by value, and that is not a style choice.**  A
+ * coroutine's parameters are copied into its frame, but a *reference*
+ * parameter copies the reference: the temporary it binds to is destroyed at
+ * the end of the full expression that called this, which is long before the
+ * frame resumes.  The obvious call --
+ *
+ *     co_await read_body(in, how, n, [&](std::string_view p) -> task<bool> {...});
+ *
+ * -- materialises a std::function temporary, and by the first suspension it
+ * is gone.  It crashed in exactly that shape while this was being written,
+ * inside `pour`, one resume after the lambda died.
+ *
+ * The blocking overload above keeps its reference because it is not a
+ * coroutine: it runs to completion inside the call, so nothing it was handed
+ * can expire underneath it.
+ */
+sys::task<void> read_body(sys::async_reader& in, framing how,
+                          std::size_t length, async_body_sink sink,
+                          std::size_t cap = no_cap);
+
+/**
  * Read a body whose framing is already known.
  *
  * The Response overload below forwards to this; a Request needs it because its

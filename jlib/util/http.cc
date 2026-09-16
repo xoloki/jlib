@@ -576,6 +576,45 @@ namespace {
             " octets short of the body it promised";
     }
 
+    /**
+     * How much body is handed over at a time.
+     *
+     * The same 4096 the until_close loop already read in.  It bounds what a
+     * sink is called with, not what it may be called with in total -- the
+     * point of a sink is that the total need not fit in memory.
+     */
+    const std::size_t BODY_BLOCK = 4096;
+
+    /**
+     * n octets, to the sink, a block at a time.
+     *
+     * @return false if the sink asked to stop, in which case the stream is
+     *         **not** at a message boundary and the connection cannot be
+     *         reused.  That is the caller's to know; nothing here can put the
+     *         octets back.
+     */
+    bool pour(std::istream& is, std::size_t n, const body_sink& sink) {
+        char buf[BODY_BLOCK];
+
+        std::size_t left = n;
+
+        while(left) {
+            const std::size_t want = left < sizeof buf ? left : sizeof buf;
+
+            is.read(buf, static_cast<std::streamsize>(want));
+
+            const std::size_t got = static_cast<std::size_t>(is.gcount());
+
+            if(got != want) throw error(short_body(left - got));
+
+            left -= got;
+
+            if(!sink(std::string_view(buf, got))) return false;
+        }
+
+        return true;
+    }
+
     std::string read_exactly(std::istream& is, std::size_t n, std::size_t cap) {
         refuse_oversized_claim(n, cap);
 
@@ -650,6 +689,40 @@ namespace {
         co_return out;
     }
 
+    /**
+     * The same, suspending -- and the sink may suspend too.  See the header.
+     *
+     * The sink is a reference here and **by value one frame up**, in
+     * read_body, which awaits this: that frame is alive for the whole of this
+     * one, so the reference cannot dangle.  Getting that wrong the other way
+     * round is what the note on read_body is about.
+     */
+    sys::task<bool> pour(sys::async_reader& in, std::size_t n,
+                         const async_body_sink& sink)
+    {
+        char buf[BODY_BLOCK];
+
+        std::size_t left = n;
+
+        while(left) {
+            const std::size_t want = left < sizeof buf ? left : sizeof buf;
+
+            const std::size_t took = in.take(buf, want);
+
+            if(took == 0) {
+                if(!co_await in.fill()) throw error(short_body(left));
+
+                continue;
+            }
+
+            left -= took;
+
+            if(!co_await sink(std::string_view(buf, took))) co_return false;
+        }
+
+        co_return true;
+    }
+
     sys::task<void> eat_crlf(sys::async_reader& in) {
         char pair[2];
 
@@ -706,18 +779,26 @@ std::string read_body(std::istream& is, const Response& head, std::size_t cap) {
     return read_body(is, head.body_framing(), head.content_length(), cap);
 }
 
-std::string read_body(std::istream& is, framing how, std::size_t length,
-                      std::size_t cap)
+void read_body(std::istream& is, framing how, std::size_t length,
+               const body_sink& sink, std::size_t cap)
 {
     switch(how) {
     case framing::none:
-        return std::string();
+        return;
 
     case framing::length:
-        return read_exactly(is, length, cap);
+        // Refused before a single octet is read, which is the whole value of
+        // a declared length -- and why the cap did not move into the wrapper
+        // below.  A body claiming a gigabyte against a megabyte budget costs
+        // nothing to refuse here and a megabyte to refuse a block at a time.
+        refuse_oversized_claim(length, cap);
+
+        pour(is, length, sink);
+
+        return;
 
     case framing::chunked: {
-        std::string body;
+        std::size_t so_far = 0;
 
         for(;;) {
             // chunk-size [ chunk-ext ] CRLF -- the extension is parsed off and
@@ -735,32 +816,54 @@ std::string read_body(std::istream& is, framing how, std::size_t length,
                     if(trailer.empty()) break;
                 }
 
-                return body;
+                return;
             }
 
-            refuse_oversized_chunk(body.size(), n, cap);
+            // Against the declared size, before reading it, as it always was.
+            refuse_oversized_chunk(so_far, n, cap);
 
-            body += read_exactly(is, n, cap);
+            so_far += n;
+
+            if(!pour(is, n, sink)) return;
 
             eat_crlf(is);
         }
     }
 
     case framing::until_close: {
-        std::string body;
-        char buf[4096];
+        char buf[BODY_BLOCK];
+
+        std::size_t so_far = 0;
 
         while(is.read(buf, sizeof buf) || is.gcount() > 0) {
-            refuse_oversized_stream(body.size() + std::size_t(is.gcount()), cap);
+            const std::size_t got = static_cast<std::size_t>(is.gcount());
 
-            body.append(buf, is.gcount());
+            refuse_oversized_stream(so_far + got, cap);
+
+            so_far += got;
+
+            if(!sink(std::string_view(buf, got))) return;
         }
 
-        return body;
+        return;
     }
     }
+}
 
-    return std::string();
+std::string read_body(std::istream& is, framing how, std::size_t length,
+                      std::size_t cap)
+{
+    std::string body;
+
+    read_body(is, how, length,
+              [&body](std::string_view piece) {
+                  body.append(piece);
+
+                  return true;
+              },
+              cap);
+
+    return body;
 }
 
 /**
@@ -787,18 +890,23 @@ std::string read_body(std::istream& is, framing how, std::size_t length,
  * chunked bodies ever matter, that eleven is the number to go after and it has
  * nothing to do with coroutines.
  */
-sys::task<std::string> read_body(sys::async_reader& in, framing how,
-                                 std::size_t length, std::size_t cap)
+sys::task<void> read_body(sys::async_reader& in, framing how,
+                          std::size_t length, async_body_sink sink,
+                          std::size_t cap)
 {
     switch(how) {
     case framing::none:
-        co_return std::string();
+        co_return;
 
     case framing::length:
-        co_return co_await read_exactly(in, length, cap);
+        refuse_oversized_claim(length, cap);
+
+        co_await pour(in, length, sink);
+
+        co_return;
 
     case framing::chunked: {
-        std::string body;
+        std::size_t so_far = 0;
 
         for(;;) {
             const std::size_t n = chunk_size_of(co_await read_line(in, 4096));
@@ -813,38 +921,59 @@ sys::task<std::string> read_body(sys::async_reader& in, framing how,
                     if(trailer.empty()) break;
                 }
 
-                co_return body;
+                co_return;
             }
 
-            refuse_oversized_chunk(body.size(), n, cap);
+            refuse_oversized_chunk(so_far, n, cap);
 
-            body += co_await read_exactly(in, n, cap);
+            so_far += n;
+
+            if(!co_await pour(in, n, sink)) co_return;
 
             co_await eat_crlf(in);
         }
     }
 
     case framing::until_close: {
-        std::string body;
-        char buf[4096];
+        char buf[BODY_BLOCK];
+
+        std::size_t so_far = 0;
 
         for(;;) {
             const std::size_t took = in.take(buf, sizeof buf);
 
             if(took == 0) {
-                if(!co_await in.fill()) co_return body;
+                if(!co_await in.fill()) co_return;
 
                 continue;
             }
 
-            refuse_oversized_stream(body.size() + took, cap);
+            refuse_oversized_stream(so_far + took, cap);
 
-            body.append(buf, took);
+            so_far += took;
+
+            if(!co_await sink(std::string_view(buf, took))) co_return;
         }
     }
     }
 
-    co_return std::string();
+    co_return;
+}
+
+sys::task<std::string> read_body(sys::async_reader& in, framing how,
+                                 std::size_t length, std::size_t cap)
+{
+    std::string body;
+
+    co_await read_body(in, how, length,
+                       [&body](std::string_view piece) -> sys::task<bool> {
+                           body.append(piece);
+
+                           co_return true;
+                       },
+                       cap);
+
+    co_return body;
 }
 
 /** read_body() against what a response head said.  See the definition above. */
