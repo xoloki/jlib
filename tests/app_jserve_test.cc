@@ -37,11 +37,17 @@
 #include <jlib/net/http.hh>
 #include <jlib/util/json.hh>
 
+#include <cstdio>
+#include <fstream>
+#include <functional>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 namespace ai = jlib::ai;
 namespace apps = jlib::apps;
@@ -230,6 +236,40 @@ static std::string streamed(const std::vector<std::string>& evs, int& bad) {
     }
 
     return text;
+}
+
+/**
+ * What was written to stderr while `f` ran.
+ *
+ * The trim report is a log line and nothing else -- there is no field in a
+ * chat completion for "I dropped your history" (#256) -- so this is the only
+ * way to assert the thing this branch exists to add.  Without it, deleting the
+ * line would break no test.
+ */
+static std::string captured_stderr(const std::function<void()>& f) {
+    const char* path = "app_jserve_test_stderr.txt";
+
+    std::fflush(stderr);
+
+    const int saved = dup(2);
+
+    if(!std::freopen(path, "w", stderr)) { f(); return ""; }
+
+    f();
+
+    std::fflush(stderr);
+
+    dup2(saved, 2);
+    close(saved);
+
+    std::ifstream in(path);
+    const std::string out((std::istreambuf_iterator<char>(in)),
+                          std::istreambuf_iterator<char>());
+
+    in.close();
+    std::remove(path);
+
+    return out;
 }
 
 static std::string ids_to_text(const std::vector<int>& ids) {
@@ -506,9 +546,18 @@ static void the_oldest_turns_are_dropped(jlib::net::http::server& s) {
 
     body += R"({"role":"user","content":"LAST"}]})";
 
-    const reply a = post(s, body);
+    reply a;
+
+    const std::string said = captured_stderr([&]{ a = post(s, body); });
 
     ok("the request is answered", a.status == 200, std::to_string(a.status) + " " + a.body);
+
+    // The whole of #256: the client sent thirteen turns and got an answer to
+    // fewer, and this line is the only place that is written down.
+    ok("  and the server says what it trimmed",
+       said.find("trimmed") != std::string::npos &&
+       said.find("turns to reserve") != std::string::npos,
+       said.empty() ? "(nothing on stderr)" : said);
 
     const std::string prompt = ids_to_text(g_script.saw_prompt);
 
@@ -564,6 +613,71 @@ static void the_models_route(jlib::net::http::server& s) {
     catch(std::exception& e) { ok("the route answers", false, e.what()); }
 }
 
+static void what_the_trimmer_gave_up() {
+    std::cout << "\nwhat the trimmer reports giving up:\n";
+
+    // Called directly rather than over HTTP: the count exists so the endpoint
+    // can log it, and a log line is not in the response.  jserve.hh is a
+    // header for exactly this reason.
+    fake_session s;
+
+    g_script = script();
+    g_script.context = 8192;
+
+    std::vector<ai::message> turns;
+
+    // 40 turns whose ids come to 6000, which fits 8192 with room to spare.
+    for(int i = 0; i < 40; i++)
+        turns.push_back({ "user", std::string(144, char('a' + i % 26)) });
+
+    const std::size_t whole = s.templ().encode(turns, s.tok()).size();
+
+    ok("the conversation fits the context as sent", whole < 8192,
+       std::to_string(whole) + " ids");
+
+    {
+        const apps::laid_out p = apps::lay_out(s, turns, 0);
+
+        ok("a request with no cap drops nothing", p.dropped == 0,
+           std::to_string(p.dropped));
+
+        ok("  and says how many turns it was given", p.turns == 40,
+           std::to_string(p.turns));
+
+        ok("  reserving the default", p.reserved == 512, std::to_string(p.reserved));
+    }
+
+    {
+        // 4096 reserved out of 8192 cannot leave 6000 of prompt, so history
+        // goes -- and this is the number nothing used to record (#256).
+        const apps::laid_out p = apps::lay_out(s, turns, 4096);
+
+        ok("a generous cap drops turns that would have fitted", p.dropped > 0,
+           std::to_string(p.dropped) + " of " + std::to_string(p.turns));
+
+        ok("  reserving what the caller asked for", p.reserved == 4096,
+           std::to_string(p.reserved));
+
+        ok("  and leaving room for it", p.ids.size() + 4096 <= 8192,
+           std::to_string(p.ids.size()) + " + 4096");
+
+        ok("  with the newest turn still there",
+           p.ids.size() > 0 && ids_to_text(p.ids).find(std::string(144, char('a' + 39 % 26)))
+           != std::string::npos);
+    }
+
+    {
+        // The bigger the reservation the more it costs, which is the shape of
+        // the table on #256.
+        const apps::laid_out four = apps::lay_out(s, turns, 4096);
+        const apps::laid_out seven = apps::lay_out(s, turns, 7000);
+
+        ok("and a larger reservation costs more of it",
+           seven.dropped > four.dropped,
+           std::to_string(four.dropped) + " -> " + std::to_string(seven.dropped));
+    }
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -585,6 +699,7 @@ int main() {
 
     std::thread t([&s]{ s.run(); });
 
+    what_the_trimmer_gave_up();
     the_models_route(s);
     a_whole_reply(s);
     a_streamed_reply(s);
