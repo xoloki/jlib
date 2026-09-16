@@ -100,16 +100,15 @@ namespace util {
  * field-name, field-value, token, OWS, and the RFC 3986 rules underneath
  * absolute-URI and URI-reference.
  *
- * Two known-wrong-under-PEG rules that nothing here exercises, written down so
- * the next caller does not have to find them again:
+ * One known-wrong-under-PEG rule that nothing here exercises, written down so
+ * the next caller does not have to find it again:
  *
- * - credentials and challenge put token68 before the auth-param list, and
- *   token68 ends in *"=", so `Digest username="x"` matches token68 as
- *   `username=` and the rest is left over.  Whatever implements #104 will have
- *   to reorder those two.
  * - chunk has chunk-data = 1*OCTET, which is greedy and consumes the rest of
  *   the input, so chunked-body cannot frame anything.  That is expected:
  *   chunked framing is procedural, exactly as imap::read() frames a literal.
+ *
+ * credentials and challenge were the second entry on that list until the
+ * authentication work reordered them; the reasoning is at the rules.
  */
 namespace rfc9110 {
 
@@ -208,15 +207,39 @@ auth-param = token BWS "=" BWS ( token / quoted-string )
 auth-scheme = token
 ; jlib: authority = <authority, see [URI], Section 3.2>
 
-challenge = auth-scheme [ 1*SP ( token68 / [ auth-param *( OWS ","
- OWS auth-param ) ] ) ]
+; jlib: challenge = auth-scheme [ 1*SP ( token68 / [ auth-param
+;                   *( OWS "," OWS auth-param ) ] ) ]
+;
+; Two faults under ordered choice, and they have to be fixed together.
+;
+; token68 first: token68 ends in *"=", so `Basic realm="jlib"` matches
+; token68 as `realm=` and the quoted string is left over -- the whole
+; input does not parse, which is every challenge anyone actually sends.
+;
+; But moving the auth-param list ahead of token68 as written makes it
+; worse, not better: the list is wrapped in [ ], so it matches the
+; empty string, always succeeds, and token68 is never reached at all.
+; An optional alternative can only go last.
+;
+; So: require at least one auth-param on that branch, put it first, and
+; leave token68 as the fallback.  The outer [ 1*SP ... ] still makes the
+; whole argument optional, so a bare `Basic` parses as it did.  A
+; base64 credential with "=" padding takes the token68 branch, because
+; "=" is not a tchar so `dXNlcg==` cannot be a token BWS "=" anything.
+challenge = auth-scheme [ 1*SP ( auth-param *( OWS "," OWS auth-param )
+ / token68 ) ]
 codings = content-coding / "identity" / "*"
 comment = "(" *( ctext / quoted-pair / comment ) ")"
 complete-length = 1*DIGIT
 connection-option = token
 content-coding = token
-credentials = auth-scheme [ 1*SP ( token68 / [ auth-param *( OWS ","
- OWS auth-param ) ] ) ]
+; jlib: credentials = auth-scheme [ 1*SP ( token68 / [ auth-param
+;                     *( OWS "," OWS auth-param ) ] ) ]
+;
+; The same rule under a different name, and the same two faults; see
+; challenge above.
+credentials = auth-scheme [ 1*SP ( auth-param *( OWS "," OWS auth-param )
+ / token68 ) ]
 ctext = HTAB / SP / %x21-27 ; '!'-'''
  / %x2A-5B ; '*'-'['
  / %x5D-7E ; ']'-'~'

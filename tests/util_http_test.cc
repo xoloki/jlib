@@ -103,6 +103,75 @@ static void the_grammar_is_the_whole_rfc() {
     ok("and they are the ones from RFCs jlib has not pasted", expected);
 }
 
+/**
+ * The authentication rules, which were wrong as published for four years.
+ *
+ * This is the "alternation that commits to the wrong branch" the section above
+ * says `check()` cannot find, caught the only way it can be: by parsing things
+ * and looking at what came back.  Both rules put `token68` first, and `token68`
+ * ends in `*"="` -- so `Basic realm="jlib"` matched `realm=` and left the
+ * quoted string over.  Every challenge a server actually sends failed to parse.
+ *
+ * The fix is not simply swapping them.  The auth-param branch as published is
+ * wrapped in `[ ]`, so first in line it matches the empty string, always
+ * succeeds, and `token68` becomes unreachable -- trading a rule that rejects
+ * challenges for one that rejects credentials.  It needs `1*` on that branch
+ * *and* the reorder, which is why both halves are asserted below.
+ */
+static void the_authentication_rules() {
+    std::cout << "\nauthentication, both directions:\n";
+
+    const jlib::util::abnf::grammar& g = http::grammar();
+
+    struct { const char* rule; const char* text; bool good; const char* why; } cases[] = {
+        // token68, which is what Basic and Bearer actually send.  These are
+        // the ones a naive reorder breaks.
+        { "credentials", "Basic dXNlcjpwYXNz", true, "Basic, a base64 token68" },
+        { "credentials", "Basic dXNlcg==", true, "and with \"=\" padding on it" },
+        { "credentials", "Bearer mF_9.B5f-4.1JqM", true, "Bearer, RFC 6750's own example" },
+
+        // auth-param, which is what the published order broke.
+        { "credentials", "Digest username=\"x\"", true, "a single auth-param" },
+        { "credentials", "Newauth realm=\"apps\", type=1", true, "a list of them" },
+
+        { "credentials", "Basic", true, "a bare scheme, argument omitted" },
+        { "credentials", "Bearer ", false, "a scheme and a space and nothing" },
+
+        { "WWW-Authenticate", "Basic realm=\"jlib\"", true,
+          "the commonest challenge there is" },
+        { "WWW-Authenticate", "Bearer realm=\"api\", error=\"invalid_token\"", true,
+          "a Bearer challenge carrying an error" },
+        { "WWW-Authenticate", "Basic realm=\"x\", Bearer realm=\"y\"", true,
+          "two challenges, which is one comma list inside another" },
+
+        // RFC 9110 11.6.1 offers this one as the reason a challenge list is
+        // hard to parse: the comma before `Basic` ends the parameter list
+        // rather than continuing it, and only the shape of what follows says
+        // which.  A greedy inner repetition gets it right by stopping where
+        // `Basic realm` is not a `token BWS "=" BWS ...`.
+        { "WWW-Authenticate",
+          "Newauth realm=\"apps\", type=1, title=\"Login to \\\"apps\\\"\", Basic realm=\"simple\"",
+          true, "9110's own ambiguous example" }
+    };
+
+    for(std::size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const bool parsed = bool(g.at(cases[i].rule).try_parse(cases[i].text));
+
+        ok(cases[i].why, parsed == cases[i].good,
+           std::string(cases[i].rule) + " \"" + cases[i].text + "\" -> " +
+           (parsed ? "parsed" : "failed"));
+    }
+
+    // Not just that it parses: that the scheme is readable, since a server
+    // choosing between Basic and Bearer reads exactly this.
+    const jlib::util::abnf::parse_result r =
+        g.at("credentials").try_parse("Bearer mF_9.B5f-4.1JqM");
+
+    ok("and the scheme can be read back out",
+       r && r.root()["auth-scheme"].str() == "Bearer",
+       r ? r.root()["auth-scheme"].str() : std::string("did not parse"));
+}
+
 static void a_status_line_and_a_field_section() {
     std::cout << "\na status line and a field section:\n";
 
@@ -453,6 +522,7 @@ int main() {
     std::cout << std::unitbuf;
 
     the_grammar_is_the_whole_rfc();
+    the_authentication_rules();
     a_status_line_and_a_field_section();
     what_rfc_9112_section_6_refuses();
     reading_a_head_off_a_stream();
