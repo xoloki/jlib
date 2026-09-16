@@ -18,13 +18,13 @@
  *
  */
 
-#ifndef JLIB_APPS_UTF8_HH
-#define JLIB_APPS_UTF8_HH
+#ifndef JLIB_UTIL_UTF8_HH
+#define JLIB_UTIL_UTF8_HH
 
 #include <string>
 
 namespace jlib {
-namespace apps {
+namespace util {
 
 /**
  * Bytes in, whole characters out.
@@ -67,6 +67,19 @@ namespace apps {
  * Holding the bytes here means ncurses is never left mid-sequence: what it is
  * given is always whole characters, and what could not be completed is given
  * up at `end()` rather than handed over.
+ *
+ * ## Why this is in util and not beside the app that needed it first
+ *
+ * Because the screen is not the only place a partial sequence is a problem.
+ * `jserve` sends one SSE event per token, so those same four bytes become four
+ * JSON texts that do not parse -- measured, twelve broken events in one reply
+ * (#249).  A terminal reassembles adjacent bytes and a JSON parser does not,
+ * which is exactly why one of those was invisible for months and the other is
+ * an exception in somebody else's client.
+ *
+ * So the rule belongs where anything can reach it.  It started in
+ * `jlib/apps/utf8.hh` and moved here when the second caller turned out to be a
+ * wire format rather than a window.
  *
  * ## Not a UTF-8 validator
  *
@@ -170,4 +183,4 @@ inline std::size_t utf8_stream::end() {
 }
 }
 
-#endif // JLIB_APPS_UTF8_HH
+#endif // JLIB_UTIL_UTF8_HH

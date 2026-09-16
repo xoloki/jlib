@@ -11,4 +11,5 @@ libjutilincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/util
 libjutilinclude_HEADERS = abnf.hh jinja.hh Regex.hh MimeType.hh util.hh Date.hh xml.hh \
                           URL.hh Headers.hh Timer.hh json.hh \
                           content_type.hh rfc2045.hh rfc5322.hh http.hh \
-                          encoded_word.hh rfc2047.hh rfc3986.hh rfc9110.hh rfc9112.hh
+                          encoded_word.hh rfc2047.hh rfc3986.hh rfc9110.hh rfc9112.hh \
+                          utf8.hh

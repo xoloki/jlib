@@ -21,26 +21,31 @@
 //
 // Not for the reason #185 gives.  ncurses accumulates an incomplete multibyte
 // sequence across waddstr calls by itself, so a streamed emoji was always
-// drawn as one cell -- measured, and written down in jlib/apps/utf8.hh.  What
+// drawn as one cell -- measured, and written down in jlib/util/utf8.hh.  What
 // it cannot do is finish a sequence that never completes: a reply cut short
 // mid-character leaves ncurses holding bytes, and the newline jalpaca writes
 // next comes out as a literal ^J, so the transcript loses the line break at
 // exactly the point a reader needs it.
 //
-// Holding here means ncurses is never given a partial sequence at all.  That
-// half -- what reaches the screen -- needs a pty, a terminal emulator and a
-// model, and is in the python harness.  This is the rule about where a
-// character ends, which is arithmetic and wants no terminal: the header sits
-// under jlib/apps rather than inside jalpaca.cc so it can be reached from
-// here.
+// Holding means ncurses is never given a partial sequence at all.  That half
+// -- what reaches the screen -- needs a pty, a terminal emulator and a model,
+// and is in the python harness.  This is the rule about where a character
+// ends, which is arithmetic and wants no terminal.
+//
+// It is in jlib/util rather than beside jalpaca because the screen is not the
+// only place a partial sequence is a problem: jserve sends one SSE event per
+// token, so the same four bytes become four JSON texts that do not parse
+// (#249).  A terminal reassembles adjacent bytes and a JSON parser does not,
+// which is why one of those was invisible and the other is an exception in
+// somebody's client.
 
-#include <jlib/apps/utf8.hh>
+#include <jlib/util/utf8.hh>
 
 #include <iostream>
 #include <string>
 #include <vector>
 
-using jlib::apps::utf8_stream;
+using jlib::util::utf8_stream;
 
 static int failures = 0;
 

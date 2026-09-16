@@ -53,7 +53,7 @@
 #include <jlib/ai/model.hh>
 #include <jlib/ai/tokenizer.hh>
 
-#include <jlib/apps/utf8.hh>
+#include <jlib/util/utf8.hh>
 
 #ifdef HAVE_METAL
 #include <jlib/metal/backend.hh>
@@ -72,7 +72,7 @@
 #include <vector>
 
 namespace ai = jlib::ai;
-namespace apps = jlib::apps;
+namespace util = jlib::util;
 
 namespace {
 
@@ -734,7 +734,7 @@ int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
         // pieces are held here until they make a character (#185).  The
         // transcript is built from the pieces themselves, above, so this
         // changes what is drawn and not what was said.
-        apps::utf8_stream stream;
+        util::utf8_stream stream;
 
         const double began = now();
 
