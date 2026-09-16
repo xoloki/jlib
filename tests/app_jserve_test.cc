@@ -376,6 +376,59 @@ static void a_reply_cut_mid_character(jlib::net::http::server& s) {
     catch(std::exception& e) { ok("  it parses", false, e.what()); }
 }
 
+static void a_caller_that_asked_for_little(jlib::net::http::server& s) {
+    std::cout << "\na prompt that nearly fills the context:\n";
+
+    // #253.  No trimming happens here -- one turn, and it already fits -- so
+    // this is the ordinary shape of it: a file pasted into a harness, and a
+    // caller that wants a one-token answer out of what is left.
+    //
+    // The template spells a turn as "user:CONTENT\n", so the prompt is the
+    // content plus six.
+    g_script = script();
+    g_script.context = 100;
+    g_script.tokens.push_back(int('y'));
+
+    const std::string filler(82, 'x');            // prompt 88, room 12
+
+    const reply small = post(s, R"({"model":"m","max_tokens":1,"messages":[{"role":"user","content":")"
+                              + filler + R"("}]})");
+
+    ok("a request for one token is answered", small.status == 200,
+       std::to_string(small.status) + " " + small.body);
+
+    ok("  and the prompt left twelve free", g_script.saw_prompt.size() == 88,
+       std::to_string(g_script.saw_prompt.size()));
+
+    ok("  of which it was given the one it asked for", g_script.saw_budget == 1,
+       std::to_string(g_script.saw_budget));
+
+    // The case MIN_REPLY was written for is untouched: asking for more than is
+    // there is still refused, and this is the assertion that would fail if the
+    // fix had simply deleted the check.
+    const reply big = post(s, R"({"model":"m","max_tokens":16,"messages":[{"role":"user","content":")"
+                            + filler + R"("}]})");
+
+    ok("a request for sixteen, with twelve free, is still refused",
+       big.status == 400, std::to_string(big.status) + " " + big.body);
+
+    try {
+        json::object::ptr o = json::object::create(big.body);
+
+        ok("  as context_length_exceeded",
+           std::string(o->obj("error")->get("type")) == "context_length_exceeded");
+    }
+    catch(std::exception& e) { ok("  it unwraps", false, e.what()); }
+
+    // And a request that says nothing about length is judged as it always was,
+    // against MIN_REPLY rather than against DEFAULT_RESERVE.
+    const reply none = post(s, R"({"model":"m","messages":[{"role":"user","content":")"
+                             + filler + R"("}]})");
+
+    ok("a request with no max_tokens is refused on the same twelve",
+       none.status == 400, std::to_string(none.status));
+}
+
 static void the_refusals(jlib::net::http::server& s) {
     std::cout << "\nwhat it refuses, and how it says so:\n";
 
@@ -442,10 +495,9 @@ static void the_oldest_turns_are_dropped(jlib::net::http::server& s) {
     // context of 120, so the oldest have to go -- but never the newest, and
     // never the system turn.
     //
-    // max_tokens is 32 rather than something smaller on purpose: below
-    // MIN_REPLY the trim loop frees less than fits() then demands, and the
-    // request is refused for having no room when the room it asked for is
-    // there.  That is #253, and pinning it here would be pinning a bug.
+    // max_tokens is 32 so that trimming is what this case measures.  A
+    // smaller one used to be refused outright -- #253, fixed on this branch
+    // and covered above.
     std::string body = R"({"model":"m","max_tokens":32,"messages":[)"
         R"({"role":"system","content":"SYS"},)";
 
@@ -538,6 +590,7 @@ int main() {
     a_streamed_reply(s);
     a_character_that_arrives_in_pieces(s);
     a_reply_cut_mid_character(s);
+    a_caller_that_asked_for_little(s);
     the_refusals(s);
     a_context_with_no_room(s);
     the_oldest_turns_are_dropped(s);
