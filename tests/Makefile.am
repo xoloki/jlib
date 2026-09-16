@@ -136,6 +136,7 @@ TESTS = \
 	util_abnf_test \
 	util_jinja_test \
 	util_abnf_compile_test \
+	app_utf8_test \
  \
 	$(X_TESTS) \
 	$(METAL_TESTS) \
@@ -387,6 +388,10 @@ metal_tensor_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(JUTIL_LA) 
 
 app_jchat_test_SOURCES  = app_jchat_test.cc
 app_jchat_test_LDADD    = $(JSYS_LA)
+
+# Header-only, and deliberately so: the rule about where a character ends is
+# testable with no terminal, where the drawing it feeds is not.
+app_utf8_test_SOURCES   = app_utf8_test.cc
 
 ai_chat_test_SOURCES  = ai_chat_test.cc
 ai_chat_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)

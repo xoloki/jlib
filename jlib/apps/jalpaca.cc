@@ -53,6 +53,8 @@
 #include <jlib/ai/model.hh>
 #include <jlib/ai/tokenizer.hh>
 
+#include <jlib/apps/utf8.hh>
+
 #ifdef HAVE_METAL
 #include <jlib/metal/backend.hh>
 #endif
@@ -70,6 +72,7 @@
 #include <vector>
 
 namespace ai = jlib::ai;
+namespace apps = jlib::apps;
 
 namespace {
 
@@ -726,6 +729,13 @@ int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
         bool first = true;
         bool stopped = false;
 
+        // Between the tokenizer and the screen: a byte-fallback vocabulary
+        // hands over one byte at a time and curses decodes per call, so the
+        // pieces are held here until they make a character (#185).  The
+        // transcript is built from the pieces themselves, above, so this
+        // changes what is drawn and not what was said.
+        apps::utf8_stream stream;
+
         const double began = now();
 
         const std::vector<int> ids = ch.encode(turns, tok);
@@ -774,7 +784,9 @@ int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
 
                 reply += p;
 
-                s.say(p);
+                const std::string whole = stream.feed(p);
+
+                if(!whole.empty()) s.say(whole);
 
                 // Between tokens, which is where stopping is safe and where a
                 // keystroke can be looked for without blocking.  Scrolling back
@@ -796,6 +808,12 @@ int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
 
         g_interrupted = 0;
 
+        // Whatever is still waiting for continuation bytes is never going to
+        // get them -- the reply is over, whether it ended, was stopped, or ran
+        // into the context wall.  Given up here rather than held, and reported
+        // below with the other notes rather than in the middle of the text.
+        const std::size_t partial = stream.end();
+
         const double rate = (now() - began) > 0
             ? double(out.size() - ids.size()) / (now() - began) : 0.0;
 
@@ -816,6 +834,14 @@ int converse(ai::backend<T>& b, const ai::gguf& g, const options& o) {
             : std::string();
 
         s.say_line("");
+
+        // Silence here would be a reply that ends one character short of what
+        // the model wrote, with nothing saying so.
+        if(partial)
+            s.say_line("[" + std::to_string(partial) + " byte" +
+                       (partial == 1 ? "" : "s") +
+                       " of an unfinished character dropped]", note);
+
         s.say_line(std::string("[") + std::to_string(out.size() - ids.size()) +
                    " tokens, " + std::to_string(rate).substr(0, 5) + "/s" + room +
                    (stopped ? ", stopped]" : "]"), note);
