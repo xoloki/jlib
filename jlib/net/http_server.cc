@@ -24,11 +24,12 @@
 
 #include <algorithm>
 #include <cerrno>
-#include <fstream>
 #include <vector>
 
 #include <limits.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <stdlib.h>
 
 #include <cstring>
@@ -634,9 +635,49 @@ namespace {
     /** How much of a file is held at once.  See stream_file. */
     const std::size_t FILE_BLOCK = 64 * 1024;
 
+    /**
+     * A descriptor that closes itself.
+     *
+     * Local and minimal because jlib has no such type and this is the only
+     * place that wants one.  Movable so `located` can hold it and be returned
+     * into; not copyable, because two owners of one descriptor is the bug this
+     * exists to prevent.
+     */
+    class open_file {
+    public:
+        open_file() : m_fd(-1) {}
+        explicit open_file(int fd) : m_fd(fd) {}
+
+        open_file(open_file&& o) : m_fd(o.m_fd) { o.m_fd = -1; }
+
+        open_file& operator=(open_file&& o) {
+            if(this != &o) { reset(); m_fd = o.m_fd; o.m_fd = -1; }
+
+            return *this;
+        }
+
+        open_file(const open_file&) = delete;
+        open_file& operator=(const open_file&) = delete;
+
+        ~open_file() { reset(); }
+
+        int fd() const { return m_fd; }
+        bool ok() const { return m_fd >= 0; }
+
+        void reset() { if(m_fd >= 0) ::close(m_fd); m_fd = -1; }
+
+    private:
+        int m_fd;
+    };
+
     struct located {
         std::string real;
         struct stat st;
+
+        // What the response is actually made of.  Everything else here was
+        // decided *from* this descriptor, which is the point: a name can be
+        // re-pointed between two syscalls and an open descriptor cannot.
+        open_file file;
     };
 
     /**
@@ -648,6 +689,36 @@ namespace {
      */
     bool locate(const std::string& root, const std::string& rest, located& f) {
         const std::string candidate = root + "/" + rest;
+
+        // **Open first, and bind every later answer to what was opened.**
+        //
+        // This used to be realpath, then stat, then open by name -- three
+        // lookups of a name that can mean something different each time
+        // (#234).  The realistic damage was not disclosure but a Content-Length
+        // measured on one file and a body read from its replacement, which for
+        // a counted body is a truncated or over-long response: a framing bug
+        // rather than a leak.
+        //
+        // O_NONBLOCK because opening before checking the type reintroduces a
+        // hazard the old order did not have: a FIFO inside the root would
+        // otherwise block the open until somebody wrote to it, and the whole
+        // point of this open is that it happens before we know what the file
+        // is.  O_NOCTTY for the same reason one step further out.  Neither
+        // affects a regular file, which is the only thing that survives the
+        // check below.
+        const int fd = ::open(candidate.c_str(),
+                              O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+
+        if(fd < 0) return false;
+
+        f.file = open_file(fd);
+
+        // Regular files only, from the descriptor rather than from the name.
+        // This is also what refuses the prefix itself: an empty rest resolves
+        // to the root, which is a directory, so there is no listing and no
+        // index.html -- both being decisions a caller should make out loud
+        // rather than ones this makes quietly.
+        if(::fstat(fd, &f.st) != 0 || !S_ISREG(f.st.st_mode)) return false;
 
         char resolved[PATH_MAX];
 
@@ -662,11 +733,22 @@ namespace {
             return false;
         }
 
-        // Regular files only.  This is also what refuses the prefix itself: an
-        // empty rest resolves to the root, which is a directory, so there is
-        // no listing and no index.html -- both being decisions a caller should
-        // make out loud rather than ones this makes quietly.
-        if(::stat(f.real.c_str(), &f.st) != 0 || !S_ISREG(f.st.st_mode))
+        // **And that contained name is this descriptor.**  Without this, the
+        // two checks above are still about a name: a symlink pointed outside
+        // the root when we opened it and back inside before the realpath
+        // passes both, and we would serve what we opened.  Comparing the
+        // device and inode of the resolved name against the descriptor's makes
+        // the containment decision and the bytes the same file.
+        //
+        // A hard link inside the root to a file outside it still passes, and
+        // that is not a regression -- it passed before too, and no check made
+        // from a path can say otherwise, because the inode genuinely is inside
+        // the root by every name the filesystem has for it.
+        struct stat named;
+
+        if(::stat(f.real.c_str(), &named) != 0) return false;
+
+        if(named.st_dev != f.st.st_dev || named.st_ino != f.st.st_ino)
             return false;
 
         return true;
@@ -1048,36 +1130,32 @@ void server::files(const std::string& pattern, const std::string& root,
 
             out.begin(head);
 
-            std::ifstream in(f.real.c_str(), std::ios::binary);
-
-            if(!in) return;
-
-            // **Seek, rather than read and discard.**  This is what the
-            // streaming branch bought: a range costs the range, not the file.
-            in.seekg(std::streamoff(span.first));
-
-            if(!in) return;
-
             std::vector<char> block(FILE_BLOCK);
 
             // One block is held at a time rather than the file, so what a
             // request costs is FILE_BLOCK and not st_size.
+            //
+            // **Read the descriptor `locate()` opened**, never the name again.
+            // pread carries the offset per call, which is both how a range
+            // costs the range rather than a read-and-discard, and how this
+            // needs no seek whose result would have to be checked.
+            long long at = span.first;
             long long left = span.length();
 
-            while(left > 0 && in) {
+            while(left > 0) {
                 const std::size_t want =
                     static_cast<std::size_t>(
                         std::min<long long>(left,
                                             static_cast<long long>(block.size())));
 
-                in.read(&block[0], std::streamsize(want));
-
-                const std::streamsize got = in.gcount();
+                const ssize_t got =
+                    ::pread(f.file.fd(), &block[0], want, off_t(at));
 
                 if(got <= 0) break;
 
                 out.write(std::string(&block[0], std::size_t(got)));
 
+                at += got;
                 left -= got;
 
                 // Nobody is reading; stop producing.  A large file to a client
@@ -1101,17 +1179,10 @@ void server::files(const std::string& pattern, const std::string& root,
 
             co_await out.begin(head);
 
-            std::ifstream in(f.real.c_str(), std::ios::binary);
-
-            if(!in) co_return;
-
-            // See the blocking half: a range costs the range.
-            in.seekg(std::streamoff(span.first));
-
-            if(!in) co_return;
-
             std::vector<char> block(FILE_BLOCK);
 
+            // See the blocking half: the descriptor, and an offset per read.
+            long long at = span.first;
             long long left = span.length();
 
             while(left > 0) {
@@ -1128,9 +1199,8 @@ void server::files(const std::string& pattern, const std::string& root,
 
                 co_await sys::on_pool(out.pool());
 
-                in.read(&block[0], std::streamsize(want));
-
-                const std::streamsize got = in.gcount();
+                const ssize_t got =
+                    ::pread(f.file.fd(), &block[0], want, off_t(at));
 
                 co_await sys::on_reactor(out.reactor());
 
@@ -1138,9 +1208,8 @@ void server::files(const std::string& pattern, const std::string& root,
 
                 co_await out.write(std::string(&block[0], std::size_t(got)));
 
+                at += got;
                 left -= got;
-
-                if(!in) break;
             }
         };
 

@@ -41,6 +41,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <atomic>
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -108,6 +109,13 @@ struct tree {
         // Two symlinks: one that stays inside, one that leaves.
         ::symlink((root + "/index.html").c_str(), (root + "/inside.html").c_str());
         ::symlink(secret.c_str(), (root + "/escape.txt").c_str());
+
+        // Things inside the root that are not files.  Both matter because the
+        // server now opens before it knows what it opened: a FIFO with no
+        // writer blocks an ordinary open forever, and a character device has
+        // no end.  Neither was reachable when the type was checked first.
+        ::mkfifo((root + "/hose.txt").c_str(), 0644);
+        ::symlink("/dev/zero", (root + "/zero.txt").c_str());
     }
 
     ~tree() {
@@ -570,6 +578,129 @@ static void if_range_against_a_weak_validator(http::server& s, const tree& t) {
  * makes the second visit free.  Both routes below serve the same tree, so any
  * difference between them is the registration and nothing else.
  */
+/**
+ * Things inside the root that are not regular files.
+ *
+ * `locate()` opens before it can know what it opened -- that is the whole
+ * point of #234, since a name checked and then opened is a name checked twice
+ * with a gap in between.  The cost is that the open itself has to survive
+ * whatever is there, and the two that do not survive a plain `O_RDONLY` are a
+ * FIFO with no writer, which blocks until somebody writes, and a character
+ * device, which never ends.
+ *
+ * **A failure here is a hang, not a FAIL line.**  If the open stops being
+ * non-blocking this function never returns and the suite times out with no
+ * assertion having failed -- which is the shape of failure that has fooled a
+ * break harness in this tree before, so the harness for this one uses a
+ * watchdog rather than reading exit status alone.
+ */
+/**
+ * The race in #234, run rather than reasoned about.
+ *
+ * A symlink inside the root is flipped between a file that is inside and the
+ * secret that is outside, atomically, while requests for it are in flight.
+ * The old order -- resolve the name, check it, then open the name again --
+ * could resolve to the inside file, be flipped, and then open the secret.
+ *
+ * **The assertion is one-sided, which is what makes it safe to run.**  It does
+ * not require the window to be hit; it requires that the secret never comes
+ * back.  Correct code passes whether or not the timing lands, so this cannot
+ * flake -- it can only fail for code that is actually wrong, and then only
+ * some of the time, which is why the iteration count is large.  200 and 404
+ * are both fine answers here, and both occur: a flip to the secret is refused
+ * and a flip back is served.
+ *
+ * `rename()` rather than unlink-then-symlink so the name is never briefly
+ * absent -- otherwise most requests would land in the gap and get an honest
+ * 404 without ever reaching the window being tested.
+ */
+static void a_symlink_that_changes_while_it_is_served(http::server& s,
+                                                      const tree& t)
+{
+    std::cout << "\na symlink flipped under a request in flight:\n";
+
+    const std::string flip = t.root + "/flip.txt";
+    const std::string spare = t.root + "/.flip.tmp";
+
+    ::symlink((t.root + "/index.html").c_str(), flip.c_str());
+
+    std::atomic<bool> stop(false);
+
+    std::thread flipper([&] {
+        bool out = false;
+
+        while(!stop) {
+            ::unlink(spare.c_str());
+            ::symlink(out ? t.secret.c_str() : (t.root + "/index.html").c_str(),
+                      spare.c_str());
+            ::rename(spare.c_str(), flip.c_str());
+
+            out = !out;
+        }
+    });
+
+    int leaked = 0;
+    int served = 0;
+    int refused = 0;
+
+    std::string first;
+
+    for(int i = 0; i < 400; i++) {
+        const util::http::Response r = ask(s, "GET", "/static/flip.txt");
+
+        // **Anything but the inside file, with a 200 on it, is a leak.**
+        //
+        // Searching the body for the secret's text is what this did first, and
+        // it could not fail: the old order takes the length from its `stat` of
+        // the *inside* file and the bytes from whatever the name opened, so a
+        // leaked secret arrives truncated to fifteen octets -- "you should
+        // neve" -- and the phrase being searched for is cut off mid-way.  The
+        // wrong Content-Length is the same defect as the wrong file, so the
+        // test that sees both is the one that compares the whole body.
+        if(r.status() == 200) {
+            if(r.body() == "<h1>hello</h1>\n") served++;
+            else { leaked++; if(leaked == 1) first = r.body(); }
+        }
+        else refused++;
+    }
+
+    stop = true;
+    flipper.join();
+
+    ::unlink(flip.c_str());
+    ::unlink(spare.c_str());
+
+    ok("  nothing but the inside file is ever served, however the timing lands",
+       leaked == 0,
+       std::to_string(leaked) + " leaked" +
+       (first.empty() ? "" : " (first: \"" + first + "\")") + ", " +
+       std::to_string(served) + " served, " + std::to_string(refused) +
+       " refused");
+
+    // Without this the test could pass by never reaching the server at all --
+    // a mistyped path answers 404 four hundred times and leaks nothing.
+    ok("  and the route was live throughout", served > 0,
+       std::to_string(served));
+}
+
+static void things_that_are_not_files(http::server& s) {
+    std::cout << "\ninside the root but not a file:\n";
+
+    {
+        const util::http::Response r = ask(s, "GET", "/static/hose.txt");
+
+        ok("  a FIFO nobody is writing to is refused, and does not hang",
+           r.status() == 404, std::to_string(r.status()));
+    }
+
+    {
+        const util::http::Response r = ask(s, "GET", "/static/zero.txt");
+
+        ok("  and a character device is refused rather than streamed forever",
+           r.status() == 404, std::to_string(r.status()));
+    }
+}
+
 static void freshness(http::server& s) {
     std::cout << "\nfreshness:\n";
 
@@ -690,6 +821,8 @@ int main() {
             byte_ranges(s, t);
             if_range_against_a_weak_validator(s, t);
             freshness(s);
+            things_that_are_not_files(s);
+            a_symlink_that_changes_while_it_is_served(s, t);
         }
 
         {
@@ -709,6 +842,8 @@ int main() {
             byte_ranges(s, t);
             if_range_against_a_weak_validator(s, t);
             freshness(s);
+            things_that_are_not_files(s);
+            a_symlink_that_changes_while_it_is_served(s, t);
         }
 
         a_root_that_is_not_there();
