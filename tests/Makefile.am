@@ -142,6 +142,7 @@ TESTS = \
 	util_jinja_test \
 	util_abnf_compile_test \
 	util_utf8_test \
+	app_jcode_test \
 	app_jserve_test \
  \
 	$(X_TESTS) \
@@ -413,6 +414,13 @@ app_jchat_test_LDADD    = $(JSYS_LA)
 # Header-only, and deliberately so: the rule about where a character ends is
 # testable with no terminal, where the drawing it feeds is not.
 util_utf8_test_SOURCES  = util_utf8_test.cc
+
+# The edit format, with no model and no network: recorded replies in, a temp
+# tree out (#265).  jcode.cc is compiled into the test rather than a library
+# because jcode is an app, and this is the same arrangement jserve.hh has.
+app_jcode_test_SOURCES  = app_jcode_test.cc $(top_srcdir)/jlib/apps/jcode.cc
+app_jcode_test_CPPFLAGS = $(AM_CPPFLAGS)
+app_jcode_test_LDADD    = $(JUTIL_LA) $(JSYS_LA)
 
 # jserve's endpoint with a fake engine: the real server, the real client, the
 # real wire format, and a scripted model (#236).
