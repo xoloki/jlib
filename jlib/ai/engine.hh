@@ -27,8 +27,12 @@
 #include <jlib/ai/model.hh>
 #include <jlib/ai/tokenizer.hh>
 
+#include <jlib/sys/reactor.hh>
+
+#include <atomic>
 #include <functional>
 #include <map>
+#include <optional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -79,6 +83,18 @@ private:
     // member declaration is not a complete-class context, so a nested class
     // cannot name a type the enclosing one declares later.
     struct entry {
+        /**
+         * Whether the model is loaded, askable **without the lock**.
+         *
+         * prepare() needs to distinguish "not loaded yet" from "loaded and
+         * busy", and the lock cannot tell it: a caller holding it might be
+         * loading or might be generating.  Reading `m` instead would be a
+         * data race.
+         *
+         * Written under the lock, once, after the load; read anywhere.
+         */
+        std::atomic<bool> ready{false};
+
         std::string name;
         std::string path;
 
@@ -197,6 +213,42 @@ public:
 
     session acquire(const std::string& name);
 
+    /**
+     * A session, or nothing at all, without ever blocking.
+     *
+     * For a caller on a thread that must not block -- a reactor, where
+     * blocking stops every other connection it is carrying and, if the lock
+     * is held by a generation that needs that same reactor to finish,
+     * permanently (#273).
+     *
+     * **It does not load.** `acquire()` takes the lock before the load so that
+     * a second caller waits rather than starting a duplicate, which means the
+     * first acquisition of a model reads gigabytes with the lock held. That is
+     * fine on a thread that may block and disastrous on one that may not, so
+     * this refuses a model that is not loaded yet rather than quietly becoming
+     * the blocking version. Load it first -- see load().
+     */
+    std::optional<session> try_acquire(const std::string& name);
+
+    /**
+     * Make sure a model is loaded, here, now, blocking.
+     *
+     * The other half of not blocking a reactor, and the half `try_acquire()`
+     * cannot do: `acquire()` loads **inside the lock**, so the first
+     * acquisition of a model reads gigabytes with it held. `try_acquire()`
+     * would succeed on that first call -- the lock is free -- and then do the
+     * load wherever it was called from.
+     *
+     * So a caller that must not block calls this first, from somewhere that
+     * may: a pool thread. It takes the lock and releases it **on that one
+     * thread**, which matters, because a `std::mutex` must be unlocked by the
+     * thread that locked it and a session carries its lock with it.
+     *
+     * Two cold callers still do not load twice: the lock inside serialises
+     * them, and the second waits where waiting is allowed.
+     */
+    void prepare(const std::string& name);
+
 private:
     entry* find(const std::string& name) const;
 
@@ -266,6 +318,17 @@ bool engine<T>::loaded(const std::string& name) const {
 
 template<typename T>
 typename engine<T>::session engine<T>::acquire(const std::string& name) {
+    // **This blocks, and a reactor thread may not.**  Not "should not": the
+    // lock is held for the length of a generation, and if the holder needs
+    // this reactor to report its tokens back then waiting here is a deadlock
+    // with no way out (#273).
+    //
+    // It fires whether or not the lock is contended, which is the point: the
+    // contended case needs two clients at once and this needs only one.
+    if(sys::on_a_reactor_thread())
+        throw exception("acquire() blocks, and this is a reactor thread; "
+                        "use try_acquire() and answer 503 when it is busy");
+
     entry* e = find(name);
 
     if(!e) throw exception("no model called \"" + name + "\"");
@@ -294,7 +357,67 @@ typename engine<T>::session engine<T>::acquire(const std::string& name) {
         e->context = c.context;
     }
 
+    // Under the lock, so nothing can see it true before the model is there.
+    e->ready.store(true);
+
     return session(e, std::move(lock));
+}
+
+template<typename T>
+std::optional<typename engine<T>::session>
+engine<T>::try_acquire(const std::string& name) {
+    entry* e = find(name);
+
+    if(!e) throw exception("no model called \"" + name + "\"");
+
+    std::unique_lock<std::mutex> lock(e->lock, std::try_to_lock);
+
+    if(!lock.owns_lock()) return std::nullopt;
+
+    // Not loaded is not the same as busy, and neither is a thing to do here:
+    // loading reads the file with the lock held, which is exactly the block
+    // this exists to avoid.  A caller that reaches this has not called load().
+    if(!e->m)
+        throw exception("the model \"" + name + "\" is not loaded, and "
+                        "try_acquire() will not load it; call prepare() from "
+                        "a thread that may block");
+
+    return session(e, std::move(lock));
+}
+
+template<typename T>
+void engine<T>::prepare(const std::string& name) {
+    // It blocks by contract, so it belongs under the same rule as acquire()
+    // -- and this catches the caller who hops in the wrong direction, or
+    // forgets to hop at all.
+    if(sys::on_a_reactor_thread())
+        throw exception("prepare() loads the model and blocks, and this is a "
+                        "reactor thread; hop to a pool thread first");
+
+    entry* e = find(name);
+
+    if(!e) throw exception("no model called \"" + name + "\"");
+
+    // **Already loaded is the common case and must not touch the lock.**
+    //
+    // The first version of this was `session s = acquire(name);`, which loads
+    // correctly and then waits for whoever holds the model -- so a second
+    // request to a busy model queued on a pool thread for the length of a
+    // generation and then succeeded, instead of being told the model was
+    // busy.  Measured: both of two overlapping requests returned 200, the
+    // second 6.3 seconds late, and the 503 never fired.
+    //
+    // A load happens once; being busy happens constantly.  This returns
+    // immediately for the second and only blocks for the first.
+    if(e->ready.load()) return;
+
+    // Not loaded.  Blocking here is the point -- a second cold caller waits
+    // for the first rather than starting its own load of the same gigabytes,
+    // which is the ordering acquire() has always had.  Taken and dropped on
+    // this thread, so no lock crosses one.
+    session s = acquire(name);
+
+    (void)s;
 }
 
 template<typename T>

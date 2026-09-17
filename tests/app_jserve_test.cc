@@ -43,6 +43,8 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -52,6 +54,7 @@
 namespace ai = jlib::ai;
 namespace apps = jlib::apps;
 namespace http = jlib::net::http;
+namespace sys = jlib::sys;
 namespace json = jlib::util::json;
 namespace util = jlib::util;
 
@@ -75,6 +78,9 @@ struct script {
     unsigned int saw_budget = 0;
     bool refuses_system = false;
     unsigned int context = 4096;
+
+    /** Whether try_acquire() should report the model busy. */
+    bool busy = false;
 };
 
 static script g_script;
@@ -163,7 +169,45 @@ struct fake_engine {
 
     std::vector<std::string> names() const { return m_names; }
 
-    session acquire(const std::string&) { return session(); }
+    /**
+     * The check that matters, in the fake as well as the real one.
+     *
+     * A fake that never blocks cannot deadlock, so without this the *shape* of
+     * #273 -- acquiring on the reactor thread -- is invisible here and is
+     * found only by pointing a real model at it. juliet's point, and she is
+     * right: this is the difference between make check catching it and me
+     * catching it at a terminal with eight gigabytes loaded.
+     */
+    session acquire(const std::string&) {
+        if(jlib::sys::on_a_reactor_thread())
+            throw std::runtime_error("acquire() blocks, and this is a reactor "
+                                     "thread");
+
+        return session();
+    }
+
+    /** Never blocks, so the reactor may call it.  Busy when asked to be. */
+    std::optional<session> try_acquire(const std::string& name) {
+        if(g_script.busy) return std::nullopt;
+
+        return session();
+    }
+
+    /**
+     * The other half of not blocking a reactor, and the fake's version of it.
+     *
+     * The real one loads gigabytes; this only has to prove the endpoint hops
+     * somewhere it may block before calling it -- which the check does.
+     */
+    void prepare(const std::string&) {
+        if(jlib::sys::on_a_reactor_thread())
+            throw std::runtime_error("prepare() blocks, and this is a reactor "
+                                     "thread");
+
+        prepared++;
+    }
+
+    std::size_t prepared = 0;
 };
 
 typedef apps::endpoint<T, fake_engine> fake_endpoint;
@@ -338,6 +382,15 @@ static void a_streamed_reply(jlib::net::http::server& s) {
     ok("  the deltas concatenate to the reply", text == "Paris.", text);
 
     try {
+        // evs.front() on an empty vector is undefined, and this sat inside a
+        // try that cannot catch it.  It went unnoticed until a change made the
+        // stream empty, at which point the test segfaulted rather than failing.
+        if(evs.empty()) {
+            ok("  the framing parses", false, "no events at all");
+
+            return;
+        }
+
         json::object::ptr first = json::object::create(evs.front());
 
         ok("  the first carries the role and no text",
@@ -678,6 +731,40 @@ static void what_the_trimmer_gave_up() {
     }
 }
 
+static void a_busy_model_answers_rather_than_waits(jlib::net::http::server& s) {
+    std::cout << "\na model that is already busy:\n";
+
+    // #273: acquire() blocks, complete() is a coroutine on the reactor thread,
+    // and the reactor is what the holder needs to finish -- so waiting here
+    // wedged the server permanently.  Busy is an answer now.
+    g_script = script();
+    g_script.busy = true;
+    g_script.tokens.push_back(int('x'));
+
+    const reply a = post(s, R"({"model":"m","messages":[{"role":"user","content":"hi"}]})");
+
+    ok("it answers 503", a.status == 503, std::to_string(a.status) + " " + a.body);
+
+    try {
+        json::object::ptr o = json::object::create(a.body);
+
+        ok("  saying which model, and that it is busy",
+           std::string(o->obj("error")->get("message")).find("busy") !=
+               std::string::npos &&
+           std::string(o->obj("error")->get("type")) == "server_busy", a.body);
+    }
+    catch(std::exception& e) { ok("  it unwraps", false, e.what()); }
+
+    // And the server is still a server: the next request is served.
+    g_script.busy = false;
+    g_script.tokens.push_back(int('y'));
+
+    const reply b = post(s, R"({"model":"m","messages":[{"role":"user","content":"hi"}]})");
+
+    ok("and it is still serving afterwards", b.status == 200,
+       std::to_string(b.status));
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -691,7 +778,17 @@ int main() {
 
     fake_endpoint e(backend, o);
 
-    jlib::net::http::server s(jlib::net::http::server::async_t(), 0, "127.0.0.1");
+    // **Not the default policy.**  The endpoint hops to the pool to load a
+    // model without blocking the reactor, and `job_queue` runs a hop inline
+    // when it has no threads -- so zero means "still on the reactor", which is
+    // what the hop exists to avoid.  jserve's own default is 1 for the same
+    // reason (#273).
+    sys::server::policy p;
+
+    p.threads = 2;
+
+    jlib::net::http::server s(jlib::net::http::server::async_t(), 0,
+                              "127.0.0.1", jlib::sys::tls_context(), p);
 
     s.transport().on_error([](const std::exception&, const jlib::sys::peer&) {});
 
@@ -701,6 +798,7 @@ int main() {
 
     what_the_trimmer_gave_up();
     the_models_route(s);
+    a_busy_model_answers_rather_than_waits(s);
     a_whole_reply(s);
     a_streamed_reply(s);
     a_character_that_arrives_in_pieces(s);

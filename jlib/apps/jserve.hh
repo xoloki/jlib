@@ -64,6 +64,7 @@
 
 #include <algorithm>
 #include <ctime>
+#include <optional>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -87,7 +88,27 @@ const unsigned int MIN_REPLY = 16;
 struct options {
     unsigned short port = 8080;
     std::string host = "127.0.0.1";
-    unsigned int threads = 0;
+    /**
+     * Pool threads, and **not zero**.
+     *
+     * The pool is where a model load happens: `complete()` hops to it,
+     * blocks there while gigabytes are read, and hops back (#273). With zero
+     * threads `job_queue` runs the hop **inline**, which is its documented
+     * bargain and exactly what cannot work here -- inline means still on the
+     * reactor, which is the one thread that must not block.
+     *
+     * **Two, not one**, and the difference is measured. Buffered handlers run
+     * on the pool as well, so with a single worker a cold load blocks them
+     * for its whole duration -- `/v1/models` during a 12-second load:
+     *
+     *     threads = 1    200 in 6.96s
+     *     threads = 2    200 in 0.000768s
+     *
+     * One worker inside the load, one still answering. Generations do not use
+     * the pool at all -- they get a thread of their own from `sys::relay` --
+     * so two is enough for a server with one model.
+     */
+    unsigned int threads = 2;
 
     ai::sampler::config sampling;
 
@@ -242,6 +263,7 @@ public:
             m_engine.add(m.first, m.second);
 
         m_default = o.models.front().first;
+
     }
 
     void wire(http::server& s) {
@@ -299,10 +321,53 @@ private:
             co_return co_await refuse(out, 404, "no model called \"" + name + "\"",
                           "invalid_request_error");
 
-        // Blocks until the model is free.  One conversation at a time per
-        // model, because the key-value cache is the conversation -- see
-        // ai::engine.
-        typename Engine::session s = m_engine.acquire(name);
+        // **Two blocking things live in one call, and they need different
+        // answers.**
+        //
+        // A model not yet loaded has to be read off disk -- seconds, gigabytes
+        // -- and `acquire()` does that *inside* the lock, so that two callers
+        // cannot load it twice.  A model that is loaded but busy has to be
+        // waited for, or not.
+        //
+        // The load goes to a pool thread, where blocking is allowed and where
+        // the lock it takes is also released -- a session carries a
+        // `unique_lock`, and a mutex must be unlocked by the thread that
+        // locked it.  The wait does not happen at all: back on the reactor,
+        // `try_acquire()` either has the model or says it is busy, because
+        // waiting here for a generation that needs this same reactor to report
+        // its tokens is a deadlock with no way out (#273).
+        co_await sys::on_pool(out.pool());
+
+        try { m_engine.prepare(name); }
+        catch(std::exception& e) { bad = e.what(); }
+
+        co_await sys::on_reactor(out.reactor());
+
+        if(!bad.empty())
+            co_return co_await refuse(out, 500, bad, "server_error");
+
+        // Never blocks now: prepare() did the loading, so this lock is either
+        // free or held by another conversation.
+        std::optional<typename Engine::session> held =
+            m_engine.try_acquire(name);
+
+        if(!held) {
+            http::server::response busy;
+
+            // Retry-After is a **floor, not an estimate**: nobody can know
+            // when a generation ends, so this says "not before a second"
+            // rather than pretending to say when.  A client that ignores it
+            // and hammers meets the rate limiter, which is the layer for
+            // clients that will not back off.
+            busy.status(503).type("application/json")
+                .field("Retry-After", "1")
+                .body(oa::error("the model \"" + name + "\" is busy with "
+                                "another conversation", "server_busy"));
+
+            co_return co_await out.send(busy);
+        }
+
+        typename Engine::session& s = *held;
 
         laid_out plan;
 
