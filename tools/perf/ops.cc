@@ -140,6 +140,7 @@ int main() {
         auto q = b.make_q8_0(m.K, m.N, raw.data(), raw.size());
         auto in = b.make(m.K, PREFILL_COLS), o = b.make(m.N, PREFILL_COLS);
 
+
         // timed() answers in seconds -- the table below multiplies by 1e6 to
         // print microseconds, and taking its number for one is how this first
         // reported petaflops.  Fewer reps because one of these is five
@@ -148,6 +149,29 @@ int main() {
 
         const double weights = double(m.K) * m.N * 34.0 / 32.0;
         const double moved = weights + 2.0 * PREFILL_COLS * (m.K + m.N);
+        const double flops = 2.0 * m.K * m.N * PREFILL_COLS;
+
+        std::printf("    %-22s %9.1f us   %6.1f GB/s   %5.2f TFLOP/s\n",
+                    m.name, sec * 1e6, moved / sec / 1e9, flops / sec / 1e12);
+    }
+
+    // **The same shapes unquantised, which is the control.**
+    //
+    // The q8 kernel does two things a plain one does not: it unpacks
+    // thirty-two int8s and a scale per block, and it carries a column tile in
+    // registers. If the plain multiply lands at the same rate then neither is
+    // the cost and the loop shape is -- which decides whether a rewrite has
+    // to stay clever about quantisation or merely has to be a GEMM (#286).
+    std::printf("\n  the same shapes unquantised, as a control:\n");
+
+    for(auto& m : mats) {
+        auto w = b.make(m.K, m.N);
+        auto in = b.make(m.K, PREFILL_COLS), o = b.make(m.N, PREFILL_COLS);
+
+        const double sec = timed([&]{ b.multiply_tn(w, in, o); }, b, 20);
+
+        const double moved = 2.0 * double(m.K) * m.N +
+                             2.0 * PREFILL_COLS * (m.K + m.N);
         const double flops = 2.0 * m.K * m.N * PREFILL_COLS;
 
         std::printf("    %-22s %9.1f us   %6.1f GB/s   %5.2f TFLOP/s\n",
