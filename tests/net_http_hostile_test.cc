@@ -120,7 +120,11 @@ static std::string raw_exchange(unsigned short port, const std::string& raw) {
     try {
         sys::socketstream s("127.0.0.1", port, 5);
 
-        s.set_timeout(5);
+        // Generous on purpose: this is the *test's* patience, not the
+        // server's deadline, and a short one turns a loaded machine into a
+        // false failure. What is being measured is what the server said, never
+        // how quickly.
+        s.set_timeout(30);
         s.write(raw.data(), std::streamsize(raw.size()));
         s.flush();
 
@@ -662,7 +666,17 @@ static void furnish(http::server& s, const tree& t) {
     s.route("GET", "/slow",
             [](const http::server::Request&,
                http::server::async_responder& out) -> sys::task<void> {
-        for(int i = 0; i < 40; i++) {
+        // **Twelve, not forty.**  Each step costs two reactor hops as well as
+        // its sleep, and the client waiting on the other side has a socket
+        // timeout. On a machine busy with something else -- a GPU benchmark
+        // next door, in the run that caught this -- eighty hops can outlast
+        // that timeout, and the client gives up. The assertion then fails
+        // because the request never completed, which says nothing about
+        // peer_gone() and reads exactly like a real defect.
+        //
+        // Twelve is still several chances to notice a departure, and a
+        // quarter of the exposure.
+        for(int i = 0; i < 12; i++) {
             co_await sys::on_pool(out.pool());
 
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
