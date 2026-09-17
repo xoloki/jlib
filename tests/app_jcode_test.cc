@@ -368,6 +368,148 @@ static void what_it_will_not_write() {
     ::unlink(through.c_str());
 }
 
+// ---------------------------------------------------------------- the prompt
+
+static void the_estimate_errs_high() {
+    std::cout << "\nestimating tokens from bytes:\n";
+
+    // The measured worst case: TinyLlama's vocabulary on jlib's densest
+    // header.  Everything else is looser, so everything else is over-counted,
+    // which is the direction that does not lose the head of a conversation.
+    ok("the divisor is the worst ratio measured, not the mean",
+       jcode::bytes_per_token() <= 2.80 + 1e-9 &&
+       jcode::bytes_per_token() > 2.0,
+       std::to_string(jcode::bytes_per_token()));
+
+    const std::string k(2800, 'x');
+
+    ok("2800 bytes is about a thousand tokens",
+       jcode::estimate_tokens(k) >= 1000 && jcode::estimate_tokens(k) <= 1002,
+       std::to_string(jcode::estimate_tokens(k)));
+
+    ok("  and it is an over-estimate against every vocabulary measured",
+       double(jcode::estimate_tokens(k)) * 3.12 >= 2800.0,
+       std::to_string(jcode::estimate_tokens(k)));
+
+    ok("nothing costs nothing", jcode::estimate_tokens("") == 0);
+
+    ok("  and a fragment of a token still costs one",
+       jcode::estimate_tokens("a") == 1,
+       std::to_string(jcode::estimate_tokens("a")));
+}
+
+static void the_prompt_says_what_the_parser_reads() {
+    std::cout << "\nthe prompt and the parser are one contract:\n";
+
+    const std::string p = jcode::system_prompt();
+
+    // Every leniency parse() carries is a rule stated here.  If the prompt
+    // stops saying one, the parser is absorbing a failure nobody asked the
+    // model to avoid.
+    struct { const char* what; const char* says; } rules[] = {
+        { "the filename alone on a line", "line of its own" },
+        { "no bold",                      "no bold" },
+        { "no backticks",                 "no backticks" },
+        { "no heading",                   "no heading" },
+        { "no trailing colon",            "trailing colon" },
+        { "three backticks",              "three backticks" },
+        { "what is left out is deleted",  "deleted" },
+    };
+
+    for(const auto& r : rules)
+        ok(std::string("  it asks for: ") + r.what,
+           p.find(r.says) != std::string::npos);
+}
+
+static void laying_out_a_request() {
+    std::cout << "\nlaying out a request:\n";
+
+    std::vector<jcode::source> files{
+        { "small.cc", std::string(280, 'a') },
+        { "medium.cc", std::string(2800, 'b') },
+        { "huge.cc", std::string(28000, 'c') },
+    };
+
+    {
+        const jcode::plan p = jcode::lay_out("make it faster", files, 100000);
+
+        ok("with room for everything, everything goes", p.sent.size() == 3,
+           std::to_string(p.sent.size()) + " sent");
+
+        ok("  nothing dropped", p.dropped.empty());
+
+        ok("  a system turn and a user turn", p.turns.size() == 2 &&
+           p.turns[0].first == "system" && p.turns[1].first == "user",
+           std::to_string(p.turns.size()));
+
+        ok("  the request is in the user turn",
+           p.turns[1].second.find("make it faster") != std::string::npos);
+
+        ok("  and so are the files",
+           p.turns[1].second.find("medium.cc") != std::string::npos);
+    }
+
+    {
+        const jcode::plan p = jcode::lay_out("make it faster", files, 1500);
+
+        ok("a file that does not fit is left out", p.sent.size() == 2 &&
+           p.dropped.size() == 1,
+           std::to_string(p.sent.size()) + " sent, " +
+           std::to_string(p.dropped.size()) + " dropped");
+
+        ok("  it is the one that did not fit", !p.dropped.empty() &&
+           p.dropped[0].find("huge.cc") != std::string::npos,
+           p.dropped.empty() ? "" : p.dropped[0]);
+
+        // Whole files, never truncated: half a file in a prompt is worse than
+        // none, because a model completes it rather than noticing.
+        ok("  and nothing of it is in the prompt",
+           p.turns[1].second.find("ccc") == std::string::npos);
+
+        ok("  the drop says what it cost and what was left",
+           !p.dropped.empty() &&
+           p.dropped[0].find("tokens") != std::string::npos &&
+           p.dropped[0].find("already used") != std::string::npos,
+           p.dropped.empty() ? "" : p.dropped[0]);
+    }
+
+    {
+        // The request is never dropped.  Refusing it here would be this code
+        // deciding what the model may read.
+        const jcode::plan p = jcode::lay_out("tiny question", files, 1);
+
+        ok("a budget of one still carries the request",
+           p.turns.size() == 2 &&
+           p.turns[1].second.find("tiny question") != std::string::npos);
+
+        ok("  with every file dropped", p.sent.empty() && p.dropped.size() == 3,
+           std::to_string(p.dropped.size()) + " dropped");
+    }
+}
+
+static void the_estimate_reports_its_own_error() {
+    std::cout << "\nwhat the server says it really cost:\n";
+
+    const std::string over = jcode::estimate_drift(1200, 1000);
+
+    ok("an over-estimate says so", over.find("over by 200") != std::string::npos,
+       over);
+
+    ok("  as a percentage too", over.find("20%") != std::string::npos, over);
+
+    const std::string under = jcode::estimate_drift(900, 1000);
+
+    ok("an under-estimate says so too",
+       under.find("under by 100") != std::string::npos, under);
+
+    ok("an exact one says that",
+       jcode::estimate_drift(500, 500).find("exact") != std::string::npos,
+       jcode::estimate_drift(500, 500));
+
+    ok("and a reply with no usage block says nothing at all",
+       jcode::estimate_drift(500, 0).empty());
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -377,6 +519,10 @@ int main() {
     a_reply_that_stopped();
     applying_it();
     what_it_will_not_write();
+    the_estimate_errs_high();
+    the_prompt_says_what_the_parser_reads();
+    laying_out_a_request();
+    the_estimate_reports_its_own_error();
 
     // What a green run does not establish.
     //

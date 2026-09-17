@@ -177,6 +177,134 @@ std::vector<std::string> reply::guesses() const {
     return all;
 }
 
+// ---------------------------------------------------------------- the prompt
+
+namespace {
+
+/**
+ * The worst bytes-per-token ratio measured, which is the safe one.
+ *
+ * TinyLlama's 32k vocabulary on jlib's densest header (math/matrix.hh) --
+ * every other pairing tried was looser, so every other pairing is
+ * over-estimated by this, which is the direction that does not lose the head
+ * of a conversation.  See the note on estimate_tokens().
+ */
+const double BYTES_PER_TOKEN = 2.80;
+
+}
+
+double bytes_per_token() { return BYTES_PER_TOKEN; }
+
+std::size_t estimate_tokens(const std::string& text) {
+    if(text.empty()) return 0;
+
+    // Rounded up: a fragment of a token is a token.
+    return std::size_t(double(text.size()) / BYTES_PER_TOKEN) + 1;
+}
+
+std::string system_prompt() {
+    // Deliberately close to what aider asks for, because that is the format
+    // jserve was verified against end to end and the one models have been
+    // trained on the shape of.  What differs is that this says what happens
+    // when the rules are broken, since parse() is the other half of it and a
+    // model told the consequence has a chance of avoiding it.
+    return
+        "You are a careful programmer working on an existing codebase.\n"
+        "\n"
+        "When you change a file you MUST return its entire new contents, in "
+        "this format and no other:\n"
+        "\n"
+        "path/to/filename.cc\n"
+        "```\n"
+        "the whole file, from its first line to its last\n"
+        "```\n"
+        "\n"
+        "- the filename goes on a line of its own, exactly as it was given to "
+        "you: no bold, no backticks, no heading, no trailing colon, and no "
+        "path you were not given\n"
+        "- the fence is three backticks, alone on its line\n"
+        "- never abbreviate with \"...\" or \"rest of file unchanged\": what "
+        "you return replaces the file, so anything you leave out is deleted\n"
+        "- return a file only if you changed it\n"
+        "- if a change is not needed, or the request is unclear, say so in "
+        "prose and return no file at all\n";
+}
+
+plan lay_out(const std::string& request, const std::vector<source>& files,
+             std::size_t budget)
+{
+    plan out;
+
+    const std::string system = system_prompt();
+
+    // The two that are never dropped, costed first: without the system turn
+    // the reply is in no format at all, and without the request there is
+    // nothing to answer.
+    std::size_t used = estimate_tokens(system) + estimate_tokens(request);
+
+    std::string body;
+
+    for(const source& f : files) {
+        // A listing costs its content plus the envelope around it, and the
+        // envelope is not free on a short file.
+        const std::string one = f.name + "\n```\n" + f.content +
+                                (f.content.empty() || f.content.back() == '\n'
+                                 ? "" : "\n") + "```\n\n";
+
+        const std::size_t cost = estimate_tokens(one);
+
+        if(used + cost > budget) {
+            // **Whole files, never truncated.**  Half a file in a prompt is
+            // worse than no file: a model completes it rather than noticing,
+            // and the reply then rewrites what it never saw.
+            out.dropped.push_back(f.name + " (" + std::to_string(cost) +
+                                  " tokens; " + std::to_string(used) +
+                                  " of " + std::to_string(budget) +
+                                  " already used)");
+
+            continue;
+        }
+
+        body += one;
+        used += cost;
+
+        out.sent.push_back(f.name);
+    }
+
+    out.turns.push_back(std::make_pair(std::string("system"), system));
+
+    out.turns.push_back(std::make_pair(std::string("user"),
+                                       body.empty()
+                                           ? request
+                                           : body + request));
+
+    out.estimate = used;
+
+    return out;
+}
+
+std::string estimate_drift(std::size_t estimated, std::size_t actual) {
+    if(!actual) return std::string();
+
+    const double out_by = double(estimated) - double(actual);
+
+    const double pct = out_by * 100.0 / double(actual);
+
+    std::ostringstream said;
+
+    said << "estimated " << estimated << " prompt tokens, the server counted "
+         << actual << " (";
+
+    if(out_by == 0) said << "exact";
+    else said << (out_by > 0 ? "over" : "under") << " by "
+              << std::size_t(out_by > 0 ? out_by : -out_by) << ", "
+              << std::size_t(pct > 0 ? pct + 0.5 : -pct + 0.5) << "%";
+
+    said << ")";
+
+    return said.str();
+}
+
 const char* spell(outcome o) {
     switch(o) {
     case outcome::written:   return "written";
