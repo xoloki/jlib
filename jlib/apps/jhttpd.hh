@@ -23,6 +23,7 @@
 
 #include <jlib/net/http_server.hh>
 
+#include <csignal>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -88,6 +89,24 @@ namespace jhttpd {
 
 
 /**
+ * How many times a reopen has been asked for.
+ *
+ * Set by a signal handler, so `sig_atomic_t` and nothing else: a handler may
+ * not take a lock, allocate, or call `std::ofstream`.  It raises a flag and
+ * returns, and the reopening happens on a thread that is allowed to do it.
+ *
+ * A **counter** rather than a boolean because there is more than one log. A
+ * single flag would be consumed by whichever file wrote next and the other
+ * would keep writing to the rotated-away inode -- which is the exact bug this
+ * exists to fix, reintroduced in the fix.  Each file remembers the count it
+ * last acted on.
+ */
+extern volatile std::sig_atomic_t reopen_requested;
+
+/** The SIGHUP handler.  Does nothing but raise the count. */
+void reopen_on_hup(int);
+
+/**
  * A log file that several threads may write to.
  *
  * One `write(2)`-sized append under a mutex, because the blocking server
@@ -113,8 +132,24 @@ public:
     bool wanted() const { return m_out.is_open(); }
 
 private:
+    /**
+     * Reopen if somebody asked since the last line.
+     *
+     * **Called with the lock held**, from write(), which is what makes it safe
+     * to touch the stream at all.
+     *
+     * Rotation therefore takes effect on the next line written rather than the
+     * instant the signal arrives. That is the right way round: a log with
+     * nothing to say does not need a new file, and doing it here means there
+     * is no second thread and no window where one exists and the other does
+     * not.
+     */
+    void reopen_if_asked();
+
     std::mutex    m_lock;
     std::ofstream m_out;
+    std::string   m_path;
+    std::sig_atomic_t m_acted_on = 0;
 };
 
 
@@ -218,20 +253,51 @@ inline std::string combined(const jlib::net::http::server::access& a,
     return o.str();
 }
 
+inline volatile std::sig_atomic_t reopen_requested = 0;
+
+inline void reopen_on_hup(int) { reopen_requested++; }
+
 inline bool logfile::open(const std::string& path) {
     if(path.empty()) return true;
+
+    m_path = path;
+    m_acted_on = reopen_requested;
 
     m_out.open(path.c_str(), std::ios::out | std::ios::app);
 
     return m_out.is_open();
 }
 
+inline void logfile::reopen_if_asked() {
+    const std::sig_atomic_t asked = reopen_requested;
+
+    if(asked == m_acted_on || m_path.empty()) return;
+
+    m_acted_on = asked;
+
+    m_out.close();
+    m_out.clear();
+
+    // Appending, because the point of rotation is that the *old* file was
+    // moved away: this creates a new one, and if somebody instead truncated
+    // the file in place, appending is still what preserves what is there.
+    m_out.open(m_path.c_str(), std::ios::out | std::ios::app);
+}
+
 inline void logfile::write(const std::string& line) {
-    if(!m_out.is_open()) return;
+    // Not `is_open()` here: a file waiting to be reopened is closed for a
+    // moment and would be skipped for the rest of the process's life.  The
+    // decision is made below, under the lock, after the reopen has had its
+    // chance.
+    if(m_path.empty()) return;
 
     // Built by the caller; this only appends.  See the note on the class about
     // why the formatting is outside the lock.
     std::lock_guard<std::mutex> hold(m_lock);
+
+    reopen_if_asked();
+
+    if(!m_out.is_open()) return;
 
     m_out << line << "\n";
     m_out.flush();

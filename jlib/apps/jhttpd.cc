@@ -69,6 +69,25 @@ struct options {
     std::string    cache_control;
     unsigned int   threads = 4;
     bool           async = false;
+
+    std::string    cert;
+    std::string    key;
+
+    // Zero is off for both, which is what the library defaults to.  jhttpd
+    // does not pick a limit on the operator's behalf: a rate that is wrong is
+    // worse than none, because it is wrong in a way that looks deliberate.
+    double         rate = 0;
+    double         burst = 0;
+    std::size_t    max_per_address = 0;
+
+    // These do have defaults, because they are the library's and a server
+    // that quietly widened them would be removing a bound somebody is
+    // relying on.  Mirrored here so --help can print them.
+    std::size_t    max_connections = 256;
+    double         io_timeout = 30;
+    double         initial_idle_timeout = 5;
+    double         idle_timeout = 60;
+    std::size_t    max_requests = 100;
 };
 
 void usage(std::ostream& o, const char* argv0) {
@@ -85,6 +104,25 @@ void usage(std::ostream& o, const char* argv0) {
       << "  --cache-control V sent with every file, e.g. \"max-age=3600\"\n"
       << "  --access-log F    Combined format; - is stdout, \"\" discards\n"
       << "  --error-log F     - is stderr, \"\" discards\n"
+      << "\n"
+      << "  TLS:\n"
+      << "  --cert FILE       certificate chain, PEM\n"
+      << "  --key FILE        private key, PEM\n"
+      << "\n"
+      << "  What one client may have:\n"
+      << "  --rate N          requests per second per address (0 is off)\n"
+      << "  --burst N         how many may arrive at once (default: the rate)\n"
+      << "  --max-per-address N   connections one address may hold (0 is off)\n"
+      << "\n"
+      << "  What every client together may have:\n"
+      << "  --max-connections N   (default 256, async only)\n"
+      << "  --max-requests N      per connection (default 100)\n"
+      << "  --io-timeout F        seconds for one request (default 30)\n"
+      << "  --initial-idle F      a new connection that says nothing (default 5)\n"
+      << "  --idle-timeout F      between requests on a kept connection (default 60)\n"
+      << "\n"
+      << "  SIGHUP reopens the log files, for rotation.\n"
+      << "\n"
       << "  --help\n";
 }
 
@@ -112,6 +150,20 @@ bool parse(int argc, char** argv, options& o) {
             else if(a == "--cache-control") o.cache_control = v;
             else if(a == "--access-log") o.access_log = v;
             else if(a == "--error-log") o.error_log = v;
+            else if(a == "--cert") o.cert = v;
+            else if(a == "--key") o.key = v;
+            else if(a == "--rate") o.rate = std::atof(v.c_str());
+            else if(a == "--burst") o.burst = std::atof(v.c_str());
+            else if(a == "--max-per-address")
+                o.max_per_address = std::size_t(std::atol(v.c_str()));
+            else if(a == "--max-connections")
+                o.max_connections = std::size_t(std::atol(v.c_str()));
+            else if(a == "--max-requests")
+                o.max_requests = std::size_t(std::atol(v.c_str()));
+            else if(a == "--io-timeout") o.io_timeout = std::atof(v.c_str());
+            else if(a == "--initial-idle")
+                o.initial_idle_timeout = std::atof(v.c_str());
+            else if(a == "--idle-timeout") o.idle_timeout = std::atof(v.c_str());
             else {
                 std::cerr << "jhttpd: unknown option " << a << "\n";
 
@@ -125,6 +177,21 @@ bool parse(int argc, char** argv, options& o) {
 
         return false;
     }
+
+    // A certificate without a key is a typo, not a configuration.  Refused
+    // here rather than at the first connection, which is the argument
+    // files() and protect() both make about registration.
+    if(o.cert.empty() != o.key.empty()) {
+        std::cerr << "jhttpd: --cert and --key go together\n";
+
+        return false;
+    }
+
+    // A burst that is not said defaults to the rate, which is the shape that
+    // surprises nobody: "ten a second" allows ten at once.  A burst below one
+    // token would refuse everything, and the library clamps it, but saying so
+    // here is better than being clamped silently.
+    if(o.rate > 0 && o.burst <= 0) o.burst = o.rate;
 
     return true;
 }
@@ -151,6 +218,12 @@ int main(int argc, char** argv) {
     // rather than failing the write.  Nothing here wants the default.
     std::signal(SIGPIPE, SIG_IGN);
 
+    // The rotation convention every log tool already knows: move the file
+    // aside, send SIGHUP, get a new one.  Without this the process keeps
+    // writing to an inode with no name, and the log silently stops existing
+    // for anybody looking at the path.
+    std::signal(SIGHUP, jhttpd::reopen_on_hup);
+
     jhttpd::logfile access;
     jhttpd::logfile errors;
 
@@ -175,16 +248,39 @@ int main(int argc, char** argv) {
         sys::server::policy p;
 
         p.threads = o.threads;
+        p.io_timeout = o.io_timeout;
+        p.max_connections = o.max_connections;
+        p.max_per_address = o.max_per_address;
+
+        http::server::options so;
+
+        so.max_requests = o.max_requests;
+
+        // The request timeout is policy::io_timeout, not a server option: the
+        // async server takes it from the policy at construction and the
+        // blocking one hands it to the socket.  One number, two mechanisms,
+        // and --io-timeout sets it in the one place it lives.
+        so.initial_idle_timeout = o.initial_idle_timeout;
+        so.idle_timeout = o.idle_timeout;
+
+        // Read here rather than at the first handshake: a certificate that
+        // cannot be read, or a key that does not match it, should stop the
+        // program where the operator is watching.
+        const sys::tls_context tls =
+            o.cert.empty() ? sys::tls_context()
+                           : sys::tls_context::server(o.cert, o.key);
 
         std::unique_ptr<http::server> s;
 
         if(o.async) {
             s.reset(new http::server(http::server::async_t(), o.port, o.host,
-                                     sys::tls_context(), p));
+                                     tls, p, so));
         }
         else {
-            s.reset(new http::server(o.port, o.host, sys::tls_context(), p));
+            s.reset(new http::server(o.port, o.host, tls, p, so));
         }
+
+        if(o.rate > 0) s->rate_limit(o.rate, o.burst);
 
         s->files(pattern_for(o.prefix), o.root, o.cache_control);
 
@@ -213,10 +309,21 @@ int main(int argc, char** argv) {
             else                 errors.write(line);
         });
 
+        // What it is actually doing, on one line, because the next question
+        // after "did it start" is always "with what limits".
         std::cerr << "jhttpd: serving " << o.root << " on "
+                  << (s->tls() ? "https://" : "http://")
                   << (o.host.empty() ? "*" : o.host) << ":" << s->port()
                   << " under " << pattern_for(o.prefix)
-                  << (o.async ? " (async)" : "") << "\n";
+                  << (o.async ? " (async)" : "")
+                  << "; rate "
+                  << (o.rate > 0 ? std::to_string(o.rate) + "/s burst " +
+                                   std::to_string(o.burst)
+                                 : std::string("unlimited"))
+                  << ", per-address "
+                  << (o.max_per_address ? std::to_string(o.max_per_address)
+                                        : std::string("unlimited"))
+                  << "\n";
 
         s->run();
     }

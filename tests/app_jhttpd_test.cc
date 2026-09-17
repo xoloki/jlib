@@ -36,6 +36,7 @@
 #include <jlib/util/util.hh>
 
 #include <cstdio>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -327,11 +328,153 @@ static void the_user_that_got_in(bool async) {
                       seen[0].user + "\"");
 }
 
+/** Every line of a file, for asserting what landed where. */
+static std::vector<std::string> lines_of(const std::string& path) {
+    std::vector<std::string> out;
+    std::ifstream in(path.c_str());
+    std::string line;
+
+    while(std::getline(in, line)) out.push_back(line);
+
+    return out;
+}
+
+/**
+ * Rotation: move the file aside, send SIGHUP, get a new one.
+ *
+ * The signal itself is not sent here -- a test that raised SIGHUP would be
+ * testing the C library's dispatch and would do it to the whole process.  What
+ * is tested is everything the handler's one line leads to, which is where all
+ * the decisions are.
+ *
+ * **Reopening happens on the next line written**, not when the signal lands,
+ * because the reopen needs the lock and a signal handler may not take one. A
+ * log with nothing to say does not need a new file.
+ */
+static void rotation() {
+    std::cout << "\nrotating a log:\n";
+
+    char pattern[] = "/tmp/jlib_rot_XXXXXX";
+    const std::string dir = ::mkdtemp(pattern);
+    const std::string path = dir + "/access.log";
+
+    {
+        jhttpd::logfile log;
+
+        ok("  it opens", log.open(path));
+
+        log.write("before");
+
+        ok("  and writes", lines_of(path).size() == 1);
+
+        // What a rotation tool does.
+        ::rename(path.c_str(), (path + ".1").c_str());
+
+        log.write("still the old inode");
+
+        ok("  a line written after the move follows the moved file",
+           lines_of(path + ".1").size() == 2 && lines_of(path).empty(),
+           std::to_string(lines_of(path + ".1").size()) + " there, " +
+           std::to_string(lines_of(path).size()) + " here");
+
+        // What the handler does, and nothing else.
+        jhttpd::reopen_requested++;
+
+        log.write("after the hup");
+
+        const std::vector<std::string> fresh = lines_of(path);
+
+        ok("  and after a reopen the path has a new file with the new line",
+           fresh.size() == 1 && fresh[0] == "after the hup",
+           fresh.empty() ? "empty" : fresh[0]);
+
+        ok("  while the rotated file kept what it had",
+           lines_of(path + ".1").size() == 2);
+    }
+
+    {
+        // **The reason the flag is a counter.**  A boolean would be consumed
+        // by whichever file wrote first, and the second would go on writing to
+        // an inode with no name -- the exact bug rotation exists to prevent,
+        // reintroduced inside the fix for it.
+        const std::string a = dir + "/a.log";
+        const std::string b = dir + "/b.log";
+
+        jhttpd::logfile la;
+        jhttpd::logfile lb;
+
+        la.open(a);
+        lb.open(b);
+
+        la.write("one");
+        lb.write("one");
+
+        ::rename(a.c_str(), (a + ".1").c_str());
+        ::rename(b.c_str(), (b + ".1").c_str());
+
+        jhttpd::reopen_requested++;
+
+        la.write("two");
+        lb.write("two");
+
+        ok("  one signal reopens every log, not just the first to notice",
+           lines_of(a).size() == 1 && lines_of(b).size() == 1,
+           std::to_string(lines_of(a).size()) + " and " +
+           std::to_string(lines_of(b).size()));
+    }
+
+    {
+        // **A reopen must not be a truncation.**  Nothing says a SIGHUP
+        // arrives only after a rotation: an operator may send one twice, or
+        // send one for a reason that has nothing to do with logs once SIGHUP
+        // also means reload.  Opening with trunc would then delete everything
+        // written since the last one, which is a log that quietly loses the
+        // part an incident is in.
+        const std::string twice = dir + "/twice.log";
+
+        jhttpd::logfile log;
+
+        log.open(twice);
+        log.write("first");
+
+        jhttpd::reopen_requested++;
+        log.write("second");
+
+        jhttpd::reopen_requested++;
+        log.write("third");
+
+        ok("  a reopen with nothing rotated keeps what is already there",
+           lines_of(twice).size() == 3,
+           std::to_string(lines_of(twice).size()) + " lines");
+    }
+
+    {
+        // A log that was never given a path discards, and must not start
+        // writing somewhere after a reopen.
+        jhttpd::logfile none;
+
+        ok("  a discarding log stays discarding", none.open(""));
+
+        none.write("nowhere");
+
+        jhttpd::reopen_requested++;
+
+        none.write("still nowhere");
+
+        ok("  and has nothing to reopen", !none.wanted());
+    }
+
+    const std::string rm = "rm -rf '" + dir + "'";
+
+    if(std::system(rm.c_str()) != 0) { }
+}
+
 int main() {
     std::cout << "app_jhttpd_test\n";
 
     try {
         the_line();
+        rotation();
         what_a_client_can_put_in_a_field();
 
         what_the_hook_reports(false);
