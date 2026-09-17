@@ -104,6 +104,9 @@ int main() {
     out.push_back({ "add_scaled d_model",timed([&]{ b.add_scaled(_Float16(1), x1, y1); }, b) });
     out.push_back({ "assign    d_model", timed([&]{ b.assign(x1, y1); }, b) });
 
+    // How many columns a prefill pass carries; see the batch table below.
+    const unsigned int PREFILL_COLS = 512;
+
     // The q8 multiplies, at the seven shapes a layer uses.
     struct { const char* name; unsigned K, N; } mats[] = {
         { "q8 wq   2048->2048", D, D },     { "q8 wk   2048->256",  D, KV*DH },
@@ -116,6 +119,39 @@ int main() {
         auto q = b.make_q8_0(m.K, m.N, raw.data(), raw.size());
         auto in = b.make(m.K, 1), o = b.make(m.N, 1);
         out.push_back({ m.name, timed([&]{ b.multiply_tn(q, in, o); }, b) });
+    }
+
+    // **The same shapes at a prefill batch, which nothing measured.**
+    //
+    // Everything above is one column: what a decode step does. Prefill sends
+    // hundreds at once, and whether that is faster per token is the whole
+    // question behind #286 -- measured, prefill throughput is flat from 64
+    // columns to 512, which a batch is supposed to improve.
+    //
+    // Two rates are printed because they answer different questions. GB/s is
+    // against the weights read **once**, which is the least any implementation
+    // could move; `jperf-bwmax` says the device does ~130. TFLOP/s is the
+    // arithmetic actually required. A kernel far below both is bound by
+    // neither, and that is the interesting answer.
+    std::printf("\n  q8 multiplies at a prefill batch of %u:\n", PREFILL_COLS);
+
+    for(auto& m : mats) {
+        std::vector<char> raw((std::size_t(m.K) * m.N / 32) * 34, 1);
+        auto q = b.make_q8_0(m.K, m.N, raw.data(), raw.size());
+        auto in = b.make(m.K, PREFILL_COLS), o = b.make(m.N, PREFILL_COLS);
+
+        // timed() answers in seconds -- the table below multiplies by 1e6 to
+        // print microseconds, and taking its number for one is how this first
+        // reported petaflops.  Fewer reps because one of these is five
+        // hundred times the work of the decode shape above.
+        const double sec = timed([&]{ b.multiply_tn(q, in, o); }, b, 20);
+
+        const double weights = double(m.K) * m.N * 34.0 / 32.0;
+        const double moved = weights + 2.0 * PREFILL_COLS * (m.K + m.N);
+        const double flops = 2.0 * m.K * m.N * PREFILL_COLS;
+
+        std::printf("    %-22s %9.1f us   %6.1f GB/s   %5.2f TFLOP/s\n",
+                    m.name, sec * 1e6, moved / sec / 1e9, flops / sec / 1e12);
     }
 
     double tot = 0;
