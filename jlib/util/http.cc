@@ -287,10 +287,51 @@ namespace {
      * production in both -- RFC 9112 2.1 puts start-line above it and says
      * nothing else differs.
      */
+    /**
+     * How many fields one message may carry.
+     *
+     * The head's *size* is already capped by the caller -- 8192 octets by
+     * default in net::http::server -- and for a while that was taken to bound
+     * this too. It does not bound it well: several hundred short fields fit
+     * inside 8 KB, and `fields` looks up linearly while the server does
+     * several lookups per request, so the work grows with the count.
+     *
+     * Measured during #240, best of five, against 0.17 ms for a plain request:
+     *
+     *     50 fields (419 octets)    0.36 ms
+     *     100       (819)           0.57
+     *     200       (1719)          0.97
+     *     400       (3519)          1.70
+     *     700       (6219)          2.57
+     *
+     * Two things worth saying about those numbers. The growth is **linear**,
+     * not quadratic as #240 guessed -- so this is a sharp edge rather than a
+     * hole, and anyone who went looking for the quadratic would have found
+     * nothing and concluded there was no problem. And the amplification is
+     * real anyway: roughly 15x for a request costing the attacker 6 KB.
+     *
+     * 100 is **Apache's `LimitRequestFields` default**, which is a better
+     * justification than a number invented here: it is the most widely
+     * deployed answer to this exact question and nothing has broken on it. A
+     * browser sends on the order of twenty.
+     *
+     * Deliberately not a parameter. `parse_head` is public with four
+     * overloads and threading a cap through all of them for a bound no caller
+     * has ever wanted to raise is a worse trade than a constant with its
+     * reasoning attached.
+     */
+    const std::size_t MAX_FIELDS = 100;
+
     void read_fields(const std::vector<std::string>& lines, std::size_t from,
                      fields& into)
     {
         const abnf::rule field = grammar().at("field-line");
+
+        if(lines.size() > from && lines.size() - from > MAX_FIELDS) {
+            throw error("too many header fields: " +
+                        std::to_string(lines.size() - from) + ", and " +
+                        std::to_string(MAX_FIELDS) + " is the limit");
+        }
 
         for(std::size_t i = from; i < lines.size(); i++) {
             // obs-fold: a line beginning with SP or HTAB continues the one

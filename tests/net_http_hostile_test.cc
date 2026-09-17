@@ -295,6 +295,68 @@ static std::mutex said;
 static std::string complaint;
 
 /**
+ * How many header fields one message may carry.
+ *
+ * `max_head` caps the head's *size*, and for a while that was taken to bound
+ * the count too.  It does not: several hundred short fields fit inside 8 KB,
+ * `fields` looks up linearly, and the server does several lookups per request.
+ * Measured at 2.57 ms for 700 fields against 0.17 ms for a plain request --
+ * about 15x, for a request costing the sender 6 KB.
+ *
+ * The exact boundary is asserted rather than a comfortable number either side
+ * of it, because an off-by-one in a limit is the kind of thing that survives a
+ * test of "100 is fine, 1000 is not".
+ */
+static void too_many_header_fields(http::server& s) {
+    std::cout << "\nhow many header fields is too many:\n";
+
+    // The request line is not a field; Host is.  So `extra` X-headers plus
+    // Host is `extra + 1` fields, and the limit is 100.
+    struct { int extra; bool served; const char* why; } cases[] = {
+        { 20,  true,  "what a browser sends" },
+        { 99,  true,  "one under the limit" },
+        { 100, false, "one over it" },
+        { 400, false, "far over it" }
+    };
+
+    for(std::size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        std::string req = "GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n";
+
+        // Connection is a field too, so allow for it.
+        for(int n = 0; n < cases[i].extra - 1; n++)
+            req += "X" + std::to_string(n) + ": y\r\n";
+
+        req += "\r\n";
+
+        const std::string r = raw_exchange(s.port(), req);
+
+        ok(std::string("  ") + cases[i].why,
+           cases[i].served ? status_of(r) == 200 : status_of(r) == 400,
+           std::to_string(status_of(r)) + " for " +
+           std::to_string(cases[i].extra) + " fields");
+    }
+
+    {
+        // The refusal is cheap, which is the point: a message over the limit
+        // must not first be parsed in full to discover that it is over.
+        std::string req = "GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n";
+
+        for(int n = 0; n < 700; n++) req += "X" + std::to_string(n) + ": y\r\n";
+
+        req += "\r\n";
+
+        raw_exchange(s.port(), req);
+
+        std::string seen;
+
+        { std::lock_guard<std::mutex> hold(said); seen = complaint; }
+
+        ok("  and the operator is told how many there were",
+           seen.find("too many header fields") != std::string::npos, seen);
+    }
+}
+
+/**
  * A refusal the client cannot read must still be one the operator can.
  *
  * Withholding the diagnosis from the client is only free because it goes
@@ -347,6 +409,7 @@ static void everything(http::server& s) {
     the_name_asked_for_is_the_name_on_disk(s);
     ordinary_paths_still_work(s);
     heard_by_the_operator(s);
+    too_many_header_fields(s);
 }
 
 int main() {
