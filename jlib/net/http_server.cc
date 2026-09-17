@@ -1311,7 +1311,7 @@ void server::on_request(std::function<void(const access&)> h) {
 }
 
 void server::note(const util::http::Request& q, const sys::peer& from,
-                  const std::string& user, int status,
+                  const std::string& user, const std::string& host, int status,
                   std::size_t bytes) const
 {
     if(!m_on_request) return;
@@ -1320,6 +1320,7 @@ void server::note(const util::http::Request& q, const sys::peer& from,
 
     a.peer = from.address;
     a.user = user;
+    a.host = host;
     a.method = q.method();
     a.target = q.target();
     a.version = q.version();
@@ -1430,6 +1431,94 @@ bool server::responder::live() const { return m_s && bool(*m_s); }
  *
  * @return whether it decoded; `why` carries the 400's body if not
  */
+/**
+ * Which authority a request names, and what to refuse.
+ *
+ * **Nothing read `Host` until now** -- the server matched a method and a path
+ * and never looked -- so three ways of being ambiguous about it went
+ * unnoticed. That is fine for a server with one site. It stops being fine the
+ * moment anything *routes* on the field, because you cannot route on a value
+ * that has more than one answer.
+ *
+ * RFC 9112 3.2 makes two of these a MUST, and the server met neither:
+ *
+ *   - **No Host on HTTP/1.1** is a 400. Measured before this: 200.
+ *   - **More than one Host** is a 400. Measured: 200. This is the one that
+ *     matters most, and not for tidiness -- two Host lines is a routing
+ *     ambiguity of exactly the shape request smuggling exploits, where a front
+ *     end believes one and a back end the other.
+ *
+ * And 3.2.2 settles the third: when the request target is in **absolute form**
+ * the authority in it is what counts and `Host` **must be ignored**. Measured
+ * before this: `GET http://evil/x` with `Host: good` answered 200 having read
+ * neither. Harmless while nothing routes on it; a host-confusion bug the
+ * moment something does.
+ *
+ * The authority is returned lowercased with any port removed, because that is
+ * what a comparison wants: DNS names are case-insensitive, and `example.com`
+ * and `example.com:8080` are the same site on a server that knows its own
+ * port.
+ *
+ * @param into  the authority, or empty for HTTP/1.0 with no Host
+ * @return      false if the message must be refused, with `why` set
+ */
+bool server::authority_of(const util::http::Request& q, std::string& into,
+                          std::string& why)
+{
+    into.clear();
+
+    // Absolute form wins, whatever Host says, and without comparing them:
+    // 3.2.2 says to ignore Host rather than to check it agrees, and a server
+    // that refused a disagreement would be refusing something the RFC permits.
+    try {
+        util::URL u;
+
+        u.parse_reference(q.target());
+
+        const std::string from_target = util::http::fold(u.get_host());
+
+        if(!from_target.empty()) { into = from_target; return true; }
+    }
+    catch(std::exception&) {
+        // Not a target at all.  path_of says so, in its own words.
+        return true;
+    }
+
+    const util::http::fields::size_type n = q.fields().count("Host");
+
+    if(n > 1) {
+        why = "more than one Host\n";
+
+        return false;
+    }
+
+    if(n == 0) {
+        // HTTP/1.0 did not have Host and is still spoken by things that do not
+        // know better; the MUST is 1.1's.
+        if(q.version() == "HTTP/1.1") { why = "no Host\n"; return false; }
+
+        return true;
+    }
+
+    std::string host = util::http::fold(q.fields().get("Host"));
+
+    // A trailing ":port", removed -- but not the colons inside an IPv6
+    // literal, which is why this looks for the last one and checks it is
+    // outside any brackets.
+    const std::string::size_type colon = host.rfind(':');
+    const std::string::size_type close = host.rfind(']');
+
+    if(colon != std::string::npos &&
+       (close == std::string::npos || colon > close))
+    {
+        host.erase(colon);
+    }
+
+    into = host;
+
+    return true;
+}
+
 bool server::path_of(const std::string& target, std::string& path,
                      std::string& why)
 {
@@ -2064,6 +2153,7 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
     int         noted_status = 0;
     std::size_t noted_bytes = 0;
     std::string noted_user;
+    std::string noted_site;
 
     // Noted however this returns, **including by throwing** -- a 500 is the
     // line an operator most wants and the one an early return is most likely
@@ -2073,11 +2163,13 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
         const Request*     q;
         const sys::peer*   from;
         const std::string* user;
+        const std::string* host;
         const int*         status;
         const std::size_t* bytes;
 
-        ~noting() { self->note(*q, *from, *user, *status, *bytes); }
-    } note_on_exit{ this, &q, &from, &noted_user, &noted_status, &noted_bytes };
+        ~noting() { self->note(*q, *from, *user, *host, *status, *bytes); }
+    } note_on_exit{ this, &q, &from, &noted_user, &noted_site, &noted_status,
+                    &noted_bytes };
 
     try {
         q = util::http::read_request_head(s, m_options.max_head);
@@ -2115,6 +2207,19 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
     std::string why;
 
     if(!path_of(q.target(), path, why)) {
+        r.status(400).type("text/plain").body(why);
+
+        noted_status = r.status();
+        noted_bytes = r.body().size();
+
+        s << r.str(m_options.server_name) << std::flush;
+
+        return;
+    }
+
+    // Beside path_of, because they are the same kind of refusal: a message
+    // whose *target* cannot be read, and one whose *site* cannot be.
+    if(!authority_of(q, noted_site, why)) {
         r.status(400).type("text/plain").body(why);
 
         noted_status = r.status();
@@ -2625,6 +2730,7 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     int         noted_status = 0;
     std::size_t noted_bytes = 0;
     std::string noted_user;
+    std::string noted_site;
 
     async_responder out(c.writer(), m_options.server_name, c.reactor(),
                         c.pool(), &c);
@@ -2670,6 +2776,7 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
         const Request*        q;
         const sys::peer*      from;
         const std::string*    user;
+        const std::string*    host;
         const int*            status;
         const std::size_t*    bytes;
         const async_responder* out;
@@ -2678,10 +2785,10 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
             const int st = out->status() != 0 ? out->status() : *status;
             const std::size_t n = out->status() != 0 ? out->wrote() : *bytes;
 
-            self->note(*q, *from, *user, st, n);
+            self->note(*q, *from, *user, *host, st, n);
         }
-    } note_on_exit{ this, &q, &from, &noted_user, &noted_status, &noted_bytes,
-                    &out };
+    } note_on_exit{ this, &q, &from, &noted_user, &noted_site, &noted_status,
+                    &noted_bytes, &out };
 
     // **co_await cannot appear in a catch handler.**  That is a language rule,
     // not a limitation of anything here, and it shapes every error path below:
@@ -2803,6 +2910,17 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     std::string path;
 
     if(!path_of(q.target(), path, bad)) {
+        response r;
+
+        r.status(400).type("text/plain").body(bad);
+
+        co_await out.send(r);
+
+        co_return false;
+    }
+
+    // See the blocking half.
+    if(!authority_of(q, noted_site, bad)) {
         response r;
 
         r.status(400).type("text/plain").body(bad);

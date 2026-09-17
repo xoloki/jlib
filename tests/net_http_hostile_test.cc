@@ -299,6 +299,9 @@ static void ordinary_paths_still_work(http::server& s) {
 static std::mutex said;
 static std::string complaint;
 
+/** The site the server decided the last request named.  See on_request(). */
+static std::string last_site;
+
 /**
  * How many header fields one message may carry.
  *
@@ -473,6 +476,80 @@ static void a_handler_can_ask_if_the_client_left(http::server& s,
 
 static std::atomic<int> gone_seen{0};
 
+/**
+ * `Host`, which nothing read until something needed to route on it.
+ *
+ * The server matched a method and a path and never looked at the field, so
+ * three ways of being ambiguous about it went unnoticed. Two are RFC 9112 3.2
+ * MUSTs that were measured answering 200 before this: no Host on HTTP/1.1, and
+ * more than one Host. The second is the one that matters -- two Host lines is
+ * a routing ambiguity of the shape request smuggling exploits, where a front
+ * end believes one and a back end the other.
+ *
+ * The third is 3.2.2: an **absolute-form** target's authority wins and Host is
+ * ignored. That one is not a refusal, so it is asserted through the access
+ * record -- which is the only place the decision is visible until something
+ * routes on it.
+ */
+static void what_site_a_request_names(http::server& s) {
+    std::cout << "\nwhich site a request names:\n";
+
+    struct { const char* raw; int want; const char* why; } cases[] = {
+        { "GET /ok HTTP/1.1\r\nHost: a\r\n\r\n", 200,
+          "one Host is what a request should have" },
+        { "GET /ok HTTP/1.1\r\n\r\n", 400,
+          "none on HTTP/1.1 is a 400, per 3.2" },
+        { "GET /ok HTTP/1.0\r\n\r\n", 200,
+          "and none on HTTP/1.0 is not, because 1.0 had no Host" },
+        { "GET /ok HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n", 400,
+          "two is a 400, which is the smuggling shape" },
+        { "GET /ok HTTP/1.1\r\nHost: a.example:8080\r\n\r\n", 200,
+          "a port is allowed" }
+    };
+
+    for(std::size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const std::string r = raw_exchange(s.port(), cases[i].raw);
+
+        ok(std::string("  ") + cases[i].why,
+           status_of(r) == cases[i].want,
+           std::to_string(status_of(r)));
+    }
+
+    // And what the server decided, which a refusal cannot show.
+    struct { const char* raw; const char* want; const char* why; } named[] = {
+        { "GET /ok HTTP/1.1\r\nHost: A.Example\r\n\r\n", "a.example",
+          "Host is lowercased, because DNS is case-insensitive" },
+        { "GET /ok HTTP/1.1\r\nHost: a.example:8080\r\n\r\n", "a.example",
+          "and its port is not part of the name" },
+
+        // **3.2.2.**  Not a refusal: the RFC says use the target's authority
+        // and ignore Host, not that a disagreement is an error.  So the only
+        // way to see it is to ask what the server concluded.
+        { "GET http://from.target/ok HTTP/1.1\r\nHost: from.field\r\n\r\n",
+          "from.target",
+          "an absolute-form target beats the Host field" }
+    };
+
+    for(std::size_t i = 0; i < sizeof named / sizeof named[0]; i++) {
+        { std::lock_guard<std::mutex> hold(said); last_site.clear(); }
+
+        raw_exchange(s.port(), named[i].raw);
+
+        std::string seen;
+
+        for(int n = 0; n < 100; n++) {
+            { std::lock_guard<std::mutex> hold(said); seen = last_site; }
+
+            if(!seen.empty()) break;
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        ok(std::string("  ") + named[i].why, seen == named[i].want,
+           "\"" + seen + "\"");
+    }
+}
+
 static void furnish(http::server& s, const tree& t) {
     s.route("GET", "/ok", [](const http::server::Request&,
                              http::server::response& r) {
@@ -517,6 +594,7 @@ static void everything(http::server& s) {
     ordinary_paths_still_work(s);
     heard_by_the_operator(s);
     too_many_header_fields(s);
+    what_site_a_request_names(s);
 }
 
 int main() {
@@ -535,6 +613,12 @@ int main() {
                 complaint = e.what();
             });
 
+            s.on_request([](const http::server::access& a) {
+                std::lock_guard<std::mutex> hold(said);
+
+                last_site = a.host;
+            });
+
             running go(s);
 
             std::cout << "\n-- the blocking server --";
@@ -549,6 +633,12 @@ int main() {
                 std::lock_guard<std::mutex> hold(said);
 
                 complaint = e.what();
+            });
+
+            s.on_request([](const http::server::access& a) {
+                std::lock_guard<std::mutex> hold(said);
+
+                last_site = a.host;
             });
 
             running go(s);

@@ -1125,6 +1125,21 @@ public:
         /** Who `protect()` let through, or empty.  Combined's third field. */
         std::string user;
 
+        /**
+         * Which site the request named, lowercased and without a port.
+         *
+         * From the **request target** when it is in absolute form and from
+         * `Host` otherwise, which is RFC 9112 3.2.2's order rather than a
+         * preference. Empty only for HTTP/1.0 with no Host, which is the one
+         * case the RFC still allows.
+         *
+         * Not part of the Combined format -- Apache calls it `%v` and puts it
+         * in a different one -- so a log that wants it has to say so. It is
+         * here because a server that answers for more than one name has
+         * nothing else to tell them apart by.
+         */
+        std::string host;
+
         /** As sent, undecoded: the log records what arrived, not what it meant. */
         std::string method;
         std::string target;
@@ -1266,7 +1281,8 @@ private:
 
     /** Build and deliver one access record, if anybody asked for them. */
     void note(const util::http::Request& q, const sys::peer& from,
-              const std::string& user, int status, std::size_t bytes) const;
+              const std::string& user, const std::string& host, int status,
+              std::size_t bytes) const;
 
     /**
      * Decide the 429, if there is one.
@@ -1307,6 +1323,16 @@ private:
     sys::task<bool> serve_request_async(sys::server::connection& c,
                                         const sys::peer& from,
                                         std::size_t served);
+
+    /**
+     * Which authority this request names, normalised -- or why to refuse it.
+     *
+     * See the definition: RFC 9112 3.2 makes a missing or repeated Host a 400
+     * on HTTP/1.1, and 3.2.2 makes an absolute-form target's authority win
+     * over the field.
+     */
+    static bool authority_of(const util::http::Request& q, std::string& into,
+                             std::string& why);
 
     /** Shared by both serves: the target as a path, or why it is not one. */
     static bool path_of(const std::string& target, std::string& path,
