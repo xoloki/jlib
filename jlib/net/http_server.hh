@@ -959,6 +959,88 @@ public:
                  verifier v);
 
     /**
+     * Everything registered through this answers only for one site.
+     *
+     *     s.site("a.example").files("/*", "/srv/a");
+     *     s.site("b.example").files("/*", "/srv/b");
+     *     s.files("/*", "/srv/default");       // any other name
+     *
+     * ## How a request finds its site
+     *
+     * By the authority it named -- the absolute-form target's, or `Host` --
+     * which #284 made unambiguous first, because routing on a field with three
+     * possible answers is not routing. Compared **exactly**, after that
+     * normalisation: lowercased, port removed.
+     *
+     * No wildcards. `*.example.com` is a thing people want and a second way to
+     * pick the wrong site, and the safe version of it needs rules about how
+     * many labels match and which of two patterns wins. Exact names first;
+     * whoever needs patterns can have them with a test that says what they
+     * mean.
+     *
+     * ## And what happens to a name nothing claims
+     *
+     * **A site-qualified route wins; otherwise the unqualified ones answer.**
+     * So registrations made on the server itself are the default site, and a
+     * request for a name no `site()` claimed lands there rather than nowhere.
+     *
+     * That is the safe direction, and it is worth saying which way round it
+     * is: the *fallback* is chosen by the server's configuration, never by the
+     * request. A client cannot name its way into a site that was not
+     * registered for it -- the worst it can do is fail to name one and get the
+     * default, which is what a server with one site has always done.
+     *
+     * Per request rather than per container, unlike nginx: a path with no
+     * site-qualified route still reaches an unqualified one. One `site()` call
+     * therefore does not hide the rest of the table from that name, which is a
+     * cliff worth not having.
+     *
+     * ## Guards too
+     *
+     * `protect()` on a site guards only that site. A guard registered on the
+     * server guards every site that has no guard of its own for that path --
+     * same rule, because a guard that stopped applying because somebody added
+     * a site would be the worst possible way to lose one.
+     */
+    class site {
+    public:
+        site(server& s, const std::string& name) : m_s(&s), m_name(name) {}
+
+        void route(const std::string& method, const std::string& path,
+                   handler h);
+        void route(const std::string& method, const std::string& path,
+                   stream_handler h);
+        void route(const std::string& method, const std::string& path,
+                   async_stream_handler h);
+        void route(const std::string& method, const std::string& path,
+                   param_handler h);
+        void route(const std::string& method, const std::string& path,
+                   param_stream_handler h);
+        void route(const std::string& method, const std::string& path,
+                   async_param_stream_handler h);
+
+        void files(const std::string& pattern, const std::string& root,
+                   const std::string& cache_control = std::string());
+
+        void protect(const std::string& pattern, const std::string& challenge,
+                     verifier v);
+
+        const std::string& name() const { return m_name; }
+
+    private:
+        server*     m_s;
+        std::string m_name;
+    };
+
+    /**
+     * A handle for registering against one name.  Cheap; make it inline.
+     *
+     * @throws error if `name` is empty -- which would mean "any site", and
+     *         the server's own methods already say that more plainly
+     */
+    site site_of(const std::string& name);
+
+    /**
      * Refuse more than `per_second` requests from one address, 429.
      *
      *     s.rate_limit(10, 20);   // ten a second, twenty may arrive at once
@@ -1239,6 +1321,10 @@ private:
         std::string method;
         std::string path;
 
+        // Which site this answers for, folded; empty means any of them.
+        // See site().
+        std::string host;
+
         // The pattern, parsed once at registration.  Empty `segs` with a
         // non-empty path cannot happen: "/" parses to no segments and matches
         // only itself.
@@ -1271,13 +1357,17 @@ private:
      * handler fields are all empty and never read.
      */
     struct guard {
+        // Same rule as entry::host, and for the same reason.
+        std::string host;
+
         entry       where;
         std::string challenge;
         verifier    check;
     };
 
     /** The most specific guard matching `path`, or null. */
-    const guard* guard_for(const std::string& path) const;
+    const guard* guard_for(const std::string& path,
+                           const std::string& site) const;
 
     /** Build and deliver one access record, if anybody asked for them. */
     void note(const util::http::Request& q, const sys::peer& from,
@@ -1297,7 +1387,8 @@ private:
      * @return true if the request may proceed; otherwise `r` is the answer.
      */
     bool allowed_through(const util::http::Request& q, const std::string& path,
-                         response& r, std::string& who) const;
+                         const std::string& site, response& r,
+                         std::string& who) const;
 
     /**
      * Does this entry's pattern match `parts`?  If so, fill `into`.
@@ -1359,7 +1450,8 @@ private:
      *                 reading it.
      */
     const entry* route_for(const std::string& method, const std::string& path,
-                           params& into, std::vector<std::string>& allowed) const;
+                           const std::string& site, params& into,
+                           std::vector<std::string>& allowed) const;
 
     bool m_async = false;
 

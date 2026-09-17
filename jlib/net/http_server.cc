@@ -1335,6 +1335,82 @@ void server::note(const util::http::Request& q, const sys::peer& from,
     m_on_request(a);
 }
 
+server::site server::site_of(const std::string& name) {
+    if(name.empty()) {
+        throw error("site_of(\"\") means any site, which is what the server's "
+                    "own route(), files() and protect() already do");
+    }
+
+    // Lowercased here so a caller may write it however they like: the
+    // authority it is compared against has already been folded, and a site
+    // registered as "A.Example" that never matched would be a silent misfire.
+    return site(*this, util::http::fold(name));
+}
+
+/**
+ * Every `site` method is the server's own, with the host stamped on after.
+ *
+ * **This rests on each of them pushing exactly one thing**, which is true and
+ * is worth saying because it would not survive somebody quietly making
+ * `files()` register twice -- it carries a blocking and an async handler on
+ * *one* entry precisely so that it does not.
+ */
+void server::site::route(const std::string& method, const std::string& path,
+                         handler h)
+{
+    m_s->route(method, path, std::move(h));
+    m_s->m_routes.back().host = m_name;
+}
+
+void server::site::route(const std::string& method, const std::string& path,
+                         stream_handler h)
+{
+    m_s->route(method, path, std::move(h));
+    m_s->m_routes.back().host = m_name;
+}
+
+void server::site::route(const std::string& method, const std::string& path,
+                         async_stream_handler h)
+{
+    m_s->route(method, path, std::move(h));
+    m_s->m_routes.back().host = m_name;
+}
+
+void server::site::route(const std::string& method, const std::string& path,
+                         param_handler h)
+{
+    m_s->route(method, path, std::move(h));
+    m_s->m_routes.back().host = m_name;
+}
+
+void server::site::route(const std::string& method, const std::string& path,
+                         param_stream_handler h)
+{
+    m_s->route(method, path, std::move(h));
+    m_s->m_routes.back().host = m_name;
+}
+
+void server::site::route(const std::string& method, const std::string& path,
+                         async_param_stream_handler h)
+{
+    m_s->route(method, path, std::move(h));
+    m_s->m_routes.back().host = m_name;
+}
+
+void server::site::files(const std::string& pattern, const std::string& root,
+                         const std::string& cache_control)
+{
+    m_s->files(pattern, root, cache_control);
+    m_s->m_routes.back().host = m_name;
+}
+
+void server::site::protect(const std::string& pattern,
+                           const std::string& challenge, verifier v)
+{
+    m_s->protect(pattern, challenge, std::move(v));
+    m_s->m_guards.back().host = m_name;
+}
+
 void server::otherwise(handler h) {
     if(h) m_otherwise = std::move(h);
 }
@@ -1987,7 +2063,9 @@ void server::protect(const std::string& pattern, const std::string& challenge,
     m_guards.push_back(std::move(g));
 }
 
-const server::guard* server::guard_for(const std::string& path) const {
+const server::guard* server::guard_for(const std::string& path,
+                                       const std::string& site) const
+{
     const std::vector<std::string> parts = split_path(path);
 
     const guard* best = 0;
@@ -1995,23 +2073,31 @@ const server::guard* server::guard_for(const std::string& path) const {
     for(const guard& g : m_guards) {
         params ignored;
 
+        if(!g.host.empty() && g.host != site) continue;
+
         if(!matches(g.where, parts, ignored)) continue;
 
-        // Most literal segments wins, exactly as route_for decides, so that
-        // /admin/api/* can carry a different challenge from /admin/*.  A tie
-        // goes to whichever was registered first, which is also route_for's
-        // answer and is only reachable by registering the same pattern twice.
-        if(best == 0 || g.where.literals > best->where.literals) best = &g;
+        // Site first and then literals, exactly as route_for decides -- so
+        // /admin/api/* can carry a different challenge from /admin/*, and a
+        // site's own guard beats a server-wide one for the same path.
+        const bool mine = !g.host.empty();
+        const bool best_mine = best && !best->host.empty();
+
+        if(best == 0 || (mine && !best_mine) ||
+           (mine == best_mine && g.where.literals > best->where.literals))
+        {
+            best = &g;
+        }
     }
 
     return best;
 }
 
 bool server::allowed_through(const util::http::Request& q,
-                             const std::string& path, response& r,
-                             std::string& who) const
+                             const std::string& path, const std::string& site,
+                             response& r, std::string& who) const
 {
-    const guard* g = guard_for(path);
+    const guard* g = guard_for(path, site);
 
     if(g == 0) return true;
 
@@ -2044,6 +2130,7 @@ bool server::allowed_through(const util::http::Request& q,
 
 const server::entry* server::route_for(const std::string& method,
                                        const std::string& path,
+                                       const std::string& site,
                                        params& into,
                                        std::vector<std::string>& allowed) const
 {
@@ -2054,6 +2141,10 @@ const server::entry* server::route_for(const std::string& method,
 
     for(const entry& e : m_routes) {
         params got;
+
+        // **A route for another site is not a route.**  Exact, against an
+        // authority already folded and stripped of its port by authority_of.
+        if(!e.host.empty() && e.host != site) continue;
 
         if(!matches(e, parts, got)) continue;
 
@@ -2072,9 +2163,21 @@ const server::entry* server::route_for(const std::string& method,
             continue;
         }
 
-        // Most literal segments wins; first registered breaks a tie, which is
-        // what the old exact-match scan did for the only case it had.
-        if(best == 0 || e.literals > best->literals) {
+        // **Site first, then path.**
+        //
+        // A route registered for this name beats one registered for any name,
+        // whatever the paths look like -- otherwise a global `files("/*")`
+        // would shadow a site's own, since both have nothing literal in them
+        // and the global one was registered first.
+        //
+        // Within one of those two groups, most literal segments wins, which is
+        // the rule that was already here.
+        const bool mine = !e.host.empty();
+        const bool best_mine = best && !best->host.empty();
+
+        if(best == 0 || (mine && !best_mine) ||
+           (mine == best_mine && e.literals > best->literals))
+        {
             best = &e;
             best_params = got;
         }
@@ -2086,6 +2189,8 @@ const server::entry* server::route_for(const std::string& method,
     if(best == 0 && method == "HEAD") {
         for(const entry& e : m_routes) {
             params got;
+
+            if(!e.host.empty() && e.host != site) continue;
 
             if(e.method != "GET" || !matches(e, parts, got)) continue;
 
@@ -2252,7 +2357,7 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
     {
         response denied;
 
-        if(!allowed_through(q, path, denied, noted_user)) {
+        if(!allowed_through(q, path, noted_site, denied, noted_user)) {
             noted_status = denied.status();
             noted_bytes = denied.body().size();
 
@@ -2265,7 +2370,7 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
     params captured;
     std::vector<std::string> allowed;
 
-    const entry* chosen = route_for(q.method(), path, captured, allowed);
+    const entry* chosen = route_for(q.method(), path, noted_site, captured, allowed);
 
     // The path is known, for other methods.  405 rather than 404, because the
     // two say different things and a client can act on only one of them.
@@ -2949,7 +3054,7 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     {
         response denied;
 
-        if(!allowed_through(q, path, denied, noted_user)) {
+        if(!allowed_through(q, path, noted_site, denied, noted_user)) {
             co_await out.send(denied);
 
             co_return false;
@@ -2959,7 +3064,7 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     params captured;
     std::vector<std::string> allowed;
 
-    const entry* chosen = route_for(q.method(), path, captured, allowed);
+    const entry* chosen = route_for(q.method(), path, noted_site, captured, allowed);
 
     if(chosen == 0 && !allowed.empty()) {
         response r;

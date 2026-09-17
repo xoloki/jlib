@@ -81,17 +81,25 @@ struct tree {
     std::string base;
     std::string root;
 
+    std::string other;
+
     tree() {
         char pattern[] = "/tmp/jlib_hostile_XXXXXX";
 
         base = ::mkdtemp(pattern);
         root = base + "/www";
+        other = base + "/other";
 
         ::mkdir(root.c_str(), 0755);
         ::mkdir((root + "/private").c_str(), 0755);
+        ::mkdir(other.c_str(), 0755);
 
         write(root + "/page.html", "<h1>x</h1>\n");
         write(root + "/private/key.txt", "THE KEY\n");
+
+        // A second site, with a file of the same name and different contents,
+        // so "which root answered" is visible rather than inferred.
+        write(other + "/page.html", "OTHER SITE\n");
     }
 
     ~tree() {
@@ -550,6 +558,98 @@ static void what_site_a_request_names(http::server& s) {
     }
 }
 
+/**
+ * Virtual hosts: which root answers, and what a client can talk its way into.
+ *
+ * #270 flagged the shape before this existed: **every `files()` containment
+ * property is stated against *a* root, and picking the root from a
+ * client-supplied header is a new way to be wrong.** Containment itself is
+ * unchanged -- each registration resolves its own root and checks against that
+ * one -- so what is left to get wrong is *selection*, and that is what these
+ * assert.
+ */
+/** The first line of a body, so a detail string stays on one line. */
+static std::string first_line(const std::string& body) {
+    const std::string::size_type nl = body.find('\n');
+
+    return nl == std::string::npos ? body.substr(0, 24)
+                                   : body.substr(0, nl);
+}
+
+static void which_site_answers(http::server& s, const tree& t) {
+    std::cout << "\nwhich site answers:\n";
+
+    struct { const char* host; const char* want; const char* why; } cases[] = {
+        { "other.example", "OTHER SITE", "a name with a site of its own" },
+        { "OTHER.EXAMPLE", "OTHER SITE", "and the same name shouted" },
+        { "other.example:8080", "OTHER SITE", "and with a port on it" },
+        { "unclaimed.example", "<h1>x</h1>", "a name nobody claimed gets the default" },
+        { "", "<h1>x</h1>", "and so does HTTP/1.0, which has no name to give" }
+    };
+
+    for(std::size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        std::string raw;
+
+        if(*cases[i].host == 0) {
+            raw = "GET /static/page.html HTTP/1.0\r\nConnection: close\r\n\r\n";
+        }
+        else {
+            raw = std::string("GET /static/page.html HTTP/1.1\r\nHost: ") +
+                  cases[i].host + "\r\nConnection: close\r\n\r\n";
+        }
+
+        const std::string r = raw_exchange(s.port(), raw);
+
+        ok(std::string("  ") + cases[i].why,
+           status_of(r) == 200 &&
+           body_of(r).find(cases[i].want) != std::string::npos,
+           std::to_string(status_of(r)) + " " + first_line(body_of(r)));
+    }
+
+    {
+        // RFC 9112 3.2.2, now doing real work: the target's authority selects
+        // the site and the field is ignored.  Before virtual hosts this was
+        // invisible; it is the host-confusion bug if it goes the other way.
+        const std::string r = raw_exchange(
+            s.port(),
+            "GET http://other.example/static/page.html HTTP/1.1\r\n"
+            "Host: unclaimed.example\r\nConnection: close\r\n\r\n");
+
+        ok("  an absolute-form target picks the site, not the Host field",
+           body_of(r).find("OTHER SITE") != std::string::npos,
+           first_line(body_of(r)));
+    }
+
+    {
+        // **The containment question.**  A name cannot reach another site's
+        // files, because each registration checks against the root it was
+        // given -- the Host chooses which registration, never what it may
+        // reach.
+        const std::string r = raw_exchange(
+            s.port(),
+            "GET /static/../other/page.html HTTP/1.1\r\n"
+            "Host: unclaimed.example\r\nConnection: close\r\n\r\n");
+
+        ok("  and no name reaches another site's root by traversal",
+           body_of(r).find("OTHER SITE") == std::string::npos,
+           std::to_string(status_of(r)) + " " + first_line(body_of(r)));
+    }
+
+    {
+        // A guard on one site does not guard another, and -- the direction
+        // that matters -- a site does not escape a server-wide guard by
+        // existing.
+        const std::string r = raw_exchange(
+            s.port(),
+            "GET /static/private/key.txt HTTP/1.1\r\n"
+            "Host: other.example\r\nConnection: close\r\n\r\n");
+
+        ok("  and a site does not escape a server-wide guard",
+           status_of(r) == 401 || r.find("THE KEY") == std::string::npos,
+           std::to_string(status_of(r)));
+    }
+}
+
 static void furnish(http::server& s, const tree& t) {
     s.route("GET", "/ok", [](const http::server::Request&,
                              http::server::response& r) {
@@ -581,13 +681,16 @@ static void furnish(http::server& s, const tree& t) {
 
     s.files("/static/*", t.root);
 
+    // A second site over the same prefix, with its own root.
+    s.site_of("other.example").files("/static/*", t.other);
+
     s.protect("/static/private/*", "Basic realm=\"jlib\"",
               [](const http::server::credentials& c) {
                   return c.user == "root" && c.password == "hunter2";
               });
 }
 
-static void everything(http::server& s) {
+static void everything(http::server& s, const tree& t) {
     a_refusal_does_not_quote_the_client(s);
     a_control_character_in_the_target(s);
     the_name_asked_for_is_the_name_on_disk(s);
@@ -595,6 +698,7 @@ static void everything(http::server& s) {
     heard_by_the_operator(s);
     too_many_header_fields(s);
     what_site_a_request_names(s);
+    which_site_answers(s, t);
 }
 
 int main() {
@@ -622,7 +726,7 @@ int main() {
             running go(s);
 
             std::cout << "\n-- the blocking server --";
-            everything(s);
+            everything(s, t);
         }
 
         {
@@ -644,7 +748,7 @@ int main() {
             running go(s);
 
             std::cout << "\n-- the async server --";
-            everything(s);
+            everything(s, t);
 
             // **Async only, by construction.**  peer_gone() is on
             // async_responder, so the route that uses it is an async

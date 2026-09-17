@@ -97,6 +97,10 @@ struct options {
     // because a server with a private area usually has more than one of them.
     std::vector<std::string> protect;
 
+    // NAME:ROOT, repeatable.  --root stays the default site, which is what a
+    // request naming something nobody claimed gets.
+    std::vector<std::string> vhosts;
+
     bool           hash_password = false;
 };
 
@@ -130,6 +134,9 @@ void usage(std::ostream& o, const char* argv0) {
       << "  --io-timeout F        seconds for one request (default 30)\n"
       << "  --initial-idle F      a new connection that says nothing (default 5)\n"
       << "  --idle-timeout F      between requests on a kept connection (default 60)\n"
+      << "\n"
+      << "  --vhost NAME:ROOT repeatable; serve ROOT to requests naming NAME.\n"
+      << "                    --root remains the site for every other name.\n"
       << "\n"
       << "  Authentication:\n"
       << "  --protect PREFIX:REALM:FILE\n"
@@ -182,6 +189,7 @@ bool parse(int argc, char** argv, options& o) {
                 o.initial_idle_timeout = std::atof(v.c_str());
             else if(a == "--idle-timeout") o.idle_timeout = std::atof(v.c_str());
             else if(a == "--protect") o.protect.push_back(v);
+            else if(a == "--vhost") o.vhosts.push_back(v);
             else {
                 std::cerr << "jhttpd: unknown option " << a << "\n";
 
@@ -379,6 +387,33 @@ int main(int argc, char** argv) {
         if(o.rate > 0) s->rate_limit(o.rate, o.burst);
 
         s->files(pattern_for(o.prefix), o.root, o.cache_control);
+
+        for(std::size_t i = 0; i < o.vhosts.size(); i++) {
+            const std::string::size_type colon = o.vhosts[i].find(':');
+
+            // The *first* colon here, unlike --protect: a DNS name cannot
+            // contain one and a path can, so left-to-right is the reading that
+            // accepts every legal root.
+            if(colon == std::string::npos || colon == 0 ||
+               colon + 1 >= o.vhosts[i].size())
+            {
+                std::cerr << "jhttpd: --vhost wants NAME:ROOT, got \""
+                          << o.vhosts[i] << "\"\n";
+
+                return 2;
+            }
+
+            const std::string name = o.vhosts[i].substr(0, colon);
+            const std::string root = o.vhosts[i].substr(colon + 1);
+
+            // Throws if the root cannot be resolved, which stops the server --
+            // a vhost that silently serves nothing is worse than one that
+            // refuses to start.
+            s->site_of(name).files(pattern_for(o.prefix), root,
+                                   o.cache_control);
+
+            std::cerr << "jhttpd: " << name << " -> " << root << "\n";
+        }
 
         // Held for the life of the server: the verifier below closes over a
         // reference, and a credential file is read once at startup rather than
