@@ -51,6 +51,7 @@
  */
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace jlib {
@@ -112,6 +113,95 @@ struct reply {
  * than to write half a file.
  */
 reply parse(const std::string& text, const std::vector<std::string>& known);
+
+// ---------------------------------------------------------------- the prompt
+
+/**
+ * What to tell a model so that parse() can read what comes back.
+ *
+ * **Beside the parser on purpose.** The prompt and the parser are two halves
+ * of one contract -- this says "filename, fence, whole file, fence" and
+ * parse() is what happens when the model does something else. Put them in
+ * different files and they drift, and the drift shows up as a harness that
+ * quietly stops applying edits.
+ */
+std::string system_prompt();
+
+/**
+ * How many tokens a string is likely to be, erring high.
+ *
+ * jcode has no tokenizer -- the vocabulary is behind the server -- so this is
+ * a guess, and the direction of the error is chosen rather than accidental.
+ *
+ * Measured over eight files of jlib source and prose, bytes per token:
+ *
+ *     Qwen2.5-Coder   3.84 overall, 3.52 worst
+ *     Llama 3.2       3.87 overall, 3.53 worst
+ *     TinyLlama       3.12 overall, 2.80 worst
+ *
+ * The folk rule of four is wrong in the direction that costs: it undercounts
+ * by 4% on the coder vocabularies and 28% on TinyLlama's older 32k one, and
+ * undercounting means overflowing a context you believed you fitted -- which
+ * is #256's silent trim, arriving at the client that cannot see it.
+ *
+ * So the divisor is the **worst** ratio seen, not the mean. Sending fewer
+ * files than strictly necessary costs a little context; sending more than fits
+ * costs the head of the conversation without saying so.
+ */
+std::size_t estimate_tokens(const std::string& text);
+
+/** The divisor above, exposed so a caller can say what it used. */
+double bytes_per_token();
+
+/** One file to put in front of the model. */
+struct source {
+    std::string name;
+    std::string content;
+};
+
+/** A request laid out, and everything decided on the way. */
+struct plan {
+    /** The turns to send, system first. */
+    std::vector<std::pair<std::string, std::string> > turns;
+
+    /** The files that made it in, in the order they appear. */
+    std::vector<std::string> sent;
+
+    /** What was left out, and why -- the same policy as every other guess. */
+    std::vector<std::string> dropped;
+
+    /** What estimate_tokens() made of the whole prompt. */
+    std::size_t estimate = 0;
+};
+
+/**
+ * Lay out a request that fits `budget` tokens.
+ *
+ * Files are dropped **whole**, never truncated: half a file in a prompt is
+ * worse than no file, because the model will complete it rather than notice.
+ * They go in the order given and the ones that do not fit are the ones at the
+ * end, which is a rule a caller can see rather than a relevance judgement
+ * nothing here is qualified to make.
+ *
+ * The newest thing -- the request itself -- is never dropped. A request whose
+ * own question does not fit is laid out anyway and left to the server to
+ * refuse, because refusing it here would be this code deciding what the model
+ * can read.
+ */
+plan lay_out(const std::string& request, const std::vector<source>& files,
+             std::size_t budget);
+
+/**
+ * How far the estimate was out, once a reply says what it really cost.
+ *
+ * @param estimated what plan::estimate said
+ * @param actual    usage.prompt_tokens from the reply
+ *
+ * An estimate that reports its own error is a different thing from a
+ * constant, and this is the only place the true ratio for a given model is
+ * ever visible: the vocabulary is on the other side of the wire.
+ */
+std::string estimate_drift(std::size_t estimated, std::size_t actual);
 
 /** What became of one edit. */
 enum class outcome {
