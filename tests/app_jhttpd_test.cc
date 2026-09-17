@@ -35,6 +35,7 @@
 #include <jlib/util/URL.hh>
 #include <jlib/util/util.hh>
 
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -488,11 +489,163 @@ static void rotation() {
     if(std::system(rm.c_str()) != 0) { }
 }
 
+/** Seconds for one check(), best of `n` -- best, because noise only adds. */
+static double timed_check(const jhttpd::credentials& c, const std::string& user,
+                          const std::string& pw, int n)
+{
+    double best = 1e9;
+
+    for(int i = 0; i < n; i++) {
+        const std::chrono::steady_clock::time_point t0 =
+            std::chrono::steady_clock::now();
+
+        (void)c.check(user, pw);
+
+        const double took = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count();
+
+        if(took < best) best = took;
+    }
+
+    return best;
+}
+
+/**
+ * The credential file, and the two things about it that are security
+ * properties rather than conveniences.
+ */
+static void credentials_file() {
+    std::cout << "\ncredentials:\n";
+
+    char pattern[] = "/tmp/jlib_creds_XXXXXX";
+    const std::string dir = ::mkdtemp(pattern);
+    const std::string path = dir + "/creds";
+
+    std::string hash;
+
+    try { hash = jhttpd::hash_password("hunter2"); }
+    catch(std::exception& e) {
+        std::cout << "  skip  no libsodium in this build: " << e.what() << "\n";
+
+        return;
+    }
+
+    ok("  a hash says what it is", hash.compare(0, 9, "$argon2id") == 0,
+       hash.substr(0, 40));
+
+    const std::string write_creds =
+        "# who may read /private\n"
+        "\n"
+        "root:" + hash + "\n";
+
+    { std::ofstream o(path.c_str()); o << write_creds; }
+
+    ::chmod(path.c_str(), 0600);
+
+    jhttpd::credentials c;
+
+    c.load(path);
+
+    ok("  comments and blank lines are not users", c.size() == 1,
+       std::to_string(c.size()));
+
+    ok("  the right password is accepted", c.check("root", "hunter2"));
+    ok("  a wrong one is not", !c.check("root", "hunter3"));
+    ok("  and an unknown user is not", !c.check("nobody", "hunter2"));
+
+    {
+        // **The timing property.**  Returning early for an unknown user makes
+        // "no such user" faster than "wrong password", and Argon2id is
+        // deliberately slow, so the gap is milliseconds -- measurable from
+        // outside, and a user-enumeration oracle.
+        //
+        // Measured through HTTP before this test existed: 45.4 ms for a known
+        // user with a wrong password against 6.1 ms for an unknown one, once
+        // the decoy was removed. Here, with no network in the way, the ratio
+        // is the assertion.
+        //
+        // One-sided and generous: with the decoy the ratio is about 1, without
+        // it about 0.001. Anything above a quarter means the work happened.
+        const double known = timed_check(c, "root", "hunter3", 5);
+        const double unknown = timed_check(c, "nobody", "hunter3", 5);
+
+        const double ratio = known > 0 ? unknown / known : 0;
+
+        ok("  an unknown user costs what a wrong password costs",
+           ratio > 0.25,
+           "unknown/known = " + std::to_string(ratio));
+    }
+
+    {
+        // Refused, not warned about: these hashes are expensive to attack
+        // rather than impossible, and a world-readable list of them is an
+        // offline attack handed to whoever can read the disk.
+        ::chmod(path.c_str(), 0644);
+
+        bool threw = false;
+        std::string why;
+
+        jhttpd::credentials open_to_all;
+
+        try { open_to_all.load(path); }
+        catch(std::exception& e) { threw = true; why = e.what(); }
+
+        ok("  a world-readable credential file is refused", threw, why);
+
+        ::chmod(path.c_str(), 0600);
+    }
+
+    {
+        // A typo should stop the server rather than quietly guard less than
+        // the operator believes.
+        const std::string bad = dir + "/bad";
+
+        { std::ofstream o(bad.c_str()); o << "root" << hash << "\n"; }
+
+        ::chmod(bad.c_str(), 0600);
+
+        bool threw = false;
+        std::string why;
+
+        jhttpd::credentials c2;
+
+        try { c2.load(bad); }
+        catch(std::exception& e) { threw = true; why = e.what(); }
+
+        ok("  a line with no colon is an error, not a skipped line", threw, why);
+
+        ok("  and it says which line", why.find("line 1") != std::string::npos,
+           why);
+    }
+
+    {
+        const std::string empty = dir + "/empty";
+
+        { std::ofstream o(empty.c_str()); o << "# nobody at all\n"; }
+
+        ::chmod(empty.c_str(), 0600);
+
+        bool threw = false;
+
+        jhttpd::credentials c3;
+
+        try { c3.load(empty); }
+        catch(std::exception&) { threw = true; }
+
+        ok("  and a file with no credentials in it is refused", threw);
+    }
+
+    const std::string rm = "rm -rf '" + dir + "'";
+
+    if(std::system(rm.c_str()) != 0) { }
+}
+
 int main() {
     std::cout << "app_jhttpd_test\n";
 
     try {
         the_line();
+        credentials_file();
         rotation();
         what_a_client_can_put_in_a_field();
 

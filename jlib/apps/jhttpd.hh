@@ -25,12 +25,21 @@
 
 #include <jlib/sys/sync.hh>
 
+#ifdef HAVE_PWHASH
+#include <sodium.h>
+#endif
+
+#include <sys/stat.h>
+
+#include <stdexcept>
+
 #include <csignal>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <sstream>
 #include <future>
+#include <map>
 #include <memory>
 #include <string>
 
@@ -90,6 +99,74 @@ namespace jhttpd {
 
 
 
+
+/**
+ * A credential file: one `user:hash` per line, Argon2id.
+ *
+ * ## Why Argon2id and not htpasswd
+ *
+ * libsodium is already a dependency -- `jlib/crypt` links it -- and
+ * `crypto_pwhash_str` writes a self-describing, salted, memory-hard hash that
+ * `crypto_pwhash_str_verify` checks in **constant time**:
+ *
+ *     root:$argon2id$v=19$m=65536,t=2,p=1$<salt>$<hash>
+ *
+ * That last property is not a nicety. The auth work in #252 recorded "nothing
+ * here is constant-time; a `==` on a password is a timing oracle" as a known
+ * gap, and this closes it by construction rather than by care -- there is no
+ * comparison in jhttpd to get wrong.
+ *
+ * Real `htpasswd` files are **not** read. htpasswd writes bcrypt by default,
+ * libsodium has no bcrypt, and implementing one to be compatible with a format
+ * that is weaker than what is already available is the wrong trade. Apache
+ * compatibility is a #239 stretch goal and belongs with the config work, not
+ * with the first credential this server ever checks.
+ *
+ * ## The file
+ *
+ * Comments and blank lines are skipped, so a file can say who it is for.
+ * A line without a colon, or with an empty user, is an error rather than a
+ * skipped line: a credential file with a typo in it should stop the server,
+ * not silently guard less than the operator thinks.
+ *
+ * **Permissions are checked.** A file readable by anyone but its owner is
+ * refused. Argon2id makes the hashes expensive to attack rather than
+ * impossible, and a world-readable list of them is an offline attack somebody
+ * has been handed.
+ */
+class credentials {
+public:
+    /** @throws std::runtime_error with the line number, if it cannot be read. */
+    void load(const std::string& path);
+
+    /**
+     * Is this the password for this user?
+     *
+     * False for an unknown user, and the work is done anyway -- see the note
+     * at the implementation about why an early return would be a different
+     * kind of leak.
+     */
+    bool check(const std::string& user, const std::string& password) const;
+
+    std::size_t size() const { return m_hashes.size(); }
+
+private:
+    std::map<std::string, std::string> m_hashes;
+
+    // What an unknown user is checked against.  See check().
+    std::string m_decoy;
+};
+
+/**
+ * Hash a password the way `credentials` expects to read one.
+ *
+ * Exposed because the alternative to `jhttpd --hash-password` is telling
+ * somebody to produce an Argon2id string elsewhere, and the way that ends is a
+ * `$apr1$` line in a file that only understands `$argon2id$`.
+ *
+ * @throws std::runtime_error if libsodium is not available or the hash fails
+ */
+std::string hash_password(const std::string& password);
 
 /**
  * How many times a reopen has been asked for.
@@ -290,6 +367,139 @@ inline std::string combined(const jlib::net::http::server::access& a,
       << " \"" << agent << "\"";
 
     return o.str();
+}
+
+inline std::string hash_password(const std::string& password) {
+#ifdef HAVE_PWHASH
+    if(::sodium_init() < 0)
+        throw std::runtime_error("libsodium would not start");
+
+    char out[crypto_pwhash_STRBYTES];
+
+    // INTERACTIVE rather than MODERATE: this is checked on a request, and a
+    // parameter set that takes a second to verify is a denial of service
+    // anybody can aim at the server by guessing wrong repeatedly.  The rate
+    // limiter bounds how often that happens; the cost per attempt should still
+    // be a cost the server can afford.
+    if(::crypto_pwhash_str(out, password.data(), password.size(),
+                           crypto_pwhash_OPSLIMIT_INTERACTIVE,
+                           crypto_pwhash_MEMLIMIT_INTERACTIVE) != 0)
+    {
+        throw std::runtime_error("could not hash the password (out of memory?)");
+    }
+
+    return std::string(out);
+#else
+    (void)password;
+
+    throw std::runtime_error("this jhttpd was built without libsodium, so it "
+                             "cannot hash or check a password");
+#endif
+}
+
+inline void credentials::load(const std::string& path) {
+#ifndef HAVE_PWHASH
+    (void)path;
+
+    throw std::runtime_error("this jhttpd was built without libsodium, so it "
+                             "cannot check a password; --protect is refused "
+                             "rather than ignored");
+#else
+    struct stat st;
+
+    if(::stat(path.c_str(), &st) != 0)
+        throw std::runtime_error("cannot read \"" + path + "\"");
+
+    // **Refused rather than warned about.**  Argon2id makes these expensive to
+    // attack, not impossible, and a world-readable list of them is an offline
+    // attack handed to whoever can read the disk.  A warning would be ignored
+    // by exactly the deployment that needs it.
+    if(st.st_mode & (S_IRWXG | S_IRWXO)) {
+        throw std::runtime_error("\"" + path + "\" is readable by more than "
+                                 "its owner; chmod 600 it");
+    }
+
+    std::ifstream in(path.c_str());
+
+    if(!in) throw std::runtime_error("cannot open \"" + path + "\"");
+
+    m_hashes.clear();
+
+    std::string line;
+    int no = 0;
+
+    while(std::getline(in, line)) {
+        no++;
+
+        while(!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.erase(line.size() - 1);
+
+        if(line.empty() || line[0] == '#') continue;
+
+        const std::string::size_type colon = line.find(':');
+
+        // An error rather than a skipped line: a credential file with a typo
+        // in it should stop the server rather than quietly guard less than the
+        // operator believes it does.
+        if(colon == std::string::npos || colon == 0) {
+            throw std::runtime_error("\"" + path + "\" line " +
+                                     std::to_string(no) +
+                                     ": expected user:hash");
+        }
+
+        m_hashes[line.substr(0, colon)] = line.substr(colon + 1);
+    }
+
+    if(m_hashes.empty())
+        throw std::runtime_error("\"" + path + "\" has no credentials in it");
+
+    // The decoy, at the same parameters as everything else, over a password
+    // nobody can send: 32 random bytes rather than a word somebody might.
+    unsigned char noise[32];
+
+    ::randombytes_buf(noise, sizeof noise);
+
+    m_decoy = hash_password(std::string(reinterpret_cast<char*>(noise),
+                                        sizeof noise));
+#endif
+}
+
+inline bool credentials::check(const std::string& user,
+                               const std::string& password) const
+{
+#ifndef HAVE_PWHASH
+    (void)user; (void)password;
+
+    return false;
+#else
+    const std::map<std::string, std::string>::const_iterator i =
+        m_hashes.find(user);
+
+    // **An unknown user still pays for a verification.**
+    //
+    // Returning early makes "no such user" faster than "wrong password", and
+    // the difference is measurable from outside -- Argon2id is deliberately
+    // slow, so the gap is milliseconds rather than nanoseconds. That turns the
+    // credential file into a user-enumeration oracle, which is worth more to an
+    // attacker than it sounds: it is the half of a guess that does not change.
+    //
+    // So an unknown user is checked against a decoy, which fails, and takes
+    // the time a real failure takes.
+    //
+    // **Generated at load, not written here as a literal.**  A hand-written
+    // hash that is not a valid encoding is rejected by the parser in
+    // microseconds, which would make the decoy *faster* than a real check and
+    // hand back exactly the signal it exists to hide -- and it would look
+    // correct while doing it.
+    const std::string& against = i == m_hashes.end() ? m_decoy : i->second;
+
+    const int ok = ::crypto_pwhash_str_verify(against.c_str(), password.data(),
+                                              password.size());
+
+    // The verification itself is constant-time; this is only about not
+    // letting the *lookup* leak.
+    return i != m_hashes.end() && ok == 0;
+#endif
 }
 
 inline volatile std::sig_atomic_t reopen_requested = 0;

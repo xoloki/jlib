@@ -49,10 +49,14 @@
 #include <jlib/sys/sys.hh>
 
 #include <csignal>
+#include <list>
+#include <termios.h>
+#include <unistd.h>
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
 #include <string>
+#include <vector>
 
 using namespace jlib;
 using namespace jlib::net;
@@ -88,6 +92,12 @@ struct options {
     double         initial_idle_timeout = 5;
     double         idle_timeout = 60;
     std::size_t    max_requests = 100;
+
+    // PREFIX:REALM:FILE, in the order they were given.  A list rather than one,
+    // because a server with a private area usually has more than one of them.
+    std::vector<std::string> protect;
+
+    bool           hash_password = false;
 };
 
 void usage(std::ostream& o, const char* argv0) {
@@ -121,6 +131,12 @@ void usage(std::ostream& o, const char* argv0) {
       << "  --initial-idle F      a new connection that says nothing (default 5)\n"
       << "  --idle-timeout F      between requests on a kept connection (default 60)\n"
       << "\n"
+      << "  Authentication:\n"
+      << "  --protect PREFIX:REALM:FILE\n"
+      << "                    require a credential under PREFIX.  FILE holds\n"
+      << "                    one user:hash line each, Argon2id, mode 600.\n"
+      << "  --hash-password   read a password and print a line for that file\n"
+      << "\n"
       << "  SIGHUP reopens the log files, for rotation.\n"
       << "\n"
       << "  --help\n";
@@ -132,6 +148,7 @@ bool parse(int argc, char** argv, options& o) {
 
         if(a == "--help") { usage(std::cout, argv[0]); std::exit(0); }
         if(a == "--async") { o.async = true; continue; }
+        if(a == "--hash-password") { o.hash_password = true; continue; }
 
         if(a.size() > 2 && a.compare(0, 2, "--") == 0) {
             if(i + 1 >= argc) {
@@ -164,6 +181,7 @@ bool parse(int argc, char** argv, options& o) {
             else if(a == "--initial-idle")
                 o.initial_idle_timeout = std::atof(v.c_str());
             else if(a == "--idle-timeout") o.idle_timeout = std::atof(v.c_str());
+            else if(a == "--protect") o.protect.push_back(v);
             else {
                 std::cerr << "jhttpd: unknown option " << a << "\n";
 
@@ -196,6 +214,32 @@ bool parse(int argc, char** argv, options& o) {
     return true;
 }
 
+/**
+ * Split `PREFIX:REALM:FILE` into three.
+ *
+ * From the right, because a **path may contain a colon** and so may a realm --
+ * `/a:b/*:My Realm:/etc/creds` is a legal thing to want. The file is after the
+ * last colon and the realm after the one before it, which is the only reading
+ * that does not refuse a legal prefix.
+ */
+bool split_protect(const std::string& spec, std::string& prefix,
+                   std::string& realm, std::string& file)
+{
+    const std::string::size_type last = spec.rfind(':');
+
+    if(last == std::string::npos || last == 0) return false;
+
+    const std::string::size_type mid = spec.rfind(':', last - 1);
+
+    if(mid == std::string::npos || mid == 0) return false;
+
+    prefix = spec.substr(0, mid);
+    realm = spec.substr(mid + 1, last - mid - 1);
+    file = spec.substr(last + 1);
+
+    return !prefix.empty() && !realm.empty() && !file.empty();
+}
+
 /** "/" becomes "/*"; "/x" becomes "/x/*"; a pattern given whole is kept. */
 std::string pattern_for(const std::string& prefix) {
     if(!prefix.empty() && prefix[prefix.size() - 1] == '*') return prefix;
@@ -213,6 +257,58 @@ int main(int argc, char** argv) {
     options o;
 
     if(!parse(argc, argv, o)) return 2;
+
+    // Before anything is bound or opened: this reads a password and prints a
+    // line, and is not a server at all.
+    if(o.hash_password) {
+        std::string pw;
+
+        // No echo if this is a terminal, and no prompt if it is not -- so it
+        // composes with a pipe without printing a prompt into the output.
+        const bool tty = ::isatty(STDIN_FILENO) != 0;
+
+        if(tty) {
+            std::cerr << "password: ";
+
+            struct termios was;
+
+            if(::tcgetattr(STDIN_FILENO, &was) == 0) {
+                struct termios quiet = was;
+
+                quiet.c_lflag &= ~unsigned(ECHO);
+
+                ::tcsetattr(STDIN_FILENO, TCSAFLUSH, &quiet);
+
+                std::getline(std::cin, pw);
+
+                ::tcsetattr(STDIN_FILENO, TCSAFLUSH, &was);
+            }
+            else std::getline(std::cin, pw);
+
+            std::cerr << "\n";
+        }
+        else std::getline(std::cin, pw);
+
+        if(pw.empty()) {
+            std::cerr << "jhttpd: no password given\n";
+
+            return 2;
+        }
+
+        try {
+            // The user is not asked for: a line is `user:hash` and the caller
+            // knows the user.  Printing a bare hash keeps this composable and
+            // stops it guessing.
+            std::cout << jhttpd::hash_password(pw) << "\n";
+        }
+        catch(std::exception& e) {
+            std::cerr << "jhttpd: " << e.what() << "\n";
+
+            return 1;
+        }
+
+        return 0;
+    }
 
     // SIGPIPE from a client that goes away mid-response would kill the process
     // rather than failing the write.  Nothing here wants the default.
@@ -283,6 +379,42 @@ int main(int argc, char** argv) {
         if(o.rate > 0) s->rate_limit(o.rate, o.burst);
 
         s->files(pattern_for(o.prefix), o.root, o.cache_control);
+
+        // Held for the life of the server: the verifier below closes over a
+        // reference, and a credential file is read once at startup rather than
+        // per request.  Re-reading on SIGHUP belongs with the reload work
+        // #239 lists.
+        std::list<jhttpd::credentials> guards;
+
+        for(std::size_t i = 0; i < o.protect.size(); i++) {
+            std::string prefix, realm, file;
+
+            if(!split_protect(o.protect[i], prefix, realm, file)) {
+                std::cerr << "jhttpd: --protect wants PREFIX:REALM:FILE, got \""
+                          << o.protect[i] << "\"\n";
+
+                return 2;
+            }
+
+            guards.push_back(jhttpd::credentials());
+
+            // Throws if the file cannot be read, is world-readable, has a
+            // malformed line, or if this build has no libsodium -- and the
+            // throw stops the server. A server told to guard a path and
+            // silently not guarding it is the worst of the three outcomes.
+            guards.back().load(file);
+
+            const jhttpd::credentials& who = guards.back();
+
+            s->protect(pattern_for(prefix), "Basic realm=\"" + realm + "\"",
+                       [&who](const http::server::credentials& c) {
+                           return who.check(c.user, c.password);
+                       });
+
+            std::cerr << "jhttpd: " << pattern_for(prefix) << " needs a "
+                      << "credential from " << file << " (" << who.size()
+                      << (who.size() == 1 ? " user)" : " users)") << "\n";
+        }
 
         s->on_request([&access, access_to_stdout](
                           const http::server::access& a) {

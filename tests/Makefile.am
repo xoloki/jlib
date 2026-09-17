@@ -258,8 +258,10 @@ net_http_hostile_test_LDADD   = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) $
 net_http_fuzz_test_SOURCES = net_http_fuzz_test.cc
 net_http_fuzz_test_LDADD   = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
-app_jhttpd_test_SOURCES = app_jhttpd_test.cc
-app_jhttpd_test_LDADD   = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
+app_jhttpd_test_SOURCES  = app_jhttpd_test.cc
+app_jhttpd_test_CPPFLAGS = $(AM_CPPFLAGS) $(PWHASH_CPPFLAGS)
+app_jhttpd_test_LDADD    = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) \
+                           $(OPENSSL_LIBS) $(SODIUM_LIBS)
 
 net_http_connection_test_SOURCES = net_http_connection_test.cc
 net_http_connection_test_LDADD   = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA)

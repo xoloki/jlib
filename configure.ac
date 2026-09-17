@@ -156,6 +156,20 @@ AS_IF([test "x$have_sodium" = xyes && test "x$have_ristretto" = xno],
 AM_CONDITIONAL([HAVE_SODIUM],
                [test "x$have_sodium" = xyes && test "x$have_ristretto" = xyes])
 
+dnl Password hashing is libsodium too, and deliberately NOT gated on
+dnl HAVE_SODIUM -- which is really "sodium with ristretto255", because that is
+dnl what the elliptic curve code needs.  crypto_pwhash needs neither ristretto
+dnl nor anything past 1.0.18, so gating it on HAVE_SODIUM would lose
+dnl jhttpd's authentication on a libsodium that is perfectly capable of it.
+dnl
+dnl Substituted rather than AC_DEFINEd for the reason the reactor flags are:
+dnl no source in jlib/apps includes config.h.
+AM_CONDITIONAL([HAVE_PWHASH], [test "x$have_sodium" = xyes])
+
+PWHASH_CPPFLAGS=
+AS_IF([test "x$have_sodium" = xyes], [PWHASH_CPPFLAGS="-DHAVE_PWHASH"])
+AC_SUBST([PWHASH_CPPFLAGS])
+
 dnl PortAudio replaces the OSS backend in jlib/media.
 PKG_CHECK_MODULES([PORTAUDIO], [portaudio-2.0 >= 19],
                   [have_portaudio=yes], [have_portaudio=no])
