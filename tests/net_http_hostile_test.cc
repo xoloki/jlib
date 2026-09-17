@@ -35,10 +35,15 @@
 #include <cstdio>
 #include <iostream>
 #include <sstream>
+#include <atomic>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -389,10 +394,112 @@ static void heard_by_the_operator(http::server& s) {
        seen.find("depends on who is reading it") != std::string::npos, seen);
 }
 
+/**
+ * A handler that asks whether anybody is still waiting.
+ *
+ * The case it exists for is a handler that produces one whole answer after a
+ * long time: it writes nothing until it finishes, so the failed write that
+ * tells a *streaming* handler its client left never happens, and it spends the
+ * whole time on a reply nobody will read. jserve's non-streaming path holds a
+ * model for the length of a generation on exactly that basis.
+ *
+ * Driven with a raw socket because the point is to hang up **mid-request**,
+ * after the head has been read and before the answer -- which a well-behaved
+ * client will not do.
+ */
+static void a_handler_can_ask_if_the_client_left(http::server& s,
+                                                 std::atomic<int>& saw)
+{
+    saw.store(0);
+
+    std::cout << "\nasking whether the client is still there:\n";
+
+    {
+        // Still connected: the handler must not be told to give up on
+        // somebody who is waiting.  This is the half that catches a check
+        // which simply answers "gone".
+        const std::string r = get(s.port(), "/slow");
+
+        ok("  a client that waits is not reported gone",
+           status_of(r) == 200 && body_of(r).find("finished") != std::string::npos,
+           std::to_string(status_of(r)));
+
+        ok("  and the handler saw it as present", saw.load() == 0,
+           std::to_string(saw.load()));
+    }
+
+    {
+        saw.store(0);
+
+        // Send a complete request, then close without reading the answer.
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+
+        struct sockaddr_in to;
+
+        std::memset(&to, 0, sizeof to);
+
+        to.sin_family = AF_INET;
+        to.sin_port = htons(s.port());
+
+        ::inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+
+        if(::connect(fd, reinterpret_cast<struct sockaddr*>(&to), sizeof to) == 0) {
+            static const char* const req =
+                "GET /slow HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+
+            if(::write(fd, req, std::strlen(req)) < 0) { }
+
+            // Gone before the handler finishes.  The handler sleeps in small
+            // steps and asks between them, so it has a chance to notice.
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+
+            ::close(fd);
+        }
+
+        // One-sided: wait up to two seconds for the handler to notice, and
+        // assert only that it did.  A slow machine cannot fail this; only a
+        // check that never reports gone can.
+        bool noticed = false;
+
+        for(int i = 0; i < 200 && !noticed; i++) {
+            if(saw.load() > 0) noticed = true;
+            else std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        ok("  and a client that hangs up mid-request is", noticed,
+           std::to_string(saw.load()));
+    }
+}
+
+static std::atomic<int> gone_seen{0};
+
 static void furnish(http::server& s, const tree& t) {
     s.route("GET", "/ok", [](const http::server::Request&,
                              http::server::response& r) {
         r.status(200).type("text/plain").body("ok");
+    });
+
+    // A handler that takes its time and writes nothing until the end -- the
+    // shape peer_gone() is for.  It asks between steps rather than once, since
+    // the answer can change while it works.
+    s.route("GET", "/slow",
+            [](const http::server::Request&,
+               http::server::async_responder& out) -> sys::task<void> {
+        for(int i = 0; i < 40; i++) {
+            co_await sys::on_pool(out.pool());
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+            co_await sys::on_reactor(out.reactor());
+
+            if(out.peer_gone()) { gone_seen++; break; }
+        }
+
+        http::server::response r;
+
+        r.status(200).type("text/plain").body("finished\n");
+
+        co_await out.send(r);
     });
 
     s.files("/static/*", t.root);
@@ -448,6 +555,14 @@ int main() {
 
             std::cout << "\n-- the async server --";
             everything(s);
+
+            // **Async only, by construction.**  peer_gone() is on
+            // async_responder, so the route that uses it is an async
+            // streaming route -- which a blocking server refuses where it
+            // reaches it, with a 500.  The blocking half's equivalent is
+            // responder::live(), and it learns the same thing the same way a
+            // streaming handler always has: from a write that fails.
+            a_handler_can_ask_if_the_client_left(s, gone_seen);
         }
     }
     catch(std::exception& e) {
