@@ -144,6 +144,7 @@ TESTS = \
 	util_abnf_compile_test \
 	util_utf8_test \
 	app_jcode_test \
+	app_jcode_run_test \
 	app_jserve_test \
  \
 	$(X_TESTS) \
@@ -425,6 +426,11 @@ util_utf8_test_SOURCES  = util_utf8_test.cc
 app_jcode_test_SOURCES  = app_jcode_test.cc $(top_srcdir)/jlib/apps/jcode.cc
 app_jcode_test_CPPFLAGS = $(AM_CPPFLAGS)
 app_jcode_test_LDADD    = $(JUTIL_LA) $(JSYS_LA)
+
+# jcode end to end: the program, against a scripted endpoint, with no model.
+app_jcode_run_test_SOURCES = app_jcode_run_test.cc
+app_jcode_run_test_LDADD   = $(JAI_LA) $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) \
+                             $(JSYS_LA)
 
 # jserve's endpoint with a fake engine: the real server, the real client, the
 # real wire format, and a scripted model (#236).

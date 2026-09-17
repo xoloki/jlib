@@ -52,7 +52,7 @@ if HAVE_GLFW
 glfw_programs = jglfwhyper jgltorus jhardhyper
 endif
 
-bin_PROGRAMS = jlib-mail jcrypt jm3u jchat jserve jhttpd \
+bin_PROGRAMS = jlib-mail jcrypt jm3u jchat jserve jcode jhttpd \
 	$(alpaca_programs) \
 	$(curve_programs) \
 	$(neural_programs) \
@@ -69,7 +69,7 @@ dist_pkgdata_DATA = wow-buttons-ps3.map wow-axes-ps3.map \
                     ksp-axes-ps3.map ksp-buttons-ps3.map \
                     tor-axes-ps3.map tor-buttons-ps3.map
 
-EXTRA_DIST = Hyper.hh color.hh magick.hh jserve.hh jcode.hh jcode.cc jhttpd.hh
+EXTRA_DIST = Hyper.hh color.hh magick.hh jserve.hh jcode.hh jhttpd.hh
 
 JCRYPT_LA  = $(top_builddir)/jlib/crypt/libjcrypt.la
 JNET_LA    = $(top_builddir)/jlib/net/libjnet.la
@@ -102,6 +102,13 @@ jchat_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA) $(METAL_LA)
 # jnet as well as jai: this is the one app that is both ends at once.
 jhttpd_SOURCES  = jhttpd.cc
 jhttpd_LDADD    = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
+
+# jcode's main is separate from its implementation because a test compiles
+# the implementation and cannot have a second main().  jserve needs no such
+# split: its endpoint is a header.
+jcode_SOURCES   = jcode_main.cc jcode.cc
+jcode_CPPFLAGS  = $(AM_CPPFLAGS)
+jcode_LDADD     = $(JAI_LA) $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA)
 
 jserve_SOURCES  = jserve.cc
 jserve_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)
