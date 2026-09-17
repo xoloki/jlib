@@ -93,6 +93,7 @@ TESTS = \
 	net_http_server_test \
 	net_http_async_server_test \
 	net_http_keepalive_test \
+	net_http_connection_test \
 	net_http_routing_test \
 	net_http_auth_test \
 	net_http_ratelimit_test \
@@ -253,6 +254,9 @@ net_http_hostile_test_LDADD   = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) $
 
 net_http_fuzz_test_SOURCES = net_http_fuzz_test.cc
 net_http_fuzz_test_LDADD   = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
+
+net_http_connection_test_SOURCES = net_http_connection_test.cc
+net_http_connection_test_LDADD   = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA)
 
 net_http_keepalive_test_SOURCES = net_http_keepalive_test.cc certificate.hh
 net_http_keepalive_test_LDADD   = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)

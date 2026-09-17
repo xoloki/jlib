@@ -105,6 +105,50 @@ namespace {
         return target;
     }
 
+    /** Scheme, host and port, for comparing two URLs and for saying which. */
+    std::string origin_text(const util::URL& u) {
+        const bool tls = u.get_protocol() == "https";
+
+        const unsigned int port = u.get_port().empty()
+                                  ? (tls ? 443u : 80u) : u.get_port_val();
+
+        return u.get_protocol() + "://" + u.get_host() + ":" +
+               std::to_string(port);
+    }
+
+    bool same_origin(const util::URL& a, const util::URL& b) {
+        return origin_text(a) == origin_text(b);
+    }
+
+    /**
+     * Whether the connection survives this response.
+     *
+     * RFC 9112 9.3: HTTP/1.1 is persistent unless the response says close;
+     * HTTP/1.0 is the other way round and needs to ask.  One more makes it
+     * false: a body framed by the connection ending has just ended it.
+     *
+     * A sink that stopped early also kills the connection, and that is *not*
+     * decided here -- read_body returns void and cannot say whether it
+     * reached the end, so the caller watches its own sink.  See send().
+     */
+    bool persists(const Response& r, const std::string& method) {
+        const std::string conn = util::http::fold(r.fields().get("Connection"));
+
+        std::string lower;
+
+        for(char c : conn) lower += char(std::tolower((unsigned char)(c)));
+
+        if(lower.find("close") != std::string::npos) return false;
+
+        if(r.version() == "HTTP/1.0" &&
+           lower.find("keep-alive") == std::string::npos) return false;
+
+        if(method != "HEAD" && r.body_framing() == util::http::framing::until_close)
+            return false;
+
+        return true;
+    }
+
     std::unique_ptr<sys::socketstream> transport(const util::URL& url,
                                                  unsigned int port,
                                                  bool tls,
@@ -259,6 +303,167 @@ std::string form_encode(const std::map<std::string, std::string>& form) {
     }
 
     return out;
+}
+
+// ---------------------------------------------------------------- connection
+
+connection::connection(const util::URL& origin, const options& o)
+    : m_origin(origin), m_o(o)
+{
+}
+
+connection::~connection() {}
+
+void connection::close() {
+    m_sock.reset();
+
+    m_live = false;
+    m_served = 0;
+}
+
+Response connection::request(const std::string& method, const util::URL& target,
+                             const fields& send, const std::string& body)
+{
+    return this->send(method, target, send, body, 0);
+}
+
+Response connection::request(const std::string& method, const util::URL& target,
+                             const fields& send, const std::string& body,
+                             const util::http::body_sink& sink)
+{
+    return this->send(method, target, send, body, &sink);
+}
+
+Response connection::send(const std::string& method, const util::URL& target,
+                          const fields& send, const std::string& body,
+                          const util::http::body_sink* sink)
+{
+    if(!util::http::grammar().at("method").try_parse(method))
+        throw error("not an HTTP method: \"" + method + "\"");
+
+    const std::string scheme = target.get_protocol();
+    const bool tls = scheme == "https";
+
+    if(scheme != "http" && !tls)
+        throw error("not an HTTP URL: \"" + target.coagulate() + "\"");
+
+    const unsigned int port = target.get_port().empty()
+                              ? (tls ? 443u : 80u)
+                              : target.get_port_val();
+
+    // **The refusal that makes this safe to hold Authorization on.**  A
+    // connection is bound to one origin, and a target for another is a
+    // mistake rather than a thing to go and do: sending it down this socket
+    // would reach the wrong server, and opening a new one to reach the right
+    // one would spend the caller's fields somewhere they did not look.
+    if(!same_origin(m_origin, target))
+        throw error("this connection is to " + origin_text(m_origin) +
+                    " and that request is for " + origin_text(target));
+
+    for(const fields::value_type& f : send) check_field(f.first, f.second);
+
+    if(!m_sock || !*m_sock) {
+        m_sock = transport(target, port, tls, m_o);
+
+        m_live = true;
+        m_served = 0;
+    }
+
+    std::ostringstream head;
+
+    head << method << " " << request_target(target) << " HTTP/1.1\r\n";
+
+    // The one field that differs from a one-shot request, and the whole point
+    // of this class.  HTTP/1.1 is persistent by default, so saying keep-alive
+    // is strictly speaking redundant -- it is sent because a server that
+    // cares is likelier to have been written against the explicit form, and
+    // because it makes the intent visible in a packet capture.
+    fields out;
+
+    out.add("Host", host_field(target, port, tls));
+    out.add("User-Agent", m_o.user_agent);
+    out.add("Connection", "keep-alive");
+    out.add("Accept-Encoding", "identity");
+
+    if(!body.empty()) out.add("Content-Length", std::to_string(body.size()));
+
+    for(const fields::value_type& f : out) {
+        if(!send.has(f.first)) head << f.first << ": " << f.second << "\r\n";
+    }
+
+    for(const fields::value_type& f : send) {
+        head << f.first << ": " << f.second << "\r\n";
+    }
+
+    head << "\r\n";
+
+    // What *we* said, which decides as much as what the server says.  A
+    // caller can override Connection, and request() does -- so a connection
+    // that announced it was closing must not then be reused, whatever the
+    // response carries.  Missing this is invisible against a lenient server
+    // and a protocol violation against a strict one.
+    const bool we_said_close =
+        util::http::fold(send.get("Connection")).find("close") !=
+        std::string::npos;
+
+    if(debug()) std::cerr << head.str() << std::flush;
+
+    *m_sock << head.str() << body << std::flush;
+
+    if(!*m_sock) {
+        close();
+
+        throw error("the connection failed while sending the request");
+    }
+
+    Response r;
+
+    // Whether the caller's sink asked to stop, which read_body does not
+    // report -- it returns void, and adding a return to it for this one
+    // caller would be widening a just-settled interface for a question the
+    // caller can answer itself.  This is that answer: watch the sink.
+    bool cut = false;
+
+    try {
+        r = util::http::read_response_head(*m_sock, method == "HEAD");
+
+        if(sink) {
+            util::http::read_body(*m_sock, r.body_framing(), r.content_length(),
+                                  [&cut, sink](std::string_view piece) {
+                                      if((*sink)(piece)) return true;
+
+                                      cut = true;
+
+                                      return false;
+                                  },
+                                  util::http::no_cap);
+        }
+        else {
+            r.set_body(util::http::read_body(*m_sock, r, m_o.max_body));
+        }
+    }
+    catch(std::exception&) {
+        // Whatever went wrong, this socket is no longer at a message boundary
+        // and nothing can put it back there.
+        close();
+
+        throw;
+    }
+
+    m_served++;
+
+    // A body the sink cut short leaves the stream in the middle of a message,
+    // where the next read would take the rest of the body for a status line.
+    m_live = !cut && !we_said_close && persists(r, method);
+
+    if(!m_live) m_sock.reset();
+
+    if(debug())
+        std::cerr << r.status() << " " << r.reason() << ", request "
+                  << m_served << " on this connection, "
+                  << (m_live ? "kept" : "closed") << std::endl;
+
+    return r;
 }
 
 Response request(const std::string& method,
