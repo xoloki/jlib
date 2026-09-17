@@ -39,6 +39,7 @@
 #include "feed.hh"
 
 #include <jlib/sys/reactor.hh>
+#include <jlib/sys/sync.hh>
 #include <jlib/sys/pipe.hh>
 
 #include <unistd.h>
@@ -692,6 +693,120 @@ static void run_every_section() {
     nesting_throws();
 }
 
+/**
+ * `sys::on_a_reactor_thread()`, and the checks built on it.
+ *
+ * The rule it enforces: **nothing blocking runs on the reactor thread.** One
+ * thread drives every connection, every timer and every cross-thread handoff,
+ * so anything that waits there stops all of them, and anything that waits
+ * forever stops them forever -- including whatever would have released the
+ * thing being waited on. jserve#273 is that, and it wedged the server
+ * permanently.
+ *
+ * The property that makes a check worth more than a fix: **it does not need
+ * contention.** #273 needed two overlapping requests to hang, which is why
+ * three months of tests missed it -- but the lock was taken on the reactor on
+ * every request from the first, and returned only because nothing else held
+ * it. A check does not care that the lock was free.
+ */
+static void nothing_blocking_on_the_reactor_thread() {
+    std::cout << "\nknowing which thread this is:\n";
+
+    ok("  an ordinary thread is not a reactor thread",
+       !sys::on_a_reactor_thread());
+
+    {
+        sys::reactor r;
+        sys::pipe p(false, false);
+
+        bool inside = false;
+
+        r.once(p.get_reader(), sys::reactor::READ,
+               [&inside](sys::reactor::token, int, sys::reactor::event_type) {
+                   inside = sys::on_a_reactor_thread();
+               });
+
+        const char b = 'x';
+
+        if(::write(p.get_writer(), &b, 1) != 1) { }
+
+        r.run_one(std::chrono::milliseconds(500));
+
+        ok("  a callback knows it is on one", inside);
+    }
+
+    ok("  and the mark is gone once the pass is over",
+       !sys::on_a_reactor_thread());
+
+    {
+        // The mark is per-thread, not per-process: another thread running
+        // nothing must not inherit it.
+        sys::reactor r;
+        sys::pipe p(false, false);
+
+        bool elsewhere = true;
+
+        r.once(p.get_reader(), sys::reactor::READ,
+               [&elsewhere](sys::reactor::token, int, sys::reactor::event_type) {
+                   std::thread other([&elsewhere] {
+                       elsewhere = sys::on_a_reactor_thread();
+                   });
+
+                   other.join();
+               });
+
+        const char b = 'x';
+
+        if(::write(p.get_writer(), &b, 1) != 1) { }
+
+        r.run_one(std::chrono::milliseconds(500));
+
+        ok("  a thread started from a callback is not on a reactor",
+           !elsewhere);
+    }
+
+    {
+        // What the mark is for.  A producer waiting for room, on the one
+        // thread that would have drained the queue.
+        sys::reactor r;
+        sys::pipe p(false, false);
+        sys::job_queue q(1);
+
+        bool threw = false;
+        std::string why;
+
+        r.once(p.get_reader(), sys::reactor::READ,
+               [&q, &threw, &why](sys::reactor::token, int,
+                                  sys::reactor::event_type) {
+                   try {
+                       q.wait([](std::size_t d) { return d == 0; });
+                   }
+                   catch(std::exception& e) { threw = true; why = e.what(); }
+               });
+
+        const char b = 'x';
+
+        if(::write(p.get_writer(), &b, 1) != 1) { }
+
+        r.run_one(std::chrono::milliseconds(500));
+
+        ok("  job_queue::wait refuses to block one", threw, why);
+    }
+
+    {
+        // And the same call is fine where blocking is allowed, which is the
+        // half that proves the check is about the thread rather than the call.
+        sys::job_queue q(1);
+
+        bool threw = false;
+
+        try { q.wait([](std::size_t d) { return d == 0; }); }
+        catch(std::exception&) { threw = true; }
+
+        ok("  and allows it anywhere else", !threw);
+    }
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -714,6 +829,7 @@ int main() {
         std::cout << "\n=== " << backend << " ===\n";
 
         run_every_section();
+    nothing_blocking_on_the_reactor_thread();
     }
 
     // What a green run does not establish.

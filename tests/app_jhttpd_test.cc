@@ -365,12 +365,16 @@ static void rotation() {
 
         log.write("before");
 
+        log.drain();
+
         ok("  and writes", lines_of(path).size() == 1);
 
         // What a rotation tool does.
         ::rename(path.c_str(), (path + ".1").c_str());
 
         log.write("still the old inode");
+
+        log.drain();
 
         ok("  a line written after the move follows the moved file",
            lines_of(path + ".1").size() == 2 && lines_of(path).empty(),
@@ -381,6 +385,8 @@ static void rotation() {
         jhttpd::reopen_requested++;
 
         log.write("after the hup");
+
+        log.drain();
 
         const std::vector<std::string> fresh = lines_of(path);
 
@@ -407,7 +413,10 @@ static void rotation() {
         lb.open(b);
 
         la.write("one");
+
+        la.drain();
         lb.write("one");
+        lb.drain();
 
         ::rename(a.c_str(), (a + ".1").c_str());
         ::rename(b.c_str(), (b + ".1").c_str());
@@ -415,7 +424,10 @@ static void rotation() {
         jhttpd::reopen_requested++;
 
         la.write("two");
+
+        la.drain();
         lb.write("two");
+        lb.drain();
 
         ok("  one signal reopens every log, not just the first to notice",
            lines_of(a).size() == 1 && lines_of(b).size() == 1,
@@ -436,12 +448,15 @@ static void rotation() {
 
         log.open(twice);
         log.write("first");
+        log.drain();
 
         jhttpd::reopen_requested++;
         log.write("second");
+        log.drain();
 
         jhttpd::reopen_requested++;
         log.write("third");
+        log.drain();
 
         ok("  a reopen with nothing rotated keeps what is already there",
            lines_of(twice).size() == 3,
@@ -457,9 +472,13 @@ static void rotation() {
 
         none.write("nowhere");
 
+        none.drain();
+
         jhttpd::reopen_requested++;
 
         none.write("still nowhere");
+
+        none.drain();
 
         ok("  and has nothing to reopen", !none.wanted());
     }
