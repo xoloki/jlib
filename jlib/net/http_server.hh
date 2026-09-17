@@ -441,6 +441,22 @@ public:
         bool m_chunked = false;
         bool m_ended = false;
         bool m_no_body = false;
+
+        // What was answered, for the access record.  Body octets only: the
+        // status line and fields are not what a Combined log's byte count
+        // means, and counting them would make every line disagree with every
+        // other server's.
+        int         m_status = 0;
+        std::size_t m_wrote = 0;
+
+    public:
+        /** The status this answered with, or 0 if it has not answered. */
+        int status() const { return m_status; }
+
+        /** Body octets written, not counting framing. */
+        std::size_t wrote() const { return m_wrote; }
+
+    private:
     };
 
     /**
@@ -569,7 +585,18 @@ public:
 
         bool started() const { return m_started; }
 
+        /** The status this answered with, or 0 if it has not answered. */
+        int status() const { return m_status; }
+
+        /** Body octets written, not counting framing. */
+        std::size_t wrote() const { return m_wrote; }
+
     private:
+        // See the blocking responder: body octets only, so a Combined log's
+        // byte count means what it means everywhere else.
+        int                m_status = 0;
+        std::size_t        m_wrote = 0;
+
         sys::async_writer* m_writer;
         std::string        m_name;
         bool               m_started = false;
@@ -1037,6 +1064,73 @@ public:
     };
 
 
+    /**
+     * One answered request, as a log needs it.
+     *
+     * **The fields are chosen for the Combined Log Format** and nothing else:
+     * that format is what existing tools read, and a server that invents its
+     * own gives an operator a log nothing analyses. What is not here is not
+     * omitted by accident -- it is not in the format.
+     *
+     * Every string except `peer`, `status` and `bytes` is **client-supplied**.
+     * See the note on `on_request()` about what that means for whoever writes
+     * them down.
+     */
+    struct access {
+        /** Numeric, from the accepting side.  Never a name. */
+        std::string peer;
+
+        /** Who `protect()` let through, or empty.  Combined's third field. */
+        std::string user;
+
+        /** As sent, undecoded: the log records what arrived, not what it meant. */
+        std::string method;
+        std::string target;
+        std::string version;
+
+        std::string referer;
+        std::string user_agent;
+
+        /** 0 when the connection died before anything was answered. */
+        int status = 0;
+
+        /** Body octets, not counting the head or chunk framing. */
+        std::size_t bytes = 0;
+    };
+
+    /**
+     * Called once per answered request, on the thread that answered it.
+     *
+     * This server does not log. It cannot: a library does not know where its
+     * output goes, whether there is a file, whether two threads are writing to
+     * it, or what should happen when the disk fills. It knows what happened,
+     * which is this.
+     *
+     * ## Whoever writes these down owns an injection problem
+     *
+     * `method`, `target`, `referer` and `user_agent` are chosen by the client,
+     * and a Combined log line is newline-delimited and quote-delimited. A
+     * target containing a CR, an LF or a `"` forges log entries -- and a log
+     * an attacker can write is worse than no log, because it is believed.
+     *
+     * They are handed over **raw and undecoded on purpose**. A record that
+     * arrived escaped could not be used for anything but a log, and the
+     * escaping a log wants is not the escaping anything else wants. The
+     * server's own defences do not help here either: `path_of` refuses control
+     * characters in the *path*, and none of these four fields is the path.
+     *
+     * `jhttpd` escapes them on the way to the file. Anything else that writes
+     * one down has to do the same.
+     *
+     * ## Cost
+     *
+     * Called with the response already sent, so a slow handler here delays the
+     * next request on that connection rather than this one's answer. On the
+     * async server that is the reactor thread; a hook that writes to a file is
+     * doing I/O on it, which is the reason jhttpd's writer is what it is.
+     */
+    void on_request(std::function<void(const access&)> h);
+
     /** What runs when no route matched.  The default answers 404. */
     void otherwise(handler h);
 
@@ -1128,6 +1222,10 @@ private:
     /** The most specific guard matching `path`, or null. */
     const guard* guard_for(const std::string& path) const;
 
+    /** Build and deliver one access record, if anybody asked for them. */
+    void note(const util::http::Request& q, const sys::peer& from,
+              const std::string& user, int status, std::size_t bytes) const;
+
     /**
      * Decide the 429, if there is one.
      *
@@ -1141,7 +1239,7 @@ private:
      * @return true if the request may proceed; otherwise `r` is the answer.
      */
     bool allowed_through(const util::http::Request& q, const std::string& path,
-                         response& r) const;
+                         response& r, std::string& who) const;
 
     /**
      * Does this entry's pattern match `parts`?  If so, fill `into`.
@@ -1220,6 +1318,7 @@ private:
     options m_options;
     std::vector<entry> m_routes;
     std::vector<guard> m_guards;
+    std::function<void(const access&)> m_on_request;
     limiter m_limits;
     handler m_otherwise;
     std::unique_ptr<sys::server> m_transport;

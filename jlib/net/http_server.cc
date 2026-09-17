@@ -1285,6 +1285,34 @@ void server::files(const std::string& pattern, const std::string& root,
     m_routes.push_back(std::move(e));
 }
 
+void server::on_request(std::function<void(const access&)> h) {
+    m_on_request = std::move(h);
+}
+
+void server::note(const util::http::Request& q, const sys::peer& from,
+                  const std::string& user, int status,
+                  std::size_t bytes) const
+{
+    if(!m_on_request) return;
+
+    access a;
+
+    a.peer = from.address;
+    a.user = user;
+    a.method = q.method();
+    a.target = q.target();
+    a.version = q.version();
+    a.referer = q.fields().get("Referer");
+    a.user_agent = q.fields().get("User-Agent");
+    a.status = status;
+    a.bytes = bytes;
+
+    // Raw and undecoded.  See on_request(): escaping here would make the
+    // record fit for a log and nothing else, and the server does not know
+    // which log.
+    m_on_request(a);
+}
+
 void server::otherwise(handler h) {
     if(h) m_otherwise = std::move(h);
 }
@@ -1305,6 +1333,8 @@ void server::responder::send(const response& r) {
                     "streaming one");
 
     m_started = true;
+    m_status = r.status();
+    m_wrote = m_no_body ? 0 : r.body().size();
 
     *m_s << r.str(m_name) << std::flush;
 }
@@ -1326,6 +1356,7 @@ void server::responder::begin(const response& head) {
         throw error("a responder began a response twice");
 
     m_started = true;
+    m_status = head.status();
 
     // **A handler that knows the length says so, and then nothing needs
     // chunking.**  A body with a Content-Length already has an end; chunking
@@ -1351,6 +1382,8 @@ void server::responder::write(const std::string& piece) {
     // A zero-length chunk is the terminator, so writing one here would end the
     // body early and the client would believe it complete.  Nothing to send.
     if(m_no_body || piece.empty()) return;
+
+    m_wrote += piece.size();
 
     if(m_chunked) *m_s << chunk(piece) << std::flush;
     else          *m_s << piece << std::flush;
@@ -1865,7 +1898,8 @@ const server::guard* server::guard_for(const std::string& path) const {
 }
 
 bool server::allowed_through(const util::http::Request& q,
-                             const std::string& path, response& r) const
+                             const std::string& path, response& r,
+                             std::string& who) const
 {
     const guard* g = guard_for(path);
 
@@ -1889,6 +1923,11 @@ bool server::allowed_through(const util::http::Request& q,
 
         return false;
     }
+
+    // Combined's third field.  Basic has a user-id; Bearer does not, and a
+    // token is not one -- logging it would put a credential into a file that
+    // exists to be read by other people.
+    who = c.user;
 
     return true;
 }
@@ -1994,6 +2033,31 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
 
     Request q;
 
+    // What the access record will say.  Set beside each answer rather than at
+    // one exit, because there are a dozen exits and a log line that appears
+    // only on the paths somebody remembered is a log nobody can count.
+    //
+    // A forgotten one is visible rather than silent: the record goes out with
+    // status 0, which is also what a connection that died before being
+    // answered produces, and the tests assert a line per status they expect.
+    int         noted_status = 0;
+    std::size_t noted_bytes = 0;
+    std::string noted_user;
+
+    // Noted however this returns, **including by throwing** -- a 500 is the
+    // line an operator most wants and the one an early return is most likely
+    // to lose.
+    struct noting {
+        const server*      self;
+        const Request*     q;
+        const sys::peer*   from;
+        const std::string* user;
+        const int*         status;
+        const std::size_t* bytes;
+
+        ~noting() { self->note(*q, *from, *user, *status, *bytes); }
+    } note_on_exit{ this, &q, &from, &noted_user, &noted_status, &noted_bytes };
+
     try {
         q = util::http::read_request_head(s, m_options.max_head);
 
@@ -2016,6 +2080,9 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
         // is the only reason withholding it from the client costs nothing.
         m_transport->report(e, from);
 
+        noted_status = r.status();
+        noted_bytes = r.body().size();
+
         s << r.str(m_options.server_name) << std::flush;
 
         return;
@@ -2029,6 +2096,9 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
     if(!path_of(q.target(), path, why)) {
         r.status(400).type("text/plain").body(why);
 
+        noted_status = r.status();
+        noted_bytes = r.body().size();
+
         s << r.str(m_options.server_name) << std::flush;
 
         return;
@@ -2041,6 +2111,9 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
         response slow;
 
         if(!within_rate(from, slow)) {
+            noted_status = slow.status();
+            noted_bytes = slow.body().size();
+
             s << slow.str(m_options.server_name) << std::flush;
 
             return;
@@ -2053,7 +2126,10 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
     {
         response denied;
 
-        if(!allowed_through(q, path, denied)) {
+        if(!allowed_through(q, path, denied, noted_user)) {
+            noted_status = denied.status();
+            noted_bytes = denied.body().size();
+
             s << denied.str(m_options.server_name) << std::flush;
 
             return;
@@ -2071,6 +2147,9 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
         response r;
 
         method_not_allowed(r, q.method(), allowed);
+
+        noted_status = r.status();
+        noted_bytes = r.body().size();
 
         s << r.str(m_options.server_name) << std::flush;
 
@@ -2094,6 +2173,9 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
             .body("that route has a suspending handler and this server is "
                   "blocking\n");
 
+        noted_status = oops.status();
+        noted_bytes = oops.body().size();
+
         s << oops.str(m_options.server_name) << std::flush;
 
         return;
@@ -2103,6 +2185,21 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
 
     if(chosen && (chosen->stream || chosen->param_stream)) {
         responder out(s, m_options.server_name);
+
+        // A streaming route's answer is not a response object, so the record
+        // comes from the responder when this returns -- by pointer, because
+        // `out` outlives neither the branch nor the guard above it.
+        struct from_responder {
+            responder*   out;
+            int*         status;
+            std::size_t* bytes;
+
+            ~from_responder() {
+                if(out->status() != 0) *status = out->status();
+
+                *bytes = out->wrote();
+            }
+        } take{ &out, &noted_status, &noted_bytes };
 
         if(head_only) out.suppress_body();
 
@@ -2122,6 +2219,9 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
 
                 oops.status(500).type("text/plain").body("internal error\n");
 
+                noted_status = oops.status();
+                noted_bytes = oops.body().size();
+
                 s << oops.str(m_options.server_name) << std::flush;
             }
 
@@ -2138,6 +2238,9 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
 
             oops.status(500).type("text/plain")
                 .body("the handler produced no response\n");
+
+            noted_status = oops.status();
+            noted_bytes = oops.body().size();
 
             s << oops.str(m_options.server_name) << std::flush;
         }
@@ -2184,6 +2287,9 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
         // already has.
         if(q.method() == "GET" || q.method() == "HEAD") apply_range(q, r);
 
+        noted_status = r.status();
+        noted_bytes = head_only ? 0 : r.body().size();
+
         answer = head_only ? r.without_body(m_options.server_name)
                            : r.str(m_options.server_name);
     }
@@ -2191,6 +2297,9 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
         response oops;
 
         oops.status(500).type("text/plain").body("internal error\n");
+
+        noted_status = oops.status();
+        noted_bytes = oops.body().size();
 
         s << oops.str(m_options.server_name) << std::flush;
 
@@ -2211,6 +2320,8 @@ sys::task<void> server::async_responder::send(const response& r) {
                     "streaming one");
 
     m_started = true;
+    m_status = r.status();
+    m_wrote = m_no_body ? 0 : r.body().size();
 
     // **A whole response carries its own length, so it can be followed.**
     // This used to serialise with str()'s default, which is close -- so every
@@ -2253,6 +2364,7 @@ sys::task<void> server::async_responder::begin(const response& head) {
 
     m_started = true;
     m_begun = true;
+    m_status = head.status();
 
     // See responder::begin: a length the handler already knows beats chunking.
     const bool counted = head.fields().has("Content-Length");
@@ -2276,6 +2388,8 @@ sys::task<void> server::async_responder::write(const std::string& piece) {
 
     // A zero-length chunk is the terminator; see the note on the declaration.
     if(m_no_body || piece.empty()) co_return;
+
+    m_wrote += piece.size();
 
     co_await m_writer->write(m_chunked ? chunk(piece) : piece);
 }
@@ -2483,6 +2597,14 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
                                             const sys::peer& from,
                                             std::size_t served)
 {
+    // What the access record will say.  Unlike the blocking half, nearly
+    // everything here goes out through `out`, so the responder is the record
+    // -- the exception is send_serialised(), which takes bytes somebody else
+    // framed and therefore knows neither the status nor the body's length.
+    int         noted_status = 0;
+    std::size_t noted_bytes = 0;
+    std::string noted_user;
+
     async_responder out(c.writer(), m_options.server_name, c.reactor(),
                         c.pool());
 
@@ -2518,6 +2640,27 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     armed_deadline limit(c.reactor());
 
     Request q;
+
+    // Noted however this returns, including by throwing.  `out` is consulted
+    // last: it holds the truth for every path that answered through it, and
+    // the locals above cover the one that did not.
+    struct noting {
+        const server*         self;
+        const Request*        q;
+        const sys::peer*      from;
+        const std::string*    user;
+        const int*            status;
+        const std::size_t*    bytes;
+        const async_responder* out;
+
+        ~noting() {
+            const int st = out->status() != 0 ? out->status() : *status;
+            const std::size_t n = out->status() != 0 ? out->wrote() : *bytes;
+
+            self->note(*q, *from, *user, st, n);
+        }
+    } note_on_exit{ this, &q, &from, &noted_user, &noted_status, &noted_bytes,
+                    &out };
 
     // **co_await cannot appear in a catch handler.**  That is a language rule,
     // not a limitation of anything here, and it shapes every error path below:
@@ -2667,7 +2810,7 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     {
         response denied;
 
-        if(!allowed_through(q, path, denied)) {
+        if(!allowed_through(q, path, denied, noted_user)) {
             co_await out.send(denied);
 
             co_return false;
@@ -2882,6 +3025,9 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
 
         std::rethrow_exception(threw);
     }
+
+    noted_status = r.status();
+    noted_bytes = q.method() == "HEAD" ? 0 : r.body().size();
 
     co_await out.send_serialised(wire);
 
