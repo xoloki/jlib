@@ -490,9 +490,46 @@ public:
      */
     class async_responder {
     public:
+        /**
+         * @param conn  the connection this answers on, or null.  Only
+         *              `peer_gone()` uses it, and only to ask a question.
+         */
         async_responder(sys::async_writer& w, const std::string& server_name,
-                        sys::reactor& r, sys::job_queue& pool)
-            : m_writer(&w), m_name(server_name), m_reactor(&r), m_pool(&pool) {}
+                        sys::reactor& r, sys::job_queue& pool,
+                        const sys::server::connection* conn = 0)
+            : m_writer(&w), m_name(server_name), m_reactor(&r), m_pool(&pool),
+              m_conn(conn) {}
+
+        /**
+         * Has the client gone, asked without writing anything?
+         *
+         * **For a handler that produces one whole answer after a long time.**
+         * A streaming handler learns the client left from a failed write --
+         * `live()` below -- which makes that knowledge only as fresh as the
+         * last write. A handler that writes nothing for a minute learns
+         * nothing for a minute, and spends the minute on a reply nobody will
+         * read. jserve's non-streaming path is exactly that shape: a
+         * generation holds the model for its whole length whether or not
+         * anybody is still waiting.
+         *
+         * Cheap enough to call between units of work -- a non-blocking peek,
+         * no allocation -- and it does not consume, so a pipelined next
+         * request is still there for the reader afterwards.
+         *
+         * **Callable from any thread whose lifetime is bounded by this
+         * connection's**, which for a generation thread means one held by a
+         * `sys::relay`: it joins in its destructor, so it cannot outlive the
+         * frame that owns it, and that frame is destroyed before the
+         * descriptor closes. See sys::server::connection::peer_gone().
+         *
+         * `false` means "not known to have gone" rather than "still there",
+         * and over TLS it always means the former -- the descriptor carries
+         * ciphertext and cannot be read honestly. A model held a little longer
+         * costs time; a reply abandoned on a guess costs the answer.
+         */
+        bool peer_gone() const {
+            return m_conn != 0 && m_conn->peer_gone();
+        }
 
         /**
          * The reactor this connection is on, and the pool beside it.
@@ -602,6 +639,11 @@ public:
         bool               m_started = false;
         sys::reactor*      m_reactor = 0;
         sys::job_queue*    m_pool = 0;
+
+        // Only peer_gone() reads it, and only to ask.  A handler gets the
+        // question rather than the connection, so the responder stays the one
+        // thing that writes.
+        const sys::server::connection* m_conn = 0;
         bool               m_chunked = false;
 
         // What framing() was told the *client* would accept, before the

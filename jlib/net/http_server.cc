@@ -2627,7 +2627,7 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     std::string noted_user;
 
     async_responder out(c.writer(), m_options.server_name, c.reactor(),
-                        c.pool());
+                        c.pool(), &c);
 
     // **The slow-loris bound.**  Every piece of this existed before and
     // nothing armed it: the connection is a coroutine carrying a token, the
