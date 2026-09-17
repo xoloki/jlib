@@ -233,6 +233,11 @@ namespace jlib {
                 if(getenv("JLIB_SYS_SOCKET_DEBUG"))
                     std::cerr << "basic_tlsbuf::close()"<<std::endl;
                 if(m_ssl != 0) {
+                    // Writes a close_notify, so it can meet a peer that has
+                    // already gone -- which is the ordinary end of a
+                    // connection rather than an exotic one.
+                    sigpipe_guard guard;
+
                     SSL_shutdown(m_ssl);
                     SSL_free(m_ssl);
                     m_ssl = 0;
@@ -521,6 +526,10 @@ namespace jlib {
              * per name, which is a virtual-hosting feature this does not have.
              */
             void accept_tls() {
+                // The handshake writes, and a client that vanishes during
+                // one is the cheapest thing an attacker can do.
+                sigpipe_guard guard;
+
                 throw_if("SSL_accept", SSL_accept(m_ssl));
             }
 

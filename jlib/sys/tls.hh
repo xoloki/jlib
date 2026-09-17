@@ -105,6 +105,37 @@ public:
     static tls_context server(const std::string& cert_file,
                               const std::string& key_file);
 
+    /**
+     * Serve a different certificate to clients that ask for `name`.
+     *
+     * The name a client sends in SNI, chosen **during the handshake** -- which
+     * is the only moment it can be, because the certificate goes out before
+     * the request that carries `Host` arrives. A server with two names on one
+     * port needs one of these per name or it presents the wrong certificate
+     * and the client stops before saying anything.
+     *
+     * Exact and case-insensitive, matching `http::server::site_of`: SNI
+     * carries a DNS name and DNS names are not case-sensitive. No wildcards,
+     * for the reason vhosts have none -- a wildcard is a second way to pick
+     * the wrong identity, and the safe version needs rules about labels.
+     *
+     * ## A name this does not know keeps the default certificate
+     *
+     * It does **not** fail the handshake, and that is deliberate twice over.
+     * A client that can make a handshake fail by naming something is a client
+     * that can make the server do asymmetric work for nothing; and an alert
+     * that fires only for unknown names is an oracle for which names exist.
+     * The mismatch is the client's to notice -- it is the one holding the
+     * certificate and the name it asked for.
+     *
+     * A client that sends no SNI at all also gets the default, which is what
+     * every client did before the extension existed.
+     *
+     * @throws exception if the pair cannot be read or does not match
+     */
+    void add_site(const std::string& name, const std::string& cert_file,
+                  const std::string& key_file);
+
     bool empty() const { return !m_ctx; }
     explicit operator bool() const { return static_cast<bool>(m_ctx); }
 

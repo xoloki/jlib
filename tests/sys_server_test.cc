@@ -36,6 +36,7 @@
 #include <jlib/sys/sync.hh>
 #include <jlib/sys/socketstream.hh>
 
+#include <csignal>
 #include <memory>
 
 #include <arpa/inet.h>
@@ -935,6 +936,126 @@ static void the_server_context_refuses_renegotiation() {
     ::unlink(key.c_str());
 }
 
+/**
+ * Which certificate a client gets, and the name it asked for.
+ *
+ * **The client here is raw OpenSSL, deliberately.** jlib's own `tlsstream`
+ * sends SNI taken from the host it is connecting to, so it cannot ask for
+ * `a.example` while dialling 127.0.0.1 -- and what is under test is the
+ * server's choice, not the client's convenience.
+ *
+ * The certificate is chosen during the handshake because that is the only
+ * moment available: it goes out before the request that carries `Host`
+ * arrives. A server with two names on one port that cannot do this presents
+ * the wrong certificate and a careful client stops before saying anything.
+ */
+static std::string cert_offered_for(unsigned short port, const char* sni) {
+    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+
+    if(!ctx) return "no client context";
+
+    // Not verifying: this asks *which* certificate arrived, and every one of
+    // them is self-signed by the test.
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, 0);
+
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+
+    struct sockaddr_in to;
+
+    std::memset(&to, 0, sizeof to);
+
+    to.sin_family = AF_INET;
+    to.sin_port = htons(port);
+
+    ::inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+
+    std::string got = "no connection";
+
+    if(::connect(fd, reinterpret_cast<struct sockaddr*>(&to), sizeof to) == 0) {
+        SSL* ssl = SSL_new(ctx);
+
+        SSL_set_fd(ssl, fd);
+
+        if(sni) SSL_set_tlsext_host_name(ssl, sni);
+
+        if(SSL_connect(ssl) == 1) {
+            X509* peer = SSL_get1_peer_certificate(ssl);
+
+            if(peer) {
+                char name[256];
+
+                X509_NAME_oneline(X509_get_subject_name(peer), name,
+                                  sizeof name);
+
+                got = name;
+
+                X509_free(peer);
+            }
+            else got = "no certificate";
+        }
+        else got = "handshake failed";
+
+        SSL_free(ssl);
+    }
+
+    ::close(fd);
+    SSL_CTX_free(ctx);
+
+    return got;
+}
+
+static void a_certificate_per_name() {
+    std::cout << "\na certificate per name:\n";
+
+    const std::string dcert = "sni_default_cert.pem";
+    const std::string dkey = "sni_default_key.pem";
+    const std::string acert = "sni_a_cert.pem";
+    const std::string akey = "sni_a_key.pem";
+
+    if(!make_cert(dcert, dkey, "default.example", "DNS:default.example") ||
+       !make_cert(acert, akey, "a.example", "DNS:a.example"))
+    {
+        std::cout << "  skip  could not generate test certificates\n";
+
+        return;
+    }
+
+    sys::tls_context tls = sys::tls_context::server(dcert, dkey);
+
+    tls.add_site("a.example", acert, akey);
+
+    sys::server srv(0, echo, "127.0.0.1", tls);
+
+    srv.on_error([](const std::exception&, const sys::peer&) {});
+
+    std::thread th([&srv] { srv.run(); });
+
+    struct { const char* sni; const char* want; const char* why; } cases[] = {
+        { "a.example", "a.example", "a name with a certificate of its own" },
+        { "A.EXAMPLE", "a.example", "and the same name shouted, since DNS is "
+                                    "not case-sensitive" },
+        { "other.example", "default.example",
+          "a name nothing claimed keeps the default, rather than failing" },
+        { 0, "default.example", "and so does a client that sends no SNI" }
+    };
+
+    for(std::size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const std::string got = cert_offered_for(srv.port(), cases[i].sni);
+
+        ok(std::string("  ") + cases[i].why,
+           got.find(cases[i].want) != std::string::npos, got);
+    }
+
+    srv.stop();
+    srv.join();
+    th.join();
+
+    ::unlink(dcert.c_str());
+    ::unlink(dkey.c_str());
+    ::unlink(acert.c_str());
+    ::unlink(akey.c_str());
+}
+
 static void over_tls() {
     std::cout << "\nover TLS:\n";
 
@@ -1038,6 +1159,20 @@ static void over_tls() {
 }
 
 int main() {
+    // **This test is an application, and applications ignore SIGPIPE.**
+    //
+    // It plays TLS client with raw OpenSSL -- deliberately, because jlib's own
+    // client takes its SNI from the host it dials and cannot ask for one name
+    // while connecting to another. A raw socket gets neither SO_NOSIGPIPE nor
+    // any of the library's sigpipe_guards, so OpenSSL writing to a server that
+    // has closed kills this process on Linux. Traced to exactly that with a
+    // backtrace: libssl -> BIO_write -> write, from this binary.
+    //
+    // Not a mask over a library defect: every SSL call in jlib that can write
+    // is guarded, and this branch fixed three that were not. It is the same
+    // line jhttpd and jserve both carry, for the same reason.
+    std::signal(SIGPIPE, SIG_IGN);
+
     std::cout << std::unitbuf;
 
     one_connection_at_a_time();
@@ -1055,6 +1190,7 @@ int main() {
     the_server_context_refuses_renegotiation();
     a_handshake_that_never_finishes(false);
     a_handshake_that_never_finishes(true);
+    a_certificate_per_name();
     over_tls();
 
     // What a green run does not establish.

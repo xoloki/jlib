@@ -21,6 +21,8 @@
 #include <jlib/sys/tls.hh>
 
 #include <openssl/err.h>
+#include <map>
+#include <memory>
 #include <openssl/ssl.h>
 
 namespace jlib {
@@ -134,6 +136,114 @@ tls_context tls_context::server(const std::string& cert_file,
     SSL_CTX_set_options(ctx, SSL_OP_NO_RENEGOTIATION);
 
     return held;
+}
+
+namespace {
+
+    /** The named certificates an SNI callback chooses between. */
+    typedef std::map<std::string, std::shared_ptr<SSL_CTX> > site_map;
+
+    void forget_sites(void*, void* ptr, CRYPTO_EX_DATA*, int, long, void*) {
+        delete static_cast<site_map*>(ptr);
+    }
+
+    /**
+     * Where the map lives: inside the SSL_CTX, so their lifetimes are the
+     * same one rather than two that have to be kept in step.
+     *
+     * The callback gets an `SSL*` and nothing else useful, so the map has to
+     * be reachable from the context it is attached to. ex_data with a free
+     * function does exactly that, and means a `tls_context` that is copied and
+     * outlives the original still has its sites.
+     */
+    int sites_index() {
+        static const int i =
+            SSL_CTX_get_ex_new_index(0, 0, 0, 0, forget_sites);
+
+        return i;
+    }
+
+    std::string folded(const char* s) {
+        std::string out;
+
+        for(const char* p = s; p && *p; p++) {
+            out += char(*p >= 'A' && *p <= 'Z' ? *p + ('a' - 'A') : *p);
+        }
+
+        return out;
+    }
+
+    /**
+     * Pick a certificate for the name the client asked for.
+     *
+     * **Unknown names and absent SNI both keep the default**, rather than
+     * failing: see add_site() for why an alert here would be both a free
+     * denial of service and a name oracle.
+     */
+    int choose_site(SSL* ssl, int*, void*) {
+        const char* asked =
+            SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+
+        if(asked == 0) return SSL_TLSEXT_ERR_OK;
+
+        SSL_CTX* ctx = SSL_get_SSL_CTX(ssl);
+
+        if(ctx == 0) return SSL_TLSEXT_ERR_OK;
+
+        const site_map* sites =
+            static_cast<const site_map*>(SSL_CTX_get_ex_data(ctx,
+                                                             sites_index()));
+
+        if(sites == 0) return SSL_TLSEXT_ERR_OK;
+
+        const site_map::const_iterator i = sites->find(folded(asked));
+
+        if(i == sites->end()) return SSL_TLSEXT_ERR_OK;
+
+        // Switches the certificate chain and key this handshake will send.
+        // Every context here was built by server() below, so the protocol
+        // floor and the renegotiation policy are the same whichever is
+        // chosen -- which matters, because SSL_set_SSL_CTX does not carry
+        // across everything a caller might have set afterwards.
+        SSL_set_SSL_CTX(ssl, i->second.get());
+
+        return SSL_TLSEXT_ERR_OK;
+    }
+
+}
+
+void tls_context::add_site(const std::string& name,
+                           const std::string& cert_file,
+                           const std::string& key_file)
+{
+    if(!m_ctx) throw exception("add_site() on an empty context");
+
+    if(name.empty()) throw exception("add_site() needs a name");
+
+    // Built by the same function as the default, so it carries the same
+    // protocol floor and the same refusal to renegotiate.
+    const tls_context site = server(cert_file, key_file);
+
+    SSL_CTX* ctx = m_ctx.get();
+
+    site_map* sites =
+        static_cast<site_map*>(SSL_CTX_get_ex_data(ctx, sites_index()));
+
+    if(sites == 0) {
+        sites = new site_map;
+
+        if(!SSL_CTX_set_ex_data(ctx, sites_index(), sites)) {
+            delete sites;
+
+            throw exception("SSL_CTX_set_ex_data: " + why());
+        }
+
+        // Installed with the first site rather than in server(), so a context
+        // with no sites does not carry a callback that would do nothing.
+        SSL_CTX_set_tlsext_servername_callback(ctx, choose_site);
+    }
+
+    (*sites)[folded(name.c_str())] = site.m_ctx;
 }
 
 SSL* tls_context::new_ssl() const {

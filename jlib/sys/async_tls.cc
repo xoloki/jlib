@@ -18,6 +18,7 @@
  *
  */
 #include <jlib/sys/async_tls.hh>
+#include <jlib/sys/sys.hh>
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -127,6 +128,10 @@ public:
             // **same buffer and the same length** on the retry, which is why
             // the arguments are recomputed from `sent` and not advanced by a
             // partial count.  sslstream.hh's sync() carries the same note.
+            // See async_fd_writer::write, which has had this since it was
+            // written: the plain half was guarded and the TLS half was not.
+            sigpipe_guard guard;
+
             const int took = SSL_write(m_tls.m_ssl, data + sent,
                                        int(n - sent));
 
@@ -244,6 +249,8 @@ task<void> async_tls::handshake() {
     for(;;) {
         ERR_clear_error();
 
+        sigpipe_guard guard;
+
         const int r = m_accept ? SSL_accept(m_ssl) : SSL_connect(m_ssl);
 
         if(r == 1) {
@@ -273,6 +280,8 @@ task<void> async_tls::shutdown() {
 
     for(;;) {
         ERR_clear_error();
+
+        sigpipe_guard guard;
 
         const int r = SSL_shutdown(m_ssl);
 
