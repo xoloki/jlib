@@ -204,6 +204,25 @@ bool server::admit(int fd, const peer& from, address_count::hold& into) {
     return false;
 }
 
+bool server::connection::peer_gone() const {
+    if(m_fd < 0) return false;
+
+    char b;
+
+    const ssize_t n = ::recv(m_fd, &b, 1, MSG_PEEK | MSG_DONTWAIT);
+
+    // 0 is end of stream and the only answer that means gone.  A byte waiting
+    // is a pipelined request, and EAGAIN is a quiet live connection; both are
+    // "still here".  Anything else -- ECONNRESET, EBADF -- is also gone, but
+    // EBADF would mean the contract above was broken, so it is not treated as
+    // news.
+    if(n == 0) return true;
+
+    if(n < 0 && (errno == ECONNRESET || errno == ETIMEDOUT)) return true;
+
+    return false;
+}
+
 void server::report(const std::exception& e, const peer& from) const {
     m_on_error(e, from);
 }
@@ -600,7 +619,10 @@ task<void> server::serve_async(int fd, peer from, cancel_token t,
                 co_await tls.handshake();
             }
 
-            connection c(m_reactor, m_jobs, tls.reader(), tls.writer(), from, t);
+            // No descriptor: see connection::peer_gone(), which cannot read a
+            // TLS socket honestly.
+            connection c(m_reactor, m_jobs, tls.reader(), tls.writer(), from,
+                         t);
 
             co_await m_async(c, from);
 
@@ -617,7 +639,7 @@ task<void> server::serve_async(int fd, peer from, cancel_token t,
             async_fd_reader r(m_reactor, fd, t);
             async_fd_writer w(m_reactor, fd, t);
 
-            connection c(m_reactor, m_jobs, r, w, from, t);
+            connection c(m_reactor, m_jobs, r, w, from, t, fd);
 
             co_await m_async(c, from);
         }

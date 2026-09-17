@@ -965,6 +965,7 @@ namespace {
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
         case 429: return "Too Many Requests";
+        case 503: return "Service Unavailable";
         case 413: return "Content Too Large";
         case 414: return "URI Too Long";
         case 431: return "Request Header Fields Too Large";
@@ -1238,7 +1239,27 @@ void server::files(const std::string& pattern, const std::string& root,
             response head;
             byte_range span;
 
-            if(!file_decided(real_root, cache_control, p.rest(), q, f, head, span)) {
+            // **Decided on a worker, not on the reactor.**
+            //
+            // file_decided opens, fstats, realpaths and stats -- four
+            // filesystem calls, and on a slow mount every one of them stalls
+            // the single thread carrying every other connection.  The reads
+            // below already hop for exactly this reason; the *decision* did
+            // not, and #250 recorded that as a cost rather than the defect it
+            // is.  Nothing blocking belongs here.
+            //
+            // Two hops per request, including for a 404, which is the price.
+            // A stalled reactor costs every connection at once.
+            bool decided = false;
+
+            co_await sys::on_pool(out.pool());
+
+            decided = file_decided(real_root, cache_control, p.rest(), q, f,
+                                   head, span);
+
+            co_await sys::on_reactor(out.reactor());
+
+            if(!decided) {
                 co_await out.send(head);
 
                 co_return;

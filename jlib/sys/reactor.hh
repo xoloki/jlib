@@ -121,6 +121,48 @@ class reactor_backend;
  * A kqueue descriptor is not usefully inherited and an epoll one is inherited
  * *shared*.  Construct a reactor in the child if the child needs one.
  */
+/**
+ * Whether this thread is currently inside a reactor's dispatch.
+ *
+ * **Free, and reactor-less, which is the whole point.**  `reactor::
+ * on_reactor_thread()` answers for one instance and needs a reference to it,
+ * so code deep enough to be dangerous -- a mutex in `ai::engine`, a `wait()`
+ * in a queue, a synchronous read -- can never ask. This can.
+ *
+ * ## What it is for
+ *
+ * **Nothing blocking runs on the reactor thread.** Not "nothing slow": the
+ * reactor is one thread driving every connection, every timer and every
+ * cross-thread handoff, so anything that waits there stops all of them, and
+ * anything that waits *forever* there stops them forever -- including whatever
+ * would have released the thing being waited on. That is jserve#273: a mutex
+ * taken on the reactor, and a server that never answered again.
+ *
+ * The value of asking is that it **does not need contention to fire**. #273
+ * needed two overlapping requests to hang, which is why no test found it in
+ * three months -- but the lock was taken on the reactor thread on every
+ * request from the first, and it returned only because nothing else held it.
+ * A check does not care that the lock was free.
+ *
+ * So a blocking call that can be reached from a handler should say:
+ *
+ *     if(sys::on_a_reactor_thread())
+ *         throw exception("this blocks, and this is a reactor thread");
+ *
+ * ## What it does not mean
+ *
+ * The mark covers the **whole dispatch**, including the poll the reactor is
+ * blocked in while it waits for readiness. So this says "a reactor owns this
+ * thread", not "a callback is running" -- which is the same thing for every
+ * caller that can ask, because user code only ever runs inside a dispatch.
+ * The reactor's own wait is the one blocking call on that thread which is
+ * supposed to be there.
+ *
+ * It is also not a substitute for moving work off the reactor. A syscall has
+ * no chokepoint to put a check in; `sys::on_pool` is what that wants.
+ */
+bool on_a_reactor_thread();
+
 class reactor {
 public:
     class exception : public std::exception {

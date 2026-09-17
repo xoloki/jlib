@@ -62,6 +62,17 @@ reactor::~reactor() {}
 
 const char* reactor::backend() const { return m_backend->name(); }
 
+/**
+ * How many reactors are dispatching on this thread.
+ *
+ * A count rather than a flag: nothing runs two reactors on one thread today
+ * and nothing forbids it, and a flag would have the inner one's exit clear the
+ * outer one's mark.
+ */
+thread_local unsigned dispatching_here = 0;
+
+bool on_a_reactor_thread() { return dispatching_here != 0; }
+
 bool reactor::on_reactor_thread() const {
     // Nobody has run a pass, so nobody can be on the wrong thread.
     if(!m_claimed.load()) return true;
@@ -273,9 +284,18 @@ bool reactor::run_one(std::chrono::nanoseconds timeout) {
 
     m_dispatching = true;
 
+    // The same guard marks the *thread*, so code with no reactor to ask can
+    // still find out.  See on_a_reactor_thread().
     struct guard {
         bool& flag;
-        ~guard() { flag = false; }
+
+        guard(bool& f) : flag(f) { dispatching_here++; }
+
+        ~guard() {
+            dispatching_here--;
+
+            flag = false;
+        }
     } g{m_dispatching};
 
     bool pending = false;

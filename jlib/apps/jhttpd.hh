@@ -23,12 +23,15 @@
 
 #include <jlib/net/http_server.hh>
 
+#include <jlib/sys/sync.hh>
+
 #include <csignal>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <sstream>
-#include <mutex>
+#include <future>
+#include <memory>
 #include <string>
 
 /**
@@ -107,29 +110,62 @@ extern volatile std::sig_atomic_t reopen_requested;
 void reopen_on_hup(int);
 
 /**
- * A log file that several threads may write to.
+ * A log file written by **one thread of its own**, which nothing else touches.
  *
- * One `write(2)`-sized append under a mutex, because the blocking server
- * answers on a pool and the async one answers on the reactor, and two
- * half-lines interleaved are two lines nobody can parse.
+ * ## Why not just a mutex
  *
- * **The line is built before the lock is taken.** Formatting is the expensive
- * part and holding a mutex across it would serialise the servers' request
- * handling behind their own log -- which on the async server means serialising
- * the reactor thread, the one thread that must not wait for a disk.
+ * It was a mutex, and that was wrong for a reason a lock cannot fix: the
+ * access record is delivered on the thread that answered the request, and on
+ * the async server **that is the reactor thread.** Writing there means an
+ * `ofstream` append and a `flush()` -- a disk write -- on the one thread
+ * carrying every connection, every timer and every handoff, on every request,
+ * in a program whose whole purpose is to be left running. A lock made the
+ * lines not interleave; it did not stop the disk being on the reactor.
+ *
+ * Nothing blocking runs on the reactor thread. See `sys::on_a_reactor_thread`.
+ *
+ * So `write()` hands the line to a `job_queue` with one worker and returns.
+ * `post()` queues and notifies; it does not wait for room, so the caller is
+ * never blocked by a slow disk.
+ *
+ * ## And the lock went with it
+ *
+ * One thread owns the stream, so nothing shares it and there is nothing to
+ * guard. The reopen happens on that thread too, in the same queue, in order
+ * with the writes around it -- which is simpler than the flag it replaced and
+ * strictly more correct: a line can no longer be written to the old file after
+ * a reopen was meant to have happened.
+ *
+ * The queue is unbounded, which is deliberate: the alternative is `post()`
+ * waiting for room, and waiting is the thing being removed. A disk slow enough
+ * for that to matter is a disk that has already lost.
  */
 class logfile {
 public:
     logfile() {}
 
+    ~logfile() { close(); }
+
+    logfile(const logfile&) = delete;
+    logfile& operator=(const logfile&) = delete;
+
     /** Empty path means discard, which is what --access-log "" asks for. */
     bool open(const std::string& path);
 
+    /** Queue a line.  Never blocks, never touches the file. */
     void write(const std::string& line);
 
-    /** Declared above, defined below: the class has to exist first. */
+    /**
+     * Wait until everything queued has been written.
+     *
+     * For shutdown and for tests.  **Not to be called from a reactor thread**
+     * -- it waits, and `job_queue::wait` refuses that anyway.
+     */
+    void drain();
 
-    bool wanted() const { return m_out.is_open(); }
+    void close();
+
+    bool wanted() const { return !m_path.empty(); }
 
 private:
     /**
@@ -146,10 +182,13 @@ private:
      */
     void reopen_if_asked();
 
-    std::mutex    m_lock;
     std::ofstream m_out;
     std::string   m_path;
     std::sig_atomic_t m_acted_on = 0;
+
+    // One worker, so the stream has exactly one owner.  A pointer because a
+    // job_queue is not movable and this is created only when a path is given.
+    std::unique_ptr<jlib::sys::job_queue> m_writer;
 };
 
 
@@ -265,9 +304,49 @@ inline bool logfile::open(const std::string& path) {
 
     m_out.open(path.c_str(), std::ios::out | std::ios::app);
 
-    return m_out.is_open();
+    if(!m_out.is_open()) { m_path.clear(); return false; }
+
+    // One worker, started by the constructor.
+    m_writer.reset(new jlib::sys::job_queue(1));
+
+    return true;
 }
 
+inline void logfile::drain() {
+    if(!m_writer) return;
+
+    // **A barrier, not an empty queue.**  job_queue::size() is the *depth*, and
+    // a job a worker has taken is running rather than queued -- so waiting for
+    // depth zero returns while the line is still on its way to the disk. That
+    // is documented on max_queued and I wrote this the wrong way anyway; the
+    // rotation tests caught it.
+    //
+    // One worker and FIFO order, so a job posted now runs after everything
+    // posted before it. Waiting for *that* job is waiting for all of them.
+    std::promise<void> done;
+    std::future<void> wait = done.get_future();
+
+    m_writer->post([&done] { done.set_value(); });
+
+    wait.wait();
+}
+
+inline void logfile::close() {
+    if(!m_writer) return;
+
+    // Drained before stopping, so a line queued a moment before shutdown is
+    // written rather than dropped.  stop(true) would drain the queue too, but
+    // saying it here makes the order explicit.
+    drain();
+
+    m_writer->stop(true);
+    m_writer->join();
+    m_writer.reset();
+
+    m_out.close();
+}
+
+/** **Writer thread only**, which is what makes it safe to touch the stream. */
 inline void logfile::reopen_if_asked() {
     const std::sig_atomic_t asked = reopen_requested;
 
@@ -285,22 +364,18 @@ inline void logfile::reopen_if_asked() {
 }
 
 inline void logfile::write(const std::string& line) {
-    // Not `is_open()` here: a file waiting to be reopened is closed for a
-    // moment and would be skipped for the rest of the process's life.  The
-    // decision is made below, under the lock, after the reopen has had its
-    // chance.
-    if(m_path.empty()) return;
+    if(m_path.empty() || !m_writer) return;
 
-    // Built by the caller; this only appends.  See the note on the class about
-    // why the formatting is outside the lock.
-    std::lock_guard<std::mutex> hold(m_lock);
+    // **This is the whole of what the caller pays**: a copy and a queue push.
+    // Everything below the lambda happens on the writer's thread.
+    m_writer->post([this, line] {
+        reopen_if_asked();
 
-    reopen_if_asked();
+        if(!m_out.is_open()) return;
 
-    if(!m_out.is_open()) return;
-
-    m_out << line << "\n";
-    m_out.flush();
+        m_out << line << "\n";
+        m_out.flush();
+    });
 }
 
 }

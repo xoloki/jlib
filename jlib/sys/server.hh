@@ -354,9 +354,50 @@ public:
     class connection {
     public:
         connection(sys::reactor& r, job_queue& q, async_reader& rd,
-                   async_writer& w, const peer& from, cancel_token t)
+                   async_writer& w, const peer& from, cancel_token t,
+                   int fd = -1)
             : m_reactor(r), m_pool(q), m_reader(rd), m_writer(w),
-              m_peer(from), m_token(t) {}
+              m_peer(from), m_token(t), m_fd(fd) {}
+
+        /**
+         * Has the peer hung up?  Asked without writing anything.
+         *
+         * A handler that streams learns the client left from a failed write --
+         * `responder::live()`, `relay::wanted()` -- which makes that knowledge
+         * **only as fresh as the last write.** A handler that produces one
+         * whole answer after a minute of work never writes until it is
+         * finished, so it never finds out at all, and spends the minute on a
+         * reply nobody will read. That is jserve's non-streaming path.
+         *
+         * `recv(MSG_PEEK)` rather than polling for readability, and the
+         * difference matters: on a kept-alive connection readable may be a
+         * **pipelined next request**, which is not a peer that left. A peek
+         * distinguishes them -- 0 means end of stream -- and does not consume,
+         * so anything it finds is still there for the reader that wants it.
+         *
+         * ## Which threads may call it
+         *
+         * **Any thread whose lifetime is bounded by the connection's.** The
+         * peek itself is safe from anywhere -- it takes nothing from the
+         * reactor, because it does not consume -- so the only hazard is the
+         * descriptor being closed and its number reused underneath the call.
+         *
+         * `sys::relay` gives that bound: it joins in its destructor, so a
+         * generation thread cannot outlive the frame that owns it, and that
+         * frame is destroyed before this connection's descriptor is closed.
+         * A thread that is *not* joined before teardown must not call this.
+         *
+         * ## What false means
+         *
+         * "Not known to have gone", not "still there". It answers false for a
+         * TLS connection whatever the peer has done, because the descriptor
+         * carries ciphertext: bytes waiting are not a request and no bytes are
+         * not a live peer, and the real answer needs the TLS layer's view of
+         * close_notify. That is the right direction to be wrong in -- a model
+         * held a little longer costs time, a reply abandoned on a guess costs
+         * the answer.
+         */
+        bool peer_gone() const;
 
         async_reader& reader() { return m_reader; }
         async_writer& writer() { return m_writer; }
@@ -412,6 +453,10 @@ public:
         async_reader& m_reader;
         async_writer& m_writer;
         peer          m_peer;
+
+        // -1 when there is no descriptor this can honestly peek: a TLS
+        // connection has one, and peeking it would read ciphertext.
+        int           m_fd = -1;
         cancel_token  m_token;
     };
 

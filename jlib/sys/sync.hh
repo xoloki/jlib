@@ -258,6 +258,14 @@ protected:
  * that it is twenty lines; anything that wants one of those can ask for it
  * then.
  */
+/**
+ * Declared rather than included: see reactor.hh for what it means.
+ *
+ * A forward declaration, because a synchronisation header should not drag in
+ * the reactor's map, its pipe and its backend for the sake of one predicate.
+ */
+bool on_a_reactor_thread();
+
 class job_queue {
 public:
     /** What to do with an exception a job let escape.  See on_error(). */
@@ -367,7 +375,24 @@ public:
      */
     template<typename Predicate>
         requires std::predicate<Predicate, std::size_t>
+    /**
+     * @throws exception if called on a reactor's thread; see reactor.hh.
+     *
+     * **A producer waiting for room, on the one thread that has other things
+     * to do.**  With a pool it stalls every connection the reactor carries for
+     * as long as the queue is full; with `threads = 0` it is a guaranteed
+     * deadlock, because the thread being asked to wait is the thread that
+     * would drain the queue.
+     *
+     * jserve#273 is what this looks like when nobody checks: a lock taken on
+     * the reactor, and a server that never answered again.
+     */
     bool wait(Predicate pred) {
+        if(on_a_reactor_thread()) {
+            throw sync_exception("job_queue::wait() blocks, and this is a reactor "
+                            "thread; hop with sys::on_pool first");
+        }
+
         if(m_pool.empty()) return !m_exit && pred(0);
 
         std::unique_lock<std::mutex> lock(m_queue);
@@ -382,7 +407,19 @@ public:
     /** As above, giving up after timeout.  False for either reason. */
     template<typename Predicate>
         requires std::predicate<Predicate, std::size_t>
+    /**
+     * @throws exception if called on a reactor's thread
+     *
+     * Bounded and still refused: a five-second ceiling on the reactor is five
+     * seconds in which nothing else is answered, which is a stall rather than
+     * a deadlock and is still not something to do here.
+     */
     bool wait(Predicate pred, std::chrono::nanoseconds timeout) {
+        if(on_a_reactor_thread()) {
+            throw sync_exception("job_queue::wait() blocks, and this is a reactor "
+                            "thread; hop with sys::on_pool first");
+        }
+
         if(m_pool.empty()) return !m_exit && pred(0);
 
         std::unique_lock<std::mutex> lock(m_queue);
@@ -446,7 +483,22 @@ public:
     }
 
     /** Wait for every worker to leave.  Idempotent. */
+    /**
+     * Wait for the workers to finish.
+     *
+     * **Deliberately not checked against `on_a_reactor_thread()`**, unlike
+     * `wait()` above, and the reason is worth keeping: `~job_queue` calls
+     * `stop()` and then this. A check here throws from a destructor, which is
+     * `std::terminate` -- so a queue that happened to be destroyed on a
+     * reactor thread would abort the process instead of reporting anything.
+     *
+     * Found by breaking the thread-local and watching the suite abort rather
+     * than fail. Trading a diagnosable stall for an undiagnosable abort is not
+     * a trade; joining here is still wrong on the reactor, and a caller doing
+     * it has a shutdown-ordering problem that this cannot fix by shouting.
+     */
     void join() {
+
         for(auto& thread : m_pool) {
             if(thread.joinable()) thread.join();
         }
