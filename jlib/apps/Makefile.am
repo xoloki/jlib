@@ -101,7 +101,9 @@ jchat_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA) $(METAL_LA)
 
 # jnet as well as jai: this is the one app that is both ends at once.
 jhttpd_SOURCES  = jhttpd.cc
-jhttpd_LDADD    = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
+jhttpd_CPPFLAGS = $(AM_CPPFLAGS) $(PWHASH_CPPFLAGS)
+jhttpd_LDADD    = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) \
+                  $(OPENSSL_LIBS) $(SODIUM_LIBS)
 
 # jcode's main is separate from its implementation because a test compiles
 # the implementation and cannot have a second main().  jserve needs no such
