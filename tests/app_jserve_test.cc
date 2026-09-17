@@ -47,6 +47,11 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <atomic>
+#include <chrono>
 #include <vector>
 
 #include <unistd.h>
@@ -81,6 +86,9 @@ struct script {
 
     /** Whether try_acquire() should report the model busy. */
     bool busy = false;
+
+    /** Milliseconds per token, so a generation can be abandoned mid-flight. */
+    unsigned int per_token_ms = 0;
 };
 
 static script g_script;
@@ -120,9 +128,34 @@ struct fake_template {
     }
 };
 
+/**
+ * Whether a session is out, which the fake has to model for real.
+ *
+ * `busy` on the script is a switch a test flips; this is exclusion that
+ * happens because a generation is running.  Without it the fake cannot show a
+ * request holding the model, and a test about abandoning one has nothing to
+ * observe -- which is how the first version of that test passed for the wrong
+ * reason.
+ */
+static std::atomic<bool> g_held{false};
+
 struct fake_session {
     fake_template m_templ;
     fake_tokenizer m_tok;
+
+    bool owns = false;
+
+    fake_session() {}
+
+    explicit fake_session(bool own) : owns(own) {}
+
+    fake_session(fake_session&& o) noexcept
+        : m_templ(o.m_templ), m_tok(o.m_tok), owns(o.owns) { o.owns = false; }
+
+    ~fake_session() { if(owns) g_held.store(false); }
+
+    fake_session(const fake_session&) = delete;
+    fake_session& operator=(const fake_session&) = delete;
 
     const fake_template& templ() const { return m_templ; }
     const fake_tokenizer& tok() const { return m_tok; }
@@ -140,6 +173,10 @@ struct fake_session {
         std::vector<int> out = prompt;
 
         for(std::size_t i = 0; i < g_script.tokens.size() && i < max_new; i++) {
+            if(g_script.per_token_ms)
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(g_script.per_token_ms));
+
             out.push_back(g_script.tokens[i]);
 
             if(on_token && !on_token(g_script.tokens[i])) break;
@@ -183,14 +220,24 @@ struct fake_engine {
             throw std::runtime_error("acquire() blocks, and this is a reactor "
                                      "thread");
 
-        return session();
+        return session(false);
     }
 
-    /** Never blocks, so the reactor may call it.  Busy when asked to be. */
-    std::optional<session> try_acquire(const std::string& name) {
+    /**
+     * Never blocks, so the reactor may call it.
+     *
+     * Busy either because a test said so, or because a session really is out
+     * -- the second is what an abandoned generation looks like from here.
+     */
+    std::optional<session> try_acquire(const std::string&) {
         if(g_script.busy) return std::nullopt;
 
-        return session();
+        bool free_now = false;
+
+        if(!g_held.compare_exchange_strong(free_now, true))
+            return std::nullopt;
+
+        return session(true);
     }
 
     /**
@@ -765,6 +812,82 @@ static void a_busy_model_answers_rather_than_waits(jlib::net::http::server& s) {
        std::to_string(b.status));
 }
 
+/** The request bytes, sent raw so the socket can be closed mid-generation. */
+static void abandon(unsigned short port, const std::string& body) {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+
+    if(fd < 0) return;
+
+    sockaddr_in a{};
+
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    if(::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0) {
+        std::ostringstream head;
+
+        head << "POST /v1/chat/completions HTTP/1.1\r\n"
+             << "Host: 127.0.0.1\r\n"
+             << "Content-Type: application/json\r\n"
+             << "Content-Length: " << body.size() << "\r\n\r\n" << body;
+
+        const std::string wire = head.str();
+
+        if(::write(fd, wire.data(), wire.size()) < 0) {}
+
+        // Let it start generating, then hang up without reading a byte.
+        std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    }
+
+    ::close(fd);
+}
+
+static void a_client_that_hangs_up(jlib::net::http::server& s) {
+    std::cout << "\na client that hangs up mid-generation:\n";
+
+    // The non-streaming path writes nothing until the generation is over, so
+    // relay::wanted() -- which learns from a failed write -- can never fire on
+    // it.  A client that left held the model to the end, and the mechanism
+    // written to stop exactly that could not.
+    g_script = script();
+    g_script.per_token_ms = 60;
+
+    for(int i = 0; i < 40; i++) g_script.tokens.push_back(int('z'));
+
+    const unsigned short port = s.port();
+
+    std::thread gone([port]{
+        abandon(port, R"({"model":"m","messages":[{"role":"user","content":"long"}]})");
+    });
+
+    // While that one is generating **and still connected**, the model is busy.
+    // Checked before the hang-up rather than after: the whole point of the fix
+    // is that after it, the model is free -- so a check at the wrong moment
+    // asserts the old behaviour and fails against the new.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    const reply busy = post(s, R"({"model":"m","messages":[{"role":"user","content":"hi"}]})");
+
+    ok("while it runs, the model is busy", busy.status == 503,
+       std::to_string(busy.status));
+
+    gone.join();
+
+    // 40 tokens at 60ms is 2.4 seconds if it runs to the end, and the hang-up
+    // is at 800ms.  A generation that noticed is finished within a token or
+    // two of that; one that did not is still going for another second and a
+    // half, and the request below gets a 503.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    g_script.per_token_ms = 0;
+
+    const reply after = post(s, R"({"model":"m","messages":[{"role":"user","content":"hi"}]})");
+
+    ok("and once it goes, the model is free again", after.status == 200,
+       std::to_string(after.status) + " " + after.body);
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -799,6 +922,7 @@ int main() {
     what_the_trimmer_gave_up();
     the_models_route(s);
     a_busy_model_answers_rather_than_waits(s);
+    a_client_that_hangs_up(s);
     a_whole_reply(s);
     a_streamed_reply(s);
     a_character_that_arrives_in_pieces(s);

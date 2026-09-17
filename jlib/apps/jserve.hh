@@ -442,9 +442,9 @@ private:
     template<typename Session>
     void launch(sys::relay<std::string>& ts, Session& s, const laid_out& plan,
                 ai::sampler& sampler, const ai::stops& ends,
-                unsigned int& made)
+                unsigned int& made, http::server::async_responder& out)
     {
-        ts.start([this, &s, &plan, &sampler, &ends, &made]
+        ts.start([this, &s, &plan, &sampler, &ends, &made, &out]
                  (sys::relay<std::string>& b) {
             // A byte-fallback vocabulary hands over one byte per token, and an
             // SSE event carries its content inside a JSON string -- so a
@@ -457,10 +457,28 @@ private:
 
             s.generate(m_backend, plan.ids, plan.budget,
                        sampler, ends, [&](int token) {
-                // Asked between tokens, and the only thing that travels this
-                // way: a client that has gone should not hold the model for
-                // the whole length of a reply nobody will read.
-                if(!b.wanted()) return false;
+                // Asked between tokens: a client that has gone should not
+                // hold the model for the whole length of a reply nobody will
+                // read.
+                //
+                // **Two questions, because one of them cannot answer for a
+                // whole reply.**  `wanted()` learns the client left from a
+                // *write* that failed -- which is immediate while streaming
+                // and never on the non-streaming path, where nothing is
+                // written until the generation is over. So a client that
+                // hung up mid-request held the model to the end, and the
+                // mechanism written to prevent exactly that could not fire.
+                //
+                // `peer_gone()` asks the socket instead. It is only as fresh
+                // as the last time it is asked, which for a token loop is
+                // fine and for one long step would not be.
+                //
+                // Safe from this thread because `sys::relay` joins in its
+                // destructor, so the generation cannot outlive the connection
+                // that owns the descriptor. **If this callback ever moves
+                // somewhere that is not joined before teardown, that stops
+                // being true.**
+                if(!b.wanted() || out.peer_gone()) return false;
 
                 made++;
 
@@ -518,7 +536,7 @@ private:
 
         sys::relay<std::string> ts;
 
-        launch(ts, s, plan, sampler, ends, made);
+        launch(ts, s, plan, sampler, ends, made, out);
 
         // A write that throws is the client having gone.  There is no live()
         // to ask here and there does not need to be: the answer arrives as a
@@ -589,7 +607,7 @@ private:
 
         sys::relay<std::string> ts;
 
-        launch(ts, s, plan, sampler, ends, made);
+        launch(ts, s, plan, sampler, ends, made, out);
 
         // The same pump, collecting instead of writing.  Nothing has been sent
         // yet, so a failure here can still be answered -- which is the whole
