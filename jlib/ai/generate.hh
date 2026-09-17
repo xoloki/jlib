@@ -218,6 +218,20 @@ inline int stop_id(const tokenizer& t, const std::string& spec) {
                                spec + "\", and it is not an id");
 }
 
+/**
+ * How many prompt tokens go through in one pass.
+ *
+ * The attention scratch is (context x this x heads), so this is the only
+ * number between a long prompt and an out-of-memory. 256 rather than 512
+ * because the discarded logits are (vocab x this) and a vocabulary is 152k
+ * columns on Qwen: at 256 that allocation is 78 MB and the scratch it saves
+ * is gigabytes.
+ *
+ * Not a tuning knob so much as a ceiling. Larger is faster per token and
+ * costs quadratically; smaller is always safe.
+ */
+const unsigned int prefill_chunk = 256;
+
 template<typename T>
 std::vector<int> generate(model<T>& m, backend<T>& b,
                           const std::vector<int>& prompt,
@@ -238,6 +252,51 @@ std::vector<int> generate(model<T>& m, backend<T>& b,
     if(m.caching()) m.reset_cache();
 
     std::vector<int> feed = ids;
+
+    // **Prefill in chunks, because the scratch is the only thing that grows as
+    // seq^2.**
+    //
+    // `scores` and `probs` are (keys x queries), so a prompt fed in one pass
+    // costs a tensor as wide as the prompt: 627 MB at 2048, 2.4 GB at 4096,
+    // 9.2 GB at 8192 (#195). Everything else in a block grows as the sequence
+    // and none of it is close.
+    //
+    // A cache turns that from a property of the prompt into a property of the
+    // chunk. Each chunk is an *ordinary cached step* -- the same path a decode
+    // takes, with the keys in the cache and the queries at `cache_len` -- so
+    // nothing new has to be right about the mask, which is where the
+    // off-by-ones live (#187). `ai_transformer_test` holds that equivalence:
+    // a cached block fed in chunks answers exactly what an uncached one fed
+    // everything answers.
+    //
+    // Only with a cache. Without one every pass re-reads the whole sequence,
+    // so there is no earlier work to keep and chunking would be repetition
+    // rather than economy.
+    if(m.caching() && feed.size() > prefill_chunk) {
+        std::size_t at = 0;
+
+        while(feed.size() - at > prefill_chunk) {
+            const std::vector<int> part(feed.begin() + long(at),
+                                        feed.begin() + long(at + prefill_chunk));
+
+            m.reserve(prefill_chunk);
+
+            // Computed and thrown away: `forward` projects every position to
+            // the vocabulary and only the last column of the last chunk is
+            // ever sampled from. That allocation is the cost of chunking and
+            // it is bounded by the chunk, where the thing it replaces was
+            // bounded by the prompt.
+            typename backend<T>::tensor_ptr ignored =
+                b.make(m.conf().vocab, prefill_chunk);
+
+            m.forward(part, ignored);
+            b.wait();
+
+            at += prefill_chunk;
+        }
+
+        feed.erase(feed.begin(), feed.begin() + long(at));
+    }
 
     for(unsigned int step = 0; step < max_new; step++) {
         const unsigned int n = static_cast<unsigned int>(feed.size());

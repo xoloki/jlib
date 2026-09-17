@@ -771,6 +771,103 @@ static void the_shapes_are_checked(const char* name, ai::backend<T>& b) {
     ok("  and a sequence of the wrong length is too", threw);
 }
 
+/**
+ * A cached block fed in chunks answers what an uncached one fed everything
+ * answers.
+ *
+ * **The property chunked prefill rests on, and it had no test.** `scores` and
+ * `probs` are (keys x queries), so a prompt of 4096 costs 2.4 GB of scratch
+ * and 8192 costs 9.2 GB -- the only things in a block that grow as seq^2
+ * (#195). Feeding the prompt in chunks bounds the width at the chunk instead,
+ * and every chunk is an ordinary cached step, so nothing new has to be right
+ * about the mask.
+ *
+ * Nothing new *has* to be, and that is the claim being checked here rather
+ * than assumed: with a cache, query column c sits at absolute position
+ * `cache_len + c` and the keys are everything before it, which is the
+ * distinction #187 got wrong once already.
+ *
+ * Exactness is not the assertion. The two runs multiply different shapes --
+ * one GEMM of 12 columns against three of 4 -- so the sums happen in a
+ * different order and the last bits differ. What must agree is the answer.
+ */
+template<typename T>
+static void chunks_agree_with_one_pass(const std::string& name,
+                                       ai::backend<T>& b)
+{
+    std::cout << "\nfeeding a block in chunks, on " << name << ":\n";
+
+    const unsigned int total = 12;
+    const unsigned int chunk = 4;
+
+    std::mt19937 gen(20260917);
+
+    const weights<T> w(gen, H, H);
+    const matrix<T> x = random_matrix<T>(D, total, gen, 0.5f);
+
+    // Everything at once, no cache: the answer to compare against.
+    matrix<T> whole(D, total);
+
+    {
+        ai::block<T> blk(b, D, H, H, F);
+
+        load(blk, w);
+        blk.set_rope(true);
+        blk.reserve(total);
+
+        typename ai::backend<T>::tensor_ptr tx = b.make(x);
+        typename ai::backend<T>::tensor_ptr out = b.make(D, total);
+
+        blk.forward(tx, out);
+        b.wait();
+
+        whole = out->read();
+    }
+
+    // The same input, a chunk at a time, through a cache.
+    ai::block<T> blk(b, D, H, H, F);
+
+    load(blk, w);
+    blk.set_rope(true);
+    blk.enable_cache(total);
+
+    double worst = 0;
+
+    for(unsigned int at = 0; at < total; at += chunk) {
+        const unsigned int n = std::min(chunk, total - at);
+
+        matrix<T> piece(D, n);
+
+        for(unsigned int r = 0; r < D; r++)
+            for(unsigned int c = 0; c < n; c++)
+                piece(r,c) = x(r, at + c);
+
+        blk.reserve(n);
+
+        typename ai::backend<T>::tensor_ptr tp = b.make(piece);
+        typename ai::backend<T>::tensor_ptr out = b.make(D, n);
+
+        blk.forward(tp, out);
+        b.wait();
+
+        const matrix<T> got = out->read();
+
+        for(unsigned int r = 0; r < D; r++)
+            for(unsigned int c = 0; c < n; c++)
+                worst = std::max(worst,
+                                 std::fabs(double(got(r,c)) -
+                                           double(whole(r, at + c))));
+    }
+
+    ok("  " + name + ": every chunk matches the single pass",
+       worst < 2e-2, "worst element differs by " + std::to_string(worst));
+
+    // And the cache holds what it was fed, which is what the offsets are
+    // computed from.
+    ok("  " + name + ": the cache counted every column",
+       blk.cached() == total, std::to_string(blk.cached()));
+}
+
 template<typename T>
 static void everything(const char* name, std::vector<ai::backend<T>*>& b) {
     a_zeroed_block_is_the_identity<T>(name, b);
@@ -783,6 +880,7 @@ static void everything(const char* name, std::vector<ai::backend<T>*>& b) {
     sharing_a_head_equals_duplicating_it<T>(name, b);
     the_grouping_is_contiguous<T>(name, b);
     a_tinyllama_shaped_block<T>(name, *b[0]);
+    chunks_agree_with_one_pass<T>(name, *b[0]);
     silu_is_x_times_sigmoid<T>(name, b);
     the_backends_agree<T>(name, b);
     the_shapes_are_checked<T>(name, *b[0]);
