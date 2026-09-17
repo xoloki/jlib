@@ -115,6 +115,24 @@ tls_context tls_context::server(const std::string& cert_file,
     // No SSL_CTX_set_verify and no client CA list: see the note in the header
     // about client certificates being out of scope.
 
+    // **No renegotiation** (#240).
+    //
+    // TLS 1.3 has no renegotiation; TLS 1.2 does, and this context allows 1.2
+    // because a minimum of 1.3 would refuse clients that are not obsolete.
+    // Client-initiated renegotiation is cheap to ask for and expensive to
+    // answer -- a full handshake, asymmetric work, at a rate the client
+    // chooses -- which is a server doing an attacker's computation for them.
+    //
+    // Nothing here needs it. Its one real use is asking for a client
+    // certificate part-way through a connection, and client certificates are
+    // out of scope two comments above. A server that never renegotiates loses
+    // nothing by saying so.
+    //
+    // Server-side only: this is `tls_context::server`, and a *client* that
+    // refused renegotiation would be refusing something the peer is entitled
+    // to start.
+    SSL_CTX_set_options(ctx, SSL_OP_NO_RENEGOTIATION);
+
     return held;
 }
 

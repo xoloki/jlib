@@ -456,6 +456,69 @@ static void fuzz(http::server& s, const char* which, int rounds) {
     }
 }
 
+/**
+ * The same mutants, several at once.
+ *
+ * Both audit rounds sent one connection at a time, which is the wrong shape for
+ * finding anything that involves two. The server's shared state is real --
+ * a rate-limiter table under a mutex, a per-address connection count under
+ * another, a route table read by every request, a reactor carrying every async
+ * connection on one thread -- and none of it had been driven by hostile input
+ * concurrently.
+ *
+ * Deterministic in what it sends and **not** in what interleaves, which is the
+ * honest description: each thread walks its own seeded sequence, so the inputs
+ * are fixed, and the order they arrive in is the scheduler's business. That
+ * means a failure here may not reproduce on the next run -- so if one ever
+ * appears, the useful move is to run this under a thread sanitizer rather than
+ * to re-run it hoping.
+ */
+static void fuzz_concurrently(http::server& s, const char* which, int rounds) {
+    std::cout << "\n" << which << ", " << rounds << " mutants x 4 threads:\n";
+
+    const int threads = 4;
+
+    std::vector<std::thread> them;
+
+    for(int k = 0; k < threads; k++) {
+        them.emplace_back([&s, rounds, k] {
+            // A different seed per thread, so they are not sending the same
+            // bytes at the same moment -- which would be one input tested four
+            // times rather than four inputs interleaved.
+            std::mt19937 r(20260917u + unsigned(k) * 7919u);
+
+            const std::vector<std::string> seeds = corpus();
+
+            for(int i = 0; i < rounds; i++) {
+                std::string m = seeds[r() % seeds.size()];
+
+                const int edits = 1 + int(r() % 3);
+
+                for(int e = 0; e < edits; e++) m = mutate(m, r);
+
+                double secs = 0;
+
+                exchange_bounded(s.port(), m, secs);
+            }
+        });
+    }
+
+    for(std::thread& th : them) th.join();
+
+    const liveness how = still_serving(s.port());
+
+    if(how == out_of_sockets) {
+        std::cout << "  .. out of ephemeral sockets; liveness not checked\n";
+
+        return;
+    }
+
+    ok("  the server is still serving after four threads of it", how == alive,
+       how == alive ? std::string()
+                    : std::string(how == server_gone ? "nothing listening"
+                                                     : "listening, no answer"));
+}
+
 int main() {
     std::cout << "net_http_fuzz_test\n";
 
@@ -478,7 +541,20 @@ int main() {
         }
 
         {
-            http::server s(0, "127.0.0.1");
+            // **A pool, so the concurrent phase contends on the server and not
+            // only on the client.**  With the default threads = 0 a blocking
+            // server answers on the accept thread, one at a time -- four
+            // client threads then produce four queued requests and no
+            // simultaneous server-side work at all.  Found by planting a data
+            // race in the per-address count and watching a thread sanitizer
+            // report nothing, which is the same lesson as an unarmed
+            // sanitizer: the test could not have failed for the reason it
+            // exists.
+            sys::server::policy p;
+
+            p.threads = 4;
+
+            http::server s(0, "127.0.0.1", sys::tls_context(), p);
 
             furnish(s, root);
             s.transport().on_error([](const std::exception&, const sys::peer&) {});
@@ -486,6 +562,7 @@ int main() {
             running go(s);
 
             fuzz(s, "the blocking server", rounds);
+            fuzz_concurrently(s, "the blocking server, concurrently", rounds / 4);
         }
 
         {
@@ -497,6 +574,7 @@ int main() {
             running go(s);
 
             fuzz(s, "the async server", rounds);
+            fuzz_concurrently(s, "the async server, concurrently", rounds / 4);
         }
 
         const std::string rm = "rm -rf '" + root + "'";
