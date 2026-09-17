@@ -54,6 +54,7 @@
 #include <unistd.h>
 #include <cstdlib>
 #include <ctime>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -102,6 +103,11 @@ struct options {
     std::vector<std::string> vhosts;
 
     bool           hash_password = false;
+
+    std::string    user;
+    std::string    group;
+    std::string    pidfile;
+    bool           allow_root = false;
 };
 
 void usage(std::ostream& o, const char* argv0) {
@@ -147,6 +153,12 @@ void usage(std::ostream& o, const char* argv0) {
       << "                    one user:hash line each, Argon2id, mode 600.\n"
       << "  --hash-password   read a password and print a line for that file\n"
       << "\n"
+      << "  Running it:\n"
+      << "  --user NAME       drop to this user after binding and opening\n"
+      << "  --group NAME      and this group (default: the user's own)\n"
+      << "  --pidfile FILE    written after binding, before dropping\n"
+      << "  --allow-root      run as root anyway, which is refused by default\n"
+      << "\n"
       << "  SIGHUP reopens the log files, for rotation.\n"
       << "\n"
       << "  --help\n";
@@ -159,6 +171,7 @@ bool parse(int argc, char** argv, options& o) {
         if(a == "--help") { usage(std::cout, argv[0]); std::exit(0); }
         if(a == "--async") { o.async = true; continue; }
         if(a == "--hash-password") { o.hash_password = true; continue; }
+        if(a == "--allow-root") { o.allow_root = true; continue; }
 
         if(a.size() > 2 && a.compare(0, 2, "--") == 0) {
             if(i + 1 >= argc) {
@@ -193,6 +206,9 @@ bool parse(int argc, char** argv, options& o) {
             else if(a == "--idle-timeout") o.idle_timeout = std::atof(v.c_str());
             else if(a == "--protect") o.protect.push_back(v);
             else if(a == "--vhost") o.vhosts.push_back(v);
+            else if(a == "--user") o.user = v;
+            else if(a == "--group") o.group = v;
+            else if(a == "--pidfile") o.pidfile = v;
             else {
                 std::cerr << "jhttpd: unknown option " << a << "\n";
 
@@ -221,6 +237,13 @@ bool parse(int argc, char** argv, options& o) {
     // token would refuse everything, and the library clamps it, but saying so
     // here is better than being clamped silently.
     if(o.rate > 0 && o.burst <= 0) o.burst = o.rate;
+
+    if(!o.group.empty() && o.user.empty()) {
+        std::cerr << "jhttpd: --group without --user; there is nothing to "
+                  << "drop to\n";
+
+        return false;
+    }
 
     return true;
 }
@@ -374,6 +397,34 @@ int main(int argc, char** argv) {
     // writing to an inode with no name, and the log silently stops existing
     // for anybody looking at the path.
     std::signal(SIGHUP, jhttpd::reopen_on_hup);
+
+    // **Resolved before anything is opened or dropped.**  getpwnam may need
+    // to reach a directory service, and a name looked up after the drop is a
+    // name that fails only on the machines where that service is not a local
+    // file.  A typo in --user should also stop the server before it has bound
+    // a port or written a pidfile.
+    jhttpd::identity who;
+
+    if(!o.user.empty()) {
+        try { who = jhttpd::resolve_identity(o.user, o.group); }
+        catch(std::exception& e) {
+            std::cerr << "jhttpd: " << e.what() << "\n";
+
+            return 1;
+        }
+    }
+
+    // A server that binds a port anyone can reach and then answers it as root
+    // is one mistake away from being a very bad day.  Refused rather than
+    // warned about: a warning is read by exactly the people who did not need
+    // it.
+    if(::geteuid() == 0 && o.user.empty() && !o.allow_root) {
+        std::cerr << "jhttpd: refusing to run as root; give --user NAME to "
+                  << "drop after binding, or --allow-root if that is really "
+                  << "what you want\n";
+
+        return 1;
+    }
 
     jhttpd::logfile access;
     jhttpd::logfile errors;
@@ -540,6 +591,44 @@ int main(int argc, char** argv) {
 
         // What it is actually doing, on one line, because the next question
         // after "did it start" is always "with what limits".
+        // **The order below is the point of this branch**, and every line of
+        // it is a way to get privilege dropping wrong if moved:
+        //
+        //   - the port is bound above, because a port under 1024 needs
+        //     privilege and dropping first makes it unbindable;
+        //   - the logs, the credential files and the TLS keys are opened
+        //     above, because they live where an unprivileged user cannot
+        //     read them;
+        //   - the pidfile is written here, still privileged, because /var/run
+        //     is not writable by the user we are about to become;
+        //   - and only then is the privilege given up.
+        if(!o.pidfile.empty()) {
+            std::ofstream pid(o.pidfile.c_str(),
+                              std::ios::out | std::ios::trunc);
+
+            if(!pid) {
+                std::cerr << "jhttpd: cannot write the pidfile \""
+                          << o.pidfile << "\"\n";
+
+                return 1;
+            }
+
+            pid << ::getpid() << "\n";
+        }
+
+        if(!o.user.empty()) {
+            try { jhttpd::become(who); }
+            catch(std::exception& e) {
+                std::cerr << "jhttpd: " << e.what() << "\n";
+
+                return 1;
+            }
+
+            std::cerr << "jhttpd: running as " << o.user
+                      << (o.group.empty() ? "" : ":" + o.group)
+                      << " (uid " << who.uid << ", gid " << who.gid << ")\n";
+        }
+
         std::cerr << "jhttpd: serving " << o.root << " on "
                   << (s->tls() ? "https://" : "http://")
                   << (o.host.empty() ? "*" : o.host) << ":" << s->port()
