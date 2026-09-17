@@ -37,6 +37,11 @@
 #include <jlib/sys/socketstream.hh>
 
 #include <memory>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <jlib/sys/sslstream.hh>
 #include <jlib/sys/tls.hh>
 
@@ -779,6 +784,157 @@ static void the_destructor_waits_for_a_handler() {
        finished.load());
 }
 
+/**
+ * A client that connects to a TLS server and never speaks.
+ *
+ * **This was unbounded on the async server** and it is the #240 find that the
+ * header was actively wrong about: three timeouts were advertised as bounding
+ * a slow-loris, and every one of them is armed by the *handler*, after the
+ * handshake has returned. Nothing timed the handshake itself, so a peer that
+ * completed a TCP connection and then said nothing held its slot for as long
+ * as it cared to -- measured at six seconds and still held, against an
+ * initial_idle_timeout of one.
+ *
+ * The blocking server never had it: `io_timeout` reaches `tlsstream` as
+ * `SO_RCVTIMEO`, which covers `SSL_accept`. Both are asserted here, because
+ * "the other one was always fine" is the kind of claim worth a test rather
+ * than a sentence.
+ *
+ * Each such connection spends one of `max_connections` and one of
+ * `max_per_address`, so the cheapest possible client -- a connect and nothing
+ * else, no TLS, no bytes -- could exhaust an async server.
+ */
+static void a_handshake_that_never_finishes(bool async) {
+    std::cout << "\na TLS client that says nothing ("
+              << (async ? "async" : "blocking") << "):\n";
+
+    const std::string cert = "handshake_test_cert.pem";
+    const std::string key = "handshake_test_key.pem";
+
+    if(!make_cert(cert, key)) {
+        std::cout << "  skip  could not generate a test certificate\n";
+
+        return;
+    }
+
+    sys::server::policy p;
+
+    // Short, so "bounded" and "unbounded" are far apart rather than a race.
+    p.io_timeout = 2;
+    p.threads = 2;
+
+    std::unique_ptr<sys::server> srv;
+
+    if(async) {
+        srv.reset(new sys::server(
+            0,
+            [](sys::server::connection&, const sys::peer&) -> sys::task<void> {
+                co_return;
+            },
+            "127.0.0.1", sys::tls_context::server(cert, key), p));
+    }
+    else {
+        srv.reset(new sys::server(0, echo, "127.0.0.1",
+                                  sys::tls_context::server(cert, key), p));
+    }
+
+    srv->on_error([](const std::exception&, const sys::peer&) {});
+
+    std::thread th([&srv] { srv->run(); });
+
+    // A bare TCP connection.  No ClientHello, no bytes at all: the cheapest
+    // thing a client can do that still occupies a server.
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+
+    struct sockaddr_in to;
+
+    std::memset(&to, 0, sizeof to);
+
+    to.sin_family = AF_INET;
+    to.sin_port = htons(srv->port());
+
+    ::inet_pton(AF_INET, "127.0.0.1", &to.sin_addr);
+
+    const bool connected =
+        ::connect(fd, reinterpret_cast<struct sockaddr*>(&to), sizeof to) == 0;
+
+    ok("  the connection is accepted", connected);
+
+    // Generous: six times the timeout.  The assertion is one-sided -- that it
+    // is dropped *at all* -- so a slow machine cannot make it fail, only an
+    // unbounded handshake can.
+    bool gone = false;
+
+    for(int i = 0; i < 120 && !gone; i++) {
+        char b[1];
+
+        if(::recv(fd, b, 1, MSG_DONTWAIT) == 0) gone = true;
+        else std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    ok("  and a handshake that never starts is eventually dropped", gone);
+
+    ok("  which returns the slot it was holding",
+       settles_to(*srv, "127.0.0.1", 0),
+       std::to_string(srv->connections_from("127.0.0.1")));
+
+    if(fd >= 0) ::close(fd);
+
+    srv->stop();
+    srv->join();
+    th.join();
+
+    ::unlink(cert.c_str());
+    ::unlink(key.c_str());
+}
+
+/**
+ * The server context refuses renegotiation.
+ *
+ * A policy assertion rather than a behavioural one, and worth being clear
+ * about which: this checks the option is set, not that a renegotiating client
+ * is refused. Driving a real renegotiation needs a client built to do
+ * something no client in this tree does, and the option *is* the mechanism --
+ * OpenSSL enforces it, and what could go wrong is somebody deleting the line.
+ * A test that fails when the line goes is the thing worth having.
+ *
+ * Why it is set: TLS 1.3 has no renegotiation, TLS 1.2 does, and this context
+ * allows 1.2. Client-initiated renegotiation is cheap to ask for and expensive
+ * to answer, at a rate the client picks -- a server doing an attacker's
+ * arithmetic. Its one real use, asking for a client certificate mid-connection,
+ * is out of scope here.
+ */
+static void the_server_context_refuses_renegotiation() {
+    std::cout << "\nthe TLS server context's policy:\n";
+
+    const std::string cert = "renego_test_cert.pem";
+    const std::string key = "renego_test_key.pem";
+
+    if(!make_cert(cert, key)) {
+        std::cout << "  skip  could not generate a test certificate\n";
+
+        return;
+    }
+
+    const sys::tls_context ctx = sys::tls_context::server(cert, key);
+
+    SSL* ssl = ctx.new_ssl();
+
+    ok("  renegotiation is off", ssl != 0 &&
+       (SSL_get_options(ssl) & SSL_OP_NO_RENEGOTIATION) != 0);
+
+    // And the floor it was already holding, asserted beside it so the two
+    // policies live in one place.
+    ok("  and TLS 1.2 is the floor", ssl != 0 &&
+       SSL_get_min_proto_version(ssl) == TLS1_2_VERSION,
+       ssl ? std::to_string(SSL_get_min_proto_version(ssl)) : "");
+
+    if(ssl) SSL_free(ssl);
+
+    ::unlink(cert.c_str());
+    ::unlink(key.c_str());
+}
+
 static void over_tls() {
     std::cout << "\nover TLS:\n";
 
@@ -896,6 +1052,9 @@ int main() {
     stopping();
     stopping_without_draining();
     the_destructor_waits_for_a_handler();
+    the_server_context_refuses_renegotiation();
+    a_handshake_that_never_finishes(false);
+    a_handshake_that_never_finishes(true);
     over_tls();
 
     // What a green run does not establish.

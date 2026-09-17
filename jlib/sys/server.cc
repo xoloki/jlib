@@ -503,6 +503,56 @@ void server::reap() {
     }
 }
 
+namespace {
+
+    /**
+     * Request `t` if this outlives `seconds`.
+     *
+     * The same shape as net::http::server's armed_deadline, including the one
+     * subtle part: **cancel only from the reactor's own thread.** A
+     * destructor runs wherever the frame is destroyed, and one path that
+     * destroys this frame is stop() requesting the token from another thread,
+     * so the coroutine unwinds there while the reactor is mid-pass.
+     * reactor::cancel() mutates two containers with no lock, and cancelling
+     * from that unwind is a data race whose symptom is heap corruption a long
+     * way from the cause.
+     *
+     * Abandoning the timer instead is safe and cheap: it fires later into a
+     * token that has already been requested, and requesting a requested token
+     * does nothing.
+     */
+    class timed_out_after {
+    public:
+        timed_out_after(reactor& r, double seconds, cancel_token t)
+            : m_reactor(&r)
+        {
+            if(seconds > 0) {
+                m_timer = deadline(
+                    r,
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::duration<double>(seconds)),
+                    t);
+            }
+        }
+
+        ~timed_out_after() {
+            if(m_timer == reactor::timer_token::none) return;
+
+            if(m_reactor->on_reactor_thread()) m_reactor->cancel(m_timer);
+
+            m_timer = reactor::timer_token::none;
+        }
+
+        timed_out_after(const timed_out_after&) = delete;
+        timed_out_after& operator=(const timed_out_after&) = delete;
+
+    private:
+        reactor*             m_reactor;
+        reactor::timer_token m_timer = reactor::timer_token::none;
+    };
+
+}
+
 task<void> server::serve_async(int fd, peer from, cancel_token t,
                                address_count::hold slot) {
     // By value again, and here that means *in the coroutine frame*: a
@@ -528,13 +578,40 @@ task<void> server::serve_async(int fd, peer from, cancel_token t,
             // or hostile client stalls itself and nothing else.
             async_tls tls(m_reactor, fd, tls_server, m_tls, t);
 
-            co_await tls.handshake();
+            // **And it is bounded, which it was not** (#240).
+            //
+            // "Stalls itself and nothing else" was true about the reactor
+            // thread and false about the connection slot. Nothing timed the
+            // handshake: net::http::server's three timeouts are all armed
+            // *after* it returns, so a client that connected and said nothing
+            // held a slot indefinitely -- measured at six seconds and still
+            // held, against an initial_idle_timeout of one. Each such
+            // connection spends one of max_connections and one of
+            // max_per_address, which is a slow-loris wearing the one costume
+            // the timeouts could not see.
+            //
+            // The blocking path never had this: it hands io_timeout to
+            // tlsstream, where it becomes SO_RCVTIMEO and covers SSL_accept.
+            // Same number here, for the same reason, so the two agree about
+            // what a handshake may cost.
+            {
+                const timed_out_after bound(m_reactor, m_policy.io_timeout, t);
+
+                co_await tls.handshake();
+            }
 
             connection c(m_reactor, m_jobs, tls.reader(), tls.writer(), from, t);
 
             co_await m_async(c, from);
 
-            co_await tls.shutdown();
+            // Bounded for the same reason: a peer that will not finish the
+            // close is a peer holding a slot, and the handler's own deadlines
+            // are gone by now.
+            {
+                const timed_out_after bound(m_reactor, m_policy.io_timeout, t);
+
+                co_await tls.shutdown();
+            }
         }
         else {
             async_fd_reader r(m_reactor, fd, t);
