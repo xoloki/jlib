@@ -20,11 +20,13 @@
 #ifndef JLIB_NET_HTTP_HH
 #define JLIB_NET_HTTP_HH
 
+#include <jlib/sys/socketstream.hh>
 #include <jlib/util/URL.hh>
 #include <jlib/util/http.hh>
 
 #include <map>
 #include <string>
+#include <memory>
 
 namespace jlib {
 namespace net {
@@ -130,6 +132,105 @@ Response request(const std::string& method,
                  const fields& send = fields(),
                  const std::string& body = "",
                  const options& o = options());
+
+/**
+ * Several requests down one connection, and a body taken as it arrives.
+ *
+ * `request()` above opens a socket, says `Connection: close`, reads the whole
+ * response and hangs up. That is the right shape for the call this client was
+ * written for -- one OAuth2 token exchange -- and the wrong one for a caller
+ * that makes many: jcode asks a local jserve for a completion per edit, and
+ * paid a TCP handshake, and a TLS handshake where there is one, for each (#242).
+ *
+ * ## What it is not
+ *
+ * **Not a pool.** One connection to one origin, opened on first use, owned by
+ * the caller and closed when it goes. Nothing here picks a connection for you,
+ * counts them, or hands them round between threads; a `connection` belongs to
+ * one thread the way a `socketstream` does.
+ *
+ * **Not a redirect follower.** `request()` keeps that, because following one
+ * means connecting somewhere else and this object is bound to an origin. A
+ * target for a different host is refused rather than sent -- which is the
+ * point: a connection carrying an Authorization must not be talked into
+ * spending it on a host named by somebody else.
+ *
+ * ## When it stops being usable
+ *
+ * `live()` goes false when the response said `Connection: close`, when an
+ * HTTP/1.0 response did not ask to stay, when the body was framed by the
+ * connection ending, when anything threw, and when a sink stopped a body
+ * early -- that last because the stream is then not at a message boundary and
+ * the next read would take the rest of a body for a status line. A caller
+ * checks `live()` or simply keeps calling: a dead connection reopens on the
+ * next request, which is what a pool would have done anyway.
+ */
+class connection {
+public:
+    /**
+     * @param origin scheme, host and port; the path is ignored
+     *
+     * Nothing is connected here. The socket opens on the first request, so
+     * constructing one costs nothing and a caller may keep one against the
+     * possibility of using it.
+     */
+    connection(const jlib::util::URL& origin, const options& o = options());
+
+    ~connection();
+
+    connection(const connection&) = delete;
+    connection& operator=(const connection&) = delete;
+
+    /**
+     * One request; the whole response, as request() gives it.
+     *
+     * @throws error if the target names a different origin, or the exchange
+     *         could not be completed
+     */
+    Response request(const std::string& method,
+                     const jlib::util::URL& target,
+                     const fields& send = fields(),
+                     const std::string& body = "");
+
+    /**
+     * One request; the body handed to `sink` as it arrives.
+     *
+     * The Response comes back with **no body in it** -- the sink got it. That
+     * is deliberate rather than convenient: a caller streaming a body has
+     * already said it will not hold the whole thing, and filling `body()` as
+     * well would be doing exactly what it asked not to happen.
+     *
+     * `options::max_body` does not apply. The sink decides when it has had
+     * enough by returning false, and see `live()` for what that costs.
+     */
+    Response request(const std::string& method,
+                     const jlib::util::URL& target,
+                     const fields& send,
+                     const std::string& body,
+                     const jlib::util::http::body_sink& sink);
+
+    /** Whether another request may be sent without reconnecting. */
+    bool live() const { return m_live; }
+
+    /** How many requests have gone down the socket that is open now. */
+    std::size_t served() const { return m_served; }
+
+    /** Hang up.  The next request opens a new socket. */
+    void close();
+
+private:
+    Response send(const std::string& method, const jlib::util::URL& target,
+                  const fields& send, const std::string& body,
+                  const jlib::util::http::body_sink* sink);
+
+    jlib::util::URL m_origin;
+    options m_o;
+
+    std::unique_ptr<jlib::sys::socketstream> m_sock;
+
+    bool m_live = false;
+    std::size_t m_served = 0;
+};
 
 Response get(const jlib::util::URL& url,
              const fields& send = fields(),
