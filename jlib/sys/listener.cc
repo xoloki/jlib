@@ -249,6 +249,14 @@ int listener::accept_into(peer* from, double timeout) {
     // exactly the case the stall needs.  See sys::nodelay.
     nodelay(fd);
 
+    // **Here rather than in socketstream::configure**, which is where it used
+    // to be and which an async connection never reaches -- the same gap
+    // nodelay had, for the same reason.  Where the platform has SO_NOSIGPIPE
+    // this covers every write on the descriptor including the ones OpenSSL
+    // makes internally; where it does not, sigpipe_guard at each write site is
+    // what does the work.
+    nosigpipe(fd);
+
     if(from != 0) {
         from->address = address_of(ss, len);
         from->port = port_of(ss);

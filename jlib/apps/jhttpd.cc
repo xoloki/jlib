@@ -135,8 +135,11 @@ void usage(std::ostream& o, const char* argv0) {
       << "  --initial-idle F      a new connection that says nothing (default 5)\n"
       << "  --idle-timeout F      between requests on a kept connection (default 60)\n"
       << "\n"
-      << "  --vhost NAME:ROOT repeatable; serve ROOT to requests naming NAME.\n"
-      << "                    --root remains the site for every other name.\n"
+      << "  --vhost NAME:ROOT[:CERT:KEY]\n"
+      << "                    repeatable; serve ROOT to requests naming NAME,\n"
+      << "                    and present CERT to clients that ask for NAME.\n"
+      << "                    --root remains the site for every other name,\n"
+      << "                    and --cert the certificate for every other name.\n"
       << "\n"
       << "  Authentication:\n"
       << "  --protect PREFIX:REALM:FILE\n"
@@ -220,6 +223,50 @@ bool parse(int argc, char** argv, options& o) {
     if(o.rate > 0 && o.burst <= 0) o.burst = o.rate;
 
     return true;
+}
+
+/**
+ * `NAME:ROOT` or `NAME:ROOT:CERT:KEY`.
+ *
+ * Left to right, unlike `--protect`: a DNS name cannot contain a colon, so the
+ * first one always ends the name. The optional pair is recognised by there
+ * being exactly four fields, which is why a root containing colons is only
+ * legal in the two-field form -- a limitation worth stating rather than
+ * pretending the grammar is unambiguous.
+ */
+bool split_vhost(const std::string& spec, std::string& name, std::string& root,
+                 std::string& cert, std::string& key)
+{
+    std::vector<std::string> bits;
+    std::string::size_type at = 0;
+
+    for(;;) {
+        const std::string::size_type c = spec.find(':', at);
+
+        if(c == std::string::npos) { bits.push_back(spec.substr(at)); break; }
+
+        bits.push_back(spec.substr(at, c - at));
+
+        at = c + 1;
+    }
+
+    if(bits.size() == 2) {
+        name = bits[0];
+        root = bits[1];
+        cert.clear();
+        key.clear();
+    }
+    else if(bits.size() == 4) {
+        name = bits[0];
+        root = bits[1];
+        cert = bits[2];
+        key = bits[3];
+    }
+    else return false;
+
+    if(name.empty() || root.empty()) return false;
+
+    return bits.size() == 2 || (!cert.empty() && !key.empty());
 }
 
 /**
@@ -370,9 +417,30 @@ int main(int argc, char** argv) {
         // Read here rather than at the first handshake: a certificate that
         // cannot be read, or a key that does not match it, should stop the
         // program where the operator is watching.
-        const sys::tls_context tls =
+        sys::tls_context tls =
             o.cert.empty() ? sys::tls_context()
                            : sys::tls_context::server(o.cert, o.key);
+
+        // Before the server is built, because the context is copied into it.
+        // A --vhost with its own pair and no --cert is refused: there would be
+        // no default certificate to fall back to for every other name, and a
+        // listener with no identity cannot speak TLS at all.
+        for(std::size_t i = 0; i < o.vhosts.size(); i++) {
+            std::string name, root, cert, key;
+
+            if(!split_vhost(o.vhosts[i], name, root, cert, key) || cert.empty())
+                continue;
+
+            if(tls.empty()) {
+                std::cerr << "jhttpd: --vhost \"" << name << "\" has a "
+                          << "certificate but the server has none; give "
+                          << "--cert and --key too\n";
+
+                return 2;
+            }
+
+            tls.add_site(name, cert, key);
+        }
 
         std::unique_ptr<http::server> s;
 
@@ -389,22 +457,15 @@ int main(int argc, char** argv) {
         s->files(pattern_for(o.prefix), o.root, o.cache_control);
 
         for(std::size_t i = 0; i < o.vhosts.size(); i++) {
-            const std::string::size_type colon = o.vhosts[i].find(':');
+            std::string name, root, cert, key;
 
-            // The *first* colon here, unlike --protect: a DNS name cannot
-            // contain one and a path can, so left-to-right is the reading that
-            // accepts every legal root.
-            if(colon == std::string::npos || colon == 0 ||
-               colon + 1 >= o.vhosts[i].size())
-            {
-                std::cerr << "jhttpd: --vhost wants NAME:ROOT, got \""
-                          << o.vhosts[i] << "\"\n";
+            if(!split_vhost(o.vhosts[i], name, root, cert, key)) {
+                std::cerr << "jhttpd: --vhost wants NAME:ROOT or "
+                          << "NAME:ROOT:CERT:KEY, got \"" << o.vhosts[i]
+                          << "\"\n";
 
                 return 2;
             }
-
-            const std::string name = o.vhosts[i].substr(0, colon);
-            const std::string root = o.vhosts[i].substr(colon + 1);
 
             // Throws if the root cannot be resolved, which stops the server --
             // a vhost that silently serves nothing is worse than one that
@@ -412,7 +473,8 @@ int main(int argc, char** argv) {
             s->site_of(name).files(pattern_for(o.prefix), root,
                                    o.cache_control);
 
-            std::cerr << "jhttpd: " << name << " -> " << root << "\n";
+            std::cerr << "jhttpd: " << name << " -> " << root
+                      << (cert.empty() ? "" : " (own certificate)") << "\n";
         }
 
         // Held for the life of the server: the verifier below closes over a
