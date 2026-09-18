@@ -82,8 +82,14 @@ http {
     # which is selected by SNI -- but only if the server has one too, since
     # there would otherwise be nothing to fall back on.
     #
+    # server_name takes a list, as nginx's does -- this is what Apache
+    # writes as ServerName plus ServerAlias.  One site is registered per
+    # name; they differ only in what a request has to say to reach them,
+    # and every one of them carries the certificate, because SNI matches on
+    # the name the client asked for.
+    #
     # server {
-    #     server_name          other.example;
+    #     server_name          other.example www.other.example other.ninja;
     #     root                 /srv/other;
     #     ssl_certificate      /etc/jhttpd/other.pem;
     #     ssl_certificate_key  /etc/jhttpd/other.key;

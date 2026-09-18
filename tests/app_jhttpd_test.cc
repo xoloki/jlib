@@ -812,6 +812,67 @@ static void sites_and_guards() {
 
     ok("  a location with neither directive is not a guard",
        refusal("http { location /x { } }", none).empty() && none.protect.empty());
+
+    // **server_name takes a list**, which is what Apache writes as ServerName
+    // plus ServerAlias and what nginx writes directly.  One site per name.
+    jhttpd::options many;
+
+    const std::string why2 = refusal(
+        "http {\n"
+        "    root /srv/www;\n"
+        "    server {\n"
+        "        server_name www.example.org example.org example.ninja;\n"
+        "        root /srv/ex;\n"
+        "        ssl_certificate /etc/e.pem;\n"
+        "        ssl_certificate_key /etc/e.key;\n"
+        "    }\n"
+        "}\n", many);
+
+    ok("  a list of names is accepted", why2.empty(), why2);
+    ok("  and is one site per name", many.vhosts.size() == 3,
+       std::to_string(many.vhosts.size()));
+    ok("  each with the same root",
+       many.vhosts.size() == 3 && many.vhosts[0].root == "/srv/ex" &&
+           many.vhosts[2].root == "/srv/ex");
+    ok("  in the order they were written",
+       many.vhosts.size() == 3 && many.vhosts[0].name == "www.example.org" &&
+           many.vhosts[1].name == "example.org" &&
+           many.vhosts[2].name == "example.ninja",
+       many.vhosts.size() == 3 ? many.vhosts[1].name : "");
+
+    // Not decoration: SNI matches on the name the client asked for, so a name
+    // without the certificate would fail the handshake before anything else
+    // here is consulted.
+    ok("  and every one of them carries the certificate",
+       many.vhosts.size() == 3 && many.vhosts[0].cert == "/etc/e.pem" &&
+           many.vhosts[1].cert == "/etc/e.pem" &&
+           many.vhosts[2].cert == "/etc/e.pem" &&
+           many.vhosts[2].key == "/etc/e.key");
+
+    jhttpd::options split;
+
+    ok("  repeated server_name accumulates rather than replacing",
+       refusal("http { server { server_name a.example;\n"
+               "                server_name b.example;\n"
+               "                root /srv/x; } }", split).empty() &&
+           split.vhosts.size() == 2,
+       std::to_string(split.vhosts.size()));
+
+    ok("  a name listed twice is refused, since one of them was meant to differ",
+       refusal("http { server { server_name a.example a.example; root /r; } }")
+           .find("twice") != std::string::npos);
+
+    ok("  and across two directives as well",
+       refusal("http { server { server_name a.example; server_name a.example; "
+               "root /r; } }").find("twice") != std::string::npos);
+
+    // Still exactly one name is fine -- the list must not have made the
+    // single-name form into an error.
+    jhttpd::options one;
+
+    ok("  one name still works",
+       refusal("http { server { server_name only.example; root /r; } }", one)
+               .empty() && one.vhosts.size() == 1);
 }
 
 static void what_a_config_refuses() {
