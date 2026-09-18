@@ -140,7 +140,7 @@ TESTS = \
 	util_json_test \
 	util_http_test \
 	util_http_async_test \
-	util_abnf_test \
+	util_conf_test util_abnf_test \
 	util_jinja_test \
 	util_abnf_compile_test \
 	util_utf8_test \
@@ -368,6 +368,8 @@ util_headers_angie_test_LDADD   = $(JUTIL_LA)
 util_jinja_test_SOURCES = util_jinja_test.cc jinja_templates.hh
 util_jinja_test_LDADD   = $(JUTIL_LA) $(JSYS_LA)
 
+util_conf_test_SOURCES = util_conf_test.cc
+util_conf_test_LDADD   = $(JUTIL_LA)
 util_abnf_test_SOURCES = util_abnf_test.cc
 util_abnf_test_LDADD   = $(JUTIL_LA)
 
