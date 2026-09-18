@@ -30,25 +30,38 @@ int main(int c, char** v) {
     gguf g(v[1]);
     jlib::metal::backend<_Float16> b;
     auto cf = model<_Float16>::config::from(g);
-    model<_Float16> m(b, cf); m.load(g); m.enable_cache(160);
+    // **The decode model is scoped so it is gone before the prefill one is
+    // built.** They used to overlap, and two 8.1 GB copies of Qwen2.5-Coder 7B
+    // do not fit in 16 GB: the machine swapped, and every number this prints
+    // became a measure of that -- decode included, which no kernel change
+    // touches. It reported 1.8 tok/s and a 29s prefill64 for a model that does
+    // 11.7 and 1.0s, so the tool was not slow, it was wrong.
+    //
+    // The comment above always said "one load". Two models is what the code
+    // did, and the reason it needs a second one is that the first has a
+    // conversation in its KV cache by then.
+    double d = 0;
+    {
+        model<_Float16> m(b, cf); m.load(g); m.enable_cache(160);
 
-    std::vector<int> p(128, 100);
-    m.reserve(128); auto l0 = b.make(cf.vocab, 128);
-    m.forward(p, l0); b.wait();
+        std::vector<int> p(128, 100);
+        m.reserve(128); auto l0 = b.make(cf.vocab, 128);
+        m.forward(p, l0); b.wait();
 
-    std::vector<int> one(1, 100);
-    m.reserve(1); auto l1 = b.make(cf.vocab, 1);
-    m.forward(one, l1); b.wait();
-    auto t0 = std::chrono::steady_clock::now();
-    for(int r = 0; r < 20; r++) { m.forward(one, l1); b.wait(); }
-    const double d = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - t0).count() / 20.0;
+        std::vector<int> one(1, 100);
+        m.reserve(1); auto l1 = b.make(cf.vocab, 1);
+        m.forward(one, l1); b.wait();
+        auto t0 = std::chrono::steady_clock::now();
+        for(int r = 0; r < 20; r++) { m.forward(one, l1); b.wait(); }
+        d = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count() / 20.0;
+    }
 
     model<_Float16> m2(b, cf); m2.load(g);
     std::vector<int> ids(512, 100);
     m2.reserve(512); auto lg = b.make(cf.vocab, 512);
     m2.forward(ids, lg); b.wait();
-    t0 = std::chrono::steady_clock::now();
+    auto t0 = std::chrono::steady_clock::now();
     for(int r = 0; r < 3; r++) { m2.forward(ids, lg); b.wait(); }
     const double pf = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count() / 3.0;

@@ -1195,8 +1195,17 @@ static matrix<T> from_q8_0(const std::vector<char>& raw, uint rows, uint cols) {
  * different path through the tail, and 1 is the decode case where the tile
  * loop runs once.  #158 tiled this and the shapes below are what a tiling bug
  * would show up in.
+ *
+ * **And either side of a second threshold now.**  Above `q8_dequant_above()`
+ * -- 32 -- the Metal backend stops using that kernel at all: it unpacks the
+ * weight and hands the multiply to MPS, which is eight times faster at a
+ * prefill batch (#286).  Every count here used to be below 32, so the path
+ * that now carries every prefill was covered by nothing.
  */
-static const unsigned int Q8_COLUMN_COUNTS[] = { 1, 5, 7, 8, 9, 16, 17 };
+static const unsigned int Q8_COLUMN_COUNTS[] = {
+    1, 5, 7, 8, 9, 16, 17,          // the tile boundary, and the gemv path
+    31, 32, 33, 64, 129             // the dequantise-and-GEMM path
+};
 
 /**
  * Output widths that land either side of the SIMD-reduction threshold.
@@ -1270,6 +1279,63 @@ static void a_quantised_weight_multiplies(const char* name,
                    " rows x " + std::to_string(ncols) +
                    " column(s) match dequantising first",
                    d < ((sizeof(T) == 2) ? 5e-2 : 1e-3), std::to_string(d));
+            }
+        }
+
+        // **Two weights of one shape, both encoded before either is read.**
+        //
+        // Metal's backend unpacks a quantised weight into a scratch tensor
+        // shared by every weight of the same shape, so this is the case where
+        // the second unpack could land on top of the first one's operand.  It
+        // does not, because a command buffer runs its encoders in the order
+        // they were created and the first multiply is encoded before the
+        // second unpack -- but that is an argument, and this is the test.
+        //
+        // A model reaches it on every layer: each layer's wq has the shape of
+        // the last one's, and nothing waits in between.
+        {
+            std::mt19937 gen(31337);
+
+            const matrix<T> w1 = random_matrix<T>(K, N, gen);
+            const matrix<T> w2 = random_matrix<T>(K, N, gen);
+
+            const std::vector<char> r1 = as_q8_0(w1), r2 = as_q8_0(w2);
+            const matrix<T> d1 = from_q8_0<T>(r1, K, N);
+            const matrix<T> d2 = from_q8_0<T>(r2, K, N);
+
+            const unsigned int wide = 64;
+            const matrix<T> x = random_matrix<T>(K, wide, gen);
+
+            for(ai::backend<T>* b : backends) {
+                typename ai::backend<T>::tensor_ptr tx = b->make(x);
+
+                typename ai::backend<T>::tensor_ptr g1 = b->make(N, wide);
+                typename ai::backend<T>::tensor_ptr g2 = b->make(N, wide);
+
+                // Both encoded, then one wait.  Reading g1 first would hide
+                // the bug by forcing the flush this is trying to do without.
+                b->multiply_tn(b->make_q8_0(K, N, r1.data(), r1.size()), tx, g1);
+                b->multiply_tn(b->make_q8_0(K, N, r2.data(), r2.size()), tx, g2);
+
+                typename ai::backend<T>::tensor_ptr w1d = b->make(d1);
+                typename ai::backend<T>::tensor_ptr w2d = b->make(d2);
+                typename ai::backend<T>::tensor_ptr e1 = b->make(N, wide);
+                typename ai::backend<T>::tensor_ptr e2 = b->make(N, wide);
+
+                b->multiply_tn(w1d, tx, e1);
+                b->multiply_tn(w2d, tx, e2);
+                b->wait();
+
+                const double tol = (sizeof(T) == 2) ? 5e-2 : 1e-3;
+
+                ok(std::string("  ") + b->name() + ": the first of two weights "
+                   "sharing a shape is not overwritten by the second",
+                   worst(g1->read(), e1->read()) < tol,
+                   std::to_string(worst(g1->read(), e1->read())));
+
+                ok(std::string("  ") + b->name() + ": and the second is right too",
+                   worst(g2->read(), e2->read()) < tol,
+                   std::to_string(worst(g2->read(), e2->read())));
             }
         }
 

@@ -33,6 +33,7 @@
 #include <jlib/metal/backend.hh>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 #include <string>
 using namespace jlib;
@@ -105,14 +106,33 @@ int main() {
     out.push_back({ "assign    d_model", timed([&]{ b.assign(x1, y1); }, b) });
 
     // How many columns a prefill pass carries; see the batch table below.
-    const unsigned int PREFILL_COLS = 512;
+    //
+    // Overridable because the crossover between the two q8 multiply paths is a
+    // column count, and the path is chosen by a threshold read once per
+    // process (`q8_dequant_above()`).  So the sweep that finds the crossover is
+    // this program run at each width with the threshold pinned either side --
+    // which is also why the widths are not hard-coded into a loop here.
+    const unsigned int PREFILL_COLS = [] {
+        const char* e = std::getenv("JLIB_PERF_COLS");
+
+        return e ? unsigned(std::atoi(e)) : 512u;
+    }();
 
     // The q8 multiplies, at the seven shapes a layer uses.
     struct { const char* name; unsigned K, N; } mats[] = {
         { "q8 wq   2048->2048", D, D },     { "q8 wk   2048->256",  D, KV*DH },
         { "q8 wv   2048->256",  D, KV*DH }, { "q8 wo   2048->2048", D, D },
         { "q8 gate 2048->5632", D, FF },    { "q8 up   2048->5632", D, FF },
-        { "q8 down 5632->2048", FF, D }
+        { "q8 down 5632->2048", FF, D },
+
+        // **The output head, which is the widest matrix a model has and was
+        // the one shape this table never carried.** A layer's matrices stop
+        // at 5632 columns; a head has one per vocabulary entry -- 32000 for
+        // TinyLlama and 152064 for Qwen2.5 -- and it is read through the same
+        // multiply_tn as everything else. Nothing here had measured whether
+        // the two paths behave the same way 27 times wider.
+        { "q8 head 2048->32000",  D, 32000 },
+        { "q8 head 2048->152064", D, 152064 }
     };
     for(auto& m : mats) {
         std::vector<char> raw((std::size_t(m.K) * m.N / 32) * 34, 1);

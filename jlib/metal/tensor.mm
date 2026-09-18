@@ -541,6 +541,43 @@ constant uint Q8_TILE = 8;
 constant uint Q8_LANES [[function_constant(0)]];
 
 /**
+ * q8_0 blocks out to a plain tensor, one block per thread.
+ *
+ * The layout is already right: a qweight holds K values contiguously per
+ * output row, and a (K x N) column-major tensor holds a column contiguously.
+ * Output row j *is* column j, so this is a straight unpack with no transpose
+ * and no gather.
+ *
+ * It exists because `k_q8_gemv` is eight times slower than MPS at prefill
+ * shapes -- 1.5 TFLOP/s against 13 on the same device and the same matrices
+ * (#286) -- and one pass over the weights buys the difference, once the batch
+ * is wide enough to spread it over. See stream::multiply_tn.
+ */
+template<typename T>
+kernel void k_q8_dequant(device const uchar* w [[buffer(0)]],
+                         device T* out [[buffer(1)]],
+                         constant uint& K [[buffer(2)]],
+                         constant uint& blocks [[buffer(3)]],
+                         uint gid [[thread_position_in_grid]])
+{
+    if(gid >= blocks) return;
+
+    device const uchar* p = w + (ulong)gid * 34;
+
+    const ushort bits = ushort(p[0]) | (ushort(p[1]) << 8);
+    const float d = float(as_type<half>(bits));
+
+    device const char* q = (device const char*)(p + 2);
+
+    // Block `gid` is block `gid % (K/32)` of output row `gid / (K/32)`, and
+    // that row is a whole column of the destination -- so the 32 values land
+    // contiguously and the index is just the block number times 32.
+    device T* o = out + (ulong)gid * 32;
+
+    for(uint i = 0; i < 32; i++) o[i] = T(d * float(q[i]));
+}
+
+/**
  * y = alpha * (W^T x) + beta * y, with W held as q8_0 and never expanded.
  *
  * The dequantisation is inside the multiply -- a weight block is 34 bytes,
@@ -722,6 +759,11 @@ INSTANTIATE(k_copy_columns, float, "_f32")(device const float*, device float*,
 INSTANTIATE(k_copy_columns, half, "_f16")(device const half*, device half*,
                                           constant uint&, constant uint&,
                                           constant uint&, uint);
+INSTANTIATE(k_q8_dequant, float, "_f32")(device const uchar*, device float*,
+                                          constant uint&, constant uint&, uint);
+INSTANTIATE(k_q8_dequant, half, "_f16")(device const uchar*, device half*,
+                                        constant uint&, constant uint&, uint);
+
 INSTANTIATE(k_q8_gemv, float, "_f32")(device const uchar*, device const float*,
                                       device float*, constant uint&,
                                       constant uint&, constant uint&,
@@ -863,10 +905,52 @@ struct stream<T>::impl {
     id<MTLComputePipelineState> rope = nil;
     id<MTLComputePipelineState> gather = nil;
     id<MTLComputePipelineState> q8_gemv = nil;        // one thread per row
+    id<MTLComputePipelineState> q8_dequant = nil;     // one thread per block
     id<MTLComputePipelineState> q8_gemv_simd = nil;   // a SIMD group per row
+
     id<MTLComputePipelineState> attn_scores = nil;
     id<MTLComputePipelineState> attn_weighted = nil;
     id<MTLComputePipelineState> rms_norm = nil;
+
+    /**
+     * Weights unpacked for MPS, one per shape rather than one per weight.
+     *
+     * Per *shape* because a model has a handful of them and dozens of weights:
+     * holding a dequantised copy of every weight would double the model in
+     * memory, and holding one buffer for all of them would reallocate on every
+     * matmul. A layer's seven matrices reuse four shapes, and every layer
+     * reuses the same four.
+     *
+     * The cost this accepts is re-unpacking the same weight on every pass. It
+     * is one read of the weights against a GEMM that is eight times what the
+     * quantised kernel manages, and #286 has the arithmetic.
+     *
+     * **It is not free in memory, and the amount is worth knowing**: one f16
+     * buffer per distinct shape, which for Qwen2.5-Coder 7B is
+     *
+     *     3584 x  3584    25.7 MB      3584 x   512     3.7 MB
+     *     3584 x 18944   135.8 MB     18944 x  3584   135.8 MB
+     *
+     * -- 301 MB on top of an 8.1 GB model. A single buffer sized to the
+     * largest shape would be 136 MB, because the two big ones hold the same
+     * number of elements, and it would be exactly as safe for the reason
+     * below. It is not done that way because `tensor` owns its shape and the
+     * saving has not been shown to matter; if it ever does, that is the shape
+     * of the fix.
+     *
+     * **Why sharing one scratch between weights is safe.** A command buffer
+     * runs its encoders in the order they were created, and each multiply
+     * encodes its unpack before its GEMM. So weight B's unpack cannot land on
+     * weight A's operand: A's GEMM is already encoded ahead of it. That is an
+     * argument rather than an observation, so ai_backend_test makes it a test
+     * -- two weights of one shape, both encoded before either is read.
+     */
+    std::map<std::pair<unsigned int, unsigned int>,
+             std::unique_ptr<tensor<T> > > dequantised;
+
+    // The largest scratch the map is allowed to hold, in bytes.  A device
+    // constant, so it is asked for once rather than at every multiply.
+    unsigned long dequant_cap = 0;
 
     // Buffers made for one encoded operation and needed until the command
     // buffer has run.  Metal does retain what an encoder binds, so this is
@@ -892,6 +976,99 @@ namespace {
  * The number is measured rather than reasoned: see the comment on the
  * dispatch.
  */
+/**
+ * The batch at which dequantising and calling MPS beats the q8 kernel.
+ *
+ * `k_q8_gemv` runs at 1.2-1.6 TFLOP/s at prefill shapes where MPS does 11-13
+ * on the same matrices (#286). Dequantising first costs one pass over the
+ * weights, which a wide batch spreads thin and a narrow one cannot: at a
+ * single column the pass is eight times the whole matmul it would replace.
+ *
+ * So there is a crossover, and it is measured rather than assumed. The gate
+ * matrix (2048->5632), best of five batches, each path forced with this
+ * override:
+ *
+ *     cols     k_q8_gemv    dequantise + MPS
+ *        8       216.6 us            452.3 us
+ *       16       423.1 us            483.7 us
+ *       24       552.4 us            482.0 us     <- crossover
+ *       32       803.5 us            476.8 us
+ *       64      1335.0 us            534.0 us
+ *      128      2493.6 us            720.4 us
+ *      256      4756.1 us            721.7 us
+ *      512      8863.2 us           1129.4 us     <- 7.9x
+ *
+ * Two different curves, which is why a threshold works at all: the kernel is
+ * linear in columns because it re-reads the weights per tile, and this path is
+ * nearly flat because the unpack is fixed and the GEMM after it is close to
+ * free. 24 is where they cross and 24 is the default.
+ *
+ * Overridable for the same reason q8_reduce_below() is: comparing two paths
+ * in one process is the only way to compare them without a rebuild and a
+ * different thermal state in between -- and the table above is that
+ * comparison. 0 turns dequantisation off entirely.
+ */
+unsigned int q8_dequant_above() {
+    static const unsigned int n = [] {
+        const char* e = std::getenv("JLIB_Q8_DEQUANT_ABOVE");
+
+        return e ? unsigned(std::atoi(e)) : 24u;
+    }();
+
+    return n;
+}
+
+/**
+ * The largest scratch this will keep, as a fraction of what the device wants
+ * resident.  0 removes the cap.
+ *
+ * **The column threshold is not the whole question.** It asks whether a batch
+ * is wide enough to pay for an unpack. It does not ask what the unpack costs
+ * to *keep* -- and the scratch is permanent GPU residency, competing with the
+ * weights themselves.
+ *
+ * That distinction is not theoretical. Measured on Qwen2.5-Coder 7B, an
+ * 8.1 GB model on a device that wants 12.7 GB resident:
+ *
+ *     prefill512   every weight unpacked   20.1-33.1 s
+ *                  the head left alone      1.6-1.8 s
+ *                  no unpacking at all      6.6-7.6 s
+ *
+ * The head is one matrix out of roughly two hundred, and unpacking it turned
+ * a 4x win into a 4x loss. Its scratch is 3584 x 152064 x 2 = 1.09 GB, where
+ * a layer's largest is 136 MB.
+ *
+ * **Every one of those shapes is faster unpacked when measured alone** --
+ * the head most of all, 358.1 ms against 39.3 ms, 9.1x. So this is not a
+ * shape that MPS handles badly, and the per-operation benchmark cannot see
+ * the problem at all. What a model adds is that all of it has to be resident
+ * at once.
+ *
+ * ## What the number is, and what it is not
+ *
+ * The measurement establishes that 136 MB of scratch is fine here and 1.09 GB
+ * is not. It does not establish where between them the line belongs: 1/32 of
+ * the working set puts it at 397 MB on this device, which clears the layer
+ * shapes by 2.9x and refuses the head by 2.7x, and any divisor from about 8
+ * to 80 would have done the same thing on this model.
+ *
+ * ## The cap is a workaround for doing the whole matrix at once
+ *
+ * Unpacking a block of output rows at a time would bound the scratch to that
+ * block whatever the weight's size, keep the head on the fast path, and need
+ * no cap. That wants an `encode_gemm` that takes an offset and a row stride,
+ * which this one does not. **#292.**
+ */
+unsigned int q8_dequant_share() {
+    static const unsigned int n = [] {
+        const char* e = std::getenv("JLIB_Q8_DEQUANT_SHARE");
+
+        return e ? unsigned(std::atoi(e)) : 32u;
+    }();
+
+    return n;
+}
+
 unsigned int q8_reduce_below() {
     // Overridable so the two paths can be compared inside one process, which
     // is the only way to compare them without a rebuild and a different
@@ -919,6 +1096,7 @@ struct pipelines {
     id<MTLComputePipelineState> rope = nil;
     id<MTLComputePipelineState> gather = nil;
     id<MTLComputePipelineState> q8_gemv = nil;        // one thread per row
+    id<MTLComputePipelineState> q8_dequant = nil;     // one thread per block
     id<MTLComputePipelineState> q8_gemv_simd = nil;   // a SIMD group per row
     id<MTLComputePipelineState> attn_scores = nil;
     id<MTLComputePipelineState> attn_weighted = nil;
@@ -982,6 +1160,7 @@ pipelines& compiled(id<MTLDevice> gpu) {
         { "k_attn_scores", &p.attn_scores },
         { "k_attn_weighted", &p.attn_weighted },
         { "k_rms_norm",   &p.rms_norm },
+        { "k_q8_dequant", &p.q8_dequant },
     };
 
     // The q8 multiply is built twice from one source, specialised on how many
@@ -1078,6 +1257,10 @@ stream<T>::stream(std::shared_ptr<device> d)
     m_impl->rope = p.rope;
     m_impl->gather = p.gather;
     m_impl->q8_gemv = p.q8_gemv;
+    m_impl->q8_dequant = p.q8_dequant;
+
+    if(const unsigned int share = q8_dequant_share())
+        m_impl->dequant_cap = d->working_set() / share;
     m_impl->q8_gemv_simd = p.q8_gemv_simd;
     m_impl->attn_scores = p.attn_scores;
     m_impl->attn_weighted = p.attn_weighted;
@@ -1445,6 +1628,32 @@ qweight::qweight(std::shared_ptr<device> d, unsigned int rows, unsigned int cols
 qweight::~qweight() {}
 
 template<typename T>
+tensor<T>& stream<T>::dequantised(const qweight& w, unsigned int K,
+                                  unsigned int N)
+{
+    std::unique_ptr<tensor<T> >& slot =
+        m_impl->dequantised[std::make_pair(K, N)];
+
+    if(!slot) slot.reset(new tensor<T>(m_device, K, N));
+
+    open();
+
+    const unsigned int blocks = (K / 32) * N;
+
+    [m_impl->enc setComputePipelineState:m_impl->q8_dequant];
+    [m_impl->enc setBuffer:w.m_impl->buf offset:0 atIndex:0];
+    [m_impl->enc setBuffer:slot->m_impl->buf offset:0 atIndex:1];
+    [m_impl->enc setBytes:&K length:sizeof(K) atIndex:2];
+    [m_impl->enc setBytes:&blocks length:sizeof(blocks) atIndex:3];
+
+    dispatch(m_impl->enc, m_impl->q8_dequant, blocks);
+
+    m_impl->pending++;
+
+    return *slot;
+}
+
+template<typename T>
 void stream<T>::multiply_tn(const qweight& w, const tensor<T>& x, tensor<T>& y,
                             float alpha, float beta)
 {
@@ -1459,9 +1668,32 @@ void stream<T>::multiply_tn(const qweight& w, const tensor<T>& x, tensor<T>& y,
         throw typename tensor<T>::exception("q8 multiply_tn: the output shape "
                                             "does not match");
 
-    open();
-
     const unsigned int ncols = x.cols();
+
+    // **Wide enough to pay for unpacking the weights first.**
+    //
+    // MPS does 11-13 TFLOP/s on these matrices and the kernel below does 1.5,
+    // so for a prefill batch the fastest thing this can do is stop being
+    // clever: dequantise into a scratch and hand the problem to the GEMM that
+    // is already linked in. One pass over the weights, spread over every
+    // column in the batch.
+    //
+    // Not at decode, where the batch is one column and that pass would cost
+    // eight times the matmul it replaces. See q8_dequant_above().
+    // Wide enough to pay for the unpack, and small enough to keep.
+    const unsigned long bytes = (unsigned long)K * N * sizeof(T);
+    const unsigned long cap = m_impl->dequant_cap;
+
+    if(q8_dequant_above() && ncols >= q8_dequant_above() &&
+       (!cap || bytes <= cap)) {
+        // The plain path rather than the encoder underneath it: same GEMM,
+        // and it is the one every other caller has been using.
+        multiply_tn(dequantised(w, K, N), x, y, alpha, beta);
+
+        return;
+    }
+
+    open();
 
     // One thread per output row per tile of columns.  A "unit" is that pair.
     const unsigned int tiles = (ncols + 8 - 1) / 8;

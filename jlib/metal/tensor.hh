@@ -264,6 +264,15 @@ public:
     void multiply_tn(const qweight& w, const tensor<T>& x, tensor<T>& y,
                      float alpha, float beta);
 
+    /**
+     * W unpacked into a plain tensor, for handing to MPS.
+     *
+     * One scratch per shape, kept and reused; see the member it fills. Encodes
+     * the unpack every call, because the weight may have changed even when the
+     * shape has not.
+     */
+    tensor<T>& dequantised(const qweight& w, unsigned int K, unsigned int N);
+
     /** RMS normalisation down each column, scaled by a per-row weight. */
     void rms_norm(const tensor<T>& in, const tensor<T>& weight, tensor<T>& out,
                   float eps = 1e-5f);

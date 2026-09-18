@@ -88,6 +88,15 @@ public:
     /** Whether this device shares memory with the CPU rather than copying. */
     bool unified() const;
 
+    /**
+     * What the device would like to keep resident, in bytes.
+     *
+     * Metal's `recommendedMaxWorkingSetSize`. Not a hard limit -- allocating
+     * past it works and starts costing -- which is exactly why a caller that
+     * keeps a large scratch around wants to know the number.
+     */
+    unsigned long working_set() const;
+
 private:
     device();
 
