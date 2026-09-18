@@ -527,9 +527,37 @@ struct site {
     std::string key;
 };
 
-struct options {
-    unsigned short port = 8080;
+/**
+ * One port to bind, and what it does.
+ *
+ * `ssl` is nginx's `listen 443 ssl;`, which used to be parsed and thrown away
+ * because a single-port server took its TLS from having a certificate at all.
+ * With several ports it is the only way to say *which* of them is encrypted,
+ * so it now decides.
+ *
+ * `redirect` is `listen 80 redirect;` -- answer 301 and point at the TLS port,
+ * which is what a plaintext port mostly exists for. Per listener rather than a
+ * server-wide switch, so a plaintext port that genuinely serves can sit beside
+ * one that bounces.
+ */
+struct listen_spec {
     std::string    host = "127.0.0.1";
+    unsigned short port = 8080;
+    bool           ssl = false;
+    bool           redirect = false;
+    std::size_t    line = 0;
+};
+
+struct options {
+    /**
+     * Empty means the default one, filled in after the walk.
+     *
+     * Not defaulted to a single entry here: "the operator said nothing" and
+     * "the operator asked for 8080" have to be told apart, or a --port flag
+     * could not replace a list it was never sure existed.
+     */
+    std::vector<listen_spec> listens;
+
     std::string    root = ".";
     std::string    prefix = "/";
     std::string    access_log = "-";
@@ -707,7 +735,15 @@ inline void as_listen(const jlib::util::conf::directive& d, options& o) {
 
     const std::string port = colon == std::string::npos ? s : s.substr(colon + 1);
 
-    if(colon != std::string::npos) o.host = s.substr(0, colon);
+    listen_spec bind;
+
+    bind.line = d.line;
+
+    // A host only when one was given.  This used to assign into a shared
+    // `o.host`, so `listen 1.2.3.4:443;` followed by `listen 8080;` left the
+    // second listening on 1.2.3.4 -- the assignment was conditional and the
+    // field was not per-listener.  A struct per directive is what fixes it.
+    if(colon != std::string::npos) bind.host = s.substr(0, colon);
 
     for(std::size_t i = 0; i < port.size(); i++) {
         if(port[i] < '0' || port[i] > '9') wrong(d, "wants a port, got \"" + s + "\"");
@@ -715,14 +751,25 @@ inline void as_listen(const jlib::util::conf::directive& d, options& o) {
 
     if(port.empty()) wrong(d, "wants a port, got \"" + s + "\"");
 
-    o.port = (unsigned short)std::atoi(port.c_str());
+    bind.port = (unsigned short)std::atoi(port.c_str());
 
-    // `listen 443 ssl;` is nginx's spelling and it is accepted, but it is a
-    // *claim* rather than a switch -- what actually turns TLS on is having a
-    // certificate.  Checked at the end of the walk rather than here, because
-    // ssl_certificate may legitimately come after listen.
-    if(d.args.size() > 1 && d.arg(1) != "ssl")
-        wrong(d, "does not know \"" + d.arg(1) + "\"");
+    for(std::size_t i = 1; i < d.args.size(); i++) {
+        if(d.arg(i) == "ssl") bind.ssl = true;
+        else if(d.arg(i) == "redirect") bind.redirect = true;
+        else wrong(d, "does not know \"" + d.arg(i) + "\"");
+    }
+
+    // No check that ssl and redirect are not both given: they are opposites,
+    // but `listen` takes at most two arguments, so saying both needs three and
+    // the arity check has already refused it.  A guard here would be a branch
+    // that cannot run.
+
+    for(std::size_t i = 0; i < o.listens.size(); i++) {
+        if(o.listens[i].port == bind.port && o.listens[i].host == bind.host)
+            wrong(d, "binds " + s + " twice");
+    }
+
+    o.listens.push_back(bind);
 }
 
 inline void apply_location(const jlib::util::conf::directive& d, options& o) {
@@ -815,6 +862,12 @@ inline void apply_http(const jlib::util::conf::directive& d, options& o) {
     blocked(d, 0, 0);
 
     for(const jlib::util::conf::directive& e : d.block) {
+        // Two, not three: `ssl` and `redirect` are the only keywords and they
+        // are mutually exclusive, so no legal `listen` has three arguments --
+        // and keeping the bound tight is what lets a forgotten ";" be reported
+        // as one.  `listen 8080` followed by `root /srv;` is three arguments,
+        // and the arity message names the cause; a wider bound would let it
+        // through to be refused as an unknown keyword instead.
         if(e.name == "listen") { plain(e, 1, 2); as_listen(e, o); }
         else if(e.name == "root") { plain(e, 1, 1); o.root = e.arg(0); }
         else if(e.name == "prefix") { plain(e, 1, 1); o.prefix = e.arg(0); }
@@ -833,6 +886,45 @@ inline void apply_http(const jlib::util::conf::directive& d, options& o) {
         else if(e.name == "location") apply_location(e, o);
         else if(e.name == "server") apply_server(e, o);
         else throw jlib::util::conf::error("\"" + e.name + "\" is not an http directive", e.line);
+    }
+
+    // **The end-of-walk checks**, which have to be here rather than in
+    // as_listen: `ssl_certificate` may legitimately come after the `listen`
+    // that needs it, so nothing about TLS can be decided until the block is
+    // read.  The comment in as_listen promised this and it did not exist.
+    if(o.cert.empty() != o.key.empty()) {
+        wrong(d, o.cert.empty()
+                     ? "has ssl_certificate_key but no ssl_certificate"
+                     : "has ssl_certificate but no ssl_certificate_key");
+    }
+
+    bool any_ssl = false;
+
+    for(std::size_t i = 0; i < o.listens.size(); i++) {
+        if(o.listens[i].ssl) any_ssl = true;
+    }
+
+    // `listen 443 ssl;` with nothing to present is a configuration that cannot
+    // work: the handshake would fail on every connection, and it would fail at
+    // the first client rather than at startup where somebody is watching.
+    if(any_ssl && o.cert.empty()) {
+        throw jlib::util::conf::error(
+            "\"listen ... ssl\" needs ssl_certificate and ssl_certificate_key",
+            d.line);
+    }
+
+    for(std::size_t i = 0; i < o.listens.size(); i++) {
+        if(!o.listens[i].redirect) continue;
+
+        // Refused rather than ignored.  A redirect with nowhere to point is
+        // the shape that silently serves nothing: every request to that port
+        // would be answered with a Location naming a port nobody is listening
+        // on, which looks like the server is up and is worse than a refusal.
+        if(!any_ssl) {
+            throw jlib::util::conf::error(
+                "\"listen ... redirect\" needs a \"listen ... ssl\" to point at",
+                o.listens[i].line);
+        }
     }
 }
 

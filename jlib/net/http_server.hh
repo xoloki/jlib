@@ -711,13 +711,64 @@ public:
            const sys::server::policy& p = sys::server::policy(),
            const options& o = options());
 
+    /**
+     * Several ports at once, each with its own identity.
+     *
+     * One route table, one set of guards, one limiter, one `on_request` hook
+     * and one connection cap across all of them -- **nothing here is keyed by
+     * transport**, so a route registered once is served on every port. That is
+     * the whole of what this buys over running the program twice.
+     *
+     * The usual shape is a plaintext port and a TLS one:
+     *
+     *     std::vector<sys::server::bound> ports;
+     *     ports.push_back(sys::server::bound(sys::listener(80, host)));
+     *     ports.push_back(sys::server::bound(sys::listener(443, host), tls));
+     */
+    server(std::vector<sys::server::bound> ports,
+           const sys::server::policy& p = sys::server::policy(),
+           const options& o = options());
+
+    /** The same, serving on a reactor rather than on threads. */
+    server(async_t, std::vector<sys::server::bound> ports,
+           const sys::server::policy& p = sys::server::policy(),
+           const options& o = options());
+
     ~server();
 
     server(const server&) = delete;
     server& operator=(const server&) = delete;
 
+    /**
+     * The first listener's port, and whether *that* one is TLS.
+     *
+     * They describe the same listener, as sys::server's do and for the same
+     * reason: read apart they would let a caller dial a plaintext port over
+     * TLS while each answer was separately true.
+     */
     unsigned short port() const;
     bool tls() const;
+
+    /** Every port, in the order they were given. */
+    std::vector<unsigned short> ports() const;
+
+    /**
+     * Answer 301 to anything arriving on `from`, pointing at `to` over https.
+     *
+     * The paradigm port 80 exists for. `Location` is built from the authority
+     * the request named, so a redirect serves every site on the listener
+     * without being told what they are; the port is omitted when `to` is 443
+     * and included otherwise.
+     *
+     * **It is decided before the guards are**, which is the point rather than
+     * an optimisation: `Basic` credentials are base64, and a 401 on a
+     * plaintext port asks for a password that anyone on the path can read.
+     * Redirecting first means the challenge only ever goes out over TLS.
+     *
+     * Rate limiting still comes first, so a flood meets the cheap defence
+     * before this one.
+     */
+    void redirect_insecure(unsigned short from, unsigned short to);
 
     /** http:// or https://, with the port, and that path. */
     std::string url(const std::string& path = "/") const;
@@ -1481,8 +1532,21 @@ private:
     std::function<void(const access&)> m_on_request;
     limiter m_limits;
     handler m_otherwise;
+    /** Where an insecure request should have gone, or "" if it should stay. */
+    std::string redirected(const sys::peer& from, const std::string& authority,
+                           const std::string& target) const;
+
     std::unique_ptr<sys::server> m_transport;
     bool m_tls = false;
+
+    /**
+     * Plaintext port -> the https port it is answered with.
+     *
+     * A map rather than a flag because the marker is per listener: a server
+     * may have a port that redirects and another that genuinely serves.
+     * Empty for nearly every server, and looked at once per request.
+     */
+    std::map<unsigned short, unsigned short> m_redirect;
 };
 
 }
