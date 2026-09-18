@@ -642,6 +642,288 @@ static void credentials_file() {
     if(std::system(rm.c_str()) != 0) { }
 }
 
+
+// ------------------------------------------------------------- the config
+
+/** Write `text` to a scratch file and return its path. */
+static std::string conf_file(const std::string& text) {
+    const std::string path = "jhttpd_conf_test.conf";
+    std::ofstream     out(path.c_str());
+
+    out << text;
+    out.close();
+
+    return path;
+}
+
+/** Read a config, or return the message it was refused with. */
+static std::string refusal(const std::string& text, jhttpd::options& o) {
+    const std::string path = conf_file(text);
+
+    try {
+        jhttpd::read_config(path, o);
+        std::remove(path.c_str());
+
+        return "";
+    }
+    catch(const std::exception& e) {
+        std::remove(path.c_str());
+
+        return e.what();
+    }
+}
+
+static std::string refusal(const std::string& text) {
+    jhttpd::options o;
+
+    return refusal(text, o);
+}
+
+static void what_a_config_sets() {
+    std::cout << "\nwhat a config sets:\n";
+
+    jhttpd::options o;
+
+    const std::string why = refusal(
+        "# a server\n"
+        "threads 7;\n"
+        "daemon;\n"
+        "pid /var/run/jhttpd.pid;\n"
+        "user www-data www-group;\n"
+        "error_log /var/log/err.log;\n"
+        "\n"
+        "http {\n"
+        "    listen 127.0.0.1:9443;\n"
+        "    root /srv/www;\n"
+        "    prefix /pub;\n"
+        "    access_log /var/log/acc.log;\n"
+        "    cache_control \"public, max-age=60\";\n"
+        "    ssl_certificate /etc/c.pem;\n"
+        "    ssl_certificate_key /etc/k.pem;\n"
+        "    request_rate 2.5;\n"
+        "    request_burst 10;\n"
+        "    max_per_address 4;\n"
+        "    max_connections 64;\n"
+        "    keepalive_requests 20;\n"
+        "    keepalive_timeout 45;\n"
+        "    client_header_timeout 3;\n"
+        "    io_timeout 15;\n"
+        "}\n", o);
+
+    ok("  it is accepted", why.empty(), why);
+
+    ok("  threads", o.threads == 7, std::to_string(o.threads));
+    ok("  daemon", o.daemon);
+    ok("  pid", o.pidfile == "/var/run/jhttpd.pid", o.pidfile);
+    ok("  user and group", o.user == "www-data" && o.group == "www-group",
+       o.user + ":" + o.group);
+    ok("  error_log", o.error_log == "/var/log/err.log", o.error_log);
+
+    ok("  listen splits host from port",
+       o.host == "127.0.0.1" && o.port == 9443,
+       o.host + ":" + std::to_string(o.port));
+    ok("  root", o.root == "/srv/www", o.root);
+    ok("  prefix", o.prefix == "/pub", o.prefix);
+    ok("  access_log", o.access_log == "/var/log/acc.log", o.access_log);
+    ok("  cache_control keeps its spaces",
+       o.cache_control == "public, max-age=60", o.cache_control);
+    ok("  the certificate pair",
+       o.cert == "/etc/c.pem" && o.key == "/etc/k.pem", o.cert + " " + o.key);
+    ok("  a fractional rate", o.rate == 2.5, std::to_string(o.rate));
+    ok("  burst", o.burst == 10);
+    ok("  max_per_address", o.max_per_address == 4);
+    ok("  max_connections", o.max_connections == 64);
+    ok("  keepalive_requests", o.max_requests == 20);
+    ok("  keepalive_timeout", o.idle_timeout == 45);
+    ok("  client_header_timeout", o.initial_idle_timeout == 3);
+    ok("  io_timeout", o.io_timeout == 15);
+
+    // A port on its own leaves the host alone, which is the common case and
+    // the one where getting it wrong would bind somewhere unintended.
+    jhttpd::options b;
+
+    ok("  a bare port does not touch the host",
+       refusal("http { listen 8081; }", b).empty() &&
+           b.port == 8081 && b.host == jhttpd::options().host,
+       b.host + ":" + std::to_string(b.port));
+
+    jhttpd::options v6;
+
+    ok("  an IPv6 address keeps its colons",
+       refusal("http { listen [::1]:8082; }", v6).empty() &&
+           v6.host == "[::1]" && v6.port == 8082,
+       v6.host + " " + std::to_string(v6.port));
+
+    jhttpd::options off;
+
+    ok("  \"off\" turns a flag off, as nginx spells it",
+       refusal("daemon off;\nasync off;\n", off).empty() &&
+           !off.daemon && !off.async);
+}
+
+static void sites_and_guards() {
+    std::cout << "\nsites and guards:\n";
+
+    jhttpd::options o;
+
+    const std::string why = refusal(
+        "http {\n"
+        "    root /srv/www;\n"
+        "    server {\n"
+        "        server_name other.example;\n"
+        "        root /srv/other;\n"
+        "    }\n"
+        "    server {\n"
+        "        server_name tls.example;\n"
+        "        root /srv/tls;\n"
+        "        ssl_certificate /etc/t.pem;\n"
+        "        ssl_certificate_key /etc/t.key;\n"
+        "    }\n"
+        "    location /private {\n"
+        "        auth_basic \"restricted area\";\n"
+        "        auth_basic_user_file /etc/jhttpd/users;\n"
+        "    }\n"
+        "}\n", o);
+
+    ok("  it is accepted", why.empty(), why);
+
+    ok("  two sites", o.vhosts.size() == 2, std::to_string(o.vhosts.size()));
+    ok("  the first has no certificate",
+       o.vhosts.size() == 2 && o.vhosts[0].name == "other.example" &&
+           o.vhosts[0].root == "/srv/other" && o.vhosts[0].cert.empty());
+    ok("  the second has one",
+       o.vhosts.size() == 2 && o.vhosts[1].cert == "/etc/t.pem" &&
+           o.vhosts[1].key == "/etc/t.key");
+    ok("  the default root is untouched by either", o.root == "/srv/www", o.root);
+
+    ok("  one guard", o.protect.size() == 1, std::to_string(o.protect.size()));
+
+    // **The shape that replaces PREFIX:REALM:FILE.**  The realm has a space in
+    // it and the prefix is a path; in the flag those had to be pulled apart by
+    // counting colons from opposite ends.  Here they are three separate
+    // directives and nothing has to be guessed.
+    ok("  its prefix, realm and file",
+       o.protect.size() == 1 && o.protect[0].prefix == "/private" &&
+           o.protect[0].realm == "restricted area" &&
+           o.protect[0].file == "/etc/jhttpd/users",
+       o.protect.size() ? o.protect[0].realm : "");
+
+    jhttpd::options none;
+
+    ok("  a location with neither directive is not a guard",
+       refusal("http { location /x { } }", none).empty() && none.protect.empty());
+}
+
+static void what_a_config_refuses() {
+    std::cout << "\nwhat a config refuses:\n";
+
+    // Each of these is a mistake somebody will make, and each must stop the
+    // server rather than be warned about -- a config that half-applied is how
+    // a server ends up not doing what its operator believes it is doing.
+    struct { const char* text; const char* wanted; const char* why; } cases[] = {
+        { "http {\n    listen 8080\n    root /srv;\n}\n", "line 2",
+          "a missing semicolon is caught by the arity check" },
+        { "http {\n    listen 8080\n    root /srv;\n}\n", "missing \";\"",
+          "and named as one, since the count alone would puzzle anybody" },
+        { "http { listne 8080; }", "not an http directive",
+          "a misspelled directive" },
+        { "lisen 80;", "not a directive here",
+          "and one at the top level" },
+        { "http { server_name x; }", "not an http directive",
+          "a directive in the wrong block" },
+        // No ";" after the block: a directive has one or the other and never
+        // both, so `daemon { };` is refused by the grammar before this check
+        // is reached, and would test the parser rather than the walker.
+        { "daemon { }", "does not take a { } block",
+          "a block where none belongs" },
+        { "http;", "wants a { } block",
+          "and none where one does" },
+        { "http { request_rate abc; }", "wants a number",
+          "a number that is not one" },
+        { "http { request_rate -1; }", "wants a number",
+          "and a negative one" },
+        { "http { listen http; }", "wants a port",
+          "a port that is not one" },
+        { "http { listen 8080 quic; }", "does not know",
+          "a listen option nobody implements" },
+        { "daemon maybe;", "wants \"on\" or \"off\"",
+          "a flag that is neither" },
+        { "http { location /x { auth_basic \"r\"; } }", "no auth_basic_user_file",
+          "half a guard, which would ask for a password it cannot check" },
+        { "http { location /x { auth_basic_user_file /f; } }", "no auth_basic",
+          "and the other half, which no browser could answer" },
+        { "http { server { root /srv; } }", "needs a server_name",
+          "a site with no name" },
+        { "http { server { server_name a; } }", "needs a root",
+          "a site with no root" },
+        { "http { server { server_name a; root /r; ssl_certificate /c; } }",
+          "both ssl_certificate", "half a certificate" },
+        { "http { } http { }", "more than once",
+          "two http blocks, which would silently keep the last" },
+        { "http {\n    listen 8080;\n", "expected \"}\"",
+          "and a syntax error still comes through with its line" }
+    };
+
+    for(std::size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const std::string got = refusal(cases[i].text);
+
+        ok(std::string("  ") + cases[i].why,
+           !got.empty() && got.find(cases[i].wanted) != std::string::npos,
+           got.empty() ? "accepted" : got);
+    }
+
+    // Break-the-guard: the cases above all assert a *refusal*, and a
+    // read_config that threw at everything would pass every one of them.
+    ok("  and a config with none of those mistakes is accepted",
+       refusal("# fine\nthreads 2;\nhttp { listen 8080; root /srv; }\n").empty());
+
+    // A file that is not there is not a syntax error, and the message has to
+    // name it -- this is the most likely failure in the field by a distance.
+    jhttpd::options o;
+    std::string     missing;
+
+    try { jhttpd::read_config("no-such-config-here.conf", o); }
+    catch(const std::exception& e) { missing = e.what(); }
+
+    ok("  a missing file names itself",
+       missing.find("no-such-config-here.conf") != std::string::npos, missing);
+
+    // **The shipped example has to parse.** It is the documentation for this
+    // feature, and documentation that the program would refuse is worse than
+    // none -- the first thing anybody does with it is uncomment a line.
+    // Skipped rather than failed when it cannot be found, since the path
+    // depends on how the tree was configured and a test that fails on a
+    // VPATH build is a test people learn to ignore.
+    const char* const src = std::getenv("srcdir");
+
+    if(src) {
+        const std::string path =
+            std::string(src) + "/../jlib/apps/jhttpd.conf.example";
+
+        std::ifstream in(path.c_str());
+
+        if(in) {
+            in.close();
+
+            jhttpd::options e;
+            std::string     why;
+
+            try { jhttpd::read_config(path, e); }
+            catch(const std::exception& x) { why = x.what(); }
+
+            ok("  the shipped example config parses", why.empty(), why);
+
+            // Not vacuous: it must actually have set something.
+            ok("  and says what it looks like it says",
+               e.threads == 4 && e.port == 8080 && e.root == "/srv/www",
+               std::to_string(e.threads) + " " + std::to_string(e.port) +
+                   " " + e.root);
+        }
+        else std::cout << "  ..     no example config beside the test\n";
+    }
+    else std::cout << "  ..     srcdir unset, not looking for the example\n";
+}
+
 int main() {
     std::cout << "app_jhttpd_test\n";
 
@@ -656,6 +938,10 @@ int main() {
 
         the_user_that_got_in(false);
         the_user_that_got_in(true);
+
+        what_a_config_sets();
+        sites_and_guards();
+        what_a_config_refuses();
     }
     catch(std::exception& e) {
         std::cerr << "app_jhttpd_test: " << e.what() << "\n";

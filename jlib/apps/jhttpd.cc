@@ -47,6 +47,7 @@
 
 #include <jlib/net/http_server.hh>
 #include <jlib/sys/sys.hh>
+#include <jlib/util/conf.hh>
 
 #include <csignal>
 #include <list>
@@ -64,52 +65,15 @@ using namespace jlib::net;
 
 namespace {
 
-struct options {
-    unsigned short port = 8080;
-    std::string    host = "127.0.0.1";
-    std::string    root = ".";
-    std::string    prefix = "/";
-    std::string    access_log = "-";
-    std::string    error_log = "-";
-    std::string    cache_control;
-    unsigned int   threads = 4;
-    bool           async = false;
+using jhttpd::guard;
+using jhttpd::options;
+using jhttpd::read_config;
+using jhttpd::site;
 
-    std::string    cert;
-    std::string    key;
-
-    // Zero is off for both, which is what the library defaults to.  jhttpd
-    // does not pick a limit on the operator's behalf: a rate that is wrong is
-    // worse than none, because it is wrong in a way that looks deliberate.
-    double         rate = 0;
-    double         burst = 0;
-    std::size_t    max_per_address = 0;
-
-    // These do have defaults, because they are the library's and a server
-    // that quietly widened them would be removing a bound somebody is
-    // relying on.  Mirrored here so --help can print them.
-    std::size_t    max_connections = 256;
-    double         io_timeout = 30;
-    double         initial_idle_timeout = 5;
-    double         idle_timeout = 60;
-    std::size_t    max_requests = 100;
-
-    // PREFIX:REALM:FILE, in the order they were given.  A list rather than one,
-    // because a server with a private area usually has more than one of them.
-    std::vector<std::string> protect;
-
-    // NAME:ROOT, repeatable.  --root stays the default site, which is what a
-    // request naming something nobody claimed gets.
-    std::vector<std::string> vhosts;
-
-    bool           hash_password = false;
-
-    std::string    user;
-    std::string    group;
-    std::string    pidfile;
-    bool           allow_root = false;
-    bool           daemon = false;
-};
+bool split_vhost(const std::string& spec, std::string& name, std::string& root,
+                 std::string& cert, std::string& key);
+bool split_protect(const std::string& spec, std::string& prefix,
+                   std::string& realm, std::string& file);
 
 void usage(std::ostream& o, const char* argv0) {
     o << "usage: " << argv0 << " [options]\n"
@@ -149,6 +113,7 @@ void usage(std::ostream& o, const char* argv0) {
       << "                    and --cert the certificate for every other name.\n"
       << "\n"
       << "  Authentication:\n"
+      << "  --config FILE               an nginx-shaped config; flags override it\n"
       << "  --protect PREFIX:REALM:FILE\n"
       << "                    require a credential under PREFIX.  FILE holds\n"
       << "                    one user:hash line each, Argon2id, mode 600.\n"
@@ -209,8 +174,37 @@ bool parse(int argc, char** argv, options& o) {
             else if(a == "--initial-idle")
                 o.initial_idle_timeout = std::atof(v.c_str());
             else if(a == "--idle-timeout") o.idle_timeout = std::atof(v.c_str());
-            else if(a == "--protect") o.protect.push_back(v);
-            else if(a == "--vhost") o.vhosts.push_back(v);
+            else if(a == "--config") o.config = v;
+            else if(a == "--protect") {
+                // **Split here rather than at the point of use.**  A spec that
+                // cannot be read is a mistake in the command line, and the
+                // command line is what the operator is looking at right now --
+                // reporting it three hundred lines later, after the logs are
+                // open and the privileges dropped, tells them the same thing
+                // at a worse moment.
+                guard g;
+
+                if(!split_protect(v, g.prefix, g.realm, g.file)) {
+                    std::cerr << "jhttpd: --protect wants PREFIX:REALM:FILE, "
+                              << "got \"" << v << "\"\n";
+
+                    return false;
+                }
+
+                o.protect.push_back(g);
+            }
+            else if(a == "--vhost") {
+                site s;
+
+                if(!split_vhost(v, s.name, s.root, s.cert, s.key)) {
+                    std::cerr << "jhttpd: --vhost wants NAME:ROOT or "
+                              << "NAME:ROOT:CERT:KEY, got \"" << v << "\"\n";
+
+                    return false;
+                }
+
+                o.vhosts.push_back(s);
+            }
             else if(a == "--user") o.user = v;
             else if(a == "--group") o.group = v;
             else if(a == "--pidfile") o.pidfile = v;
@@ -339,6 +333,27 @@ std::string pattern_for(const std::string& prefix) {
 int main(int argc, char** argv) {
     options o;
 
+    // **The config is read before any flag is applied, so a flag overrides
+    // it.**  Found by a scan of its own rather than from inside parse(),
+    // because parse() is what does the overriding: reading the file as the
+    // loop reached it would make the outcome depend on where --config sat
+    // among the other flags, so `--port 9 --config f` and `--config f --port
+    // 9` would disagree.  They must not.
+    for(int i = 1; i + 1 < argc; i++) {
+        if(std::string(argv[i]) == "--config") o.config = argv[i + 1];
+    }
+
+    if(!o.config.empty()) {
+        try {
+            read_config(o.config, o);
+        }
+        catch(const std::exception& e) {
+            std::cerr << "jhttpd: " << e.what() << "\n";
+
+            return 2;
+        }
+    }
+
     if(!parse(argc, argv, o)) return 2;
 
     // Before anything is bound or opened: this reads a password and prints a
@@ -416,23 +431,15 @@ int main(int argc, char** argv) {
     o.cert = sys::absolute_path(o.cert);
     o.key = sys::absolute_path(o.key);
 
-    for(std::size_t i = 0; i < o.protect.size(); i++) {
-        std::string prefix, realm, file;
-
-        if(split_protect(o.protect[i], prefix, realm, file))
-            o.protect[i] = prefix + ":" + realm + ":" + sys::absolute_path(file);
-    }
+    for(std::size_t i = 0; i < o.protect.size(); i++)
+        o.protect[i].file = sys::absolute_path(o.protect[i].file);
 
     for(std::size_t i = 0; i < o.vhosts.size(); i++) {
-        std::string name, root, cert, key;
+        o.vhosts[i].root = sys::absolute_path(o.vhosts[i].root);
 
-        if(!split_vhost(o.vhosts[i], name, root, cert, key)) continue;
-
-        o.vhosts[i] = name + ":" + sys::absolute_path(root);
-
-        if(!cert.empty()) {
-            o.vhosts[i] += ":" + sys::absolute_path(cert) + ":" +
-                           sys::absolute_path(key);
+        if(!o.vhosts[i].cert.empty()) {
+            o.vhosts[i].cert = sys::absolute_path(o.vhosts[i].cert);
+            o.vhosts[i].key  = sys::absolute_path(o.vhosts[i].key);
         }
     }
 
@@ -528,20 +535,19 @@ int main(int argc, char** argv) {
         // no default certificate to fall back to for every other name, and a
         // listener with no identity cannot speak TLS at all.
         for(std::size_t i = 0; i < o.vhosts.size(); i++) {
-            std::string name, root, cert, key;
+            const site& v = o.vhosts[i];
 
-            if(!split_vhost(o.vhosts[i], name, root, cert, key) || cert.empty())
-                continue;
+            if(v.cert.empty()) continue;
 
             if(tls.empty()) {
-                std::cerr << "jhttpd: --vhost \"" << name << "\" has a "
+                std::cerr << "jhttpd: site \"" << v.name << "\" has a "
                           << "certificate but the server has none; give "
                           << "--cert and --key too\n";
 
                 return 2;
             }
 
-            tls.add_site(name, cert, key);
+            tls.add_site(v.name, v.cert, v.key);
         }
 
         std::unique_ptr<http::server> s;
@@ -559,24 +565,16 @@ int main(int argc, char** argv) {
         s->files(pattern_for(o.prefix), o.root, o.cache_control);
 
         for(std::size_t i = 0; i < o.vhosts.size(); i++) {
-            std::string name, root, cert, key;
-
-            if(!split_vhost(o.vhosts[i], name, root, cert, key)) {
-                std::cerr << "jhttpd: --vhost wants NAME:ROOT or "
-                          << "NAME:ROOT:CERT:KEY, got \"" << o.vhosts[i]
-                          << "\"\n";
-
-                return 2;
-            }
+            const site& v = o.vhosts[i];
 
             // Throws if the root cannot be resolved, which stops the server --
             // a vhost that silently serves nothing is worse than one that
             // refuses to start.
-            s->site_of(name).files(pattern_for(o.prefix), root,
-                                   o.cache_control);
+            s->site_of(v.name).files(pattern_for(o.prefix), v.root,
+                                     o.cache_control);
 
-            std::cerr << "jhttpd: " << name << " -> " << root
-                      << (cert.empty() ? "" : " (own certificate)") << "\n";
+            std::cerr << "jhttpd: " << v.name << " -> " << v.root
+                      << (v.cert.empty() ? "" : " (own certificate)") << "\n";
         }
 
         // Held for the life of the server: the verifier below closes over a
@@ -586,14 +584,9 @@ int main(int argc, char** argv) {
         std::list<jhttpd::credentials> guards;
 
         for(std::size_t i = 0; i < o.protect.size(); i++) {
-            std::string prefix, realm, file;
-
-            if(!split_protect(o.protect[i], prefix, realm, file)) {
-                std::cerr << "jhttpd: --protect wants PREFIX:REALM:FILE, got \""
-                          << o.protect[i] << "\"\n";
-
-                return 2;
-            }
+            const std::string& prefix = o.protect[i].prefix;
+            const std::string& realm  = o.protect[i].realm;
+            const std::string& file   = o.protect[i].file;
 
             guards.push_back(jhttpd::credentials());
 

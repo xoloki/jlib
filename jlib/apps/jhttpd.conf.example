@@ -1,0 +1,91 @@
+# jhttpd, in nginx's shape.
+#
+# Every flag has a directive here, and a flag always overrides what this file
+# says -- so you can keep a config and still `--port 9000` for an afternoon
+# without editing it.
+#
+# What jhttpd does NOT do is guess. An unknown directive, a number that is not
+# one, or a block that is missing half of a pair all stop the server with a
+# line number, because a config that half-applied is how a server ends up not
+# doing what you believe it is doing.
+
+# --- the process -------------------------------------------------------
+
+# user NAME [GROUP];   drop to this identity once the port is bound.
+# user        www-data www-data;
+
+# daemon;              or `daemon off;` -- absent means off.
+# pid         /var/run/jhttpd.pid;
+# allow_root;          run as root anyway, which you almost never want.
+
+threads     4;
+# async;               the coroutine server rather than thread-per-connection.
+error_log   -;         # "-" is stderr
+
+# --- the server --------------------------------------------------------
+
+http {
+    # listen PORT, or ADDR:PORT.  `listen 443 ssl;` is accepted as nginx
+    # spells it, but what actually turns TLS on is having a certificate.
+    listen      127.0.0.1:8080;
+
+    root        /srv/www;
+    prefix      /;
+    access_log  -;
+
+    # Sent with every 200, 206 and 304.  Quoted because it has a comma and a
+    # space in it, which is the whole reason quoting exists here.
+    # cache_control  "public, max-age=3600";
+
+    # ssl_certificate      /etc/jhttpd/cert.pem;
+    # ssl_certificate_key  /etc/jhttpd/key.pem;
+
+    # --- limits ---
+    #
+    # These keep jhttpd's own names rather than nginx's, because they do not
+    # mean what nginx's do: `limit_rate` there is bandwidth, and `limit_conn`
+    # is per-key rather than a total.  A familiar name that means something
+    # else is worse than an unfamiliar one.
+    #
+    # Zero is off for the first three, and jhttpd will not pick a number on
+    # your behalf: a rate that is wrong is worse than none, because it is
+    # wrong in a way that looks deliberate.
+    # request_rate     10;     # requests per second, per address
+    # request_burst    20;     # how many may arrive at once
+    # max_per_address   8;
+
+    max_connections        256;
+    keepalive_requests     100;   # per connection, before it is closed
+    keepalive_timeout       60;   # idle, between requests
+    client_header_timeout    5;   # to send the first one
+    io_timeout              30;
+
+    # --- a guarded path ---
+    #
+    # nginx's own shape, and the reason the config exists: as a flag this was
+    # --protect PREFIX:REALM:FILE, which had to be split by counting colons
+    # from the right because a path may contain one and so may a realm.
+    # Here they are three things and nothing has to be guessed.
+    #
+    # The file is what `jhttpd --hash-password` writes: USER:ARGON2ID-HASH,
+    # one per line, and it must not be world-readable.
+    #
+    # location /private {
+    #     auth_basic            "restricted area";
+    #     auth_basic_user_file  /etc/jhttpd/users;
+    # }
+
+    # --- another name on the same port ---
+    #
+    # A request whose Host matches gets this root instead.  Anything nobody
+    # claimed gets the `root` above.  A site may carry its own certificate,
+    # which is selected by SNI -- but only if the server has one too, since
+    # there would otherwise be nothing to fall back on.
+    #
+    # server {
+    #     server_name          other.example;
+    #     root                 /srv/other;
+    #     ssl_certificate      /etc/jhttpd/other.pem;
+    #     ssl_certificate_key  /etc/jhttpd/other.key;
+    # }
+}
