@@ -2,14 +2,14 @@ AM_CPPFLAGS = -I$(top_srcdir) $(JSONC_CFLAGS)
 
 lib_LTLIBRARIES = libjutil.la
 libjutil_la_SOURCES = abnf.cc jinja.cc Regex.cc MimeType.cc util.cc Date.cc xml.cc \
-                      URL.cc Headers.cc Timer.cc json.cc content_type.cc http.cc \
+                      URL.cc Headers.cc Timer.cc conf.cc json.cc content_type.cc http.cc \
                       encoded_word.cc
 libjutil_la_LDFLAGS = -version-info $(LIBJ_SO_VERSION) -release $(JLIB_RELEASE) -no-undefined
 libjutil_la_LIBADD = $(top_builddir)/jlib/sys/libjsys.la $(JSONC_LIBS)
 
 libjutilincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/util
 libjutilinclude_HEADERS = abnf.hh jinja.hh Regex.hh MimeType.hh util.hh Date.hh xml.hh \
-                          URL.hh Headers.hh Timer.hh json.hh \
+                          URL.hh Headers.hh Timer.hh conf.hh json.hh \
                           content_type.hh rfc2045.hh rfc5322.hh http.hh \
                           encoded_word.hh rfc2047.hh rfc3986.hh rfc9110.hh rfc9112.hh \
                           utf8.hh
