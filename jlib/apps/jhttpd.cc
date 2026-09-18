@@ -82,7 +82,7 @@ void usage(std::ostream& o, const char* argv0) {
       << "\n"
       << "  --root DIR        what to serve (default .)\n"
       << "  --prefix PATH     the URL prefix it is served under (default /)\n"
-      << "  --port N          (default 8080)\n"
+      << "  --port N          (default 8080; replaces any listen in the config)\n"
       << "  --host ADDR       (default 127.0.0.1; \"\" for every interface)\n"
       << "  --threads N       workers, 0 to serve inline (default 4)\n"
       << "  --async           one coroutine per connection instead of a pool\n"
@@ -154,8 +154,21 @@ bool parse(int argc, char** argv, options& o) {
 
             if(a == "--root") o.root = v;
             else if(a == "--prefix") o.prefix = v;
-            else if(a == "--port") o.port = (unsigned short)std::atoi(v.c_str());
-            else if(a == "--host") o.host = v;
+            // **A flag replaces the list rather than editing it.**  That is
+            // the only reading that keeps "a flag always overrides the file"
+            // true: --port 9000 against a config with two listeners has to
+            // mean one port, or the flag would be adding a third.  Both flags
+            // land on the same single entry, so --host and --port compose.
+            else if(a == "--port") {
+                if(o.listens.size() != 1) o.listens.assign(1, jhttpd::listen_spec());
+
+                o.listens[0].port = (unsigned short)std::atoi(v.c_str());
+            }
+            else if(a == "--host") {
+                if(o.listens.size() != 1) o.listens.assign(1, jhttpd::listen_spec());
+
+                o.listens[0].host = v;
+            }
             else if(a == "--threads") o.threads = unsigned(std::atoi(v.c_str()));
             else if(a == "--cache-control") o.cache_control = v;
             else if(a == "--access-log") o.access_log = v;
@@ -424,6 +437,11 @@ int main(int argc, char** argv) {
     // obvious one, since they are all resolved later than this.
     sys::daemon bg;
 
+    // Nothing said, by flag or by file: one loopback port, as it always was.
+    // Filled here rather than defaulted in the struct so that --port can tell
+    // "the operator asked for this" from "nobody asked for anything".
+    if(o.listens.empty()) o.listens.push_back(jhttpd::listen_spec());
+
     o.root = sys::absolute_path(o.root);
     o.access_log = sys::absolute_path(o.access_log);
     o.error_log = sys::absolute_path(o.error_log);
@@ -550,14 +568,43 @@ int main(int argc, char** argv) {
             tls.add_site(v.name, v.cert, v.key);
         }
 
+        // Every port, bound before anything is served.  A listener marked
+        // `ssl` gets the context; the rest get an empty one, which is what
+        // makes 80-and-443 one process.
+        std::vector<sys::server::bound> ports;
+
+        for(std::size_t i = 0; i < o.listens.size(); i++) {
+            const jhttpd::listen_spec& b = o.listens[i];
+
+            ports.push_back(sys::server::bound(
+                sys::listener(b.port, b.host),
+                b.ssl ? tls : sys::tls_context()));
+        }
+
+        // The bind happened above, so the port a `listen 0` asked the kernel
+        // for is known now and the redirect can name it.
+        unsigned short https_port = 0;
+
+        for(std::size_t i = 0; i < o.listens.size(); i++) {
+            if(o.listens[i].ssl) { https_port = ports[i].l.port(); break; }
+        }
+
         std::unique_ptr<http::server> s;
 
         if(o.async) {
-            s.reset(new http::server(http::server::async_t(), o.port, o.host,
-                                     tls, p, so));
+            s.reset(new http::server(http::server::async_t(), std::move(ports),
+                                     p, so));
         }
         else {
-            s.reset(new http::server(o.port, o.host, tls, p, so));
+            s.reset(new http::server(std::move(ports), p, so));
+        }
+
+        for(std::size_t i = 0; i < o.listens.size(); i++) {
+            if(!o.listens[i].redirect) continue;
+
+            // The config walk refused a redirect with no TLS listener, so
+            // https_port is set by the time this runs.
+            s->redirect_insecure(o.listens[i].port, https_port);
         }
 
         if(o.rate > 0) s->rate_limit(o.rate, o.burst);
@@ -679,9 +726,21 @@ int main(int argc, char** argv) {
         // tried to take a port.
         bg.ready();
 
-        std::cerr << "jhttpd: serving " << o.root << " on "
-                  << (s->tls() ? "https://" : "http://")
-                  << (o.host.empty() ? "*" : o.host) << ":" << s->port()
+        // One line per listener, because a server on two ports that printed
+        // one would be telling the operator half of what it did.
+        for(std::size_t i = 0; i < o.listens.size(); i++) {
+            const jhttpd::listen_spec& b = o.listens[i];
+
+            std::cerr << "jhttpd: " << (b.ssl ? "https://" : "http://")
+                      << (b.host.empty() ? "*" : b.host) << ":"
+                      << s->ports()[i]
+                      << (b.redirect
+                              ? " -> redirects to https"
+                              : " -> " + o.root)
+                      << "\n";
+        }
+
+        std::cerr << "jhttpd: serving " << o.root
                   << " under " << pattern_for(o.prefix)
                   << (o.async ? " (async)" : "")
                   << "; rate "

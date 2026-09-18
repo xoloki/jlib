@@ -720,8 +720,11 @@ static void what_a_config_sets() {
     ok("  error_log", o.error_log == "/var/log/err.log", o.error_log);
 
     ok("  listen splits host from port",
-       o.host == "127.0.0.1" && o.port == 9443,
-       o.host + ":" + std::to_string(o.port));
+       o.listens.size() == 1 && o.listens[0].host == "127.0.0.1" &&
+           o.listens[0].port == 9443,
+       o.listens.empty() ? "none"
+                         : o.listens[0].host + ":" +
+                               std::to_string(o.listens[0].port));
     ok("  root", o.root == "/srv/www", o.root);
     ok("  prefix", o.prefix == "/pub", o.prefix);
     ok("  access_log", o.access_log == "/var/log/acc.log", o.access_log);
@@ -743,16 +746,50 @@ static void what_a_config_sets() {
     jhttpd::options b;
 
     ok("  a bare port does not touch the host",
-       refusal("http { listen 8081; }", b).empty() &&
-           b.port == 8081 && b.host == jhttpd::options().host,
-       b.host + ":" + std::to_string(b.port));
+       refusal("http { listen 8081; }", b).empty() && b.listens.size() == 1 &&
+           b.listens[0].port == 8081 &&
+           b.listens[0].host == jhttpd::listen_spec().host,
+       b.listens.empty() ? "none"
+                         : b.listens[0].host + ":" +
+                               std::to_string(b.listens[0].port));
 
     jhttpd::options v6;
 
     ok("  an IPv6 address keeps its colons",
        refusal("http { listen [::1]:8082; }", v6).empty() &&
-           v6.host == "[::1]" && v6.port == 8082,
-       v6.host + " " + std::to_string(v6.port));
+           v6.listens.size() == 1 && v6.listens[0].host == "[::1]" &&
+           v6.listens[0].port == 8082,
+       v6.listens.empty() ? "none"
+                          : v6.listens[0].host + " " +
+                                std::to_string(v6.listens[0].port));
+
+    // **Repeatable, which is the whole of #298 at this layer.**
+    jhttpd::options two;
+
+    ok("  two listen directives are two ports",
+       refusal("http {\n"
+               "    listen 80 redirect;\n"
+               "    listen 443 ssl;\n"
+               "    ssl_certificate /c.pem;\n"
+               "    ssl_certificate_key /c.key;\n"
+               "}\n", two).empty() && two.listens.size() == 2,
+       std::to_string(two.listens.size()));
+
+    ok("  with the markers on the right one",
+       two.listens.size() == 2 && two.listens[0].redirect &&
+           !two.listens[0].ssl && two.listens[1].ssl &&
+           !two.listens[1].redirect);
+
+    // The latent bug this replaced: `listen` used to assign into one shared
+    // host, and the assignment was conditional on a colon being present -- so
+    // a bare port after an addressed one silently inherited the address.
+    jhttpd::options mixed;
+
+    ok("  and a bare port after an addressed one keeps its own host",
+       refusal("http { listen 1.2.3.4:443; listen 8080; }", mixed).empty() &&
+           mixed.listens.size() == 2 && mixed.listens[0].host == "1.2.3.4" &&
+           mixed.listens[1].host == jhttpd::listen_spec().host,
+       mixed.listens.size() == 2 ? mixed.listens[1].host : "?");
 
     jhttpd::options off;
 
@@ -907,6 +944,20 @@ static void what_a_config_refuses() {
           "a port that is not one" },
         { "http { listen 8080 quic; }", "does not know",
           "a listen option nobody implements" },
+        { "http { listen 443 ssl; }", "needs ssl_certificate",
+          "an ssl listener with nothing to present" },
+        { "http { listen 80 redirect; }", "needs a \"listen ... ssl\"",
+          "a redirect with nowhere to point" },
+        // Both keywords needs three arguments, and listen takes two -- so
+        // this is refused by arity rather than by a rule of its own.  Asserted
+        // because "it is refused" is the property; which check refuses it is
+        // not something a config file should have to know.
+        { "http { listen 80 ssl redirect; }", "takes 1 to 2 arguments",
+          "a port asked to be both ends of the redirect" },
+        { "http { listen 8080; listen 8080; }", "twice",
+          "the same port bound twice" },
+        { "http { ssl_certificate /c.pem; }", "no ssl_certificate_key",
+          "half a certificate at the http level, which only the flag caught before" },
         { "daemon maybe;", "wants \"on\" or \"off\"",
           "a flag that is neither" },
         { "http { location /x { auth_basic \"r\"; } }", "no auth_basic_user_file",
@@ -976,8 +1027,11 @@ static void what_a_config_refuses() {
 
             // Not vacuous: it must actually have set something.
             ok("  and says what it looks like it says",
-               e.threads == 4 && e.port == 8080 && e.root == "/srv/www",
-               std::to_string(e.threads) + " " + std::to_string(e.port) +
+               e.threads == 4 && e.listens.size() == 1 &&
+                   e.listens[0].port == 8080 && e.root == "/srv/www",
+               std::to_string(e.threads) + " " +
+                   (e.listens.empty() ? "no listen"
+                                      : std::to_string(e.listens[0].port)) +
                    " " + e.root);
         }
         else std::cout << "  ..     no example config beside the test\n";

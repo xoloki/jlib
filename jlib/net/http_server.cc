@@ -1104,11 +1104,86 @@ server::server(unsigned short port, const std::string& host,
         tls, p));
 }
 
+server::server(std::vector<sys::server::bound> ports,
+               const sys::server::policy& p, const options& o)
+    : m_options(o),
+      // The first listener's, so port() and tls() describe the same one.
+      m_tls(!ports.empty() && !ports[0].tls.empty())
+{
+    m_otherwise = [](const Request&, response& r) {
+        r.status(404).type("text/plain").body("not found\n");
+    };
+
+    m_transport.reset(new sys::server(
+        std::move(ports),
+        [this](sys::socketstream& s, const sys::peer& from) { serve(s, from); },
+        p));
+}
+
+server::server(async_t, std::vector<sys::server::bound> ports,
+               const sys::server::policy& p, const options& o)
+    : m_options(o),
+      m_tls(!ports.empty() && !ports[0].tls.empty()),
+      m_async(true),
+      m_request_timeout(p.io_timeout)
+{
+    m_otherwise = [](const Request&, response& r) {
+        r.status(404).type("text/plain").body("not found\n");
+    };
+
+    m_transport.reset(new sys::server(
+        std::move(ports),
+        sys::server::async_handler(
+            [this](sys::server::connection& c, const sys::peer& from)
+                -> sys::task<void> {
+                co_await serve_async(c, from);
+            }),
+        p));
+}
+
 server::~server() = default;
 
 unsigned short server::port() const { return m_transport->port(); }
 
 bool server::tls() const { return m_tls; }
+
+std::vector<unsigned short> server::ports() const { return m_transport->ports(); }
+
+void server::redirect_insecure(unsigned short from, unsigned short to) {
+    m_redirect[from] = to;
+}
+
+/**
+ * Where an insecure request should have gone, or "" if it should stay.
+ *
+ * `authority` is what authority_of() decided -- folded, and with any port
+ * already stripped -- so this works for every site on the listener without
+ * being told which they are.
+ */
+std::string server::redirected(const sys::peer& from,
+                               const std::string& authority,
+                               const std::string& target) const
+{
+    if(m_redirect.empty() || from.secure) return std::string();
+
+    const std::map<unsigned short, unsigned short>::const_iterator i =
+        m_redirect.find(from.local_port);
+
+    if(i == m_redirect.end()) return std::string();
+
+    // A request with no authority at all -- HTTP/1.0 without Host -- has
+    // nowhere to be sent.  Left alone rather than guessed at: a Location
+    // naming the wrong host is worse than no redirect.
+    if(authority.empty()) return std::string();
+
+    std::string where = "https://" + authority;
+
+    // 443 is the default for the scheme, so naming it would be noise in every
+    // address bar.  Any other port has to be said.
+    if(i->second != 443) where += ":" + std::to_string(i->second);
+
+    return where + target;
+}
 
 std::string server::url(const std::string& path) const {
     std::ostringstream o;
@@ -2351,6 +2426,33 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
         }
     }
 
+    // **Before the guards, after the limiter.**
+    //
+    // Before, because `Basic` is base64 and a 401 on a plaintext port asks for
+    // a password anyone on the path can read -- redirecting first means the
+    // challenge only ever goes out over TLS.  After the limiter, so a flood
+    // still meets the cheap defence before this one.
+    //
+    // Before routing too, so this does not depend on the target existing: a
+    // 404 over cleartext would be a worse answer than a redirect to the same
+    // path over TLS, and an attacker could otherwise map the site on port 80.
+    {
+        const std::string where = redirected(from, noted_site, q.target());
+
+        if(!where.empty()) {
+            response moved;
+
+            moved.status(301).field("Location", where);
+
+            noted_status = moved.status();
+            noted_bytes = moved.body().size();
+
+            s << moved.str(m_options.server_name) << std::flush;
+
+            return;
+        }
+    }
+
     // **Before routing**, so a protected path that does not exist answers 401
     // rather than 404.  Routing first would make the status a directory
     // listing for anyone willing to ask twice.
@@ -3045,6 +3147,37 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
             co_await out.send(slow);
 
             co_return true;
+        }
+    }
+
+    // **Before the guards, after the limiter.**
+    //
+    // Before, because `Basic` is base64 and a 401 on a plaintext port asks for
+    // a password anyone on the path can read -- redirecting first means the
+    // challenge only ever goes out over TLS.  After the limiter, so a flood
+    // still meets the cheap defence before this one.
+    //
+    // Before routing too, so this does not depend on the target existing: a
+    // 404 over cleartext would be a worse answer than a redirect to the same
+    // path over TLS, and an attacker could otherwise map the site on port 80.
+    {
+        const std::string where = redirected(from, noted_site, q.target());
+
+        if(!where.empty()) {
+            response moved;
+
+            moved.status(301).field("Location", where);
+
+            noted_status = moved.status();
+            noted_bytes = moved.body().size();
+
+            co_await out.send(moved);
+
+            // false, not true: the connection does not continue.  A client
+            // told to go elsewhere has no reason to send a second request
+            // here, and keeping the connection open for one would hold a slot
+            // for a conversation that is over.
+            co_return false;
         }
     }
 
