@@ -115,7 +115,24 @@ struct tree {
     }
 };
 
-/** Everything the server said, raw. */
+/**
+ * Everything the server said, raw.
+ *
+ * **A request handed to this must end the connection, or it costs the whole
+ * timeout.** The read below runs to end of file, which is the only way to get
+ * "everything" from a response whose framing is the thing under test -- a
+ * malformed request has no trustworthy Content-Length to read to. So a request
+ * that gets a well-formed keep-alive 200 leaves the client sitting in read()
+ * until set_timeout() fires, and the case still *passes*, thirty seconds later.
+ *
+ * That is how it went unnoticed: five such cases in "which site a request
+ * names" were costing 150 seconds of a 152-second test, all of it idle, with
+ * every assertion green. Measured after: two seconds.
+ *
+ * Most cases here are refusals, and a 400 closes (http_server.cc says every
+ * one does, and the framing ones have to), so they return at once and hide the
+ * problem. The ones to watch are the cases that expect 200.
+ */
 static std::string raw_exchange(unsigned short port, const std::string& raw) {
     try {
         sys::socketstream s("127.0.0.1", port, 5);
@@ -507,7 +524,7 @@ static void what_site_a_request_names(http::server& s) {
     std::cout << "\nwhich site a request names:\n";
 
     struct { const char* raw; int want; const char* why; } cases[] = {
-        { "GET /ok HTTP/1.1\r\nHost: a\r\n\r\n", 200,
+        { "GET /ok HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 200,
           "one Host is what a request should have" },
         { "GET /ok HTTP/1.1\r\n\r\n", 400,
           "none on HTTP/1.1 is a 400, per 3.2" },
@@ -515,7 +532,7 @@ static void what_site_a_request_names(http::server& s) {
           "and none on HTTP/1.0 is not, because 1.0 had no Host" },
         { "GET /ok HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n", 400,
           "two is a 400, which is the smuggling shape" },
-        { "GET /ok HTTP/1.1\r\nHost: a.example:8080\r\n\r\n", 200,
+        { "GET /ok HTTP/1.1\r\nHost: a.example:8080\r\nConnection: close\r\n\r\n", 200,
           "a port is allowed" }
     };
 
@@ -529,15 +546,16 @@ static void what_site_a_request_names(http::server& s) {
 
     // And what the server decided, which a refusal cannot show.
     struct { const char* raw; const char* want; const char* why; } named[] = {
-        { "GET /ok HTTP/1.1\r\nHost: A.Example\r\n\r\n", "a.example",
+        { "GET /ok HTTP/1.1\r\nHost: A.Example\r\nConnection: close\r\n\r\n", "a.example",
           "Host is lowercased, because DNS is case-insensitive" },
-        { "GET /ok HTTP/1.1\r\nHost: a.example:8080\r\n\r\n", "a.example",
+        { "GET /ok HTTP/1.1\r\nHost: a.example:8080\r\nConnection: close\r\n\r\n", "a.example",
           "and its port is not part of the name" },
 
         // **3.2.2.**  Not a refusal: the RFC says use the target's authority
         // and ignore Host, not that a disagreement is an error.  So the only
         // way to see it is to ask what the server concluded.
-        { "GET http://from.target/ok HTTP/1.1\r\nHost: from.field\r\n\r\n",
+        { "GET http://from.target/ok HTTP/1.1\r\nHost: from.field\r\n"
+          "Connection: close\r\n\r\n",
           "from.target",
           "an absolute-form target beats the Host field" }
     };
@@ -716,6 +734,13 @@ static void everything(http::server& s, const tree& t) {
 }
 
 int main() {
+    // Unbuffered, as 62 of the tests here already are.  Piped anywhere -- which
+    // is what `make check` does -- this is otherwise block-buffered and the
+    // whole run arrives at exit, so a test that stalls looks like a test that
+    // printed nothing and there is no way to see which section it is in.  That
+    // cost two measurement attempts while finding the stall fixed above.
+    std::cout << std::unitbuf;
+
     std::cout << "net_http_hostile_test\n";
 
     try {
