@@ -128,6 +128,23 @@ struct server_options {
      * client sees a connection die under a request it has already sent.
      */
     double idle_timeout = 60;
+
+    /**
+     * What a request for a directory is answered with, in order.
+     *
+     * Apache's `DirectoryIndex` and nginx's `index`, and the reason a link to
+     * a site root works at all: `GET /` names a directory, and without this it
+     * is a 404. Apache enables it globally, in `mods-enabled/dir.conf`, which
+     * is why a vhost never mentions it and why it is easy to miss when
+     * translating one.
+     *
+     * **Not a directory listing.** When no name here exists the answer is 404,
+     * not a generated page -- that is `Options Indexes`, a different feature,
+     * and one that publishes what is in a directory to anyone who asks.
+     *
+     * Empty turns it off, and then a directory is a 404 as it was before.
+     */
+    std::vector<std::string> index = { "index.html" };
 };
 
 /**

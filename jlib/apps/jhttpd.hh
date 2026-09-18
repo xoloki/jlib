@@ -563,6 +563,16 @@ struct options {
     std::string    access_log = "-";
     std::string    error_log = "-";
     std::string    cache_control;
+
+    /**
+     * What a directory is answered with, in order.
+     *
+     * nginx spells it `index`; Apache spells it `DirectoryIndex` and enables
+     * it globally in mods-enabled/dir.conf, which is why a vhost never
+     * mentions it. `index;` with no arguments turns it off, and then a
+     * directory is a 404.
+     */
+    std::vector<std::string> index = { "index.html" };
     unsigned int   threads = 4;
     bool           async = false;
 
@@ -873,6 +883,13 @@ inline void apply_http(const jlib::util::conf::directive& d, options& o) {
         else if(e.name == "prefix") { plain(e, 1, 1); o.prefix = e.arg(0); }
         else if(e.name == "access_log") { plain(e, 1, 1); o.access_log = e.arg(0); }
         else if(e.name == "cache_control") { plain(e, 1, 1); o.cache_control = e.arg(0); }
+        else if(e.name == "index") {
+            // Zero arguments is legal and means "no index", which is the only
+            // way to ask for the old behaviour now that a directory is served.
+            plain(e, 0, std::size_t(-1));
+
+            o.index.assign(e.args.begin(), e.args.end());
+        }
         else if(e.name == "ssl_certificate") { plain(e, 1, 1); o.cert = e.arg(0); }
         else if(e.name == "ssl_certificate_key") { plain(e, 1, 1); o.key = e.arg(0); }
         else if(e.name == "request_rate") { plain(e, 1, 1); o.rate = as_number(e, 0); }
