@@ -436,9 +436,16 @@ static void a_context_reads_a_certificate(const std::string& cert,
     bool threw = false;
     std::string message;
 
-    try {
-        std::string other_cert = "mismatch_cert.pem", other_key = "mismatch_key.pem";
+    // **Named outside the try, and removed after it.**  These used to be
+    // removed on the last two lines *inside* the try -- after the call that is
+    // supposed to throw, which is the whole assertion -- so the cleanup ran
+    // only when the case could not be set up and never when the test passed.
+    // Two stray .pem files were left in the build directory every green run,
+    // which `make check` cannot see and `make distcheck` fails on.
+    const std::string other_cert = "mismatch_cert.pem";
+    const std::string other_key = "mismatch_key.pem";
 
+    try {
         if(make_cert(other_cert, other_key, "elsewhere", "DNS:elsewhere")) {
             sys::tls_context::server(cert, other_key);
         }
@@ -446,14 +453,14 @@ static void a_context_reads_a_certificate(const std::string& cert,
             threw = true;   // could not set the case up; do not fail for it
             message = "skipped";
         }
-
-        std::remove(other_cert.c_str());
-        std::remove(other_key.c_str());
     }
     catch(std::exception& e) {
         threw = true;
         message = e.what();
     }
+
+    std::remove(other_cert.c_str());
+    std::remove(other_key.c_str());
 
     ok("a key that does not match the certificate is refused at once", threw,
        message);
