@@ -553,6 +553,148 @@ constant uint Q8_LANES [[function_constant(0)]];
  * (#286) -- and one pass over the weights buys the difference, once the batch
  * is wide enough to spread it over. See stream::multiply_tn.
  */
+/**
+ * The little-endian f16 at `p`, which every quantised block begins or ends
+ * with.
+ *
+ * Through a `ushort` rather than inline, because `a | (b << 8)` promotes to
+ * int and `as_type<half>` refuses an int -- in as many words, at compile time.
+ */
+static inline float half_le(device const uchar* p)
+{
+    const ushort bits = ushort(p[0]) | ushort(ushort(p[1]) << 8);
+
+    return float(as_type<half>(bits));
+}
+
+/**
+ * q4_K's sub-block scale and min, unpacked.  ggml's `get_scale_min_k4`.
+ *
+ * Twelve bytes hold eight six-bit scales and eight six-bit mins: the first
+ * four of each in their own byte's low six bits, the last four split, four
+ * bits in one byte and the top two borrowed from the high end of an earlier
+ * one.  The host reference is `scale_min_k4` in ai/quant.hh and this is a
+ * transliteration of it -- if one changes the other has to.
+ */
+static inline void scale_min_k4(int j, device const uchar* q,
+                                thread uchar& d, thread uchar& m)
+{
+    if(j < 4) {
+        d = q[j] & 63;
+        m = q[j + 4] & 63;
+    }
+    else {
+        d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        m = (q[j + 4] >>  4) | ((q[j    ] >> 6) << 4);
+    }
+}
+
+/**
+ * A q4_K super-block out to 256 plain values, one block per thread.
+ *
+ * Affine rather than symmetric: `d*q - m`, with both the scale and the min
+ * themselves quantised against a per-super-block f16. That second tier is
+ * what buys the accuracy at four bits (#196), and it is the whole difference
+ * from q8_0's flat block.
+ *
+ * The destination index is the same argument as k_q8_dequant's: a qweight
+ * holds K values contiguously per output row and a (K x N) column-major
+ * tensor holds a column contiguously, so 256 values land contiguously and the
+ * offset is the block number times 256.
+ */
+template<typename T>
+kernel void k_q4k_dequant(device const uchar* w [[buffer(0)]],
+                          device T* out [[buffer(1)]],
+                          constant uint& K [[buffer(2)]],
+                          constant uint& units [[buffer(3)]],
+                          uint gid [[thread_position_in_grid]])
+{
+    if(gid >= units) return;
+
+    // **A thread per sub-block, not per super-block.** One thread per 256
+    // values launches eight times fewer threads than k_q8_dequant does for
+    // the same weight, each doing eight times the work in sequence -- which
+    // cost 1.7x on prefill before this was split. Thirty-two values is also
+    // where q4_K's scale changes, so the split is free.
+    const uint b  = gid / 8;
+    const uint sb = gid % 8;
+
+    device const uchar* p = w + (ulong)b * 144;
+
+    const float d    = half_le(p);
+    const float dmin = half_le(p + 2);
+
+    device const uchar* sc = p + 4;
+    device const uchar* q  = p + 16;
+
+    uchar sq = 0, sm = 0;
+
+    scale_min_k4(int(sb), sc, sq, sm);
+
+    const float d1 = d * float(sq), o1 = dmin * float(sm);
+
+    // Group sb/2 holds the low nibbles of its 32 bytes and then the high
+    // ones, which is the order dequantise_q4_k writes them in.
+    device const uchar* qq = q + (sb / 2) * 32;
+    const bool high = (sb & 1) != 0;
+
+    device T* y = out + (ulong)b * 256 + sb * 32;
+
+    for(uint i = 0; i < 32; i++)
+        y[i] = T(d1 * float(high ? (qq[i] >> 4) : (qq[i] & 0xF)) - o1);
+}
+
+/**
+ * A q6_K super-block out to 256 plain values, one block per thread.
+ *
+ * Symmetric, with six bits stored unsigned meaning [-32, 31] -- which is what
+ * the 32 below is. The six bits are split across two arrays: four low bits in
+ * `ql` and two high bits packed four-to-a-byte in `qh`.
+ *
+ * Host reference: `dequantise_q6_k` in ai/quant.hh.
+ */
+template<typename T>
+kernel void k_q6k_dequant(device const uchar* w [[buffer(0)]],
+                          device T* out [[buffer(1)]],
+                          constant uint& K [[buffer(2)]],
+                          constant uint& units [[buffer(3)]],
+                          uint gid [[thread_position_in_grid]])
+{
+    if(gid >= units) return;
+
+    // Sixteen values a thread, for the same reason as q4_K above and because
+    // sixteen is where q6_K's scale changes -- the reference's `is = l / 16`.
+    const uint b  = gid / 16;
+    const uint sb = gid % 16;
+
+    const uint h = sb / 8;
+    const uint g = (sb % 8) / 2;
+    const uint k = sb & 1;
+
+    device const uchar* p = w + (ulong)b * 210;
+
+    device const uchar* ql = p;
+    device const uchar* qh = p + 128;
+    device const char*  sc = (device const char*)(p + 192);
+
+    const float ds = half_le(p + 208) * float(sc[h * 8 + g * 2 + k]);
+
+    device const uchar* qlp = ql + h * 64 + (g % 2) * 32 + k * 16;
+    device const uchar* qhp = qh + h * 32 + k * 16;
+
+    const uint shift = g * 2;
+    const bool high = g >= 2;
+
+    device T* y = out + (ulong)b * 256 + h * 128 + g * 32 + k * 16;
+
+    // The 32 is the zero point: six bits stored unsigned mean [-32, 31].
+    for(uint i = 0; i < 16; i++) {
+        const uint lo = high ? (qlp[i] >> 4) : (qlp[i] & 0xF);
+
+        y[i] = T(ds * float(int(lo | (((qhp[i] >> shift) & 3) << 4)) - 32));
+    }
+}
+
 template<typename T>
 kernel void k_q8_dequant(device const uchar* w [[buffer(0)]],
                          device T* out [[buffer(1)]],
@@ -614,6 +756,240 @@ kernel void k_q8_dequant(device const uchar* w [[buffer(0)]],
  * Measured before this: a repacked weight layout and four-wide loads changed
  * nothing at all, which is what said the limit was never the bytes. See #190.
  */
+/**
+ * q4_K, one thread (or SIMD group) per output row and Q8_TILE columns.
+ *
+ * The same shape as k_q8_gemv -- see it for why the tiling and the optional
+ * SIMD reduction exist -- with two differences that are the format's.
+ *
+ * **A super-block is unpacked 32 values at a time, not 256.** 256 floats is a
+ * kilobyte of registers per thread and would spill; 32 is both what fits and
+ * what q4_K's scale granularity actually is, since each of the eight
+ * sub-blocks carries its own six-bit scale and min.
+ *
+ * **The dot product is affine.** A value is `d*q - m`, so its contribution is
+ * `d*sum(q*x) - m*sum(x)` and the running sum of x is needed alongside the
+ * running product. q8_0 has no analogue of that term.
+ */
+template<typename T>
+kernel void k_q4k_gemv(device const uchar* w [[buffer(0)]],
+                       device const T* x [[buffer(1)]],
+                       device T* y [[buffer(2)]],
+                       constant uint& K [[buffer(3)]],
+                       constant uint& N [[buffer(4)]],
+                       constant uint& ncols [[buffer(5)]],
+                       constant float& alpha [[buffer(6)]],
+                       constant float& beta [[buffer(7)]],
+                       uint gid [[thread_position_in_grid]],
+                       uint sl [[thread_index_in_simdgroup]])
+{
+    const uint tiles = (ncols + Q8_TILE - 1) / Q8_TILE;
+
+    const uint unit = (Q8_LANES == 1) ? gid : gid / 32;
+    const uint lane = (Q8_LANES == 1) ? 0u : sl;
+
+    const uint j = unit % N;
+    const uint t = unit / N;
+
+    if(t >= tiles) return;
+
+    const uint c0 = t * Q8_TILE;
+    const uint have = min(Q8_TILE, ncols - c0);
+
+    const uint nb = K / 256;
+
+    device const uchar* base = w + (ulong)j * nb * 144;
+
+    float sum[Q8_TILE];
+
+    for(uint i = 0; i < Q8_TILE; i++) sum[i] = 0.0f;
+
+    // **The lanes are spread over sub-blocks, not super-blocks.**
+    //
+    // A SIMD group shares a row by taking every Q8_LANES'th block, which for
+    // q8_0 means 32 lanes over K/32 = 64 blocks at K=2048. A K-quant block is
+    // 256 values, so the same loop would be 32 lanes over *eight* blocks and
+    // twenty-four of them would do nothing -- measured at 37 GB/s where q8_0
+    // manages 155 on the same shape.
+    //
+    // A sub-block is the right unit: eight per super-block here, so K=2048 is
+    // 64 of them and every lane has work again. The super-block header is
+    // re-read per sub-block, which is four bytes out of a cache line that the
+    // quants themselves are about to need anyway.
+    const uint subs = nb * 8;
+
+    for(uint g = lane; g < subs; g += Q8_LANES) {
+        const uint b  = g / 8;
+        const uint sb = g % 8;
+
+        device const uchar* p = base + (ulong)b * 144;
+
+        const float d    = half_le(p);
+        const float dmin = half_le(p + 2);
+
+        device const uchar* sc = p + 4;
+        device const uchar* q  = p + 16;
+
+        {
+            uchar sq = 0, sm = 0;
+
+            scale_min_k4(int(sb), sc, sq, sm);
+
+            const float d1 = d * float(sq), o1 = dmin * float(sm);
+
+            device const uchar* qq = q + (sb / 2) * 32;
+            const bool high = (sb & 1) != 0;
+
+            float qs[32];
+
+            for(uint i = 0; i < 32; i++)
+                qs[i] = float(high ? (qq[i] >> 4) : (qq[i] & 0xF));
+
+            for(uint cc = 0; cc < have; cc++) {
+                device const T* xc =
+                    x + (ulong)(c0 + cc) * K + (ulong)b * 256 + sb * 32;
+
+                float acc = 0.0f, xs = 0.0f;
+
+                for(uint i = 0; i < 32; i++) {
+                    const float xi = float(xc[i]);
+
+                    acc += qs[i] * xi;
+                    xs  += xi;
+                }
+
+                sum[cc] += d1 * acc - o1 * xs;
+            }
+        }
+    }
+
+    for(uint cc = 0; cc < have; cc++) {
+        const float total = (Q8_LANES == 1) ? sum[cc] : simd_sum(sum[cc]);
+
+        if(lane != 0) continue;
+
+        const ulong at = (ulong)(c0 + cc) * N + j;
+
+        y[at] = T(beta == 0.0f ? alpha * total
+                               : alpha * total + beta * float(y[at]));
+    }
+}
+
+/**
+ * q6_K, one thread (or SIMD group) per output row and Q8_TILE columns.
+ *
+ * **Sixteen values at a time, because that is q6_K's scale granularity** --
+ * sixteen int8 sub-block scales over 256 values. The reference's `is = l / 16`
+ * is exactly that boundary.
+ *
+ * The index arithmetic is the awkward part and is worth stating rather than
+ * reading off the shifts. A value's position `v` decomposes as a half
+ * `h = v/128`, a group `g = (v%128)/32` and a sixteen `k`, and then
+ *
+ *     low nibble if g < 2, high otherwise
+ *     ql at  h*64 + (g%2)*32 + k*16
+ *     qh at  h*32 + k*16, taking two bits at shift g*2
+ *     scale  sc[h*8 + g*2 + k]
+ *
+ * which is `dequantise_q6_k`'s four unrolled cases rewritten as one. The 32
+ * is the zero point: six bits are stored unsigned and mean [-32, 31].
+ */
+template<typename T>
+kernel void k_q6k_gemv(device const uchar* w [[buffer(0)]],
+                       device const T* x [[buffer(1)]],
+                       device T* y [[buffer(2)]],
+                       constant uint& K [[buffer(3)]],
+                       constant uint& N [[buffer(4)]],
+                       constant uint& ncols [[buffer(5)]],
+                       constant float& alpha [[buffer(6)]],
+                       constant float& beta [[buffer(7)]],
+                       uint gid [[thread_position_in_grid]],
+                       uint sl [[thread_index_in_simdgroup]])
+{
+    const uint tiles = (ncols + Q8_TILE - 1) / Q8_TILE;
+
+    const uint unit = (Q8_LANES == 1) ? gid : gid / 32;
+    const uint lane = (Q8_LANES == 1) ? 0u : sl;
+
+    const uint j = unit % N;
+    const uint t = unit / N;
+
+    if(t >= tiles) return;
+
+    const uint c0 = t * Q8_TILE;
+    const uint have = min(Q8_TILE, ncols - c0);
+
+    const uint nb = K / 256;
+
+    device const uchar* base = w + (ulong)j * nb * 210;
+
+    float sum[Q8_TILE];
+
+    for(uint i = 0; i < Q8_TILE; i++) sum[i] = 0.0f;
+
+    // Sixteen sub-blocks per super-block, spread over the lanes for the same
+    // reason as q4_K above: one lane per 256 values leaves most of a SIMD
+    // group idle.
+    const uint subs = nb * 16;
+
+    for(uint g = lane; g < subs; g += Q8_LANES) {
+        const uint b  = g / 16;
+        const uint sb = g % 16;
+
+        device const uchar* p = base + (ulong)b * 210;
+
+        device const uchar* ql = p;
+        device const uchar* qh = p + 128;
+        device const char*  sc = (device const char*)(p + 192);
+
+        const float d = half_le(p + 208);
+
+        {
+            const uint h = sb / 8;
+            const uint g = (sb % 8) / 2;
+            const uint k = sb & 1;
+
+            const float ds = d * float(sc[h * 8 + g * 2 + k]);
+
+            device const uchar* qlp = ql + h * 64 + (g % 2) * 32 + k * 16;
+            device const uchar* qhp = qh + h * 32 + k * 16;
+
+            const uint shift = g * 2;
+            const bool high = g >= 2;
+
+            float qs[16];
+
+            for(uint i = 0; i < 16; i++) {
+                const uint lo = high ? (qlp[i] >> 4) : (qlp[i] & 0xF);
+
+                qs[i] = float(int(lo | (((qhp[i] >> shift) & 3) << 4)) - 32);
+            }
+
+            for(uint cc = 0; cc < have; cc++) {
+                device const T* xc = x + (ulong)(c0 + cc) * K +
+                    (ulong)b * 256 + h * 128 + g * 32 + k * 16;
+
+                float acc = 0.0f;
+
+                for(uint i = 0; i < 16; i++) acc += qs[i] * float(xc[i]);
+
+                sum[cc] += ds * acc;
+            }
+        }
+    }
+
+    for(uint cc = 0; cc < have; cc++) {
+        const float total = (Q8_LANES == 1) ? sum[cc] : simd_sum(sum[cc]);
+
+        if(lane != 0) continue;
+
+        const ulong at = (ulong)(c0 + cc) * N + j;
+
+        y[at] = T(beta == 0.0f ? alpha * total
+                               : alpha * total + beta * float(y[at]));
+    }
+}
+
 template<typename T>
 kernel void k_q8_gemv(device const uchar* w [[buffer(0)]],
                       device const T* x [[buffer(1)]],
@@ -763,6 +1139,34 @@ INSTANTIATE(k_q8_dequant, float, "_f32")(device const uchar*, device float*,
                                           constant uint&, constant uint&, uint);
 INSTANTIATE(k_q8_dequant, half, "_f16")(device const uchar*, device half*,
                                         constant uint&, constant uint&, uint);
+INSTANTIATE(k_q4k_dequant, float, "_f32")(device const uchar*, device float*,
+                                          constant uint&, constant uint&, uint);
+INSTANTIATE(k_q4k_dequant, half, "_f16")(device const uchar*, device half*,
+                                         constant uint&, constant uint&, uint);
+INSTANTIATE(k_q6k_dequant, float, "_f32")(device const uchar*, device float*,
+                                          constant uint&, constant uint&, uint);
+INSTANTIATE(k_q6k_dequant, half, "_f16")(device const uchar*, device half*,
+                                         constant uint&, constant uint&, uint);
+INSTANTIATE(k_q4k_gemv, float, "_f32")(device const uchar*, device const float*,
+                                       device float*, constant uint&,
+                                       constant uint&, constant uint&,
+                                       constant float&, constant float&,
+                                       uint, uint);
+INSTANTIATE(k_q4k_gemv, half, "_f16")(device const uchar*, device const half*,
+                                      device half*, constant uint&,
+                                      constant uint&, constant uint&,
+                                      constant float&, constant float&,
+                                      uint, uint);
+INSTANTIATE(k_q6k_gemv, float, "_f32")(device const uchar*, device const float*,
+                                       device float*, constant uint&,
+                                       constant uint&, constant uint&,
+                                       constant float&, constant float&,
+                                       uint, uint);
+INSTANTIATE(k_q6k_gemv, half, "_f16")(device const uchar*, device const half*,
+                                      device half*, constant uint&,
+                                      constant uint&, constant uint&,
+                                      constant float&, constant float&,
+                                      uint, uint);
 
 INSTANTIATE(k_q8_gemv, float, "_f32")(device const uchar*, device const float*,
                                       device float*, constant uint&,
@@ -906,7 +1310,13 @@ struct stream<T>::impl {
     id<MTLComputePipelineState> gather = nil;
     id<MTLComputePipelineState> q8_gemv = nil;        // one thread per row
     id<MTLComputePipelineState> q8_dequant = nil;     // one thread per block
+    id<MTLComputePipelineState> q4k_dequant = nil;    // one thread per block
+    id<MTLComputePipelineState> q6k_dequant = nil;    // one thread per block
     id<MTLComputePipelineState> q8_gemv_simd = nil;   // a SIMD group per row
+    id<MTLComputePipelineState> q4k_gemv = nil;
+    id<MTLComputePipelineState> q4k_gemv_simd = nil;
+    id<MTLComputePipelineState> q6k_gemv = nil;
+    id<MTLComputePipelineState> q6k_gemv_simd = nil;
 
     id<MTLComputePipelineState> attn_scores = nil;
     id<MTLComputePipelineState> attn_weighted = nil;
@@ -951,6 +1361,8 @@ struct stream<T>::impl {
     // The largest scratch the map is allowed to hold, in bytes.  A device
     // constant, so it is asked for once rather than at every multiply.
     unsigned long dequant_cap = 0;
+
+
 
     // Buffers made for one encoded operation and needed until the command
     // buffer has run.  Metal does retain what an encoder binds, so this is
@@ -1025,39 +1437,28 @@ unsigned int q8_dequant_above() {
  * **The column threshold is not the whole question.** It asks whether a batch
  * is wide enough to pay for an unpack. It does not ask what the unpack costs
  * to *keep* -- and the scratch is permanent GPU residency, competing with the
- * weights themselves.
+ * weights themselves. On Qwen2.5-Coder 7B, unpacking the 1.09 GB output head
+ * beside an 8.1 GB model turned a 4x win into a 4x loss (#286).
  *
- * That distinction is not theoretical. Measured on Qwen2.5-Coder 7B, an
- * 8.1 GB model on a device that wants 12.7 GB resident:
+ * **It is too blunt, and the amount is measured.** A per-weight limit cannot
+ * tell "this weight is big" from "there is no room for it", so it refuses a
+ * head that a smaller model has ample room for:
  *
- *     prefill512   every weight unpacked   20.1-33.1 s
- *                  the head left alone      1.6-1.8 s
- *                  no unpacking at all      6.6-7.6 s
+ *     Gemma 2 2B, prefill512    q8_0     0.998 s capped, 0.549 s uncapped
+ *                               Q4_K_M   1.427 s capped, 0.563 s uncapped
  *
- * The head is one matrix out of roughly two hundred, and unpacking it turned
- * a 4x win into a 4x loss. Its scratch is 3584 x 152064 x 2 = 1.09 GB, where
- * a layer's largest is 136 MB.
+ * That is 1.8x on an 8-bit model and 2.5x on a 4-bit one, paid on every
+ * large-vocabulary model small enough to have had the room.
  *
- * **Every one of those shapes is faster unpacked when measured alone** --
- * the head most of all, 358.1 ms against 39.3 ms, 9.1x. So this is not a
- * shape that MPS handles badly, and the per-operation benchmark cannot see
- * the problem at all. What a model adds is that all of it has to be resident
- * at once.
+ * Replacing it with a `device::allocated()` room check was tried and is not
+ * here: it fixes the 2B and costs the 7B everything, because an 8.1 GB model
+ * exceeds any sensible fraction on its own and then even a 136 MB scratch is
+ * refused. One scalar cannot express both, and the thresholds that might are
+ * unmeasurable on this machine -- a 7B run leaves enough memory pressure that
+ * the 2B run after it reads 0.93 s where it reads 0.53 s alone.
  *
- * ## What the number is, and what it is not
- *
- * The measurement establishes that 136 MB of scratch is fine here and 1.09 GB
- * is not. It does not establish where between them the line belongs: 1/32 of
- * the working set puts it at 397 MB on this device, which clears the layer
- * shapes by 2.9x and refuses the head by 2.7x, and any divisor from about 8
- * to 80 would have done the same thing on this model.
- *
- * ## The cap is a workaround for doing the whole matrix at once
- *
- * Unpacking a block of output rows at a time would bound the scratch to that
- * block whatever the weight's size, keep the head on the fast path, and need
- * no cap. That wants an `encode_gemm` that takes an offset and a row stride,
- * which this one does not. **#292.**
+ * The fix is to stop needing the question answered: unpacking a block of rows
+ * at a time bounds the scratch whatever the weight's size. **#292.**
  */
 unsigned int q8_dequant_share() {
     static const unsigned int n = [] {
@@ -1097,7 +1498,13 @@ struct pipelines {
     id<MTLComputePipelineState> gather = nil;
     id<MTLComputePipelineState> q8_gemv = nil;        // one thread per row
     id<MTLComputePipelineState> q8_dequant = nil;     // one thread per block
+    id<MTLComputePipelineState> q4k_dequant = nil;    // one thread per block
+    id<MTLComputePipelineState> q6k_dequant = nil;    // one thread per block
     id<MTLComputePipelineState> q8_gemv_simd = nil;   // a SIMD group per row
+    id<MTLComputePipelineState> q4k_gemv = nil;
+    id<MTLComputePipelineState> q4k_gemv_simd = nil;
+    id<MTLComputePipelineState> q6k_gemv = nil;
+    id<MTLComputePipelineState> q6k_gemv_simd = nil;
     id<MTLComputePipelineState> attn_scores = nil;
     id<MTLComputePipelineState> attn_weighted = nil;
     id<MTLComputePipelineState> rms_norm = nil;
@@ -1161,6 +1568,8 @@ pipelines& compiled(id<MTLDevice> gpu) {
         { "k_attn_weighted", &p.attn_weighted },
         { "k_rms_norm",   &p.rms_norm },
         { "k_q8_dequant", &p.q8_dequant },
+        { "k_q4k_dequant", &p.q4k_dequant },
+        { "k_q6k_dequant", &p.q6k_dequant },
     };
 
     // The q8 multiply is built twice from one source, specialised on how many
@@ -1170,24 +1579,35 @@ pipelines& compiled(id<MTLDevice> gpu) {
 
         [cv setConstantValue:&lanes type:MTLDataTypeUInt atIndex:0];
 
-        const std::string name = std::string("k_q8_gemv") + traits<T>::suffix();
+        // Three formats, each built at both lane counts: q8_0 and the two
+        // K-quants a Q4_K_M mixes.  One file needs both of the latter.
+        struct { const char* base;
+                 __strong id<MTLComputePipelineState>* one;
+                 __strong id<MTLComputePipelineState>* simd; } gemvs[] = {
+            { "k_q8_gemv",  &p.q8_gemv,  &p.q8_gemv_simd  },
+            { "k_q4k_gemv", &p.q4k_gemv, &p.q4k_gemv_simd },
+            { "k_q6k_gemv", &p.q6k_gemv, &p.q6k_gemv_simd },
+        };
 
-        id<MTLFunction> fn =
-            [lib newFunctionWithName:[NSString stringWithUTF8String:name.c_str()]
-                      constantValues:cv
-                               error:&err];
+        for(auto& g : gemvs) {
+            const std::string name = std::string(g.base) + traits<T>::suffix();
 
-        if(fn == nil)
-            throw ai::backend_error("no kernel called " + name);
+            id<MTLFunction> fn =
+                [lib newFunctionWithName:[NSString stringWithUTF8String:name.c_str()]
+                          constantValues:cv
+                                   error:&err];
 
-        id<MTLComputePipelineState> built =
-            [gpu newComputePipelineStateWithFunction:fn error:&err];
+            if(fn == nil)
+                throw ai::backend_error("no kernel called " + name);
 
-        if(built == nil)
-            throw ai::backend_error("could not build a pipeline for " + name);
+            id<MTLComputePipelineState> built =
+                [gpu newComputePipelineStateWithFunction:fn error:&err];
 
-        if(lanes == 1) p.q8_gemv = built;
-        else p.q8_gemv_simd = built;
+            if(built == nil)
+                throw ai::backend_error("could not build a pipeline for " + name);
+
+            *(lanes == 1 ? g.one : g.simd) = built;
+        }
     }
 
     for(auto& w : wanted) {
@@ -1261,7 +1681,15 @@ stream<T>::stream(std::shared_ptr<device> d)
 
     if(const unsigned int share = q8_dequant_share())
         m_impl->dequant_cap = d->working_set() / share;
+    m_impl->q4k_dequant = p.q4k_dequant;
+    m_impl->q6k_dequant = p.q6k_dequant;
+
+
     m_impl->q8_gemv_simd = p.q8_gemv_simd;
+    m_impl->q4k_gemv = p.q4k_gemv;
+    m_impl->q4k_gemv_simd = p.q4k_gemv_simd;
+    m_impl->q6k_gemv = p.q6k_gemv;
+    m_impl->q6k_gemv_simd = p.q6k_gemv_simd;
     m_impl->attn_scores = p.attn_scores;
     m_impl->attn_weighted = p.attn_weighted;
     m_impl->held = [NSMutableArray array];
@@ -1599,9 +2027,10 @@ struct qweight::impl {
     id<MTLBuffer> buf = nil;
 };
 
-qweight::qweight(std::shared_ptr<device> d, unsigned int rows, unsigned int cols,
-                 const void* blocks, std::size_t bytes)
-    : m_device(d),
+qweight::qweight(std::shared_ptr<device> d, ai::quant fmt, unsigned int rows,
+                 unsigned int cols, const void* blocks, std::size_t bytes)
+    : m_format(fmt),
+      m_device(d),
       m_impl(new impl),
       m_rows(rows),
       m_cols(cols),
@@ -1609,11 +2038,15 @@ qweight::qweight(std::shared_ptr<device> d, unsigned int rows, unsigned int cols
 {
     const std::size_t n = std::size_t(rows) * cols;
 
-    if(n % 32)
-        throw std::runtime_error("jlib::metal::qweight: the element count is "
-                                 "not a multiple of the block size");
+    const std::size_t vals = ai::quant_values(fmt);
+    const std::size_t size = ai::quant_bytes(fmt);
 
-    if(bytes != (n / 32) * 34)
+    if(n % vals)
+        throw std::runtime_error("jlib::metal::qweight: the element count is "
+                                 "not a multiple of " + ai::quant_name(fmt) +
+                                 "'s block size");
+
+    if(bytes != (n / vals) * size)
         throw std::runtime_error("jlib::metal::qweight: the bytes do not match "
                                  "the shape");
 
@@ -1638,15 +2071,41 @@ tensor<T>& stream<T>::dequantised(const qweight& w, unsigned int K,
 
     open();
 
-    const unsigned int blocks = (K / 32) * N;
+    // One thread per block, whatever a block is for this format: 32 values
+    // for q8_0 and 256 for either K-quant.  The kernels differ only in how
+    // they unpack; the destination index is the same argument in all three.
+    id<MTLComputePipelineState> pipe = nil;
 
-    [m_impl->enc setComputePipelineState:m_impl->q8_dequant];
+    switch(w.format()) {
+    case ai::quant::q8_0: pipe = m_impl->q8_dequant;  break;
+    case ai::quant::q4_K: pipe = m_impl->q4k_dequant; break;
+    case ai::quant::q6_K: pipe = m_impl->q6k_dequant; break;
+    }
+
+    const unsigned int blocks =
+        (K / ai::quant_values(w.format())) * N;
+
+    // How many threads one block is worth.  A q8_0 block is one thread's
+    // work; a K-quant super-block is split so that a thread still covers
+    // about thirty-two values, because one thread per 256 leaves the machine
+    // idle -- the same mistake the gemv kernels started with.
+    unsigned int per_block = 1;
+
+    switch(w.format()) {
+    case ai::quant::q8_0: per_block = 1;  break;
+    case ai::quant::q4_K: per_block = 8;  break;
+    case ai::quant::q6_K: per_block = 16; break;
+    }
+
+    const unsigned int units = blocks * per_block;
+
+    [m_impl->enc setComputePipelineState:pipe];
     [m_impl->enc setBuffer:w.m_impl->buf offset:0 atIndex:0];
     [m_impl->enc setBuffer:slot->m_impl->buf offset:0 atIndex:1];
     [m_impl->enc setBytes:&K length:sizeof(K) atIndex:2];
-    [m_impl->enc setBytes:&blocks length:sizeof(blocks) atIndex:3];
+    [m_impl->enc setBytes:&units length:sizeof(units) atIndex:3];
 
-    dispatch(m_impl->enc, m_impl->q8_dequant, blocks);
+    dispatch(m_impl->enc, pipe, units);
 
     m_impl->pending++;
 
@@ -1661,11 +2120,11 @@ void stream<T>::multiply_tn(const qweight& w, const tensor<T>& x, tensor<T>& y,
     const unsigned int N = w.cols();
 
     if(x.rows() != K)
-        throw typename tensor<T>::exception("q8 multiply_tn: the input is not "
+        throw typename tensor<T>::exception("quantised multiply_tn: the input is not "
                                             "as tall as the weight is wide");
 
     if(y.rows() != N || y.cols() != x.cols())
-        throw typename tensor<T>::exception("q8 multiply_tn: the output shape "
+        throw typename tensor<T>::exception("quantised multiply_tn: the output shape "
                                             "does not match");
 
     const unsigned int ncols = x.cols();
@@ -1706,8 +2165,16 @@ void stream<T>::multiply_tn(const qweight& w, const tensor<T>& x, tensor<T>& y,
     // before this was made conditional.  See Q8_LANES and q8_reduce_below.
     const bool reduce = units < q8_reduce_below();
 
-    id<MTLComputePipelineState> pipe =
-        reduce ? m_impl->q8_gemv_simd : m_impl->q8_gemv;
+    id<MTLComputePipelineState> pipe = nil;
+
+    switch(w.format()) {
+    case ai::quant::q8_0:
+        pipe = reduce ? m_impl->q8_gemv_simd  : m_impl->q8_gemv;  break;
+    case ai::quant::q4_K:
+        pipe = reduce ? m_impl->q4k_gemv_simd : m_impl->q4k_gemv; break;
+    case ai::quant::q6_K:
+        pipe = reduce ? m_impl->q6k_gemv_simd : m_impl->q6k_gemv; break;
+    }
 
     [m_impl->enc setComputePipelineState:pipe];
     [m_impl->enc setBuffer:w.m_impl->buf offset:0 atIndex:0];

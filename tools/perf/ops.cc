@@ -136,9 +136,46 @@ int main() {
     };
     for(auto& m : mats) {
         std::vector<char> raw((std::size_t(m.K) * m.N / 32) * 34, 1);
-        auto q = b.make_q8_0(m.K, m.N, raw.data(), raw.size());
+        auto q = b.make_quantised(ai::quant::q8_0, m.K, m.N, raw.data(), raw.size());
         auto in = b.make(m.K, 1), o = b.make(m.N, 1);
         out.push_back({ m.name, timed([&]{ b.multiply_tn(q, in, o); }, b) });
+    }
+
+    // **The two K-quants, at the same shapes and against the same q8_0.**
+    //
+    // #196 gave q4_K and q6_K a device path so a 4-bit model stops being
+    // materialised as float at load. Whether that is *worth* having is a
+    // kernel question, not a file-size one -- a format that is half the bytes
+    // and a third of the speed is not a win -- and #191 already recorded one
+    // device-side repack that measured exactly zero benefit. So both formats
+    // are timed here against the q8_0 above, at the shapes a layer uses and
+    // at the head, which is the widest thing a model has.
+    //
+    // The bytes are nonsense on purpose: nothing branches on a weight's
+    // value, so a filled buffer times the same as a real one.
+    for(ai::quant fmt : { ai::quant::q4_K, ai::quant::q6_K }) {
+        std::printf("\n  %s multiplies, one column (decode):\n",
+                    ai::quant_name(fmt).c_str());
+
+        const std::size_t vals = ai::quant_values(fmt);
+        const std::size_t size = ai::quant_bytes(fmt);
+
+        for(auto& m : mats) {
+            std::vector<char> raw((std::size_t(m.K) * m.N / vals) * size, 1);
+
+            auto q = b.make_quantised(fmt, m.K, m.N, raw.data(), raw.size());
+            auto in = b.make(m.K, 1), o = b.make(m.N, 1);
+
+            const double sec = timed([&]{ b.multiply_tn(q, in, o); }, b);
+
+            // Against the weights read once, which is the least any
+            // implementation could move -- and the whole argument for a
+            // narrower format, since decode is bandwidth-bound.
+            const double weights = double(m.K) * m.N * double(size) / vals;
+
+            std::printf("    %-24s %10.1f us %8.1f GB/s\n",
+                        m.name, sec * 1e6, weights / sec / 1e9);
+        }
     }
 
     // **The same shapes at a prefill batch, which nothing measured.**
@@ -157,7 +194,7 @@ int main() {
 
     for(auto& m : mats) {
         std::vector<char> raw((std::size_t(m.K) * m.N / 32) * 34, 1);
-        auto q = b.make_q8_0(m.K, m.N, raw.data(), raw.size());
+        auto q = b.make_quantised(ai::quant::q8_0, m.K, m.N, raw.data(), raw.size());
         auto in = b.make(m.K, PREFILL_COLS), o = b.make(m.N, PREFILL_COLS);
 
 
@@ -182,7 +219,39 @@ int main() {
     // registers. If the plain multiply lands at the same rate then neither is
     // the cost and the loop shape is -- which decides whether a rewrite has
     // to stay clever about quantisation or merely has to be a GEMM (#286).
-    std::printf("\n  the same shapes unquantised, as a control:\n");
+        // **The K-quants at the same batch**, which is where Q4_K_M measured 1.8x
+    // slower than q8_0 end to end even after both gemv kernels were fixed.
+    //
+    // Prefill does not go through the gemv kernels at all: above the column
+    // threshold a weight is unpacked into a scratch and handed to MPS (#286).
+    // So this table and the decode one above answer different questions, and
+    // the end-to-end regression has to be in this one.
+    for(ai::quant fmt : { ai::quant::q4_K, ai::quant::q6_K }) {
+        std::printf("\n  %s multiplies at a prefill batch of %u:\n",
+                    ai::quant_name(fmt).c_str(), PREFILL_COLS);
+
+        const std::size_t vals = ai::quant_values(fmt);
+        const std::size_t size = ai::quant_bytes(fmt);
+
+        for(auto& m : mats) {
+            std::vector<char> raw((std::size_t(m.K) * m.N / vals) * size, 1);
+
+            auto q = b.make_quantised(fmt, m.K, m.N, raw.data(), raw.size());
+            auto in = b.make(m.K, PREFILL_COLS), o = b.make(m.N, PREFILL_COLS);
+
+            const double sec = timed([&]{ b.multiply_tn(q, in, o); }, b, 20);
+
+            const double weights = double(m.K) * m.N * double(size) / vals;
+            const double moved = weights + 2.0 * PREFILL_COLS * (m.K + m.N);
+            const double flops = 2.0 * m.K * m.N * PREFILL_COLS;
+
+            std::printf("    %-22s %9.1f us   %6.1f GB/s   %5.2f TFLOP/s\n",
+                        m.name, sec * 1e6, moved / sec / 1e9,
+                        flops / sec / 1e12);
+        }
+    }
+
+std::printf("\n  the same shapes unquantised, as a control:\n");
 
     for(auto& m : mats) {
         auto w = b.make(m.K, m.N);

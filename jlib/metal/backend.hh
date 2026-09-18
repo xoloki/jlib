@@ -55,7 +55,8 @@ public:
     tensor_ptr make(unsigned int rows, unsigned int cols);
     tensor_ptr make(const math::matrix<T>& m);
 
-    typename ai::backend<T>::quantised_ptr make_q8_0(unsigned int rows,
+    typename ai::backend<T>::quantised_ptr make_quantised(ai::quant fmt,
+                                                          unsigned int rows,
                                                      unsigned int cols,
                                                      const void* blocks,
                                                      std::size_t bytes);

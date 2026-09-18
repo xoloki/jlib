@@ -1234,6 +1234,161 @@ static const unsigned int Q8_ROW_COUNTS[] = { 8, 16384 };
  * point measuring that here; what is being tested is that the two orders of
  * doing the same arithmetic agree.
  */
+/**
+ * A K-quantised weight multiplies the same way the host says it does.
+ *
+ * **No quantiser is needed and none exists here.** Any 144 bytes are a valid
+ * q4_K block and any 210 are a valid q6_K one, so the weight is random bytes
+ * with only the f16 scales fixed up -- left random those would occasionally be
+ * inf or NaN, and an assertion about NaN is not an assertion.
+ *
+ * The reference is `ai::dequantise_block` and the host backend, which is the
+ * same C++ the Metal kernels were transliterated from. That is exactly what
+ * wants testing: the two K-quant formats each have a device kernel now (#196)
+ * and a transliteration is the kind of thing that is wrong in one nibble.
+ *
+ * Both column counts matter and the list straddles the threshold: below it
+ * the multiply goes through `k_q4k_gemv`/`k_q6k_gemv`, above it through
+ * `k_q4k_dequant`/`k_q6k_dequant` and MPS. They are separate ports of the
+ * same arithmetic and either can be wrong alone -- verified by breaking each
+ * and watching only its own column counts fail.
+ *
+ * **The float instantiation is the load-bearing one.** Dropping q4_K's affine
+ * min term -- a real bug, and the one this format invites -- moves the worst
+ * case to 0.036, which fp16's 5e-2 tolerance does not catch at every shape.
+ * float's 1e-3 catches it everywhere. A K-quant kernel that passed only at
+ * fp16 would not have been tested.
+ */
+template<typename T>
+static void a_kquant_weight_multiplies(const char* name,
+                                       std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\na K-quantised weight multiplies, " << name << ":\n";
+
+    // A multiple of 256, which is what a super-block covers.
+    const uint K = 512;
+
+    const ai::quant formats[] = { ai::quant::q4_K, ai::quant::q6_K };
+
+    for(ai::quant fmt : formats) {
+        for(uint N : { 8u, 64u }) {
+            std::mt19937 gen(4241 + N);
+
+            const std::size_t vals = ai::quant_values(fmt);
+            const std::size_t size = ai::quant_bytes(fmt);
+            const std::size_t nb = (std::size_t(K) * N) / vals;
+
+            std::vector<char> raw(nb * size);
+
+            for(char& c : raw) c = char(gen() & 0xFF);
+
+            // The scales, so nothing in here is inf or NaN.  q4_K carries two
+            // at the front -- the scale of the scales and the scale of the
+            // mins -- and q6_K one at byte 208.
+            for(std::size_t b = 0; b < nb; b++) {
+                char* p = raw.data() + b * size;
+
+                // Small, so a 512-term dot product stays inside fp16's
+                // 65504.  A q6_K value is d * sc * q with sc up to 127 and q
+                // up to 32, so a scale of 0.1 would reach 400 a value and
+                // overflow the reference to infinity -- which compares equal
+                // to nothing and would read as a kernel bug.
+                const _Float16 d = _Float16(0.0002 + (gen() % 100) / 500000.0);
+
+                if(fmt == ai::quant::q4_K) {
+                    const _Float16 dm = _Float16(0.0001 + (gen() % 50) / 500000.0);
+
+                    std::memcpy(p, &d, sizeof(d));
+                    std::memcpy(p + 2, &dm, sizeof(dm));
+                }
+                else
+                    std::memcpy(p + 208, &d, sizeof(d));
+            }
+
+            // The reference matrix, straight from the shared unpacking.
+            matrix<T> want(K, N);
+
+            {
+                std::vector<float> block(vals);
+
+                for(std::size_t b = 0; b < nb; b++) {
+                    ai::dequantise_block(fmt, raw.data() + b * size,
+                                         block.data());
+
+                    for(std::size_t i = 0; i < vals; i++) {
+                        const std::size_t at = b * vals + i;
+
+                        want(uint(at % K), uint(at / K)) = T(block[i]);
+                    }
+                }
+            }
+
+            for(uint ncols : { 1u, 8u, 64u }) {
+                const matrix<T> x = random_matrix<T>(K, ncols, gen);
+
+                for(ai::backend<T>* b : backends) {
+                    typename ai::backend<T>::quantised_ptr q =
+                        b->make_quantised(fmt, K, N, raw.data(), raw.size());
+
+                    ok(std::string("  ") + b->name() + ": " +
+                       ai::quant_name(fmt) + " knows its own shape and format",
+                       q->rows() == K && q->cols() == N &&
+                       q->format() == fmt);
+
+                    typename ai::backend<T>::tensor_ptr tx = b->make(x);
+                    typename ai::backend<T>::tensor_ptr got = b->make(N, ncols);
+
+                    b->multiply_tn(q, tx, got);
+
+                    typename ai::backend<T>::tensor_ptr td = b->make(want);
+                    typename ai::backend<T>::tensor_ptr ref = b->make(N, ncols);
+
+                    b->multiply_tn(td, tx, ref);
+                    b->wait();
+
+                    const matrix<T> gm = got->read(), rm = ref->read();
+
+                    // **Relative, where the q8_0 test above is absolute.**
+                    // The kernel unpacks to float and accumulates in float;
+                    // the reference rounds every weight to T first and then
+                    // multiplies. At fp16 those genuinely differ, and over a
+                    // 512-term dot product the difference scales with the
+                    // result rather than sitting at some fixed size -- so an
+                    // absolute bound would be measuring the magnitude of the
+                    // test data and not the correctness of the kernel.
+                    double mag = 0;
+
+                    for(uint r = 0; r < rm.M; r++)
+                        for(uint c = 0; c < rm.N; c++)
+                            mag = std::max(mag,
+                                           std::fabs(double(float(rm(r, c)))));
+
+                    const double d = worst(gm, rm) / std::max(1.0, mag);
+
+                    ok(std::string("  ") + b->name() + ": " +
+                       ai::quant_name(fmt) + " " + std::to_string(N) +
+                       " rows x " + std::to_string(ncols) +
+                       " column(s) match unpacking first",
+                       d < ((sizeof(T) == 2) ? 5e-2 : 1e-3), std::to_string(d));
+                }
+            }
+
+            // Bytes that do not match the shape are refused rather than read
+            // past -- the block size differs per format and this is where a
+            // wrong one would show up.
+            for(ai::backend<T>* b : backends) {
+                bool threw = false;
+
+                try { b->make_quantised(fmt, K, N, raw.data(), raw.size() - 1); }
+                catch(std::exception&) { threw = true; }
+
+                ok(std::string("  ") + b->name() + ": " + ai::quant_name(fmt) +
+                   " bytes that do not match the shape are refused", threw);
+            }
+        }
+    }
+}
+
 template<typename T>
 static void a_quantised_weight_multiplies(const char* name,
                                           std::vector<ai::backend<T>*>& backends)
@@ -1256,7 +1411,7 @@ static void a_quantised_weight_multiplies(const char* name,
 
             for(ai::backend<T>* b : backends) {
                 typename ai::backend<T>::quantised_ptr q =
-                    b->make_q8_0(K, N, raw.data(), raw.size());
+                    b->make_quantised(ai::quant::q8_0, K, N, raw.data(), raw.size());
 
                     ok(std::string("  ") + b->name() + ": it knows its own shape",
                    q->rows() == K && q->cols() == N);
@@ -1314,8 +1469,8 @@ static void a_quantised_weight_multiplies(const char* name,
 
                 // Both encoded, then one wait.  Reading g1 first would hide
                 // the bug by forcing the flush this is trying to do without.
-                b->multiply_tn(b->make_q8_0(K, N, r1.data(), r1.size()), tx, g1);
-                b->multiply_tn(b->make_q8_0(K, N, r2.data(), r2.size()), tx, g2);
+                b->multiply_tn(b->make_quantised(ai::quant::q8_0, K, N, r1.data(), r1.size()), tx, g1);
+                b->multiply_tn(b->make_quantised(ai::quant::q8_0, K, N, r2.data(), r2.size()), tx, g2);
 
                 typename ai::backend<T>::tensor_ptr w1d = b->make(d1);
                 typename ai::backend<T>::tensor_ptr w2d = b->make(d2);
@@ -1342,7 +1497,7 @@ static void a_quantised_weight_multiplies(const char* name,
         for(ai::backend<T>* b : backends) {
             bool threw = false;
 
-            try { b->make_q8_0(K, N, raw.data(), raw.size() - 34); }
+            try { b->make_quantised(ai::quant::q8_0, K, N, raw.data(), raw.size() - 34); }
             catch(std::exception&) { threw = true; }
 
             ok(std::string("  ") + b->name() + ": bytes that do not match the shape "
@@ -1353,7 +1508,7 @@ static void a_quantised_weight_multiplies(const char* name,
                 ai::backend<T>* other = (b == backends[0]) ? backends[1] : backends[0];
 
                 typename ai::backend<T>::quantised_ptr foreign =
-                    other->make_q8_0(K, N, raw.data(), raw.size());
+                    other->make_quantised(ai::quant::q8_0, K, N, raw.data(), raw.size());
 
                 typename ai::backend<T>::tensor_ptr tx = b->make(K, 1);
                 typename ai::backend<T>::tensor_ptr out = b->make(N, 1);
@@ -1618,6 +1773,7 @@ int main() {
         the_offset_mask<float>("float", b);
         beta_zero_does_not_read_the_output<float>("float", b);
         a_quantised_weight_multiplies<float>("float", b);
+        a_kquant_weight_multiplies<float>("float", b);
         every_head_at_once<float>("float", b);
         the_mask_knows_where_a_head_ends<float>("float", b);
 #else
@@ -1638,6 +1794,7 @@ int main() {
         the_offset_mask<float>("float", b);
         beta_zero_does_not_read_the_output<float>("float", b);
         a_quantised_weight_multiplies<float>("float", b);
+        a_kquant_weight_multiplies<float>("float", b);
         every_head_at_once<float>("float", b);
         the_mask_knows_where_a_head_ends<float>("float", b);
 #endif
@@ -1669,6 +1826,7 @@ int main() {
         the_offset_mask<_Float16>("_Float16", b);
         beta_zero_does_not_read_the_output<_Float16>("_Float16", b);
         a_quantised_weight_multiplies<_Float16>("_Float16", b);
+        a_kquant_weight_multiplies<_Float16>("_Float16", b);
         every_head_at_once<_Float16>("_Float16", b);
         the_mask_knows_where_a_head_ends<_Float16>("_Float16", b);
     }

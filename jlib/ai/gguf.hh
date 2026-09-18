@@ -30,6 +30,8 @@
 #include <string>
 #include <vector>
 
+#include <jlib/ai/quant.hh>
+
 namespace jlib {
 namespace ai {
 
@@ -202,6 +204,25 @@ private:
 
     template<typename U> U read_pod();
 };
+
+/**
+ * The block format a tensor type goes to the device in, if it goes at all.
+ *
+ * True for the three formats with a device path. Everything else -- f32, f16,
+ * and the quantisations jlib does not read -- is materialised on the host and
+ * narrowed on the way in, which is what a device path exists to avoid.
+ *
+ * @return false if this type has no device path, leaving `q` untouched
+ */
+inline bool device_quant(gguf::tensor_type t, quant& q)
+{
+    switch(t) {
+    case gguf::tensor_type::q8_0: q = quant::q8_0; return true;
+    case gguf::tensor_type::q4_k: q = quant::q4_K; return true;
+    case gguf::tensor_type::q6_k: q = quant::q6_K; return true;
+    default: return false;
+    }
+}
 
 }
 }
