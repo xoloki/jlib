@@ -1161,6 +1161,39 @@ static void over_tls() {
 }
 
 
+
+/**
+ * Runs a server on its own thread and **always joins it**.
+ *
+ * Not a convenience. A bare `std::thread` destroyed while still joinable calls
+ * std::terminate, so a section that threw between starting the thread and
+ * joining it -- a failed connect, a handshake that did not happen -- aborted
+ * the process instead of reporting the failure. That is worth a type rather
+ * than care, because the abort *looks* like a crash in the code under test:
+ * it cost a round of blaming the library for taking the accept thread down
+ * when what had died was the test's own thread handle.
+ */
+struct turning {
+    explicit turning(sys::server& s) : m_s(s), m_t([&s] { s.run(); }) {}
+
+    ~turning() { done(); }
+
+    /** Stop and join, once; the destructor calls it on the throwing path. */
+    void done() {
+        if(!m_t.joinable()) return;
+
+        m_s.stop();
+        m_t.join();
+    }
+
+    turning(const turning&) = delete;
+    turning& operator=(const turning&) = delete;
+
+private:
+    sys::server& m_s;
+    std::thread  m_t;
+};
+
 /**
  * Two ports, one server.
  *
@@ -1236,7 +1269,7 @@ static void two_ports_one_server() {
         ok("which the indexed pair agrees with",
            srv.port(0) == plain && srv.port(1) == tls && !srv.tls(0));
 
-        std::thread turn([&srv] { srv.run(); });
+        turning turn(srv);
 
         ok("the plaintext port is served", ask(plain, "one") == "echo: one");
 
@@ -1268,8 +1301,7 @@ static void two_ports_one_server() {
                secure_on[plain] == false && secure_on[tls] == true);
         }
 
-        srv.stop();
-        turn.join();
+        turn.done();
 
         ok("and stop() ends a two-port server just the same", srv.stopped());
     }
@@ -1329,7 +1361,7 @@ static void a_full_server_stops_accepting_everywhere() {
 
     sys::server srv(std::move(ports), hold, p);
 
-    std::thread turn([&srv] { srv.run(); });
+    turning turn(srv);
 
     // Fill the cap on the first port only.
     std::vector<std::unique_ptr<sys::socketstream> > held;
@@ -1377,8 +1409,7 @@ static void a_full_server_stops_accepting_everywhere() {
     ok("and the queued one is taken once there is room again", back,
        std::to_string(arrived.load()) + " arrived");
 
-    srv.stop();
-    turn.join();
+    turn.done();
 }
 
 int main() {
