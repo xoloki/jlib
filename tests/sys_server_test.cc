@@ -47,6 +47,8 @@
 #include <jlib/sys/tls.hh>
 
 #include <atomic>
+#include <condition_variable>
+#include <map>
 #include <chrono>
 #include <cstdio>
 #include <iostream>
@@ -1158,6 +1160,258 @@ static void over_tls() {
     std::remove(key.c_str());
 }
 
+
+
+/**
+ * Runs a server on its own thread and **always joins it**.
+ *
+ * Not a convenience. A bare `std::thread` destroyed while still joinable calls
+ * std::terminate, so a section that threw between starting the thread and
+ * joining it -- a failed connect, a handshake that did not happen -- aborted
+ * the process instead of reporting the failure. That is worth a type rather
+ * than care, because the abort *looks* like a crash in the code under test:
+ * it cost a round of blaming the library for taking the accept thread down
+ * when what had died was the test's own thread handle.
+ */
+struct turning {
+    explicit turning(sys::server& s) : m_s(s), m_t([&s] { s.run(); }) {}
+
+    ~turning() { done(); }
+
+    /** Stop and join, once; the destructor calls it on the throwing path. */
+    void done() {
+        if(!m_t.joinable()) return;
+
+        m_s.stop();
+        m_t.join();
+    }
+
+    turning(const turning&) = delete;
+    turning& operator=(const turning&) = delete;
+
+private:
+    sys::server& m_s;
+    std::thread  m_t;
+};
+
+/**
+ * Two ports, one server.
+ *
+ * The thing under test is not "it binds twice" -- that part is arithmetic.
+ * It is that **TLS belongs to the listener**, so one server can hold a
+ * plaintext port and an encrypted one and answer both through the same
+ * handler, with one reactor, one pool and one cap between them.  Two servers
+ * would give two of each, which is what made 80-and-443 two processes.
+ */
+static void two_ports_one_server() {
+    std::cout << "\ntwo ports, one server:\n";
+
+    const std::string cert = "server_test_two_cert.pem";
+    const std::string key = "server_test_two_key.pem";
+
+    if(!make_cert(cert, key)) {
+        std::cout << "  skip  could not generate a test certificate\n";
+
+        return;
+    }
+
+    const char* const had = std::getenv("SSL_CERT_FILE");
+    const std::string keep = had ? had : "";
+
+    ::setenv("SSL_CERT_FILE", cert.c_str(), 1);
+
+    try {
+        // What the handler saw, so the assertions below are about the peer
+        // rather than about which socket happened to answer.
+        std::mutex said;
+        std::map<unsigned short, bool> secure_on;
+        std::map<unsigned short, unsigned short> local_on;
+
+        const sys::server::handler note =
+            [&said, &secure_on, &local_on](sys::socketstream& s,
+                                           const sys::peer& from) {
+                {
+                    std::lock_guard<std::mutex> hold(said);
+
+                    secure_on[from.local_port] = from.secure;
+                    local_on[from.local_port] = from.local_port;
+                }
+
+                echo(s, from);
+            };
+
+        std::vector<sys::server::bound> ports;
+
+        ports.push_back(sys::server::bound(sys::listener(0, "127.0.0.1")));
+        ports.push_back(sys::server::bound(sys::listener(0, "127.0.0.1"),
+                                           sys::tls_context::server(cert, key)));
+
+        const unsigned short plain = ports[0].l.port();
+        const unsigned short tls = ports[1].l.port();
+
+        sys::server srv(std::move(ports), note);
+
+        ok("it bound two", srv.listeners() == 2, std::to_string(srv.listeners()));
+        ok("and reports both ports",
+           srv.ports().size() == 2 && srv.ports()[0] == plain &&
+               srv.ports()[1] == tls,
+           std::to_string(srv.ports()[0]) + " and " + std::to_string(srv.ports()[1]));
+
+        // **port() and tls() describe the same listener.**  Read as "does this
+        // server speak TLS anywhere", tls() would be true here and port()
+        // would still be the plaintext port -- and a caller doing
+        // `if(s.tls()) connect_tls(s.port())` would be wrong while each half
+        // was right.
+        ok("port() is the first of them", srv.port() == plain,
+           std::to_string(srv.port()));
+        ok("and tls() answers about that same one, not about any of them",
+           !srv.tls() && srv.tls(1));
+        ok("which the indexed pair agrees with",
+           srv.port(0) == plain && srv.port(1) == tls && !srv.tls(0));
+
+        turning turn(srv);
+
+        ok("the plaintext port is served", ask(plain, "one") == "echo: one");
+
+        {
+            sys::tlsstream s("localhost", tls);
+
+            s.set_timeout(5);
+            s << "two\r\n" << std::flush;
+
+            std::string line;
+            std::getline(s, line);
+
+            while(!line.empty() && line.back() == '\r') line.pop_back();
+
+            ok("and so is the TLS one, through the same handler",
+               line == "echo: two", line);
+        }
+
+        {
+            std::lock_guard<std::mutex> hold(said);
+
+            ok("the handler was told which port each arrived on",
+               local_on.size() == 2 && local_on.count(plain) &&
+                   local_on.count(tls));
+
+            // The bit an http-to-https redirect is made of.  Without it a
+            // handler serving both ports cannot tell them apart at all.
+            ok("and that one was encrypted and the other was not",
+               secure_on[plain] == false && secure_on[tls] == true);
+        }
+
+        turn.done();
+
+        ok("and stop() ends a two-port server just the same", srv.stopped());
+    }
+    catch(std::exception& e) {
+        ok("two ports, one server", false, e.what());
+    }
+
+    if(had) ::setenv("SSL_CERT_FILE", keep.c_str(), 1);
+    else    ::unsetenv("SSL_CERT_FILE");
+
+    std::remove(cert.c_str());
+    std::remove(key.c_str());
+}
+
+/**
+ * A full server stops accepting on **every** port.
+ *
+ * The cap counts connections, not connections-per-port.  A version that
+ * disarmed only the listener that happened to fill it would pass every
+ * single-port test in this file and hand a client the whole cap a second time
+ * for the price of knocking on the other door -- which is worth a test of its
+ * own precisely because nothing else here would notice.
+ */
+static void a_full_server_stops_accepting_everywhere() {
+    std::cout << "\nwhen it is full, every port is:\n";
+
+    sys::server::policy p;
+
+    p.threads = 2;
+    p.max_connections = 2;
+
+    std::atomic<int> arrived{0};
+
+    // **Held by suspending, not by blocking.**  An async handler runs on the
+    // reactor thread, so a condition variable here would stop the accept loop
+    // itself and the second connection would never arrive -- which is what the
+    // first draft of this test did, and it looked exactly like a cap that was
+    // working.  Awaiting a read parks the coroutine and leaves the reactor
+    // turning, so the connection is held open by a client that says nothing.
+    const sys::server::async_handler hold =
+        [&arrived](sys::server::connection& c, const sys::peer&)
+            -> sys::task<void> {
+        arrived++;
+
+        co_await c.reader().fill();
+
+        co_await c.writer().write("held\r\n");
+    };
+
+    std::vector<sys::server::bound> ports;
+
+    ports.push_back(sys::server::bound(sys::listener(0, "127.0.0.1")));
+    ports.push_back(sys::server::bound(sys::listener(0, "127.0.0.1")));
+
+    const unsigned short first = ports[0].l.port();
+    const unsigned short second = ports[1].l.port();
+
+    sys::server srv(std::move(ports), hold, p);
+
+    turning turn(srv);
+
+    // Fill the cap on the first port only.
+    std::vector<std::unique_ptr<sys::socketstream> > held;
+
+    for(int i = 0; i < 2; i++) {
+        held.push_back(std::unique_ptr<sys::socketstream>(
+            new sys::socketstream("127.0.0.1", first, 5)));
+    }
+
+    for(int i = 0; i < 100 && arrived.load() < 2; i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    ok("two connections fill it", arrived.load() == 2,
+       std::to_string(arrived.load()));
+
+    // **The other port must now be deaf.**  The connect itself may well
+    // succeed -- the kernel completes the handshake into the listen backlog
+    // whether or not anything accepts -- so what is asserted is that no third
+    // connection reaches the handler.
+    {
+        sys::socketstream other("127.0.0.1", second, 5);
+
+        other << "hello\r\n" << std::flush;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+        ok("and the second port accepts nothing while it is full",
+           arrived.load() == 2, std::to_string(arrived.load()) + " arrived");
+    }
+
+    // Dropping the clients ends the reads the handlers are parked on, which
+    // ends the connections and frees the slots.
+    held.clear();
+
+    // Once the cap clears, both are armed again -- including the one that was
+    // never the reason it filled.
+    bool back = false;
+
+    for(int i = 0; i < 200 && !back; i++) {
+        if(arrived.load() > 2) { back = true; break; }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    ok("and the queued one is taken once there is room again", back,
+       std::to_string(arrived.load()) + " arrived");
+
+    turn.done();
+}
+
 int main() {
     // **This test is an application, and applications ignore SIGPIPE.**
     //
@@ -1178,6 +1432,8 @@ int main() {
     one_connection_at_a_time();
     a_handler_that_throws_does_not_stop_the_server();
     several_at_once_when_asked();
+    two_ports_one_server();
+    a_full_server_stops_accepting_everywhere();
     the_cap_holds_at_two();
     counting_connections_per_address();
     one_address_may_not_have_every_slot(false);

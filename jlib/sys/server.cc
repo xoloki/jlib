@@ -22,6 +22,8 @@
 
 #include <jlib/sys/async_tls.hh>
 
+#include <iterator>
+
 #include <jlib/sys/sslstream.hh>
 
 #include <openssl/err.h>
@@ -72,38 +74,84 @@ namespace {
 
 }
 
-server::server(deferred_handler_t, listener l, tls_context tls,
-               const policy& p)
-    : m_listener(std::move(l)),
+server::server(deferred_handler_t, std::vector<bound> ports, const policy& p)
+    : m_bound(std::make_move_iterator(ports.begin()),
+              std::make_move_iterator(ports.end())),
       m_on_error(complain),
-      m_tls(std::move(tls)),
       m_policy(p),
       m_jobs(static_cast<int>(p.threads))
 {
-    // So the accept never blocks: the reactor reports the listening descriptor
-    // ready, and a client that sends an RST between the readiness and the
-    // accept would otherwise leave it waiting for the next one.
-    m_listener.set_blocking(false);
+    // A server with no port would construct, run, and never do anything, which
+    // is a harder mistake to find than a throw here.
+    if(m_bound.empty()) throw exception("a server with no listener");
 
-    // Registered once, here, rather than a two-element pollfd array rebuilt on
-    // every serve_one.  The reactor's own wake pipe is the second descriptor
-    // now, and it registers that itself.
-    m_listen = m_reactor.add(
-        m_listener.get_socket(), reactor::READ,
-        [this](reactor::token, int, reactor::event_type) {
-            // Caught rather than thrown: a reactor callback that throws goes to
-            // on_error and the pass carries on, where serve_one's caller has
-            // always been told about a failed accept.  Parked, and rethrown
-            // once the pass is over.
-            try {
-                m_accepted = m_async ? accept_and_start() : accept_and_post();
-            }
-            catch(...) { m_accept_error = std::current_exception(); }
-        });
+    for(std::size_t i = 0; i < m_bound.size(); i++) {
+        // So the accept never blocks: the reactor reports the listening
+        // descriptor ready, and a client that sends an RST between the
+        // readiness and the accept would otherwise leave it waiting for the
+        // next one.
+        m_bound[i].l.set_blocking(false);
+
+        // Registered once, here, rather than a pollfd array rebuilt on every
+        // serve_one.  The reactor's own wake pipe is another descriptor now,
+        // and it registers that itself.
+        //
+        // **The index is captured, not a pointer.**  m_bound is built in this
+        // constructor and never resized, so the index stays the same element
+        // for the object's life; a pointer or reference would be the thing
+        // that made add_listener() a hazard rather than merely absent.
+        m_bound[i].token = m_reactor.add(
+            m_bound[i].l.get_socket(), reactor::READ,
+            [this, i](reactor::token, int, reactor::event_type) {
+                // Caught rather than thrown: a reactor callback that throws
+                // goes to on_error and the pass carries on, where serve_one's
+                // caller has always been told about a failed accept.  Parked,
+                // and rethrown once the pass is over.
+                try {
+                    // |=, not =: several listeners can be ready in one pass,
+                    // and serve_one answers "did this pass accept anything".
+                    // Plain assignment would let a second listener with
+                    // nothing waiting erase the first one's answer.
+                    if(m_async ? accept_and_start(i) : accept_and_post(i))
+                        m_accepted = true;
+                }
+                catch(...) { m_accept_error = std::current_exception(); }
+            });
+    }
+}
+
+namespace {
+
+    /** One listener and one context, as the vector the real constructor wants. */
+    std::vector<server::bound> just_one(listener l, tls_context tls) {
+        std::vector<server::bound> one;
+
+        one.reserve(1);
+        one.push_back(server::bound(std::move(l), std::move(tls)));
+
+        return one;
+    }
+
+}
+
+server::server(std::vector<bound> ports, handler h, const policy& p)
+    : server(deferred_handler_t(), std::move(ports), p)
+{
+    m_handler = std::move(h);
+
+    if(!m_handler) throw exception("a server with no handler");
+}
+
+server::server(std::vector<bound> ports, async_handler h, const policy& p)
+    : server(deferred_handler_t(), std::move(ports), p)
+{
+    m_async = std::move(h);
+
+    if(!m_async) throw exception("a server with no handler");
 }
 
 server::server(listener l, handler h, tls_context tls, const policy& p)
-    : server(deferred_handler_t(), std::move(l), std::move(tls), p)
+    : server(deferred_handler_t(), just_one(std::move(l), std::move(tls)), p)
 {
     m_handler = std::move(h);
 
@@ -119,7 +167,7 @@ server::server(unsigned short port, handler h, const std::string& host,
 {}
 
 server::server(listener l, async_handler h, tls_context tls, const policy& p)
-    : server(deferred_handler_t(), std::move(l), std::move(tls), p)
+    : server(deferred_handler_t(), just_one(std::move(l), std::move(tls)), p)
 {
     m_async = std::move(h);
 
@@ -242,9 +290,30 @@ server::~server() {
     join();
 }
 
-unsigned short server::port() const { return m_listener.port(); }
+unsigned short server::port() const { return port(0); }
 
-bool server::tls() const { return !m_tls.empty(); }
+bool server::tls() const { return tls(0); }
+
+std::size_t server::listeners() const { return m_bound.size(); }
+
+unsigned short server::port(std::size_t i) const {
+    // at(), not [], because an index out of range here is a caller asking
+    // about a port that does not exist, and answering 0 would look like a
+    // listener that failed to bind.
+    return m_bound.at(i).l.port();
+}
+
+bool server::tls(std::size_t i) const { return !m_bound.at(i).tls.empty(); }
+
+std::vector<unsigned short> server::ports() const {
+    std::vector<unsigned short> all;
+
+    all.reserve(m_bound.size());
+
+    for(std::size_t i = 0; i < m_bound.size(); i++) all.push_back(m_bound[i].l.port());
+
+    return all;
+}
 
 std::size_t server::pending() const { return m_jobs.size(); }
 
@@ -336,7 +405,8 @@ void server::join() {
     m_jobs.join();
 }
 
-void server::serve(int fd, const peer& from, address_count::hold slot) {
+void server::serve(int fd, const peer& from, tls_context tls,
+                   address_count::hold slot) {
     // `slot` is taken **by value and never touched again**, which is the whole
     // of the bookkeeping: it is destroyed when this returns, on every path it
     // can return by.  A local copy of it was here until a break harness showed
@@ -359,8 +429,8 @@ void server::serve(int fd, const peer& from, address_count::hold slot) {
         // tlsstream performs SSL_accept, and doing that on the accept thread
         // would let one slow or hostile client stall every other connection
         // through a full handshake -- which is exactly what a pool is for.
-        if(!m_tls.empty()) {
-            s.reset(new tlsstream(tls_server, m_tls, adopt, held.release(),
+        if(!tls.empty()) {
+            s.reset(new tlsstream(tls_server, tls, adopt, held.release(),
                                   from.address, from.port, m_policy.io_timeout));
         }
         else {
@@ -398,19 +468,19 @@ void server::serve(int fd, const peer& from, address_count::hold slot) {
     }
 }
 
-bool server::accept_and_post() {
+bool server::accept_and_post(std::size_t i) {
     peer from;
     int fd;
 
     try {
-        fd = m_listener.accept(from, 0);
+        fd = m_bound[i].l.accept(from, 0);
     }
     catch(std::exception& e) {
         // Out of descriptors is not a reason to stop serving, and it is a
         // condition that clears.  Without the pause this spins at full tilt,
         // because the connection stays queued and the listener stays readable.
         //
-        // The reactor makes the better answer easy -- modify(m_listen, NONE)
+        // The reactor makes the better answer easy -- modify the token to NONE
         // and an after() to re-arm -- but that only works when the accept loop
         // is reactor-driven rather than call-driven, and serve_one(timeout) is
         // call-driven by contract.  Left as it was; named as the follow-up.
@@ -426,6 +496,13 @@ bool server::accept_and_post() {
     }
 
     if(fd < 0) return false;
+
+    // Which door it came through, stamped here because listener does not know
+    // -- it binds one address and has no opinion about TLS.  `from.port` is
+    // the peer's ephemeral port and says nothing; these two are what an
+    // http-to-https redirect is made of.
+    from.local_port = m_bound[i].l.port();
+    from.secure = !m_bound[i].tls.empty();
 
     address_count::hold slot;
 
@@ -454,20 +531,25 @@ bool server::accept_and_post() {
     std::shared_ptr<address_count::hold> kept =
         std::make_shared<address_count::hold>(std::move(slot));
 
-    m_jobs.post([this, held, from, kept] {
-        serve(held->release(), from, std::move(*kept));
+    // The context is captured by value -- a refcount bump on one SSL_CTX --
+    // so the job carries the identity of the listener that accepted it rather
+    // than reading a server-wide one that no longer exists.
+    const tls_context tls = m_bound[i].tls;
+
+    m_jobs.post([this, held, from, kept, tls] {
+        serve(held->release(), from, tls, std::move(*kept));
     });
 
     return true;
 }
 
 
-bool server::accept_and_start() {
+bool server::accept_and_start(std::size_t i) {
     peer from;
     int fd;
 
     try {
-        fd = m_listener.accept(from, 0);
+        fd = m_bound[i].l.accept(from, 0);
     }
     catch(std::exception& e) {
         if(errno == EMFILE || errno == ENFILE) {
@@ -483,6 +565,13 @@ bool server::accept_and_start() {
 
     if(fd < 0) return false;
 
+    // Which door it came through, stamped here because listener does not know
+    // -- it binds one address and has no opinion about TLS.  `from.port` is
+    // the peer's ephemeral port and says nothing; these two are what an
+    // http-to-https redirect is made of.
+    from.local_port = m_bound[i].l.port();
+    from.secure = !m_bound[i].tls.empty();
+
     address_count::hold slot;
 
     if(!admit(fd, from, slot)) return true;
@@ -495,13 +584,20 @@ bool server::accept_and_start() {
     // afterwards.  Lazy, so nothing runs until start() below -- which matters,
     // because a coroutine that ran on creation would run before anything held
     // its frame.
-    m_live.push_back(live{ serve_async(fd, from, t, std::move(slot)), t });
+    m_live.push_back(
+        live{ serve_async(fd, from, m_bound[i].tls, t, std::move(slot)), t });
 
     m_live.back().work.start();
 
     if(full()) {
-        // Stop asking about the listener rather than accepting and refusing.
-        m_reactor.modify(m_listen, reactor::NONE);
+        // Stop asking about the listeners rather than accepting and refusing.
+        //
+        // **Every one of them**, because the cap counts connections and not
+        // connections-per-port: leaving one armed would let a client have the
+        // whole cap again by knocking on a different door, which is the bug a
+        // single-listener re-arm would have shipped silently.
+        for(std::size_t j = 0; j < m_bound.size(); j++)
+            m_reactor.modify(m_bound[j].token, reactor::NONE);
 
         m_listen_off = true;
     }
@@ -516,7 +612,8 @@ void server::reap() {
     }
 
     if(m_listen_off && !full()) {
-        m_reactor.modify(m_listen, reactor::READ);
+        for(std::size_t j = 0; j < m_bound.size(); j++)
+            m_reactor.modify(m_bound[j].token, reactor::READ);
 
         m_listen_off = false;
     }
@@ -572,8 +669,8 @@ namespace {
 
 }
 
-task<void> server::serve_async(int fd, peer from, cancel_token t,
-                               address_count::hold slot) {
+task<void> server::serve_async(int fd, peer from, tls_context tls,
+                               cancel_token t, address_count::hold slot) {
     // By value again, and here that means *in the coroutine frame*: a
     // coroutine's parameters are moved into the frame and destroyed with it,
     // so the count is released when the connection's frame is -- which reap()
@@ -591,11 +688,11 @@ task<void> server::serve_async(int fd, peer from, cancel_token t,
     ERR_clear_error();
 
     try {
-        if(!m_tls.empty()) {
+        if(!tls.empty()) {
             // The handshake is awaited rather than performed in a
             // constructor, which is the whole reason async_tls exists: a slow
             // or hostile client stalls itself and nothing else.
-            async_tls tls(m_reactor, fd, tls_server, m_tls, t);
+            async_tls conn(m_reactor, fd, tls_server, tls, t);
 
             // **And it is bounded, which it was not** (#240).
             //
@@ -616,12 +713,12 @@ task<void> server::serve_async(int fd, peer from, cancel_token t,
             {
                 const timed_out_after bound(m_reactor, m_policy.io_timeout, t);
 
-                co_await tls.handshake();
+                co_await conn.handshake();
             }
 
             // No descriptor: see connection::peer_gone(), which cannot read a
             // TLS socket honestly.
-            connection c(m_reactor, m_jobs, tls.reader(), tls.writer(), from,
+            connection c(m_reactor, m_jobs, conn.reader(), conn.writer(), from,
                          t);
 
             co_await m_async(c, from);
@@ -632,7 +729,7 @@ task<void> server::serve_async(int fd, peer from, cancel_token t,
             {
                 const timed_out_after bound(m_reactor, m_policy.io_timeout, t);
 
-                co_await tls.shutdown();
+                co_await conn.shutdown();
             }
         }
         else {

@@ -41,6 +41,7 @@
 #include <exception>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace jlib {
 namespace sys {
@@ -484,6 +485,38 @@ public:
      */
     typedef std::function<void(const std::exception&, const peer&)> error_handler;
 
+    /**
+     * One bound port and the identity it answers with.
+     *
+     * An empty context is a plaintext port. Two of these with the *same*
+     * context share its SNI table, since a tls_context is a refcount over one
+     * SSL_CTX -- which is what makes "the same certificate on 443 and 8443"
+     * free rather than something to configure twice.
+     */
+    struct bound {
+        listener    l;
+        tls_context tls;
+
+        bound(listener l_, tls_context tls_ = tls_context())
+            : l(std::move(l_)), tls(std::move(tls_)) {}
+    };
+
+    /**
+     * Several ports at once, each with its own identity.
+     *
+     * What one server buys over several is everything above the listener: one
+     * reactor, one pool, one connection cap, one address table, and one
+     * handler. Two servers would have two of each, which for 80-and-443 is two
+     * reactor threads and a cap that an attacker gets to spend twice.
+     *
+     * The list must not be empty, and every listener must already be bound.
+     */
+    server(std::vector<bound> ports, handler h, const policy& p = policy());
+
+    /** The same, with a handler that suspends. */
+    server(std::vector<bound> ports, async_handler h,
+           const policy& p = policy());
+
     /** From a listener already bound: the caller chose the port and backlog. */
     server(listener l, handler h, tls_context tls = tls_context(),
            const policy& p = policy());
@@ -525,8 +558,29 @@ public:
     server(const server&) = delete;
     server& operator=(const server&) = delete;
 
+    /**
+     * The first listener's port, and whether *that* listener is TLS.
+     *
+     * They answer about the same listener on purpose. Reading tls() as "does
+     * this server speak TLS anywhere" would be the friendlier sentence and the
+     * wrong one: a caller doing `if(s.tls()) connect_tls(s.port())` would then
+     * be dialling a plaintext port over TLS, and it would be right about both
+     * halves separately.
+     *
+     * For a server with one port -- which is nearly all of them, and every
+     * test in this tree -- these are what they always were.
+     */
     unsigned short port() const;
     bool tls() const;
+
+    /** Every port, in the order they were given. */
+    std::vector<unsigned short> ports() const;
+
+    /** How many listeners there are; port(i) and tls(i) index them. */
+    std::size_t listeners() const;
+
+    unsigned short port(std::size_t i) const;
+    bool tls(std::size_t i) const;
 
     /** Fixed at construction.  There is no setter; see server_policy. */
     const policy& get_policy() const { return m_policy; }
@@ -670,13 +724,19 @@ private:
      */
     struct deferred_handler_t { explicit deferred_handler_t() = default; };
 
-    server(deferred_handler_t, listener l, tls_context tls, const policy& p);
+    server(deferred_handler_t, std::vector<bound> ports, const policy& p);
 
-    void serve(int fd, const peer& from, address_count::hold slot);
+    // The tls_context is passed by value, not by reference, and that is
+    // load-bearing on the async side: serve_async is a coroutine, and a
+    // coroutine's parameters are copied into the frame *as declared*, so a
+    // reference parameter copies the reference and dangles the moment the
+    // caller's frame goes.  A copy is a refcount bump on one SSL_CTX.
+    void serve(int fd, const peer& from, tls_context tls,
+               address_count::hold slot);
     std::size_t cap() const;
 
-    /** One accept and one post.  What the reactor calls the listener ready for. */
-    bool accept_and_post();
+    /** One accept and one post.  What the reactor calls listener `i` ready for. */
+    bool accept_and_post(std::size_t i);
 
     /**
      * Take a slot for `from` if policy allows, closing `fd` if it does not.
@@ -689,10 +749,10 @@ private:
     bool full() const;
 
     /** The async path: one accept, and a coroutine that owns the descriptor. */
-    bool accept_and_start();
+    bool accept_and_start(std::size_t i);
 
     /** The coroutine one connection runs in. */
-    task<void> serve_async(int fd, peer from, cancel_token t,
+    task<void> serve_async(int fd, peer from, tls_context tls, cancel_token t,
                            address_count::hold slot);
 
     /** Drop the connections that have finished.  Called once per pass. */
@@ -711,14 +771,43 @@ private:
 
     address_count m_addresses;
 
-    listener      m_listener;
+    /**
+     * The ports this serves, each with its own identity.
+     *
+     * **TLS belongs to the listener, not to the server**, which is the whole
+     * of what made one port a limit: a server holding one context can describe
+     * every connection as encrypted or none of them, and 80-and-443 is neither.
+     *
+     * Built once, in the constructor, and never resized -- the callbacks
+     * registered below hold an index into it, and a vector that grew would
+     * move the elements those indices name.  There is deliberately no
+     * add_listener(): every port is known before the reactor turns, and
+     * registering a descriptor while the loop is running is a question nobody
+     * has had to ask yet.
+     */
+    /**
+     * What the server keeps: a bound port, its identity, and its registration.
+     *
+     * Separate from the public `bound` because the token is the server's
+     * business -- a caller describing a port it wants served has no use for a
+     * reactor handle and should not have to look at one.
+     */
+    struct listening {
+        listener       l;
+        tls_context    tls;
+        reactor::token token = reactor::token::none;
+
+        listening(bound b) : l(std::move(b.l)), tls(std::move(b.tls)) {}
+    };
+
+    std::vector<listening> m_bound;
+
     handler       m_handler;
     mutable error_handler m_on_error;
-    tls_context   m_tls;
     policy        m_policy;
 
-    // Declared after m_listener, so it is destroyed *before* it: the
-    // registration below names a descriptor the listener owns.
+    // Declared after m_bound, so it is destroyed *before* it: the
+    // registrations below name descriptors the listeners own.
     //
     // The wake pipe used to live here, alongside a two-element pollfd array
     // rebuilt on every call.  Both moved into the reactor, and with them the
@@ -726,7 +815,6 @@ private:
     // -- which is undefined while another thread polls it and on macOS does not
     // wake it.
     reactor        m_reactor;
-    reactor::token m_listen = reactor::token::none;
 
     // This pass's answer, written by the callback and read by serve_one.  A
     // plain bool because only the reactor's thread touches it, which is the
@@ -761,13 +849,19 @@ private:
     // dropping is what keeps the overflow in the kernel's listen backlog,
     // where a connection is supposed to wait -- and what stops the accept loop
     // spinning on a readiness it refuses to act on.
+    //
+    // One flag for all of them, because the cap is one number: full() counts
+    // connections, not connections-per-port, so a server at its limit stops
+    // accepting everywhere.  Per-listener flags would let an attacker have the
+    // cap twice by knocking on two doors.
     bool m_listen_off = false;
 
     std::atomic<bool> m_stop{false};
 
     // Declared last, so it is destroyed first: ~job_queue is stop() then
-    // join(), and every worker has to have left before m_handler, m_tls and
-    // m_listener are destroyed -- a running handler reaches all three.  The
+    // join(), and every worker has to have left before m_handler and m_bound
+    // are destroyed -- a running handler reaches both, including the
+    // tls_context its connection was wrapped with.  The
     // destructor below makes that redundant in the ordinary case and not
     // redundant when a constructor throws after the pool is built.
     job_queue m_jobs;
