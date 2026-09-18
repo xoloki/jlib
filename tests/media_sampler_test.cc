@@ -35,6 +35,7 @@
 #include <cmath>
 #include <complex>
 #include <iomanip>
+#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -398,7 +399,29 @@ static void a_sample_and_a_voice_are_the_same_kind_of_thing() {
        differ ? (std::to_string(differ) + " differ") : "");
 }
 
+/**
+ * The clips the sections above wrote, removed however this ends.
+ *
+ * Every section calls make_clip(), which writes a real file -- these tests are
+ * about decoding one, so a temporary is the point rather than an accident.
+ * Nothing removed them, so a green run left two .wav files in the build
+ * directory, which `make check` cannot see and `make distcheck` fails on at
+ * `distcleancheck`.
+ *
+ * A struct rather than two calls at the end of main, so the throwing path
+ * cleans up too -- which is the mistake the .pem pair in sys_tls_server_test
+ * made in the other direction, with its removes after the call that throws.
+ */
+struct written {
+    ~written() {
+        std::remove("sampler_test_mono.wav");
+        std::remove("sampler_test_stereo.wav");
+    }
+};
+
 int main() {
+    const written clips;
+
     try {
         decoding();
         plays_back_what_was_recorded();
