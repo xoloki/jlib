@@ -24,6 +24,7 @@
 #include <jlib/net/http_server.hh>
 
 #include <jlib/sys/sync.hh>
+#include <jlib/util/conf.hh>
 
 #ifdef HAVE_PWHASH
 #include <sodium.h>
@@ -50,6 +51,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 /**
  * jhttpd's logging: the Combined Log Format, and the escaping it needs.
@@ -508,6 +510,333 @@ inline bool credentials::check(const std::string& user,
     // letting the *lookup* leak.
     return i != m_hashes.end() && ok == 0;
 #endif
+}
+
+/** A path that needs a credential, and where the credentials are. */
+struct guard {
+    std::string prefix;
+    std::string realm;
+    std::string file;
+};
+
+/** A name with a root of its own, and optionally a certificate of its own. */
+struct site {
+    std::string name;
+    std::string root;
+    std::string cert;
+    std::string key;
+};
+
+struct options {
+    unsigned short port = 8080;
+    std::string    host = "127.0.0.1";
+    std::string    root = ".";
+    std::string    prefix = "/";
+    std::string    access_log = "-";
+    std::string    error_log = "-";
+    std::string    cache_control;
+    unsigned int   threads = 4;
+    bool           async = false;
+
+    std::string    cert;
+    std::string    key;
+
+    // Zero is off for both, which is what the library defaults to.  jhttpd
+    // does not pick a limit on the operator's behalf: a rate that is wrong is
+    // worse than none, because it is wrong in a way that looks deliberate.
+    double         rate = 0;
+    double         burst = 0;
+    std::size_t    max_per_address = 0;
+
+    // These do have defaults, because they are the library's and a server
+    // that quietly widened them would be removing a bound somebody is
+    // relying on.  Mirrored here so --help can print them.
+    std::size_t    max_connections = 256;
+    double         io_timeout = 30;
+    double         initial_idle_timeout = 5;
+    double         idle_timeout = 60;
+    std::size_t    max_requests = 100;
+
+    // In the order they were given.  A list rather than one, because a server
+    // with a private area usually has more than one of them.
+    //
+    // **Split once, at the point of entry, rather than carried as text.**
+    // These used to be the raw `PREFIX:REALM:FILE` and `NAME:ROOT:CERT:KEY`
+    // strings, re-split at each of three use sites.  A config file can say
+    // these without colons at all, and packing its fields back into a string
+    // so they could be taken apart again would re-introduce exactly the
+    // ambiguity the file exists to remove -- and would do it to values that
+    // never had it.
+    std::vector<guard> protect;
+    std::vector<site>  vhosts;
+
+    bool           hash_password = false;
+
+    // Read before any flag is applied, so a flag overrides what it says.
+    std::string    config;
+
+    std::string    user;
+    std::string    group;
+    std::string    pidfile;
+    bool           allow_root = false;
+    bool           daemon = false;
+};
+
+
+// -------------------------------------------------------------- the config
+
+/**
+ * Applying a parsed config to `options`.
+ *
+ * ## Which names
+ *
+ * nginx's own, **wherever the meaning is genuinely the same** -- `listen`,
+ * `root`, `server_name`, `ssl_certificate`, `ssl_certificate_key`,
+ * `access_log`, `error_log`, `user`, `daemon`, `pid`, `location`,
+ * `auth_basic`, `auth_basic_user_file`, `keepalive_timeout`,
+ * `keepalive_requests`, `client_header_timeout`. An operator who knows nginx
+ * should be able to guess these and be right.
+ *
+ * Where jhttpd's setting is *not* nginx's, it gets a name of its own rather
+ * than a borrowed one: `prefix`, `cache_control`, `threads`, `async`,
+ * `allow_root`, `max_connections`, `max_per_address`, `request_rate`,
+ * `request_burst`, `io_timeout`. The temptation was `limit_rate` and
+ * `limit_conn`, and both were rejected: nginx's `limit_rate` is *bandwidth*,
+ * not request rate, and its `limit_conn` is per-key rather than a total. A
+ * familiar name that means something else is worse than an unfamiliar one,
+ * because it is wrong in a way the operator has no reason to check.
+ *
+ * ## Which file wins
+ *
+ * The config is read first and every flag is applied over it, so **a flag
+ * always overrides the file**. That is one rule with no exceptions rather than
+ * a per-setting story, and it is the one people expect from a daemon.
+ */
+
+[[noreturn]] inline void wrong(const jlib::util::conf::directive& d, const std::string& why) {
+    throw jlib::util::conf::error("\"" + d.name + "\" " + why, d.line);
+}
+
+/**
+ * **The arity check, which is what catches a forgotten semicolon.**
+ *
+ * util::conf cannot: a newline is whitespace there, so `listen 8080` with no
+ * `;` followed by `root /srv;` parses as one `listen` holding three arguments.
+ * That is nginx's behaviour too, and it has to be, or a directive could not
+ * span lines. So the parser hands up something well-formed and wrong, and the
+ * only thing standing between that and a server listening on a port nobody
+ * chose is counting the arguments here.
+ *
+ * Which means every directive below must call this, including the ones that
+ * take none -- `daemon 8080 root /srv;` is what a missing semicolon after
+ * `daemon` looks like.
+ */
+inline void arity(const jlib::util::conf::directive& d, std::size_t least, std::size_t most) {
+    if(d.args.size() >= least && d.args.size() <= most) return;
+
+    std::string want = std::to_string(least);
+
+    if(most != least) {
+        want += most == std::size_t(-1) ? " or more"
+                                        : " to " + std::to_string(most);
+    }
+
+    wrong(d, "takes " + want + " argument" + (most == 1 ? "" : "s") +
+             ", got " + std::to_string(d.args.size()) +
+             (d.args.size() > least
+                  ? " -- a missing \";\" on the line before reads like this"
+                  : ""));
+}
+
+/** A directive that must not have a block. */
+inline void plain(const jlib::util::conf::directive& d, std::size_t least, std::size_t most) {
+    if(d.blocked) wrong(d, "does not take a { } block");
+
+    arity(d, least, most);
+}
+
+/** A directive that must have one. */
+inline void blocked(const jlib::util::conf::directive& d, std::size_t least,
+             std::size_t most) {
+    if(!d.blocked) wrong(d, "wants a { } block");
+
+    arity(d, least, most);
+}
+
+inline double as_number(const jlib::util::conf::directive& d, std::size_t i) {
+    const std::string& s = d.arg(i);
+    char*              end = 0;
+    const double       v = std::strtod(s.c_str(), &end);
+
+    // strtod reports failure by not moving `end`, which is the only way to
+    // tell "0" from a word -- std::atof answers 0 for both, and a rate of zero
+    // means "no limit", so a typo would silently turn a limit off.
+    if(end == s.c_str() || *end != '\0' || v < 0)
+        wrong(d, "wants a number, got \"" + s + "\"");
+
+    return v;
+}
+
+inline std::size_t as_count(const jlib::util::conf::directive& d, std::size_t i) {
+    return std::size_t(as_number(d, i));
+}
+
+/** `on` or `off`, as nginx spells a boolean.  Absent means on. */
+inline bool as_flag(const jlib::util::conf::directive& d) {
+    if(d.args.empty()) return true;
+    if(d.arg(0) == "on") return true;
+    if(d.arg(0) == "off") return false;
+
+    wrong(d, "wants \"on\" or \"off\", got \"" + d.arg(0) + "\"");
+}
+
+/**
+ * `PORT`, or `ADDR:PORT`.
+ *
+ * The last colon that is not inside brackets separates them, so `[::1]:8080`
+ * works and a bare `::1` is not mistaken for a port.
+ */
+inline void as_listen(const jlib::util::conf::directive& d, options& o) {
+    const std::string& s = d.arg(0);
+    const std::string::size_type close = s.rfind(']');
+    const std::string::size_type colon =
+        s.rfind(':') == std::string::npos || (close != std::string::npos &&
+                                              s.rfind(':') < close)
+            ? std::string::npos
+            : s.rfind(':');
+
+    const std::string port = colon == std::string::npos ? s : s.substr(colon + 1);
+
+    if(colon != std::string::npos) o.host = s.substr(0, colon);
+
+    for(std::size_t i = 0; i < port.size(); i++) {
+        if(port[i] < '0' || port[i] > '9') wrong(d, "wants a port, got \"" + s + "\"");
+    }
+
+    if(port.empty()) wrong(d, "wants a port, got \"" + s + "\"");
+
+    o.port = (unsigned short)std::atoi(port.c_str());
+
+    // `listen 443 ssl;` is nginx's spelling and it is accepted, but it is a
+    // *claim* rather than a switch -- what actually turns TLS on is having a
+    // certificate.  Checked at the end of the walk rather than here, because
+    // ssl_certificate may legitimately come after listen.
+    if(d.args.size() > 1 && d.arg(1) != "ssl")
+        wrong(d, "does not know \"" + d.arg(1) + "\"");
+}
+
+inline void apply_location(const jlib::util::conf::directive& d, options& o) {
+    blocked(d, 1, 1);
+
+    guard g;
+
+    g.prefix = d.arg(0);
+
+    for(const jlib::util::conf::directive& e : d.block) {
+        if(e.name == "auth_basic") { plain(e, 1, 1); g.realm = e.arg(0); }
+        else if(e.name == "auth_basic_user_file") { plain(e, 1, 1); g.file = e.arg(0); }
+        else throw jlib::util::conf::error("\"" + e.name + "\" is not a location directive", e.line);
+    }
+
+    // Half a guard is the dangerous shape: a realm with no file would ask for
+    // a password it could never check, and a file with no realm would send a
+    // challenge no browser can answer.  Neither is a thing to guess at.
+    if(g.realm.empty() && g.file.empty()) return;
+
+    if(g.realm.empty()) wrong(d, "has auth_basic_user_file but no auth_basic");
+    if(g.file.empty())  wrong(d, "has auth_basic but no auth_basic_user_file");
+
+    o.protect.push_back(g);
+}
+
+inline void apply_server(const jlib::util::conf::directive& d, options& o) {
+    blocked(d, 0, 0);
+
+    site v;
+
+    for(const jlib::util::conf::directive& e : d.block) {
+        if(e.name == "server_name") { plain(e, 1, 1); v.name = e.arg(0); }
+        else if(e.name == "root") { plain(e, 1, 1); v.root = e.arg(0); }
+        else if(e.name == "ssl_certificate") { plain(e, 1, 1); v.cert = e.arg(0); }
+        else if(e.name == "ssl_certificate_key") { plain(e, 1, 1); v.key = e.arg(0); }
+        else throw jlib::util::conf::error("\"" + e.name + "\" is not a server directive", e.line);
+    }
+
+    if(v.name.empty()) wrong(d, "needs a server_name");
+    if(v.root.empty()) wrong(d, "needs a root");
+
+    // The same pairing rule the flag enforces, for the same reason: one half
+    // of a certificate cannot be used and must not be ignored.
+    if(v.cert.empty() != v.key.empty())
+        wrong(d, "needs both ssl_certificate and ssl_certificate_key, or neither");
+
+    o.vhosts.push_back(v);
+}
+
+inline void apply_http(const jlib::util::conf::directive& d, options& o) {
+    blocked(d, 0, 0);
+
+    for(const jlib::util::conf::directive& e : d.block) {
+        if(e.name == "listen") { plain(e, 1, 2); as_listen(e, o); }
+        else if(e.name == "root") { plain(e, 1, 1); o.root = e.arg(0); }
+        else if(e.name == "prefix") { plain(e, 1, 1); o.prefix = e.arg(0); }
+        else if(e.name == "access_log") { plain(e, 1, 1); o.access_log = e.arg(0); }
+        else if(e.name == "cache_control") { plain(e, 1, 1); o.cache_control = e.arg(0); }
+        else if(e.name == "ssl_certificate") { plain(e, 1, 1); o.cert = e.arg(0); }
+        else if(e.name == "ssl_certificate_key") { plain(e, 1, 1); o.key = e.arg(0); }
+        else if(e.name == "request_rate") { plain(e, 1, 1); o.rate = as_number(e, 0); }
+        else if(e.name == "request_burst") { plain(e, 1, 1); o.burst = as_number(e, 0); }
+        else if(e.name == "max_per_address") { plain(e, 1, 1); o.max_per_address = as_count(e, 0); }
+        else if(e.name == "max_connections") { plain(e, 1, 1); o.max_connections = as_count(e, 0); }
+        else if(e.name == "keepalive_requests") { plain(e, 1, 1); o.max_requests = as_count(e, 0); }
+        else if(e.name == "keepalive_timeout") { plain(e, 1, 1); o.idle_timeout = as_number(e, 0); }
+        else if(e.name == "client_header_timeout") { plain(e, 1, 1); o.initial_idle_timeout = as_number(e, 0); }
+        else if(e.name == "io_timeout") { plain(e, 1, 1); o.io_timeout = as_number(e, 0); }
+        else if(e.name == "location") apply_location(e, o);
+        else if(e.name == "server") apply_server(e, o);
+        else throw jlib::util::conf::error("\"" + e.name + "\" is not an http directive", e.line);
+    }
+}
+
+/**
+ * Read `path` into `o`.
+ *
+ * Throws jlib::util::conf::error, which carries the line. Nothing here warns and
+ * continues: a directive nobody recognises is a typo, and a typo in a config
+ * file is how a server ends up not doing the thing its operator believes it
+ * is doing. Refusing to start is the only outcome that cannot be missed.
+ */
+inline void read_config(const std::string& path, options& o) {
+    const std::vector<jlib::util::conf::directive> top = jlib::util::conf::read(path);
+
+    bool saw_http = false;
+
+    for(const jlib::util::conf::directive& d : top) {
+        if(d.name == "http") {
+            if(saw_http) wrong(d, "appears more than once");
+
+            saw_http = true;
+
+            apply_http(d, o);
+        }
+        else if(d.name == "user") {
+            plain(d, 1, 2);
+
+            o.user = d.arg(0);
+
+            // nginx's `user NAME GROUP;`.  One argument means the group is
+            // whatever resolving the user gives, which sys::resolve_identity
+            // already does.
+            if(d.args.size() > 1) o.group = d.arg(1);
+        }
+        else if(d.name == "daemon") { plain(d, 0, 1); o.daemon = as_flag(d); }
+        else if(d.name == "async") { plain(d, 0, 1); o.async = as_flag(d); }
+        else if(d.name == "allow_root") { plain(d, 0, 1); o.allow_root = as_flag(d); }
+        else if(d.name == "pid") { plain(d, 1, 1); o.pidfile = d.arg(0); }
+        else if(d.name == "threads") { plain(d, 1, 1); o.threads = unsigned(as_count(d, 0)); }
+        else if(d.name == "error_log") { plain(d, 1, 1); o.error_log = d.arg(0); }
+        else throw jlib::util::conf::error("\"" + d.name + "\" is not a directive here", d.line);
+    }
 }
 
 inline volatile std::sig_atomic_t reopen_requested = 0;
