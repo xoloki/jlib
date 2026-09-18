@@ -15,7 +15,8 @@ libjsysinclude_HEADERS = tfstream.hh socketstream.hh sslstream.hh proxystream.hh
                          listener.hh tls.hh server.hh reactor.hh task.hh await.hh async_reader.hh async_writer.hh async_tls.hh \
                          sslproxystream.hh serialstream.hh pstream.hh \
                          sys.hh Directory.hh auto.hh sync.hh ringbuffer.hh Servent.hh \
-                         ASServent.hh pipe.hh relay.hh object.hh joystick.hh
+                         ASServent.hh pipe.hh relay.hh object.hh joystick.hh \
+                         signal.hh
 
 if HAVE_KQUEUE
 libjsys_la_SOURCES += reactor_kqueue.cc
