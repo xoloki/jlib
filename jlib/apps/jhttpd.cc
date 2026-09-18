@@ -108,6 +108,7 @@ struct options {
     std::string    group;
     std::string    pidfile;
     bool           allow_root = false;
+    bool           daemon = false;
 };
 
 void usage(std::ostream& o, const char* argv0) {
@@ -158,6 +159,9 @@ void usage(std::ostream& o, const char* argv0) {
       << "  --group NAME      and this group (default: the user's own)\n"
       << "  --pidfile FILE    written after binding, before dropping\n"
       << "  --allow-root      run as root anyway, which is refused by default\n"
+      << "  --daemon          fork into the background; the command does not\n"
+      << "                    return until the server is bound and serving,\n"
+      << "                    and exits non-zero if it never got there\n"
       << "\n"
       << "  SIGHUP reopens the log files, for rotation.\n"
       << "\n"
@@ -172,6 +176,7 @@ bool parse(int argc, char** argv, options& o) {
         if(a == "--async") { o.async = true; continue; }
         if(a == "--hash-password") { o.hash_password = true; continue; }
         if(a == "--allow-root") { o.allow_root = true; continue; }
+        if(a == "--daemon") { o.daemon = true; continue; }
 
         if(a.size() > 2 && a.compare(0, 2, "--") == 0) {
             if(i + 1 >= argc) {
@@ -398,15 +403,61 @@ int main(int argc, char** argv) {
     // for anybody looking at the path.
     std::signal(SIGHUP, jhttpd::reopen_on_hup);
 
+    // **Absolute before anything forks or chdirs**, because --daemon moves to
+    // "/" and a relative --root would then mean a different directory than the
+    // one the operator typed it in.  Done for every path rather than the
+    // obvious one, since they are all resolved later than this.
+    sys::daemon bg;
+
+    o.root = sys::absolute_path(o.root);
+    o.access_log = sys::absolute_path(o.access_log);
+    o.error_log = sys::absolute_path(o.error_log);
+    o.pidfile = sys::absolute_path(o.pidfile);
+    o.cert = sys::absolute_path(o.cert);
+    o.key = sys::absolute_path(o.key);
+
+    for(std::size_t i = 0; i < o.protect.size(); i++) {
+        std::string prefix, realm, file;
+
+        if(split_protect(o.protect[i], prefix, realm, file))
+            o.protect[i] = prefix + ":" + realm + ":" + sys::absolute_path(file);
+    }
+
+    for(std::size_t i = 0; i < o.vhosts.size(); i++) {
+        std::string name, root, cert, key;
+
+        if(!split_vhost(o.vhosts[i], name, root, cert, key)) continue;
+
+        o.vhosts[i] = name + ":" + sys::absolute_path(root);
+
+        if(!cert.empty()) {
+            o.vhosts[i] += ":" + sys::absolute_path(cert) + ":" +
+                           sys::absolute_path(key);
+        }
+    }
+
+    // **Before any thread exists.**  The log writer and the server's pool are
+    // both threads, and fork() keeps only the calling one -- a mutex another
+    // thread held would stay locked for the life of the child.  Nothing above
+    // this line starts one.
+    if(o.daemon) {
+        try { bg.start(); }
+        catch(std::exception& e) {
+            std::cerr << "jhttpd: " << e.what() << "\n";
+
+            return 1;
+        }
+    }
+
     // **Resolved before anything is opened or dropped.**  getpwnam may need
     // to reach a directory service, and a name looked up after the drop is a
     // name that fails only on the machines where that service is not a local
     // file.  A typo in --user should also stop the server before it has bound
     // a port or written a pidfile.
-    jhttpd::identity who;
+    sys::identity who;
 
     if(!o.user.empty()) {
-        try { who = jhttpd::resolve_identity(o.user, o.group); }
+        try { who = sys::resolve_identity(o.user, o.group); }
         catch(std::exception& e) {
             std::cerr << "jhttpd: " << e.what() << "\n";
 
@@ -617,7 +668,7 @@ int main(int argc, char** argv) {
         }
 
         if(!o.user.empty()) {
-            try { jhttpd::become(who); }
+            try { sys::become(who); }
             catch(std::exception& e) {
                 std::cerr << "jhttpd: " << e.what() << "\n";
 
@@ -628,6 +679,12 @@ int main(int argc, char** argv) {
                       << (o.group.empty() ? "" : ":" + o.group)
                       << " (uid " << who.uid << ", gid " << who.gid << ")\n";
         }
+
+        // **Bound, opened, dropped -- and only now is the caller told.**  A
+        // --daemon that exited zero the moment it forked would tell every
+        // script that starts it that a server was running before anything had
+        // tried to take a port.
+        bg.ready();
 
         std::cerr << "jhttpd: serving " << o.root << " on "
                   << (s->tls() ? "https://" : "http://")

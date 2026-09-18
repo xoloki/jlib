@@ -37,6 +37,9 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <grp.h>
+#include <pwd.h>
+#include <limits.h>
 #include <unistd.h>
 
 #include <fstream>
@@ -164,6 +167,166 @@ namespace jlib {
         }
 
 #endif
+
+        std::string absolute_path(const std::string& path) {
+            if(path.empty() || path == "-" || path[0] == '/') return path;
+
+            char here[PATH_MAX];
+
+            if(::getcwd(here, sizeof here) == 0) return path;
+
+            return std::string(here) + "/" + path;
+        }
+
+        identity resolve_identity(const std::string& user,
+                                  const std::string& group)
+        {
+            identity who;
+
+            who.user = user;
+            who.group = group;
+
+            const struct passwd* pw = ::getpwnam(user.c_str());
+
+            if(pw == 0)
+                throw sys_exception("no such user: \"" + user + "\"");
+
+            who.uid = pw->pw_uid;
+            who.gid = pw->pw_gid;
+
+            if(!group.empty()) {
+                const struct group* gr = ::getgrnam(group.c_str());
+
+                if(gr == 0)
+                    throw sys_exception("no such group: \"" + group + "\"");
+
+                who.gid = gr->gr_gid;
+            }
+
+            return who;
+        }
+
+        void verify_identity(const identity& who) {
+            if(::getuid() != who.uid || ::geteuid() != who.uid ||
+               ::getgid() != who.gid || ::getegid() != who.gid)
+            {
+                throw sys_exception("the privilege drop did not take: wanted "
+                                    "uid " + std::to_string(who.uid) + " gid " +
+                                    std::to_string(who.gid) + ", have uid " +
+                                    std::to_string(::getuid()) + " gid " +
+                                    std::to_string(::getgid()));
+            }
+
+            // Only when the target is not root, because a process told to run
+            // as root can obviously become root.
+            if(who.uid != 0 && ::setuid(0) == 0)
+                throw sys_exception("root was regained after dropping it");
+        }
+
+        void become(const identity& who) {
+            // Already there: nothing to give up, and nothing that needs
+            // privilege to do it with.
+            if(::getuid() == who.uid && ::getgid() == who.gid) return;
+
+            if(::setgroups(1, &who.gid) != 0) {
+                throw sys_exception("setgroups() failed: " +
+                                    std::string(std::strerror(errno)));
+            }
+
+            if(::setgid(who.gid) != 0) {
+                throw sys_exception("setgid() failed: " +
+                                    std::string(std::strerror(errno)));
+            }
+
+            if(::setuid(who.uid) != 0) {
+                throw sys_exception("setuid() failed: " +
+                                    std::string(std::strerror(errno)));
+            }
+
+            verify_identity(who);
+        }
+
+        void daemon::start() {
+            int fds[2];
+
+            if(::pipe(fds) != 0) {
+                throw sys_exception("pipe() for the readiness signal failed: " +
+                                    std::string(std::strerror(errno)));
+            }
+
+            const pid_t first = ::fork();
+
+            if(first < 0) {
+                throw sys_exception("fork() failed: " +
+                                    std::string(std::strerror(errno)));
+            }
+
+            if(first > 0) {
+                // The parent, which never returns from here.
+                ::close(fds[1]);
+
+                char answer = 0;
+
+                const ssize_t got = ::read(fds[0], &answer, 1);
+
+                ::close(fds[0]);
+
+                // EOF means the child went away without saying it was ready,
+                // and it will have printed why on the terminal we share.
+                ::_exit(got == 1 && answer == 'k' ? 0 : 1);
+            }
+
+            ::close(fds[0]);
+
+            if(::setsid() < 0) {
+                throw sys_exception("setsid() failed: " +
+                                    std::string(std::strerror(errno)));
+            }
+
+            // The second fork: see the note on the class.  The intermediate
+            // exits at once; the grandchild keeps the write end, so the parent
+            // does not yet read EOF.
+            const pid_t second = ::fork();
+
+            if(second < 0) {
+                throw sys_exception("the second fork() failed: " +
+                                    std::string(std::strerror(errno)));
+            }
+
+            if(second > 0) ::_exit(0);
+
+            m_tell = fds[1];
+
+            // Away from wherever it started, so it does not hold a mount busy.
+            // Every path a caller cares about must already be absolute --
+            // see absolute_path().
+            if(::chdir("/") != 0) { }
+        }
+
+        void daemon::ready() {
+            if(m_tell < 0) return;
+
+            const char ok = 'k';
+
+            if(::write(m_tell, &ok, 1) != 1) { }
+
+            ::close(m_tell);
+
+            m_tell = -1;
+
+            // Only now: until this point every failure path printed to the
+            // terminal the parent shares, which is what makes a failed start
+            // visible.
+            const int null = ::open("/dev/null", O_RDWR);
+
+            if(null >= 0) {
+                ::dup2(null, STDIN_FILENO);
+                ::dup2(null, STDOUT_FILENO);
+                ::dup2(null, STDERR_FILENO);
+
+                if(null > STDERR_FILENO) ::close(null);
+            }
+        }
 
         void getline(std::istream& is, std::string& s) {
             std::getline(is,s);

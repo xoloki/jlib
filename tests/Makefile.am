@@ -123,6 +123,7 @@ TESTS = \
 	sys_server_test \
 	sys_async_server_test \
 	sys_reactor_test \
+	sys_process_test \
 	sys_task_test \
  \
 	util_test \
@@ -319,6 +320,9 @@ sys_task_test_LDADD   = $(JSYS_LA)
 
 sys_reactor_test_SOURCES  = sys_reactor_test.cc feed.hh
 sys_reactor_test_CPPFLAGS = $(AM_CPPFLAGS) $(REACTOR_CPPFLAGS)
+
+sys_process_test_SOURCES = sys_process_test.cc
+sys_process_test_LDADD   = $(JSYS_LA)
 sys_reactor_test_LDADD    = $(JSYS_LA)
 
 sys_async_server_test_SOURCES = sys_async_server_test.cc certificate.hh

@@ -44,6 +44,7 @@
 #include <thread>
 #include <vector>
 
+#include <limits.h>
 #include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -641,121 +642,12 @@ static void credentials_file() {
     if(std::system(rm.c_str()) != 0) { }
 }
 
-/**
- * Resolving a user, and becoming one.
- *
- * **The interesting half of this cannot run here**, and saying so is more
- * useful than pretending otherwise: an actual privilege drop needs privilege,
- * and `make check` does not have it. What is testable is everything around the
- * three syscalls -- the lookup that must happen before the drop, the failure
- * that must stop the server, and the verification that must run after.
- *
- * `become()` returns early when the target is who you already are, which is
- * what lets the checks be exercised without root. That early return is not a
- * test affordance: a server told to drop to the user it is already running as
- * has nothing to give up, and calling `setgroups` would fail for no reason.
- */
-static void who_the_server_becomes() {
-    std::cout << "\ndropping privileges:\n";
-
-    const struct passwd* me = ::getpwuid(::getuid());
-
-    if(me == 0) {
-        std::cout << "  skip  cannot look up the running user\n";
-
-        return;
-    }
-
-    const std::string myname = me->pw_name;
-
-    {
-        const jhttpd::identity who = jhttpd::resolve_identity(myname, "");
-
-        ok("  a name resolves to the ids it names",
-           who.uid == ::getuid() && who.gid == ::getgid(),
-           std::to_string(who.uid) + ":" + std::to_string(who.gid));
-    }
-
-    {
-        // Before anything is opened or bound, so a typo stops the server
-        // rather than leaving it half-started.
-        bool threw = false;
-        std::string why;
-
-        try { jhttpd::resolve_identity("nosuchuser-jlibtest", ""); }
-        catch(std::exception& e) { threw = true; why = e.what(); }
-
-        ok("  an unknown user is an error, not a silent no-op", threw, why);
-    }
-
-    {
-        bool threw = false;
-
-        try { jhttpd::resolve_identity(myname, "nosuchgroup-jlibtest"); }
-        catch(std::exception&) { threw = true; }
-
-        ok("  and so is an unknown group", threw);
-    }
-
-    {
-        // Becoming who you already are: no syscall that needs privilege, and
-        // every check still runs.
-        bool threw = false;
-        std::string why;
-
-        try { jhttpd::become(jhttpd::resolve_identity(myname, "")); }
-        catch(std::exception& e) { threw = true; why = e.what(); }
-
-        ok("  becoming who you already are succeeds and changes nothing",
-           !threw && ::getuid() == me->pw_uid, why);
-    }
-
-    {
-        // **The check, on its own.**  The syscalls need privilege; deciding
-        // whether they worked does not -- and that decision is the step most
-        // implementations leave out, so it is the one worth a test.
-        bool threw = false;
-
-        try { jhttpd::verify_identity(jhttpd::resolve_identity(myname, "")); }
-        catch(std::exception&) { threw = true; }
-
-        ok("  and the check passes for the identity this process has", !threw);
-    }
-
-    if(::geteuid() != 0) {
-        // Asking whether we are root, while not being root, must fail --
-        // which is the direction that matters: a check that always passes is
-        // the same as no check, and looks identical in review.
-        jhttpd::identity root;
-
-        root.uid = 0;
-        root.gid = 0;
-
-        bool threw = false;
-        std::string why;
-
-        try { jhttpd::verify_identity(root); }
-        catch(std::exception& e) { threw = true; why = e.what(); }
-
-        ok("  and fails for one it does not", threw, why);
-    }
-
-    if(::geteuid() == 0) {
-        std::cout << "  .. running as root, so the drop itself is exercised\n";
-    }
-    else {
-        std::cout << "  .. not root, so setgroups/setgid/setuid are not "
-                  << "exercised here\n";
-    }
-}
-
 int main() {
     std::cout << "app_jhttpd_test\n";
 
     try {
         the_line();
         credentials_file();
-        who_the_server_becomes();
         rotation();
         what_a_client_can_put_in_a_field();
 
