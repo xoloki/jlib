@@ -64,5 +64,9 @@ bool device::unified() const {
     return [m_impl->gpu hasUnifiedMemory];
 }
 
+unsigned long device::working_set() const {
+    return (unsigned long)[m_impl->gpu recommendedMaxWorkingSetSize];
+}
+
 }
 }
