@@ -12,6 +12,6 @@ libjaiincludedir = $(includedir)/jlib-$(JLIB_RELEASE)/jlib/ai
 libjaiinclude_HEADERS = environment.hh agent.hh percept.hh action.hh vacuum.hh \
                         neural.hh backend.hh attention.hh transformer.hh \
                         gguf.hh model.hh engine.hh openai.hh unicode.hh pretokenizer.hh \
-                        tokenizer.hh sampler.hh generate.hh chat.hh
+                        tokenizer.hh sampler.hh generate.hh chat.hh quant.hh
 
 EXTRA_DIST = unicode.py

@@ -20,6 +20,7 @@
 #ifndef JLIB_AI_BACKEND_HH
 #define JLIB_AI_BACKEND_HH
 
+#include <jlib/ai/quant.hh>
 #include <jlib/math/matrix.hh>
 
 #include <cmath>
@@ -188,6 +189,9 @@ public:
 
         virtual unsigned int rows() const = 0;
         virtual unsigned int cols() const = 0;
+
+        /** Which block format the device is holding. */
+        virtual quant format() const = 0;
     };
 
     typedef std::shared_ptr<quantised> quantised_ptr;
@@ -196,16 +200,24 @@ public:
     virtual tensor_ptr make(const math::matrix<T>& m) = 0;
 
     /**
-     * Take a q8_0 tensor's bytes exactly as a file holds them.
+     * Take a quantised tensor's bytes exactly as a file holds them.
      *
-     * Blocks of 32: a two-byte scale then thirty-two signed quants, 34 bytes
-     * for 32 values. Nothing is rearranged, so this is a copy to the device
-     * and not a conversion.
+     * Nothing is rearranged, so this is a copy to the device and not a
+     * conversion -- which is the whole point. A weight that reaches the
+     * device still quantised is read at its file size for the life of the
+     * model, and for decode, which is bandwidth-bound, that size *is* the
+     * speed.
+     *
+     * `quant.hh` has the block layouts. All three put their blocks along the
+     * contiguous dimension, so a block never straddles two columns and no
+     * rearrangement is possible to need.
      *
      * @throws backend_error if the bytes do not match the shape
      */
-    virtual quantised_ptr make_q8_0(unsigned int rows, unsigned int cols,
-                                    const void* blocks, std::size_t bytes) = 0;
+    virtual quantised_ptr make_quantised(quant fmt,
+                                         unsigned int rows, unsigned int cols,
+                                         const void* blocks,
+                                         std::size_t bytes) = 0;
 
     /** c = alpha * a^T * b + beta * c, with a held quantised. */
     virtual void multiply_tn(const quantised_ptr& a, const tensor_ptr& b,
@@ -445,10 +457,11 @@ public:
     tensor_ptr make(unsigned int rows, unsigned int cols);
     tensor_ptr make(const math::matrix<T>& m);
 
-    typename backend<T>::quantised_ptr make_q8_0(unsigned int rows,
-                                                 unsigned int cols,
-                                                 const void* blocks,
-                                                 std::size_t bytes);
+    typename backend<T>::quantised_ptr make_quantised(quant fmt,
+                                                      unsigned int rows,
+                                                      unsigned int cols,
+                                                      const void* blocks,
+                                                      std::size_t bytes);
 
     void multiply_tn(const typename backend<T>::quantised_ptr& a,
                      const tensor_ptr& b, tensor_ptr& c,
@@ -605,36 +618,37 @@ math::matrix<T> slope_matrix(activation a, const math::matrix<T>& out) {
 template<typename T>
 class host_quantised : public backend<T>::quantised {
 public:
-    host_quantised(unsigned int rows, unsigned int cols, const void* blocks,
-                   std::size_t bytes)
-        : m(rows, cols)
+    host_quantised(quant fmt, unsigned int rows, unsigned int cols,
+                   const void* blocks, std::size_t bytes)
+        : m(rows, cols), f(fmt)
     {
         const std::size_t n = std::size_t(rows) * cols;
 
-        if(n % 32)
-            throw backend_error("make_q8_0: the element count is not a multiple "
-                                "of the block size");
+        const std::size_t vals = quant_values(fmt);
+        const std::size_t size = quant_bytes(fmt);
 
-        if(bytes != (n / 32) * 34)
-            throw backend_error("make_q8_0: the bytes do not match the shape");
+        if(n % vals)
+            throw backend_error("make_quantised: the element count is not a "
+                                "multiple of " + quant_name(fmt) +
+                                "'s block size");
+
+        if(bytes != (n / vals) * size)
+            throw backend_error("make_quantised: the bytes do not match the "
+                                "shape");
 
         const char* raw = static_cast<const char*>(blocks);
 
+        std::vector<float> block(vals);
+
         // Rows is the contiguous dimension and a block runs along it, so a
         // block never straddles two columns.
-        for(std::size_t b = 0; b < n / 32; b++) {
-            const char* p = raw + b * 34;
+        for(std::size_t b = 0; b < n / vals; b++) {
+            dequantise_block(fmt, raw + b * size, block.data());
 
-            _Float16 d;
+            for(std::size_t i = 0; i < vals; i++) {
+                const std::size_t at = b * vals + i;
 
-            std::memcpy(&d, p, sizeof(d));
-
-            const signed char* q = reinterpret_cast<const signed char*>(p + 2);
-
-            for(std::size_t i = 0; i < 32; i++) {
-                const std::size_t at = b * 32 + i;
-
-                m(uint(at % rows), uint(at / rows)) = T(float(d) * float(q[i]));
+                m(uint(at % rows), uint(at / rows)) = T(block[i]);
             }
         }
     }
@@ -642,7 +656,10 @@ public:
     unsigned int rows() const { return m.M; }
     unsigned int cols() const { return m.N; }
 
+    quant format() const { return f; }
+
     math::matrix<T> m;
+    quant f;
 };
 
 /** A tensor that is just a matrix. */
@@ -846,11 +863,12 @@ void host_backend<T>::copy_columns(const tensor_ptr& src, tensor_ptr& dst,
 
 template<typename T>
 typename backend<T>::quantised_ptr
-host_backend<T>::make_q8_0(unsigned int rows, unsigned int cols,
-                           const void* blocks, std::size_t bytes)
+host_backend<T>::make_quantised(quant fmt, unsigned int rows,
+                                unsigned int cols, const void* blocks,
+                                std::size_t bytes)
 {
     return typename backend<T>::quantised_ptr(
-        new host_quantised<T>(rows, cols, blocks, bytes));
+        new host_quantised<T>(fmt, rows, cols, blocks, bytes));
 }
 
 template<typename T>

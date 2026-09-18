@@ -196,27 +196,29 @@ void backend<T>::attention_weighted(const tensor_ptr& v, const tensor_ptr& probs
                                  kv_heads, d_head);
 }
 
-/** What make_q8_0 hands back: a device-side weight, and nothing else. */
+/** What make_quantised hands back: a device-side weight, and nothing else. */
 template<typename T>
 class metal_quantised : public ai::backend<T>::quantised {
 public:
-    metal_quantised(std::shared_ptr<device> d, unsigned int rows,
+    metal_quantised(std::shared_ptr<device> d, ai::quant fmt, unsigned int rows,
                     unsigned int cols, const void* blocks, std::size_t bytes)
-        : w(d, rows, cols, blocks, bytes) {}
+        : w(d, fmt, rows, cols, blocks, bytes) {}
 
     unsigned int rows() const { return w.rows(); }
     unsigned int cols() const { return w.cols(); }
+
+    ai::quant format() const { return w.format(); }
 
     qweight w;
 };
 
 template<typename T>
 typename ai::backend<T>::quantised_ptr
-backend<T>::make_q8_0(unsigned int rows, unsigned int cols, const void* blocks,
-                      std::size_t bytes)
+backend<T>::make_quantised(ai::quant fmt, unsigned int rows, unsigned int cols,
+                           const void* blocks, std::size_t bytes)
 {
     return typename ai::backend<T>::quantised_ptr(
-        new metal_quantised<T>(m_device, rows, cols, blocks, bytes));
+        new metal_quantised<T>(m_device, fmt, rows, cols, blocks, bytes));
 }
 
 template<typename T>

@@ -22,6 +22,8 @@
 
 #include <jlib/metal/device.hh>
 
+#include <jlib/ai/quant.hh>
+
 #include <jlib/math/matrix.hh>
 
 #include <jlib/ai/backend.hh>
@@ -94,12 +96,13 @@ template<> struct supported<_Float16> { static constexpr bool value = true; };
 class qweight {
 public:
     /**
+     * @param fmt which block layout `blocks` is in; see ai/quant.hh
      * @param rows the contiguous dimension, which for a GGUF weight is its
      *        input width
-     * @param blocks 34 bytes per 32 values, exactly as a file holds them
+     * @param blocks the file's bytes exactly as it holds them
      */
-    qweight(std::shared_ptr<device> d, unsigned int rows, unsigned int cols,
-            const void* blocks, std::size_t bytes);
+    qweight(std::shared_ptr<device> d, ai::quant fmt, unsigned int rows,
+            unsigned int cols, const void* blocks, std::size_t bytes);
 
     ~qweight();
 
@@ -109,8 +112,13 @@ public:
     /** How many bytes it occupies on the device. */
     std::size_t bytes() const { return m_bytes; }
 
+    /** Which block format those bytes are in. */
+    ai::quant format() const { return m_format; }
+
 private:
     struct impl;
+
+    ai::quant m_format;
 
     std::shared_ptr<device> m_device;
     std::shared_ptr<impl> m_impl;

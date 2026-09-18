@@ -400,10 +400,11 @@ void model<T>::load(const gguf& g) {
     // Kept quantised where the file quantised it.  These are the tensors whose
     // blocks run along the dimension they are used on, so nothing has to be
     // rearranged and the file's bytes go to the device unchanged.
-    if(g.tensor(head).type == gguf::tensor_type::q8_0) {
+    if(quant qf; device_quant(g.tensor(head).type, qf)) {
         const std::vector<char> raw = g.read_raw(head);
 
-        set_head(m_b.make_q8_0(d, m_conf.vocab, raw.data(), raw.size()));
+        set_head(m_b.make_quantised(qf, d, m_conf.vocab,
+                                    raw.data(), raw.size()));
     }
     else
         m_head->write(narrowed(g.read(head)));
@@ -454,10 +455,11 @@ void model<T>::load(const gguf& g) {
         for(const auto& e : attn) {
             expect(g, p + e.name, e.rows, e.cols);
 
-            if(g.tensor(p + e.name).type == gguf::tensor_type::q8_0) {
+            if(quant qf; device_quant(g.tensor(p + e.name).type, qf)) {
                 const std::vector<char> raw = g.read_raw(p + e.name);
 
-                (l.*e.set)(m_b.make_q8_0(e.rows, e.cols, raw.data(), raw.size()));
+                (l.*e.set)(m_b.make_quantised(qf, e.rows, e.cols,
+                                              raw.data(), raw.size()));
             }
             else
                 (l.*e.get)()->write(narrowed(g.read(p + e.name)));
@@ -500,10 +502,11 @@ void model<T>::load(const gguf& g) {
         };
 
         for(const auto& e : ffn) {
-            if(g.tensor(p + e.name).type == gguf::tensor_type::q8_0) {
+            if(quant qf; device_quant(g.tensor(p + e.name).type, qf)) {
                 const std::vector<char> raw = g.read_raw(p + e.name);
 
-                (l.*e.set)(m_b.make_q8_0(e.rows, e.cols, raw.data(), raw.size()));
+                (l.*e.set)(m_b.make_quantised(qf, e.rows, e.cols,
+                                              raw.data(), raw.size()));
             }
             else
                 (l.*e.get)()->write(narrowed(g.read(p + e.name)));
