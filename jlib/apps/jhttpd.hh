@@ -749,20 +749,50 @@ inline void apply_location(const jlib::util::conf::directive& d, options& o) {
     o.protect.push_back(g);
 }
 
+/**
+ * One `server { }`.
+ *
+ * **`server_name` takes a list**, as nginx's does, and one site is registered
+ * per name -- they differ only in what a request has to say to reach them.
+ * This is what Apache writes as ServerName plus ServerAlias, and a real
+ * config has plenty: six names for one root is an ordinary amount, and
+ * without a list that is six near-identical blocks whose only difference is
+ * a string, which is a shape that invites a copy-paste mistake.
+ *
+ * Repeated `server_name` directives accumulate rather than the last one
+ * winning, so a long list can be broken across lines the obvious way. The
+ * alternative -- silently discarding the first -- is the kind of rule nobody
+ * discovers until a name has been unreachable for a month.
+ */
 inline void apply_server(const jlib::util::conf::directive& d, options& o) {
     blocked(d, 0, 0);
 
-    site v;
+    std::vector<std::string> names;
+    site                     v;
 
     for(const jlib::util::conf::directive& e : d.block) {
-        if(e.name == "server_name") { plain(e, 1, 1); v.name = e.arg(0); }
+        if(e.name == "server_name") {
+            plain(e, 1, std::size_t(-1));
+
+            for(std::size_t i = 0; i < e.args.size(); i++) {
+                // A name given twice would register the same site twice,
+                // which is harmless but means the operator believes something
+                // that is not so -- most likely they meant a different name.
+                for(std::size_t j = 0; j < names.size(); j++) {
+                    if(names[j] == e.arg(i))
+                        wrong(e, "lists \"" + e.arg(i) + "\" twice");
+                }
+
+                names.push_back(e.arg(i));
+            }
+        }
         else if(e.name == "root") { plain(e, 1, 1); v.root = e.arg(0); }
         else if(e.name == "ssl_certificate") { plain(e, 1, 1); v.cert = e.arg(0); }
         else if(e.name == "ssl_certificate_key") { plain(e, 1, 1); v.key = e.arg(0); }
         else throw jlib::util::conf::error("\"" + e.name + "\" is not a server directive", e.line);
     }
 
-    if(v.name.empty()) wrong(d, "needs a server_name");
+    if(names.empty()) wrong(d, "needs a server_name");
     if(v.root.empty()) wrong(d, "needs a root");
 
     // The same pairing rule the flag enforces, for the same reason: one half
@@ -770,7 +800,15 @@ inline void apply_server(const jlib::util::conf::directive& d, options& o) {
     if(v.cert.empty() != v.key.empty())
         wrong(d, "needs both ssl_certificate and ssl_certificate_key, or neither");
 
-    o.vhosts.push_back(v);
+    for(std::size_t i = 0; i < names.size(); i++) {
+        v.name = names[i];
+
+        // Every name gets the certificate, because SNI matches on the name
+        // the client asked for -- a site reachable by two names and holding a
+        // certificate for only one of them would fail the handshake for the
+        // other, before any of this is consulted.
+        o.vhosts.push_back(v);
+    }
 }
 
 inline void apply_http(const jlib::util::conf::directive& d, options& o) {
