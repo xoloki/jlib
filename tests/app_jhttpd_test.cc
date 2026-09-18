@@ -728,6 +728,29 @@ static void what_a_config_sets() {
     ok("  root", o.root == "/srv/www", o.root);
     ok("  prefix", o.prefix == "/pub", o.prefix);
     ok("  access_log", o.access_log == "/var/log/acc.log", o.access_log);
+    // The directive that makes a link to a site root work.
+    {
+        jhttpd::options d;
+
+        ok("  index defaults to index.html",
+           jhttpd::options().index.size() == 1 &&
+               jhttpd::options().index[0] == "index.html");
+
+        ok("  and takes a list, in order",
+           refusal("http { index index.html index.htm default.html; }", d)
+                   .empty() &&
+               d.index.size() == 3 && d.index[0] == "index.html" &&
+               d.index[2] == "default.html",
+           std::to_string(d.index.size()));
+
+        jhttpd::options off;
+
+        // The only way to ask for the old behaviour, so it has to be sayable.
+        ok("  and no arguments turns it off",
+           refusal("http { index; }", off).empty() && off.index.empty(),
+           std::to_string(off.index.size()));
+    }
+
     ok("  cache_control keeps its spaces",
        o.cache_control == "public, max-age=60", o.cache_control);
     ok("  the certificate pair",

@@ -164,6 +164,14 @@ struct running {
  * with a name, not the run to end here, so a throw becomes status 0 and every
  * assertion then says which expectation it was.
  */
+/** The first line of a body, for a detail string. */
+static std::string first_line(const std::string& body) {
+    const std::string::size_type nl = body.find('\n');
+
+    return nl == std::string::npos ? body.substr(0, 60)
+                                   : body.substr(0, nl > 60 ? 60 : nl);
+}
+
 static util::http::Response ask(http::server& s, const std::string& method,
                                 const std::string& path)
 {
@@ -250,10 +258,19 @@ static void what_it_refuses(http::server& s, const tree& t) {
         { "/static/../secret.txt",          "a traversal" },
         { "/static/sub/../../secret.txt",   "a traversal from further down" },
         { "/static/escape.txt",             "a symlink pointing out of the root" },
-        { "/static/sub",                    "a directory" },
-        { "/static/",                       "the root itself" },
         { "/static/nope.txt",               "something that is not there" }
     };
+
+    // A directory and the prefix itself used to be here, as 404s.  They are
+    // not refusals any more -- a directory is served by its index and, asked
+    // for without a trailing slash, is a 301.  Moved to their own section
+    // rather than deleted, because what they were really asserting -- that
+    // nothing outside the root comes back -- still holds and is still worth
+    // asserting.
+    //
+    // This is a deliberate change to what files() answers, and the only one
+    // in this branch: anything relying on a directory being a 404 sees a 200
+    // or a 301 now.
 
     for(std::size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
         const util::http::Response r = ask(s, "GET", cases[i].path);
@@ -798,6 +815,107 @@ static void a_cache_control_that_is_not_one(const tree& t) {
     ok("  but empty is how you ask for none, and is fine", !empty_threw);
 }
 
+
+/**
+ * A directory is served by its index, and asked for without a slash it moves.
+ *
+ * Apache's mod_dir, which is enabled globally in `mods-enabled/dir.conf` and
+ * therefore never mentioned in a vhost -- which is exactly why it is easy to
+ * miss when translating one, and why `GET /` returning 404 looked like a small
+ * caveat rather than a site that does not work.
+ */
+static void a_directory_is_served_by_its_index(http::server& s, const tree& t) {
+    std::cout << "\ndirectory index:\n";
+
+    {
+        const util::http::Response r = ask(s, "GET", "/static/");
+
+        ok("  a directory serves its index", r.status() == 200,
+           std::to_string(r.status()));
+        ok("  which is the index file's content",
+           r.body().find("<h1>hello</h1>") != std::string::npos,
+           first_line(r.body()));
+    }
+
+    {
+        // The prefix itself, which is the case every link to a site root is.
+        const util::http::Response r = ask(s, "GET", "/static");
+
+        ok("  the prefix without a slash is moved", r.status() == 301,
+           std::to_string(r.status()));
+        ok("  to itself with one",
+           r.fields().get("Location") == "/static/",
+           r.fields().get("Location"));
+    }
+
+    {
+        const util::http::Response r = ask(s, "GET", "/static/sub");
+
+        ok("  and so is a subdirectory", r.status() == 301,
+           std::to_string(r.status()));
+
+        // **The redirect that must not loop.**  `rest` has been through
+        // tidy_path by the time the file layer sees it, so "sub/" and "sub"
+        // arrive identical -- deciding from `rest` sent "/static/sub/" to
+        // "/static/sub//" and onwards forever.  Asserting the *next* request
+        // is what catches that; asserting only this one does not.
+        ok("  to itself with one",
+           r.fields().get("Location") == "/static/sub/",
+           r.fields().get("Location"));
+    }
+
+    {
+        const util::http::Response r = ask(s, "GET", "/static/sub/");
+
+        ok("  and following that redirect does not redirect again",
+           r.status() == 404 || r.status() == 200,
+           std::to_string(r.status()) + " " + r.fields().get("Location"));
+
+        // sub/ has no index in this tree, so the honest answer is 404.  Not a
+        // listing: publishing what is in a directory is a different feature
+        // and one nobody asked for.
+        ok("  a directory with no index is 404, not a listing",
+           r.status() == 404, std::to_string(r.status()));
+        ok("  and says nothing about what is in it",
+           r.body().find("deep.txt") == std::string::npos, first_line(r.body()));
+    }
+
+    {
+        // The query belongs to the request, not to the Location: the client
+        // puts it back.  Carrying it would reflect chosen bytes into a header.
+        const util::http::Response r = ask(s, "GET", "/static/sub?a=1&b=2");
+
+        ok("  a query is not carried into the Location",
+           r.fields().get("Location") == "/static/sub/",
+           r.fields().get("Location"));
+    }
+
+    {
+        // Break-the-guard: a file must not have become a redirect.
+        const util::http::Response r = ask(s, "GET", "/static/app.js");
+
+        ok("  an ordinary file is still served, not moved", r.status() == 200,
+           std::to_string(r.status()));
+    }
+
+    {
+        // And the index must not have become a way past containment: the
+        // index file is resolved by calling locate() again, so it inherits
+        // every check.  A traversal that named a directory outside the root
+        // still fails before any index is looked for.
+        const util::http::Response r = ask(s, "GET", "/static/../");
+
+        ok("  a traversal that names a directory is still refused",
+           r.status() == 404 || r.status() == 301,
+           std::to_string(r.status()) + " " + r.fields().get("Location"));
+        ok("  and serves nothing from outside the root",
+           r.body().find("never see this") == std::string::npos,
+           first_line(r.body()));
+    }
+
+    (void)t;
+}
+
 int main() {
     std::cout << "net_http_files_test\n";
 
@@ -823,6 +941,7 @@ int main() {
             freshness(s);
             things_that_are_not_files(s);
             a_symlink_that_changes_while_it_is_served(s, t);
+            a_directory_is_served_by_its_index(s, t);
         }
 
         {
@@ -844,6 +963,7 @@ int main() {
             freshness(s);
             things_that_are_not_files(s);
             a_symlink_that_changes_while_it_is_served(s, t);
+            a_directory_is_served_by_its_index(s, t);
         }
 
         a_root_that_is_not_there();

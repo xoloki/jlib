@@ -533,6 +533,7 @@ int main(int argc, char** argv) {
         http::server::options so;
 
         so.max_requests = o.max_requests;
+        so.index = o.index;
 
         // The request timeout is policy::io_timeout, not a server option: the
         // async server takes it from the policy at construction and the

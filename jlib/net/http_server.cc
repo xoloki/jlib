@@ -821,6 +821,95 @@ namespace {
     }
 
     /**
+     * Whether `rest` names a directory under `root`.
+     *
+     * Asked by opening rather than by looking at the name, so it agrees with
+     * what locate() would have opened. O_NONBLOCK for the reason locate()
+     * gives: a FIFO in the root would otherwise block this.
+     */
+    bool is_directory(const std::string& root, const std::string& rest) {
+        const std::string candidate = root + "/" + rest;
+        const int fd = ::open(candidate.c_str(),
+                              O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+
+        if(fd < 0) return false;
+
+        struct stat st;
+        const bool dir = ::fstat(fd, &st) == 0 && S_ISDIR(st.st_mode);
+
+        ::close(fd);
+
+        return dir;
+    }
+
+    /**
+     * locate(), plus the directory rules Apache's mod_dir implements.
+     *
+     * Two of them, and the second is easy to leave out and wrong to:
+     *
+     * - A directory is served by the first name in `index` that exists under
+     *   it. Resolved by calling locate() again with a longer `rest`, so the
+     *   index file goes through the same open-then-fstat-then-realpath-then-
+     *   inode containment as any other -- an index resolved by some other path
+     *   would be a way around all of it.
+     *
+     * - A directory asked for **without a trailing slash** is a 301 to the
+     *   same path with one. Not cosmetic: every relative link in the page that
+     *   comes back is resolved against the request target, so `<img src="a.png">`
+     *   inside `/sub` fetches `/a.png` rather than `/sub/a.png`. Serving the
+     *   index directly at `/sub` returns a page whose links are all broken.
+     *
+     * @param moved  set to where a 301 should point, when one should
+     * @return whether `f` holds a file to serve
+     */
+    bool locate_or_index(const std::string& root, const std::string& rest,
+                         const std::vector<std::string>& index,
+                         const std::string& target, located& f,
+                         std::string& moved)
+    {
+        if(locate(root, rest, f)) return true;
+
+        // Only a directory gets a second chance. Anything else -- missing,
+        // a FIFO, outside the root -- was already decided by locate().
+        if(index.empty() || !is_directory(root, rest)) return false;
+
+        // **Decided from the target, not from `rest`.**  `rest` has already
+        // been through tidy_path, which drops a trailing separator -- so
+        // "sub/" and "sub" arrive here identical, and testing `rest` sent
+        // "/sub/" to "/sub//", then to "/sub///", forever.  What the client
+        // asked for is the only string that still knows.
+        //
+        // The query is dropped from the Location: it belongs to the request,
+        // and the client puts it back on the redirected one.  Carrying it
+        // would reflect attacker-chosen bytes into a header, which is the
+        // shape #240 spent a round removing.
+        const std::string::size_type q = target.find('?');
+        const std::string asked = q == std::string::npos ? target
+                                                         : target.substr(0, q);
+
+        if(asked.empty() || asked[asked.size() - 1] != '/') {
+            moved = asked + "/";
+
+            return false;
+        }
+
+        // `rest` lost its separator to tidy_path, so put one back rather than
+        // joining "sub" to "index.html".
+        std::string base = rest;
+
+        if(!base.empty() && base[base.size() - 1] != '/') base += "/";
+
+        for(std::size_t i = 0; i < index.size(); i++) {
+            if(locate(root, base + index[i], f)) return true;
+        }
+
+        // A directory with no index is a 404, not a listing. Saying "there is
+        // nothing here" about a directory that exists is the deliberate
+        // answer: the alternative publishes its contents.
+        return false;
+    }
+
+    /**
      * Everything that can fail, and everything that shapes the head, before a
      * byte goes out.
      *
@@ -849,11 +938,15 @@ namespace {
      */
     bool file_decided(const std::string& root, const std::string& cache,
                       const std::string& rest,
+                      const std::vector<std::string>& index,
                       const util::http::Request& q, located& f,
                       server::response& r, byte_range& span)
     {
-        if(!locate(root, rest, f)) {
-            nothing_there(r);
+        std::string moved;
+
+        if(!locate_or_index(root, rest, index, q.target(), f, moved)) {
+            if(!moved.empty()) r.status(301).field("Location", moved);
+            else               nothing_there(r);
 
             return false;
         }
@@ -1248,6 +1341,11 @@ void server::files(const std::string& pattern, const std::string& root,
 
     const std::string real_root(resolved);
 
+    // Copied into both lambdas at registration, because options are fixed at
+    // construction and a route should not reach back into the server for
+    // something that cannot change.
+    const std::vector<std::string> index = m_options.index;
+
     // **Both kinds on one route**, which is why the two serves refuse the
     // other's handler only when their own is missing.  A file is streamed
     // either way and the two servers stream differently, so one registration
@@ -1259,13 +1357,14 @@ void server::files(const std::string& pattern, const std::string& root,
     e.path = pattern;
 
     e.param_stream =
-        [real_root, cache_control](const Request& q, const params& p,
-                                   responder& out) {
+        [real_root, cache_control, index](const Request& q, const params& p,
+                                          responder& out) {
             located f;
             response head;
             byte_range span;
 
-            if(!file_decided(real_root, cache_control, p.rest(), q, f, head, span)) {
+            if(!file_decided(real_root, cache_control, p.rest(), index, q, f,
+                             head, span)) {
                 out.send(head);
 
                 return;
@@ -1308,7 +1407,7 @@ void server::files(const std::string& pattern, const std::string& root,
         };
 
     e.async_param_stream =
-        [real_root, cache_control](const Request& q, const params& p,
+        [real_root, cache_control, index](const Request& q, const params& p,
                                    async_responder& out) -> sys::task<void> {
             located f;
             response head;
@@ -1329,8 +1428,8 @@ void server::files(const std::string& pattern, const std::string& root,
 
             co_await sys::on_pool(out.pool());
 
-            decided = file_decided(real_root, cache_control, p.rest(), q, f,
-                                   head, span);
+            decided = file_decided(real_root, cache_control, p.rest(), index,
+                                   q, f, head, span);
 
             co_await sys::on_reactor(out.reactor());
 

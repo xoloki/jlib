@@ -44,6 +44,20 @@ http {
     listen      127.0.0.1:8080;
 
     root        /srv/www;
+
+    # What a directory is answered with, in order -- nginx's `index`, and
+    # Apache's DirectoryIndex, which Apache enables globally in
+    # mods-enabled/dir.conf and so never mentions in a vhost.  This is what
+    # makes a link to a site root work: GET / names a directory.
+    #
+    # A directory asked for without a trailing slash is answered with a 301
+    # that adds one, because relative links in the page resolve against the
+    # request target.
+    #
+    # `index;` with no arguments turns it off, and a directory becomes a 404.
+    # There is no directory *listing* either way -- that is a different
+    # feature, and one that publishes what is in a directory to anyone.
+    index       index.html index.htm;
     prefix      /;
     access_log  -;
 
