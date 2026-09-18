@@ -68,6 +68,28 @@ struct peer {
 
     unsigned short port = 0;
 
+    /**
+     * Which listener accepted this, and whether that listener speaks TLS.
+     *
+     * `port` above is the *peer's* port, which is ephemeral and tells nobody
+     * anything; these two say which door the connection came through. They are
+     * filled by sys::server after accept() returns rather than by listener,
+     * which binds one address and has no opinion about TLS.
+     *
+     * **This is the only channel that reaches both kinds of handler.** The
+     * blocking one is handed `(socketstream&, const peer&)` and the async one
+     * `(connection&, const peer&)`, so a fact that has to reach both has
+     * nowhere else to live.
+     *
+     * `secure` deliberately qualifies the note on server::connection that a
+     * handler cannot tell plain from TLS. That property is about the *stream*
+     * being the same either way, and it still holds -- what changes is that a
+     * connection can now say which port it arrived on, which is what an
+     * http-to-https redirect is made of.
+     */
+    unsigned short local_port = 0;
+    bool           secure = false;
+
     /** 127.0.0.0/8, ::1, or an IPv4-mapped loopback address. */
     bool loopback() const;
 };
