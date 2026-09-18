@@ -31,7 +31,9 @@
 
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <fcntl.h>
 #include <grp.h>
+#include <limits.h>
 #include <pwd.h>
 #include <unistd.h>
 
@@ -105,71 +107,6 @@ namespace jhttpd {
 
 
 
-
-/**
- * Who the server should become, resolved before anything is given up.
- *
- * Names are looked up **first and separately**, because `getpwnam` reads
- * `/etc/passwd` -- or NSS, or LDAP -- and a lookup that needs privilege must
- * happen while there still is some. Resolving after dropping is a class of bug
- * that only shows on the machines where the directory is not a local file.
- */
-struct identity {
-    uid_t       uid = 0;
-    gid_t       gid = 0;
-    std::string user;
-    std::string group;
-};
-
-/**
- * Turn `--user` and `--group` into ids.
- *
- * An unnamed group means the user's own primary group, which is what an
- * operator means by `--user www` and what they would have to look up
- * otherwise.
- *
- * @throws std::runtime_error naming what could not be found
- */
-identity resolve_identity(const std::string& user, const std::string& group);
-
-/**
- * Become that identity, permanently.
- *
- * **The order is the whole of this function**, and every step of it is a
- * documented way to get privilege dropping wrong:
- *
- *   1. `setgroups()` clears the supplementary groups. It needs privilege, so
- *      it must come first -- and skipping it is the classic one: a process
- *      that dropped to `www` while keeping root's supplementary groups has
- *      dropped almost nothing.
- *   2. `setgid()` before `setuid()`, because after `setuid()` there is no
- *      privilege left to change group with. The reverse order looks identical
- *      and leaves the process in the group it started in.
- *   3. `setuid()` last.
- *
- * And then it **checks**, which is the step most implementations skip.
- * `setuid()` can fail and return an error nobody reads, leaving a process that
- * believes it is unprivileged and is not. So this verifies the real and
- * effective ids are what was asked for, and then tries to **regain root** --
- * which must fail. A drop you can undo is not a drop.
- *
- * @throws std::runtime_error if any step fails or the check does not hold
- */
-void become(const identity& who);
-
-/**
- * Is this process actually that identity, with no way back?
- *
- * Split out of `become()` so it can be tested without privilege -- and
- * because **it is the step implementations skip.** `setuid()` returns an error
- * that nobody reads, and the process carries on believing it is unprivileged.
- *
- * Checks both halves: that the real and effective ids are what was asked for,
- * and that root cannot be regained. A drop you can undo is not a drop.
- *
- * @throws std::runtime_error saying which half failed
- */
-void verify_identity(const identity& who);
 
 /**
  * A credential file: one `user:hash` per line, Argon2id.
@@ -438,77 +375,6 @@ inline std::string combined(const jlib::net::http::server::access& a,
       << " \"" << agent << "\"";
 
     return o.str();
-}
-
-inline identity resolve_identity(const std::string& user,
-                                 const std::string& group)
-{
-    identity who;
-
-    who.user = user;
-    who.group = group;
-
-    const struct passwd* pw = ::getpwnam(user.c_str());
-
-    if(pw == 0)
-        throw std::runtime_error("no such user: \"" + user + "\"");
-
-    who.uid = pw->pw_uid;
-    who.gid = pw->pw_gid;
-
-    if(!group.empty()) {
-        const struct group* gr = ::getgrnam(group.c_str());
-
-        if(gr == 0)
-            throw std::runtime_error("no such group: \"" + group + "\"");
-
-        who.gid = gr->gr_gid;
-    }
-
-    return who;
-}
-
-inline void become(const identity& who) {
-    // Already there: nothing to give up, and nothing that needs privilege to
-    // do it with.  This is also what makes the function testable without
-    // root -- becoming who you already are exercises the checks below and
-    // none of the syscalls that would refuse.
-    if(::getuid() == who.uid && ::getgid() == who.gid) return;
-
-    if(::setgroups(1, &who.gid) != 0) {
-        throw std::runtime_error("setgroups() failed: " +
-                                 std::string(std::strerror(errno)));
-    }
-
-    if(::setgid(who.gid) != 0) {
-        throw std::runtime_error("setgid() failed: " +
-                                 std::string(std::strerror(errno)));
-    }
-
-    if(::setuid(who.uid) != 0) {
-        throw std::runtime_error("setuid() failed: " +
-                                 std::string(std::strerror(errno)));
-    }
-
-    // **Did it take?**  Checked rather than assumed: see verify_identity.
-    verify_identity(who);
-}
-
-inline void verify_identity(const identity& who) {
-    if(::getuid() != who.uid || ::geteuid() != who.uid ||
-       ::getgid() != who.gid || ::getegid() != who.gid)
-    {
-        throw std::runtime_error("the privilege drop did not take: wanted uid " +
-                                 std::to_string(who.uid) + " gid " +
-                                 std::to_string(who.gid) + ", have uid " +
-                                 std::to_string(::getuid()) + " gid " +
-                                 std::to_string(::getgid()));
-    }
-
-    // The stronger half.  Only attempted when the target is not root, because
-    // a server told to run as root can obviously become root.
-    if(who.uid != 0 && ::setuid(0) == 0)
-        throw std::runtime_error("root was regained after dropping it");
 }
 
 inline std::string hash_password(const std::string& password) {

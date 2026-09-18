@@ -25,6 +25,8 @@
 #include <iostream>
 #include <string>
 
+#include <sys/types.h>
+
 #include <functional>
 #include <vector>
 
@@ -163,6 +165,139 @@ namespace jlib {
          */
         void set_default_io_timeout(double seconds);
         double get_default_io_timeout();
+
+        /**
+         * `path` made absolute against the current directory.
+         *
+         * For anything that will `chdir` later -- see daemon below -- because
+         * a relative path resolved after the move means a different file, with
+         * no symptom except the wrong one.
+         *
+         * Purely textual: no `realpath`, because the file need not exist yet.
+         * `""` and `"-"` are returned unchanged, being the conventional
+         * spellings of "discard" and "standard output" rather than paths.
+         */
+        std::string absolute_path(const std::string& path);
+
+        /**
+         * Who a process should become, resolved from names.
+         *
+         * Resolved **before** anything is given up: `getpwnam` may reach NSS
+         * or LDAP, and a lookup done after the drop fails only on the machines
+         * where that service is not a local file.
+         */
+        struct identity {
+            uid_t       uid = 0;
+            gid_t       gid = 0;
+            std::string user;
+            std::string group;
+        };
+
+        /**
+         * Turn a user and an optional group into ids.
+         *
+         * An empty group means the user's own primary group.
+         *
+         * @throws sys_exception naming what could not be found
+         */
+        identity resolve_identity(const std::string& user,
+                                  const std::string& group);
+
+        /**
+         * Become that identity, permanently.
+         *
+         * **The order is the whole of this function**, and each step is a
+         * documented way to get privilege dropping wrong:
+         *
+         *   1. `setgroups()` clears the supplementary groups.  It needs
+         *      privilege, so it must come first -- and skipping it is the
+         *      classic one: a process that dropped to `www` while keeping
+         *      root's supplementary groups has dropped almost nothing.
+         *   2. `setgid()` before `setuid()`, because afterwards there is no
+         *      privilege left to change group with.  The reverse order
+         *      compiles, runs, looks identical, and leaves the process in the
+         *      group it started in.
+         *   3. `setuid()` last, then verify_identity().
+         *
+         * Returns without doing anything when the process is already that
+         * identity: there is nothing to give up, and `setgroups` would fail
+         * for no reason.
+         *
+         * @throws sys_exception if any step fails or the check does not hold
+         */
+        void become(const identity& who);
+
+        /**
+         * Is this process that identity, with no way back?
+         *
+         * Separate because **it is the step implementations skip.**
+         * `setuid()` can fail and return an error nobody reads, leaving a
+         * process that believes it is unprivileged and is not.  Checks the
+         * real *and* effective ids, then tries to regain root, which must
+         * fail: a drop you can undo is not a drop.
+         *
+         * Separate also because it can be tested without privilege, while the
+         * three syscalls above cannot.
+         *
+         * @throws sys_exception saying which half failed
+         */
+        void verify_identity(const identity& who);
+
+        /**
+         * Fork into the background, and tell the caller whether it worked.
+         *
+         * ## Why a pipe
+         *
+         * A daemon that forks and *then* fails -- a port in use, a file it
+         * cannot read -- has already handed the shell a zero exit, and every
+         * script that starts it believes it is running.  So the child keeps
+         * one end of a pipe and the parent blocks on the other: the parent
+         * does not exit until the child says it is ready, and if the child
+         * dies first the parent sees the pipe close and exits non-zero.
+         *
+         * **stderr is left alone until ready().**  The child inherits the
+         * terminal, so every failure path a caller already has keeps printing
+         * where somebody can read it, and the pipe carries only *whether* to
+         * exit zero.  That is what makes this small rather than a rework of
+         * every error return in the calling program.
+         *
+         * ## Why twice
+         *
+         * The first fork lets the parent return to the shell; `setsid()` makes
+         * the child a session leader with no controlling terminal.  A session
+         * leader can *acquire* one by opening a terminal device, so it forks
+         * again and continues as a grandchild, which cannot.  The second fork
+         * is about what could happen later rather than what has happened.
+         *
+         * ## Threads
+         *
+         * **Call start() before anything creates a thread.**  `fork()` keeps
+         * only the calling thread, and a mutex another thread held stays
+         * locked forever in the child.  A server with a pool or a log writer
+         * has to daemonise before it builds either.
+         */
+        class daemon {
+        public:
+            /**
+             * Fork.  In the parent this **does not return** -- it waits for
+             * the child's verdict and exits with it.
+             *
+             * @throws sys_exception if the pipe or either fork fails
+             */
+            void start();
+
+            /**
+             * Tell the parent to exit zero, and let go of the terminal.
+             *
+             * Called once the caller is actually serving.  Does nothing if
+             * start() was never called, so a program can carry one of these
+             * unconditionally and only daemonise when asked.
+             */
+            void ready();
+
+        private:
+            int m_tell = -1;
+        };
 
         void getline(std::istream& is, std::string& s);
 
