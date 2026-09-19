@@ -49,6 +49,7 @@
 #include <sstream>
 #include <future>
 #include <map>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -158,13 +159,74 @@ public:
      */
     bool check(const std::string& user, const std::string& password) const;
 
-    std::size_t size() const { return m_hashes.size(); }
+    std::size_t size() const {
+        const std::shared_ptr<const table> t = snapshot();
+
+        return t ? t->hashes.size() : 0;
+    }
 
 private:
-    std::map<std::string, std::string> m_hashes;
+    /**
+     * The hashes and the decoy, as one immutable object.
+     *
+     * **Replaced wholesale, never edited.**  load() can be called again while
+     * requests are being checked -- that is what makes SIGHUP able to pick up
+     * a new password file -- and check() holds a reference into this map
+     * across a deliberately slow Argon2id verification. Editing the map under
+     * it would invalidate that reference mid-verify; swapping the pointer
+     * cannot, because the reader's shared_ptr keeps the old table alive for
+     * exactly as long as it is still reading.
+     *
+     * The decoy belongs in here with them: it is generated per load, and a
+     * reader that got the new hashes and the old decoy would be checking an
+     * unknown user against a hash from a file that is no longer in use. It
+     * would still take the right amount of time, which is the only thing the
+     * decoy is for, but one object with one lifetime is easier to be sure of.
+     */
+    struct table {
+        std::map<std::string, std::string> hashes;
 
-    // What an unknown user is checked against.  See check().
-    std::string m_decoy;
+        // What an unknown user is checked against.  See check().
+        std::string decoy;
+    };
+
+    /**
+     * Guarded by a mutex, which is a choice rather than a constraint.
+     *
+     * Both platforms build as C++20. Two ways to do this without a lock, and
+     * neither was ruled out by the language level:
+     *
+     * - `std::atomic<std::shared_ptr<T>>`, the C++20 specialisation, is
+     *   **absent from the libc++ shipped with Xcode** -- libstdc++ defines
+     *   `__cpp_lib_atomic_shared_ptr` and libc++ does not, so there it falls
+     *   through to the primary template and fails an `is_trivially_copyable`
+     *   assertion. That one would need the macro and an #else.
+     *
+     * - `std::atomic_load` / `std::atomic_store` on a plain shared_ptr, the
+     *   C++11 spelling, compile and run on both with no warning. They are
+     *   deprecated in favour of the specialisation above, which is the only
+     *   thing against them.
+     *
+     * The second would work here and is a reasonable thing to prefer; a
+     * sibling codebase uses exactly it for exactly this shape. The mutex wins
+     * on the numbers rather than on principle: it is held for a refcount bump
+     * and released, while the Argon2id verification that follows -- the
+     * expensive part, and the whole reason the hash is worth anything -- takes
+     * milliseconds. A lock that is a rounding error next to the work it
+     * guards is not worth a deprecated API to avoid.
+     *
+     * What would be worth avoiding is holding it *across* the verify, which
+     * would serialise every authentication in the server. That is why the
+     * snapshot is taken and the lock dropped before check() does any work.
+     */
+    mutable std::mutex                 m_lock;
+    std::shared_ptr<const table>       m_table;
+
+    std::shared_ptr<const table> snapshot() const {
+        std::lock_guard<std::mutex> hold(m_lock);
+
+        return m_table;
+    }
 };
 
 /**
@@ -433,7 +495,11 @@ inline void credentials::load(const std::string& path) {
 
     if(!in) throw std::runtime_error("cannot open \"" + path + "\"");
 
-    m_hashes.clear();
+    // Built to the side, and published at the end.  A partly-filled table is
+    // never visible to a request: either the whole file was read or the old
+    // one is still in use, which is what lets a reload that finds a malformed
+    // line leave the server working.
+    std::shared_ptr<table> built(new table);
 
     std::string line;
     int no = 0;
@@ -457,10 +523,10 @@ inline void credentials::load(const std::string& path) {
                                      ": expected user:hash");
         }
 
-        m_hashes[line.substr(0, colon)] = line.substr(colon + 1);
+        built->hashes[line.substr(0, colon)] = line.substr(colon + 1);
     }
 
-    if(m_hashes.empty())
+    if(built->hashes.empty())
         throw std::runtime_error("\"" + path + "\" has no credentials in it");
 
     // The decoy, at the same parameters as everything else, over a password
@@ -469,8 +535,18 @@ inline void credentials::load(const std::string& path) {
 
     ::randombytes_buf(noise, sizeof noise);
 
-    m_decoy = hash_password(std::string(reinterpret_cast<char*>(noise),
+    built->decoy = hash_password(std::string(reinterpret_cast<char*>(noise),
                                         sizeof noise));
+
+    // **The last thing.**  Every throw above this line leaves the previous
+    // table in place, so a reload that finds a missing file, a world-readable
+    // one, or a malformed line changes nothing and the server keeps checking
+    // against what it had.
+    {
+        std::lock_guard<std::mutex> hold(m_lock);
+
+        m_table = built;
+    }
 #endif
 }
 
@@ -482,8 +558,15 @@ inline bool credentials::check(const std::string& user,
 
     return false;
 #else
+    // One load, held for the whole check: the table this names stays alive
+    // until `t` goes, so a reload during the verify below cannot pull the
+    // hash out from under it.
+    const std::shared_ptr<const table> t = snapshot();
+
+    if(!t) return false;
+
     const std::map<std::string, std::string>::const_iterator i =
-        m_hashes.find(user);
+        t->hashes.find(user);
 
     // **An unknown user still pays for a verification.**
     //
@@ -501,14 +584,14 @@ inline bool credentials::check(const std::string& user,
     // microseconds, which would make the decoy *faster* than a real check and
     // hand back exactly the signal it exists to hide -- and it would look
     // correct while doing it.
-    const std::string& against = i == m_hashes.end() ? m_decoy : i->second;
+    const std::string& against = i == t->hashes.end() ? t->decoy : i->second;
 
     const int ok = ::crypto_pwhash_str_verify(against.c_str(), password.data(),
                                               password.size());
 
     // The verification itself is constant-time; this is only about not
     // letting the *lookup* leak.
-    return i != m_hashes.end() && ok == 0;
+    return i != t->hashes.end() && ok == 0;
 #endif
 }
 
@@ -953,6 +1036,99 @@ inline void apply_http(const jlib::util::conf::directive& d, options& o) {
  * file is how a server ends up not doing the thing its operator believes it
  * is doing. Refusing to start is the only outcome that cannot be missed.
  */
+/**
+ * What a reload cannot change, given the old options and the new ones.
+ *
+ * SIGHUP re-reads the file, but most of what is in it was consumed at
+ * startup and cannot be revisited without one: a port is bound, a route table
+ * is registered, a thread pool is sized, privileges are dropped. Changing
+ * those in a running process means rebuilding it, which means dropping every
+ * connection -- and a reload that drops connections is a restart wearing a
+ * different name.
+ *
+ * So the rule is: **apply what can be applied, and say plainly what was
+ * ignored.** Silently keeping the old value is the one outcome that must not
+ * happen, because the operator has a file on disk that does not describe the
+ * server that is running, and nothing told them.
+ *
+ * @return the directive names that differ and need a restart, in config order
+ */
+inline std::vector<std::string> needs_a_restart(const options& was,
+                                                const options& now)
+{
+    std::vector<std::string> changed;
+
+    if(was.listens.size() != now.listens.size()) changed.push_back("listen");
+    else {
+        for(std::size_t i = 0; i < was.listens.size(); i++) {
+            if(was.listens[i].port == now.listens[i].port &&
+               was.listens[i].host == now.listens[i].host &&
+               was.listens[i].ssl == now.listens[i].ssl &&
+               was.listens[i].redirect == now.listens[i].redirect) continue;
+
+            changed.push_back("listen");
+            break;
+        }
+    }
+
+    if(was.root != now.root)                   changed.push_back("root");
+    if(was.prefix != now.prefix)               changed.push_back("prefix");
+    if(was.index != now.index)                 changed.push_back("index");
+    if(was.cache_control != now.cache_control) changed.push_back("cache_control");
+
+    // A path change, not a rotation.  Rotation is moving the file out from
+    // under the same path, which SIGHUP already handles by reopening it.
+    if(was.access_log != now.access_log)       changed.push_back("access_log");
+    if(was.error_log != now.error_log)         changed.push_back("error_log");
+
+    if(was.threads != now.threads)             changed.push_back("threads");
+    if(was.async != now.async)                 changed.push_back("async");
+    if(was.user != now.user)                   changed.push_back("user");
+    if(was.group != now.group)                 changed.push_back("user");
+    if(was.pidfile != now.pidfile)             changed.push_back("pid");
+    if(was.daemon != now.daemon)               changed.push_back("daemon");
+
+    // Fixed in the policy the server was constructed with.
+    if(was.max_connections != now.max_connections) changed.push_back("max_connections");
+    if(was.max_per_address != now.max_per_address) changed.push_back("max_per_address");
+    if(was.max_requests != now.max_requests)       changed.push_back("keepalive_requests");
+    if(was.idle_timeout != now.idle_timeout)       changed.push_back("keepalive_timeout");
+    if(was.initial_idle_timeout != now.initial_idle_timeout)
+        changed.push_back("client_header_timeout");
+    if(was.io_timeout != now.io_timeout)           changed.push_back("io_timeout");
+
+    // A site is a route registration, so adding, removing or repointing one
+    // needs the table rebuilt.  Its *certificate* is reloadable and is not
+    // compared here -- see the note on reload().
+    if(was.vhosts.size() != now.vhosts.size()) changed.push_back("server");
+    else {
+        for(std::size_t i = 0; i < was.vhosts.size(); i++) {
+            if(was.vhosts[i].name == now.vhosts[i].name &&
+               was.vhosts[i].root == now.vhosts[i].root) continue;
+
+            changed.push_back("server");
+            break;
+        }
+    }
+
+    // Likewise a guard: which paths are protected and with what realm is a
+    // registration.  The credential *file* is re-read on every reload, which
+    // is the half that matters -- adding a user should not need a restart.
+    if(was.protect.size() != now.protect.size()) changed.push_back("location");
+    else {
+        for(std::size_t i = 0; i < was.protect.size(); i++) {
+            if(was.protect[i].prefix == now.protect[i].prefix &&
+               was.protect[i].realm == now.protect[i].realm &&
+               was.protect[i].file == now.protect[i].file) continue;
+
+            changed.push_back("location");
+            break;
+        }
+    }
+
+    return changed;
+}
+
 inline void read_config(const std::string& path, options& o) {
     const std::vector<jlib::util::conf::directive> top = jlib::util::conf::read(path);
 
@@ -988,7 +1164,118 @@ inline void read_config(const std::string& path, options& o) {
 
 inline volatile std::sig_atomic_t reopen_requested = 0;
 
-inline void reopen_on_hup(int) { reopen_requested++; }
+/**
+ * The write end of a self-pipe, for the handler; -1 until opened.
+ *
+ * `sig_atomic_t` rather than `int` because a handler may read it while another
+ * thread is still writing it, and that is the one type the standard says can
+ * be accessed from a handler without a data race.
+ */
+inline volatile std::sig_atomic_t hup_wake = -1;
+
+/** The read end, touched only by ordinary threads. */
+inline int hup_woken = -1;
+
+/**
+ * Open the self-pipe SIGHUP is announced on.
+ *
+ * **Why a pipe and not a flag somebody polls.** A handler may call very
+ * little, but `write()` is on POSIX's async-signal-safe list precisely so this
+ * works -- it is the sanctioned way to get a signal out of a handler and into
+ * an ordinary thread that can then do whatever it likes. What is *not* safe is
+ * anything that takes a lock or allocates, which rules out posting to the
+ * reactor from here: a handler that interrupts a thread already holding that
+ * mutex would deadlock the process.
+ *
+ * So the handler writes a byte, a thread blocks on the other end, and the
+ * reload happens there. No polling interval to choose, no wakeups while
+ * nothing is happening, and no latency between the signal and the work.
+ *
+ * @return false if the pipe could not be made, in which case reload is off
+ */
+inline bool open_hup_pipe() {
+    int fd[2];
+
+    if(::pipe(fd) != 0) return false;
+
+    // Both ends close across exec, and the write end never blocks: if the
+    // pipe is full there is already a wakeup nobody has read, and one more
+    // byte would say nothing a reader is not about to be told anyway. A
+    // handler that blocked on a full pipe would stop the thread it
+    // interrupted, which could be the thread that drains it.
+    ::fcntl(fd[0], F_SETFD, FD_CLOEXEC);
+    ::fcntl(fd[1], F_SETFD, FD_CLOEXEC);
+    ::fcntl(fd[1], F_SETFL, ::fcntl(fd[1], F_GETFL, 0) | O_NONBLOCK);
+
+    hup_woken = fd[0];
+    hup_wake = fd[1];
+
+    return true;
+}
+
+/**
+ * The SIGHUP handler.  Raises the count and pokes the pipe.
+ *
+ * **errno is saved and restored**, which is the bug this shape invites: the
+ * handler can interrupt a thread between a failing syscall and its errno
+ * check, and a write() in here would otherwise overwrite the value that thread
+ * is about to read. It costs two assignments and the failure it prevents is
+ * one nobody would ever reproduce.
+ *
+ * The counter stays for the log files, which notice it when they next write.
+ * The pipe is for the reload thread, which has nothing else to notice.
+ */
+inline void reopen_on_hup(int) {
+    const int kept = errno;
+
+    reopen_requested++;
+
+    if(hup_wake >= 0) {
+        const char one = 'h';
+
+        // The result is deliberately discarded: a full pipe (EAGAIN) means a
+        // wakeup is already pending, which is exactly what this wanted.
+        ssize_t n = ::write(static_cast<int>(hup_wake), &one, 1);
+
+        (void)n;
+    }
+
+    errno = kept;
+}
+
+/**
+ * Block until SIGHUP arrives, or until somebody pokes the pipe.
+ *
+ * @return false when the pipe is gone, which is how the reload thread is told
+ *         to stop
+ */
+inline bool wait_for_hup() {
+    if(hup_woken < 0) return false;
+
+    for(;;) {
+        char drain[64];
+        const ssize_t n = ::read(hup_woken, drain, sizeof drain);
+
+        if(n > 0) return true;
+
+        // A signal arriving *during* the read is not a reason to give up; it
+        // is very often the signal being waited for, whose handler has just
+        // written the byte this will find on the retry.
+        if(n < 0 && errno == EINTR) continue;
+
+        return false;
+    }
+}
+
+/** Wake the reload thread without a signal, to shut it down. */
+inline void poke_hup() {
+    if(hup_wake < 0) return;
+
+    const char one = 'q';
+    ssize_t n = ::write(static_cast<int>(hup_wake), &one, 1);
+
+    (void)n;
+}
 
 inline bool logfile::open(const std::string& path) {
     if(path.empty()) return true;

@@ -55,6 +55,9 @@
 #include <unistd.h>
 #include <cstdlib>
 #include <ctime>
+#include <thread>
+#include <atomic>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -429,6 +432,17 @@ int main(int argc, char** argv) {
     // aside, send SIGHUP, get a new one.  Without this the process keeps
     // writing to an inode with no name, and the log silently stops existing
     // for anybody looking at the path.
+    // Before the handler, so it always has somewhere to write.  The daemon
+    // fork below inherits both ends, which is what is wanted: FD_CLOEXEC
+    // closes them on exec, not on fork.
+    //
+    // A failure here costs the config reload and nothing else -- the log files
+    // notice the counter rather than the pipe, so rotation still works.
+    if(!jhttpd::open_hup_pipe()) {
+        std::cerr << "jhttpd: no pipe for SIGHUP, so the config will not "
+                  << "reload; log rotation still will\n";
+    }
+
     std::signal(SIGHUP, jhttpd::reopen_on_hup);
 
     // **Absolute before anything forks or chdirs**, because --daemon moves to
@@ -636,7 +650,9 @@ int main(int argc, char** argv) {
             const std::string& realm  = o.protect[i].realm;
             const std::string& file   = o.protect[i].file;
 
-            guards.push_back(jhttpd::credentials());
+            // emplace, not push_back: a credentials holds a mutex now, so it
+            // is neither copyable nor movable.
+            guards.emplace_back();
 
             // Throws if the file cannot be read, is world-readable, has a
             // malformed line, or if this build has no libsodium -- and the
@@ -753,6 +769,173 @@ int main(int argc, char** argv) {
                                         : std::string("unlimited"))
                   << "\n";
 
+        // **The reload thread.**
+        //
+        // Its own thread, and not the reactor's, because everything a reload
+        // does is blocking: reading the config file, reading a certificate off
+        // disk, and hashing a decoy password with Argon2id, which is slow by
+        // design. On the reactor that would stall every connection at once.
+        //
+        // It blocks on a pipe the handler writes to, rather than polling a
+        // flag: write() is async-signal-safe, so the signal reaches an
+        // ordinary thread directly. No interval to pick, no wakeups while
+        // nothing is happening, and no latency.
+        std::atomic<bool> reloading{true};
+
+        /**
+         * Owns the reload thread and joins it however this scope ends.
+         *
+         * **Not tidiness.** A std::thread destroyed while still joinable calls
+         * std::terminate, and `s->run()` below can throw -- which would jump
+         * past a bare join() straight to the catch, and take the process down
+         * with an abort instead of the error message it was about to print.
+         *
+         * The order matters too: the flag before the poke, because the thread
+         * tests it after the read returns. Poking first lets it wake, see a
+         * flag that is still true, and block again on a pipe nobody will
+         * write to -- and then the join waits forever.
+         */
+        struct joining {
+            joining(std::atomic<bool>& f, std::thread t)
+                : m_flag(f), m_thread(std::move(t)) {}
+
+            ~joining() {
+                m_flag.store(false);
+                jhttpd::poke_hup();
+
+                if(m_thread.joinable()) m_thread.join();
+            }
+
+            std::atomic<bool>& m_flag;
+            std::thread        m_thread;
+        };
+
+        std::thread worker([&] {
+            while(reloading.load()) {
+                if(!jhttpd::wait_for_hup()) break;
+
+                if(!reloading.load() || o.config.empty()) continue;
+
+                jhttpd::options fresh;
+
+                // Read into a *default* options, not a copy of the live one,
+                // so what comes back is what the file says rather than the
+                // file laid over what is already running. The flags are
+                // deliberately not reapplied: a flag overrode the file at
+                // startup and still does, which is why anything a flag set is
+                // compared below and reported as needing a restart.
+                try {
+                    jhttpd::read_config(o.config, fresh);
+                }
+                catch(std::exception& e) {
+                    // The whole point of reading into `fresh`: a config with a
+                    // typo in it leaves the server exactly as it was.
+                    std::cerr << "jhttpd: reload refused, keeping what is "
+                              << "running: " << e.what() << "\n";
+
+                    continue;
+                }
+
+                if(fresh.listens.empty())
+                    fresh.listens.push_back(jhttpd::listen_spec());
+
+                fresh.root = sys::absolute_path(fresh.root);
+                fresh.cert = sys::absolute_path(fresh.cert);
+                fresh.key = sys::absolute_path(fresh.key);
+
+                for(std::size_t i = 0; i < fresh.protect.size(); i++)
+                    fresh.protect[i].file = sys::absolute_path(fresh.protect[i].file);
+
+                for(std::size_t i = 0; i < fresh.vhosts.size(); i++)
+                    fresh.vhosts[i].root = sys::absolute_path(fresh.vhosts[i].root);
+
+                const std::vector<std::string> stuck =
+                    jhttpd::needs_a_restart(o, fresh);
+
+                for(std::size_t i = 0; i < stuck.size(); i++) {
+                    std::cerr << "jhttpd: \"" << stuck[i] << "\" changed and "
+                              << "needs a restart; still using the old one\n";
+                }
+
+                // --- the certificate ---
+                //
+                // Rebuilt every time rather than when the path changes, which
+                // is the case that matters: certbot rewrites the same file
+                // every couple of months, so the path is exactly what does
+                // *not* change when the certificate does.
+                if(!fresh.cert.empty()) {
+                    try {
+                        sys::tls_context next =
+                            sys::tls_context::server(fresh.cert, fresh.key);
+
+                        for(std::size_t i = 0; i < fresh.vhosts.size(); i++) {
+                            const jhttpd::site& v = fresh.vhosts[i];
+
+                            if(!v.cert.empty())
+                                next.add_site(v.name, v.cert, v.key);
+                        }
+
+                        for(std::size_t i = 0; i < o.listens.size(); i++) {
+                            if(o.listens[i].ssl) s->transport().reload_tls(i, next);
+                        }
+
+                        std::cerr << "jhttpd: certificate reloaded from "
+                                  << fresh.cert << "\n";
+                    }
+                    catch(std::exception& e) {
+                        std::cerr << "jhttpd: certificate not reloaded, keeping "
+                                  << "the old one: " << e.what() << "\n";
+                    }
+                }
+
+                // --- the credential files ---
+                //
+                // Same argument: a user is added by editing the file, not by
+                // renaming it, so the path staying the same is the normal case
+                // and re-reading unconditionally is what picks the change up.
+                // Guards are matched by position, which holds because a change
+                // to the list itself was reported as needing a restart above.
+                {
+                    std::size_t i = 0;
+
+                    for(std::list<jhttpd::credentials>::iterator g = guards.begin();
+                        g != guards.end() && i < o.protect.size(); ++g, ++i) {
+                        try {
+                            g->load(o.protect[i].file);
+                        }
+                        catch(std::exception& e) {
+                            std::cerr << "jhttpd: credentials not reloaded from "
+                                      << o.protect[i].file << ", keeping the "
+                                      << "old ones: " << e.what() << "\n";
+                        }
+                    }
+                }
+
+                // --- the rate limit ---
+                if(fresh.rate != o.rate || fresh.burst != o.burst) {
+                    s->rate_limit(fresh.rate, fresh.burst);
+
+                    std::cerr << "jhttpd: rate limit now "
+                              << (fresh.rate > 0
+                                      ? std::to_string(fresh.rate) + "/s burst " +
+                                        std::to_string(fresh.burst)
+                                      : std::string("unlimited"))
+                              << "\n";
+
+                    o.rate = fresh.rate;
+                    o.burst = fresh.burst;
+                }
+
+                std::cerr << "jhttpd: reloaded " << o.config << "\n";
+            }
+        });
+
+        const joining reloader(reloading, std::move(worker));
+
+        // Never returns today: nothing in jhttpd calls stop(), and there is no
+        // SIGINT or SIGTERM handler, so the process ends by signal. The guard
+        // above is for the path that *does* happen -- run() throwing -- and
+        // for whenever a graceful shutdown arrives.
         s->run();
     }
     catch(std::exception& e) {
