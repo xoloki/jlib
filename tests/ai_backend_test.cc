@@ -1377,6 +1377,80 @@ static const unsigned int Q8_ROW_COUNTS[] = { 8, 16384 };
  * float's 1e-3 catches it everywhere. A K-quant kernel that passed only at
  * fp16 would not have been tested.
  */
+/**
+ * A prefill multiply gives the same answer however many blocks it is cut into.
+ *
+ * Above the column threshold a quantised weight is unpacked a block of output
+ * rows at a time and each block multiplied into its own rows of the result
+ * (#292). The cut is supposed to be invisible, and this is the assertion that
+ * it is: the same multiply at a budget that makes one block, and at budgets
+ * that make several, against the same reference.
+ *
+ * **The default budget makes every testable shape a single block.** 64 MB
+ * against a 64-row weight is a width of half a million, so the loop this
+ * exercises would otherwise never run in `make check` -- which is exactly how
+ * the path #286 added went untested. Hence the knob.
+ *
+ * The last block is deliberately partial: 1000 columns at a width of 128 is
+ * seven whole blocks and one of 104, and an off-by-one in the tail would
+ * survive a count that divided evenly.
+ */
+template<typename T>
+static void a_blocked_multiply_is_one_multiply(const char* name,
+                                               std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\na blocked prefill multiply, " << name << ":\n";
+
+    const uint K = 256;
+    const uint N = 1000;              // not a multiple of any width below
+    const uint ncols = 32;            // above the unpack threshold
+
+    std::mt19937 gen(5150);
+
+    const matrix<T> w = random_matrix<T>(K, N, gen);
+    const std::vector<char> raw = as_q8_0(w);
+    const matrix<T> unpacked = from_q8_0<T>(raw, K, N);
+    const matrix<T> x = random_matrix<T>(K, ncols, gen);
+
+    const unsigned long was = jlib::metal::dequant_budget();
+
+    for(ai::backend<T>* b : backends) {
+        // The reference: one block, which is what the default budget gives.
+        jlib::metal::dequant_budget(was);
+
+        typename ai::backend<T>::tensor_ptr tx = b->make(x);
+        typename ai::backend<T>::tensor_ptr td = b->make(unpacked);
+        typename ai::backend<T>::tensor_ptr want = b->make(N, ncols);
+
+        b->multiply_tn(td, tx, want);
+        b->wait();
+
+        const matrix<T> reference = want->read();
+
+        // K * sizeof(T) is 512 bytes a column, so these are widths of 128,
+        // 256 and 512 -- eight blocks, four, and two.
+        for(unsigned long budget : { 64ul * 1024, 128ul * 1024, 256ul * 1024 }) {
+            jlib::metal::dequant_budget(budget);
+
+            typename ai::backend<T>::quantised_ptr q =
+                b->make_quantised(ai::quant::q8_0, K, N, raw.data(), raw.size());
+
+            typename ai::backend<T>::tensor_ptr got = b->make(N, ncols);
+
+            b->multiply_tn(q, tx, got);
+            b->wait();
+
+            ok(std::string("  ") + b->name() + ": a " +
+               std::to_string(budget / 1024) +
+               " KB budget gives the same answer as one block",
+               worst(got->read(), reference) < ((sizeof(T) == 2) ? 5e-2 : 1e-3),
+               std::to_string(worst(got->read(), reference)));
+        }
+    }
+
+    jlib::metal::dequant_budget(was);
+}
+
 template<typename T>
 static void a_kquant_weight_multiplies(const char* name,
                                        std::vector<ai::backend<T>*>& backends)
@@ -1893,6 +1967,7 @@ int main() {
         beta_zero_does_not_read_the_output<float>("float", b);
         a_quantised_weight_multiplies<float>("float", b);
         a_kquant_weight_multiplies<float>("float", b);
+        a_blocked_multiply_is_one_multiply<float>("float", b);
         every_head_at_once<float>("float", b);
         the_mask_knows_where_a_head_ends<float>("float", b);
 #else
@@ -1915,6 +1990,7 @@ int main() {
         beta_zero_does_not_read_the_output<float>("float", b);
         a_quantised_weight_multiplies<float>("float", b);
         a_kquant_weight_multiplies<float>("float", b);
+        a_blocked_multiply_is_one_multiply<float>("float", b);
         every_head_at_once<float>("float", b);
         the_mask_knows_where_a_head_ends<float>("float", b);
 #endif
@@ -1948,6 +2024,7 @@ int main() {
         beta_zero_does_not_read_the_output<_Float16>("_Float16", b);
         a_quantised_weight_multiplies<_Float16>("_Float16", b);
         a_kquant_weight_multiplies<_Float16>("_Float16", b);
+        a_blocked_multiply_is_one_multiply<_Float16>("_Float16", b);
         every_head_at_once<_Float16>("_Float16", b);
         the_mask_knows_where_a_head_ends<_Float16>("_Float16", b);
     }

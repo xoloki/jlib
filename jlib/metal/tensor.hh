@@ -93,6 +93,21 @@ template<> struct supported<_Float16> { static constexpr bool value = true; };
  * it a different type means nothing can pass it where a tensor is wanted and
  * get silently wrong arithmetic.
  */
+/**
+ * How many bytes of unpacked weight a quantised multiply holds at once.
+ *
+ * A prefill multiply unpacks the weight a block of output rows at a time, and
+ * this bounds the block. Defaults to 64 MB, or `JLIB_Q8_DEQUANT_BUDGET` in
+ * megabytes.
+ *
+ * Settable because a test has to be able to force more than one block -- with
+ * the default, every shape small enough to test is a single block and the
+ * loop that matters is never run. Set it before the work, not during: it is
+ * read per multiply and nothing synchronises it.
+ */
+unsigned long dequant_budget();
+void dequant_budget(unsigned long bytes);
+
 class qweight {
 public:
     /**
@@ -287,7 +302,13 @@ public:
      * the unpack every call, because the weight may have changed even when the
      * shape has not.
      */
-    tensor<T>& dequantised(const qweight& w, unsigned int K, unsigned int N);
+    /**
+     * Columns [first, first + cols) of a quantised weight, unpacked into a
+     * scratch `K` by `width`.  See multiply_tn(qweight...).
+     */
+    tensor<T>& dequantised(const qweight& w, unsigned int K,
+                           unsigned int first, unsigned int cols,
+                           unsigned int width);
 
     /** RMS normalisation down each column, scaled by a per-row weight. */
     void rms_norm(const tensor<T>& in, const tensor<T>& weight, tensor<T>& out,
