@@ -1395,6 +1395,26 @@ static const unsigned int Q8_ROW_COUNTS[] = { 8, 16384 };
  * seven whole blocks and one of 104, and an off-by-one in the tail would
  * survive a count that divided evenly.
  */
+// **The guard has to be here, not only on the call sites.**
+//
+// This sets jlib::metal::dequant_budget(), which is the thing it is about, so
+// it has no meaning without Metal.
+//
+// It is tempting to think a template body is only checked where it is
+// instantiated, and to guard the calls instead. That is true of *dependent*
+// names, and `jlib::metal::dequant_budget()` is not one -- it does not mention
+// T, so two-phase lookup resolves it when the template is defined. On a
+// machine without Metal the name is simply not there, and the definition fails
+// whether or not anything ever calls it.
+//
+// Measured, not reasoned: guarding only the call sites left the build failing
+// at 1415, 1419 and 1433 with `'jlib::metal' has not been declared`, which is
+// where these lines are.
+//
+// Guarding it here also puts the error at the point of the mistake rather than
+// at some call site far away, which is how #309 reached master -- every line
+// of it compiles on a Mac.
+#ifdef HAVE_METAL
 template<typename T>
 static void a_blocked_multiply_is_one_multiply(const char* name,
                                                std::vector<ai::backend<T>*>& backends)
@@ -1450,6 +1470,7 @@ static void a_blocked_multiply_is_one_multiply(const char* name,
 
     jlib::metal::dequant_budget(was);
 }
+#endif
 
 template<typename T>
 static void a_kquant_weight_multiplies(const char* name,
@@ -1990,7 +2011,16 @@ int main() {
         beta_zero_does_not_read_the_output<float>("float", b);
         a_quantised_weight_multiplies<float>("float", b);
         a_kquant_weight_multiplies<float>("float", b);
-        a_blocked_multiply_is_one_multiply<float>("float", b);
+        // Not here.  This is the #else of a HAVE_METAL block -- the branch
+        // that runs when there is no Metal -- and the function it called
+        // reads and sets jlib::metal::dequant_budget(), which does not exist
+        // on such a build. #309 added the call to both branches.
+        //
+        // Deleted rather than guarded, because the test has nothing to say
+        // without Metal: what it checks is that a multiply split by the
+        // dequant budget matches one that was not split, and the budget is
+        // the mechanism it is testing. With no budget there is no blocking
+        // and no claim left to make.
         every_head_at_once<float>("float", b);
         the_mask_knows_where_a_head_ends<float>("float", b);
 #endif
@@ -2004,6 +2034,22 @@ int main() {
         std::shared_ptr<jlib::metal::backend<_Float16> > g;
         try { g.reset(new jlib::metal::backend<_Float16>); b.push_back(g.get()); }
         catch(std::exception& e) { ok("  the Metal backend comes up", false, e.what()); }
+
+        // **Inside the guard, with the float call sites above.**
+        //
+        // a_blocked_multiply_is_one_multiply reads and sets
+        // jlib::metal::dequant_budget(), which is the thing it is about -- so
+        // instantiating it needs Metal to exist. Its two float call sites are
+        // already in a block like this one; the _Float16 call was a few lines
+        // below the #endif, which compiles on a machine with Metal and stops
+        // the build on one without:
+        //
+        //     ai_backend_test.cc:1415:37: error: 'jlib::metal' has not been
+        //         declared
+        //
+        // A template only fails where it is instantiated, which is why the
+        // definition could sit unguarded and only this line mattered.
+        a_blocked_multiply_is_one_multiply<_Float16>("_Float16", b);
 #endif
         one_type<_Float16>("_Float16", b);
         the_reductions<_Float16>("_Float16", b);
@@ -2024,7 +2070,6 @@ int main() {
         beta_zero_does_not_read_the_output<_Float16>("_Float16", b);
         a_quantised_weight_multiplies<_Float16>("_Float16", b);
         a_kquant_weight_multiplies<_Float16>("_Float16", b);
-        a_blocked_multiply_is_one_multiply<_Float16>("_Float16", b);
         every_head_at_once<_Float16>("_Float16", b);
         the_mask_knows_where_a_head_ends<_Float16>("_Float16", b);
     }
