@@ -626,6 +626,131 @@ namespace jlib {
         }
 
 
+    
+// ------------------------------------------------------------------ wakeup
+
+namespace {
+
+    /**
+     * The write end, for the handler.
+     *
+     * `sig_atomic_t` rather than `int` because a handler may read it while an
+     * ordinary thread is still writing it, and that is the one type the
+     * standard says can be touched from a handler without a data race.
+     */
+    volatile std::sig_atomic_t wake_write = -1;
+
+    /** The read end.  Only ordinary threads look at this. */
+    int wake_read = -1;
+
+    /**
+     * One counter per signal.
+     *
+     * NSIG is the number of signals the platform defines; a handler is only
+     * ever called with one of those, and the bound is checked anyway because
+     * an out-of-range write here would be a memory error inside a signal
+     * handler, which is the worst place to have one.
+     */
+    volatile std::sig_atomic_t wake_count[NSIG] = { 0 };
+
+}
+
+bool wakeup::arm() {
+    if(wake_read >= 0) return true;
+
+    int fd[2];
+
+    if(::pipe(fd) != 0) return false;
+
+    ::fcntl(fd[0], F_SETFD, FD_CLOEXEC);
+    ::fcntl(fd[1], F_SETFD, FD_CLOEXEC);
+    ::fcntl(fd[1], F_SETFL, ::fcntl(fd[1], F_GETFL, 0) | O_NONBLOCK);
+
+    wake_read = fd[0];
+    wake_write = fd[1];
+
+    return true;
+}
+
+void wakeup::on_signal(int sig) {
+    const int kept = errno;
+
+    if(sig >= 0 && sig < NSIG) wake_count[sig]++;
+
+    if(wake_write >= 0) {
+        const char one = 'w';
+
+        // Discarded on purpose: EAGAIN means a wakeup is already pending,
+        // which is exactly what this wanted.
+        const ssize_t n = ::write(static_cast<int>(wake_write), &one, 1);
+
+        (void)n;
+    }
+
+    errno = kept;
+}
+
+wakeup::woken wakeup::wait() {
+    if(wake_read < 0) return woken::closed;
+
+    for(;;) {
+        char drain[64];
+        const ssize_t n = ::read(wake_read, drain, sizeof drain);
+
+        if(n > 0) {
+            // **Scanned, not looked at, and a signal wins.**
+            //
+            // One read drains whatever has accumulated, so a signal and a
+            // poke that arrive together come back in the same buffer -- "wp",
+            // measured, not assumed. Deciding from drain[0] or from the last
+            // byte is then a coin flip, and losing the coin means answering
+            // `poked` while a signal is in hand: the caller returns without
+            // acting on it, and Ctrl-C does nothing at all. That is worse than
+            // the hang the enum exists to prevent, and much harder to see.
+            for(ssize_t i = 0; i < n; i++) {
+                if(drain[i] == 'w') return woken::signalled;
+            }
+
+            return woken::poked;
+        }
+
+        // A signal arriving during the read is not a reason to give up -- it
+        // is very often the signal being waited for, whose handler has just
+        // written the byte the retry will find.
+        if(n < 0 && errno == EINTR) continue;
+
+        return woken::closed;
     }
 }
 
+void wakeup::poke() {
+    if(wake_write < 0) return;
+
+    const char one = 'p';
+    const ssize_t n = ::write(static_cast<int>(wake_write), &one, 1);
+
+    (void)n;
+}
+
+void wakeup::disarm() {
+    const int r = wake_read;
+    const int w = static_cast<int>(wake_write);
+
+    // The write end first, so a handler that runs between these two lines
+    // writes to a closed descriptor and fails harmlessly rather than into a
+    // number the process has since reused for something else.
+    wake_write = -1;
+    wake_read = -1;
+
+    if(w >= 0) ::close(w);
+    if(r >= 0) ::close(r);
+}
+
+std::sig_atomic_t wakeup::count(int sig) {
+    if(sig < 0 || sig >= NSIG) return 0;
+
+    return wake_count[sig];
+}
+
+}
+}

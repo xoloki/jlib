@@ -86,10 +86,48 @@ std::atomic<bool> stopping(false);
 
 http::server* running = 0;
 
-void on_signal(int) {
-    stopping = true;
+/**
+ * Stop on the thread below, not in the handler.
+ *
+ * **This used to call `running->stop()` directly, and that was not safe.**
+ * `http::server::stop()` reaches `job_queue::stop()`, which takes the pool's
+ * mutex, and `reactor::post()`, which takes another and builds a std::function
+ * -- so it allocates. A handler may do neither: interrupt a thread that
+ * already holds one of those mutexes and the handler waits for a lock that
+ * thread can no longer release, which is the process hanging on Ctrl-C rather
+ * than stopping. Interrupt it inside malloc and the heap is what breaks.
+ *
+ * It survived because it usually fires while the process is idle in poll(),
+ * where there is no lock held and nothing to corrupt -- which is exactly the
+ * shape of bug that waits for load to show itself.
+ *
+ * sys::wakeup does the safe half: count the signal, write a byte, return.
+ */
+void wait_and_stop() {
+    std::sig_atomic_t acted = sys::wakeup::count(SIGINT) +
+                              sys::wakeup::count(SIGTERM);
 
-    if(running) running->stop();
+    for(;;) {
+        const sys::wakeup::woken w = sys::wakeup::wait();
+
+        // Poked rather than signalled: the guard below is winding this thread
+        // up. No flag to keep in step with the poke, because the answer says
+        // which it was.
+        if(w == sys::wakeup::woken::poked) return;
+        if(w == sys::wakeup::woken::closed) return;
+
+        const std::sig_atomic_t asked = sys::wakeup::count(SIGINT) +
+                                        sys::wakeup::count(SIGTERM);
+
+        if(asked == acted) continue;
+
+        acted = asked;
+        stopping = true;
+
+        if(running) running->stop();
+
+        return;
+    }
 }
 
 void usage(std::ostream& o, const char* argv0) {
@@ -202,6 +240,23 @@ int run(ai::backend<T>& b, const options& o) {
 
     running = &s;
 
+    // Joined however this scope ends.  A std::thread destroyed while joinable
+    // calls std::terminate, and s.run() below can throw -- which would turn
+    // the error it was about to report into an abort.
+    struct joining {
+        explicit joining(std::thread t) : m_thread(std::move(t)) {}
+
+        ~joining() {
+            sys::wakeup::poke();
+
+            if(m_thread.joinable()) m_thread.join();
+        }
+
+        std::thread m_thread;
+    };
+
+    const joining stopper{std::thread(wait_and_stop)};
+
     std::cerr << "jserve: " << s.url("/v1") << "\n";
 
     for(const std::pair<std::string, std::string>& m : o.models)
@@ -228,8 +283,12 @@ int main(int argc, char** argv) {
     // reason to die.
     std::signal(SIGPIPE, SIG_IGN);
 
-    std::signal(SIGINT, on_signal);
-    std::signal(SIGTERM, on_signal);
+    // Armed before the handlers, so each always has somewhere to write.
+    if(!sys::wakeup::arm())
+        std::cerr << "jserve: no pipe for signals; stopping will be abrupt\n";
+
+    std::signal(SIGINT, sys::wakeup::on_signal);
+    std::signal(SIGTERM, sys::wakeup::on_signal);
 
     try {
 #ifdef HAVE_METAL
