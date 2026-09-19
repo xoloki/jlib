@@ -385,7 +385,10 @@ static void rotation() {
            std::to_string(lines_of(path).size()) + " here");
 
         // What the handler does, and nothing else.
-        jhttpd::reopen_requested++;
+        // The real handler, called directly: it counts the signal and pokes
+        // the pipe exactly as a delivered SIGHUP would, without needing the
+        // signal installed in a test process whose default action is to die.
+        sys::wakeup::on_signal(SIGHUP);
 
         log.write("after the hup");
 
@@ -424,7 +427,10 @@ static void rotation() {
         ::rename(a.c_str(), (a + ".1").c_str());
         ::rename(b.c_str(), (b + ".1").c_str());
 
-        jhttpd::reopen_requested++;
+        // The real handler, called directly: it counts the signal and pokes
+        // the pipe exactly as a delivered SIGHUP would, without needing the
+        // signal installed in a test process whose default action is to die.
+        sys::wakeup::on_signal(SIGHUP);
 
         la.write("two");
 
@@ -453,11 +459,17 @@ static void rotation() {
         log.write("first");
         log.drain();
 
-        jhttpd::reopen_requested++;
+        // The real handler, called directly: it counts the signal and pokes
+        // the pipe exactly as a delivered SIGHUP would, without needing the
+        // signal installed in a test process whose default action is to die.
+        sys::wakeup::on_signal(SIGHUP);
         log.write("second");
         log.drain();
 
-        jhttpd::reopen_requested++;
+        // The real handler, called directly: it counts the signal and pokes
+        // the pipe exactly as a delivered SIGHUP would, without needing the
+        // signal installed in a test process whose default action is to die.
+        sys::wakeup::on_signal(SIGHUP);
         log.write("third");
         log.drain();
 
@@ -477,7 +489,10 @@ static void rotation() {
 
         none.drain();
 
-        jhttpd::reopen_requested++;
+        // The real handler, called directly: it counts the signal and pokes
+        // the pipe exactly as a delivered SIGHUP would, without needing the
+        // signal installed in a test process whose default action is to die.
+        sys::wakeup::on_signal(SIGHUP);
 
         none.write("still nowhere");
 

@@ -432,18 +432,29 @@ int main(int argc, char** argv) {
     // aside, send SIGHUP, get a new one.  Without this the process keeps
     // writing to an inode with no name, and the log silently stops existing
     // for anybody looking at the path.
-    // Before the handler, so it always has somewhere to write.  The daemon
+    // Before any handler, so each always has somewhere to write.  The daemon
     // fork below inherits both ends, which is what is wanted: FD_CLOEXEC
     // closes them on exec, not on fork.
     //
-    // A failure here costs the config reload and nothing else -- the log files
-    // notice the counter rather than the pipe, so rotation still works.
-    if(!jhttpd::open_hup_pipe()) {
-        std::cerr << "jhttpd: no pipe for SIGHUP, so the config will not "
-                  << "reload; log rotation still will\n";
+    // A failure here costs the config reload and the graceful stop, and
+    // nothing else -- the log files notice the counter rather than the pipe,
+    // so rotation still works.
+    if(!sys::wakeup::arm()) {
+        std::cerr << "jhttpd: no pipe for signals, so the config will not "
+                  << "reload and SIGINT will not stop it gracefully; log "
+                  << "rotation still works\n";
     }
 
-    std::signal(SIGHUP, jhttpd::reopen_on_hup);
+    std::signal(SIGHUP, sys::wakeup::on_signal);
+
+    // **Stopping on purpose, rather than being killed.**
+    //
+    // Without these, the only way out is a signal whose default action
+    // terminates the process -- which drops every connection mid-response,
+    // leaves the pid file behind, and never runs a destructor. The handler
+    // only counts and pokes; the thread below does the part that takes locks.
+    std::signal(SIGINT, sys::wakeup::on_signal);
+    std::signal(SIGTERM, sys::wakeup::on_signal);
 
     // **Absolute before anything forks or chdirs**, because --daemon moves to
     // "/" and a relative --root would then mean a different directory than the
@@ -801,7 +812,7 @@ int main(int argc, char** argv) {
 
             ~joining() {
                 m_flag.store(false);
-                jhttpd::poke_hup();
+                jlib::sys::wakeup::poke();
 
                 if(m_thread.joinable()) m_thread.join();
             }
@@ -810,11 +821,41 @@ int main(int argc, char** argv) {
             std::thread        m_thread;
         };
 
+        std::sig_atomic_t stops = sys::wakeup::count(SIGINT) +
+                                  sys::wakeup::count(SIGTERM);
+        std::sig_atomic_t hups = jhttpd::hups();
+
         std::thread worker([&] {
             while(reloading.load()) {
-                if(!jhttpd::wait_for_hup()) break;
+                const sys::wakeup::woken w = sys::wakeup::wait();
 
-                if(!reloading.load() || o.config.empty()) continue;
+                // Poked or gone means the guard below is winding this thread
+                // up; only a signal is worth looking at the counts for.
+                if(w != sys::wakeup::woken::signalled) break;
+
+                // **Asked to stop, so stop.**  This runs on an ordinary
+                // thread, which is the whole reason the handler only counted:
+                // server::stop() takes the pool's mutex and posts to the
+                // reactor, and a handler that did either could deadlock
+                // against the thread it interrupted.
+                const std::sig_atomic_t asked_to_stop =
+                    sys::wakeup::count(SIGINT) + sys::wakeup::count(SIGTERM);
+
+                if(asked_to_stop != stops) {
+                    stops = asked_to_stop;
+
+                    std::cerr << "jhttpd: stopping\n";
+
+                    s->stop();
+
+                    break;
+                }
+
+                const std::sig_atomic_t asked_to_reload = jhttpd::hups();
+
+                if(asked_to_reload == hups || o.config.empty()) continue;
+
+                hups = asked_to_reload;
 
                 jhttpd::options fresh;
 
@@ -932,10 +973,9 @@ int main(int argc, char** argv) {
 
         const joining reloader(reloading, std::move(worker));
 
-        // Never returns today: nothing in jhttpd calls stop(), and there is no
-        // SIGINT or SIGTERM handler, so the process ends by signal. The guard
-        // above is for the path that *does* happen -- run() throwing -- and
-        // for whenever a graceful shutdown arrives.
+        // Returns when the thread above calls stop(), which is what SIGINT
+        // and SIGTERM now reach, or if it throws -- and the guard joins on
+        // both paths.
         s->run();
     }
     catch(std::exception& e) {

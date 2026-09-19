@@ -30,6 +30,14 @@
 
 #include <jlib/sys/sys.hh>
 
+#include <pthread.h>
+
+#include <cstring>
+
+#include <atomic>
+#include <csignal>
+#include <thread>
+#include <chrono>
 #include <iostream>
 #include <string>
 
@@ -201,7 +209,217 @@ static void a_daemon_that_was_never_started() {
     ok("  ready() on one that never started does nothing, twice", true);
 }
 
+
+/**
+ * The self-pipe a signal handler writes to.
+ *
+ * The thing under test is the contract the handler depends on: that a signal
+ * arriving while a thread is blocked in wait() wakes it, that the count says
+ * which signal it was, and that a wait with nothing pending actually blocks
+ * rather than spinning.
+ */
+static void a_signal_reaches_a_thread() {
+    std::cout << "\nwaking a thread from a handler:\n";
+
+    ok("  arming opens the pipe", sys::wakeup::arm());
+    ok("  and arming twice is not an error", sys::wakeup::arm());
+
+    std::signal(SIGUSR1, sys::wakeup::on_signal);
+    std::signal(SIGUSR2, sys::wakeup::on_signal);
+
+    const std::sig_atomic_t before = sys::wakeup::count(SIGUSR1);
+
+    // Raised from this thread, which is the hard case rather than the easy
+    // one: the handler runs on the thread that will wait, so a byte that was
+    // not actually written would hang the wait below forever.
+    ::raise(SIGUSR1);
+
+    ok("  the signal was counted",
+       sys::wakeup::count(SIGUSR1) == before + 1,
+       std::to_string(sys::wakeup::count(SIGUSR1)));
+
+    ok("  and a waiter does not block on it, calling it a signal",
+       sys::wakeup::wait() == sys::wakeup::woken::signalled);
+
+    // Counts are per signal, not one total.
+    const std::sig_atomic_t one = sys::wakeup::count(SIGUSR1);
+    const std::sig_atomic_t two = sys::wakeup::count(SIGUSR2);
+
+    ::raise(SIGUSR2);
+
+    ok("  a different signal has its own count",
+       sys::wakeup::count(SIGUSR2) == two + 1 &&
+           sys::wakeup::count(SIGUSR1) == one);
+
+    ok("  which also wakes a waiter",
+       sys::wakeup::wait() == sys::wakeup::woken::signalled);
+
+    // **It really blocks.**  Without this the section above passes on an
+    // implementation whose wait() returns immediately every time, which would
+    // make every caller a busy loop.
+    {
+        // **The return value, not just "it came back".**  A waiter that
+        // ignored it could not tell being woken from giving up, and a wait()
+        // that returned false on the first hiccup would pass either way.
+        std::atomic<int> got{-1};
+        std::thread waiter([&got] {
+            got.store(static_cast<int>(sys::wakeup::wait()));
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        const bool still_waiting = got.load() == -1;
+
+        sys::wakeup::poke();
+        waiter.join();
+
+        ok("  a wait with nothing pending blocks", still_waiting);
+        ok("  and poke() wakes it, calling it a poke",
+           got.load() == static_cast<int>(sys::wakeup::woken::poked),
+           std::to_string(got.load()));
+    }
+
+    // A signal arriving while a thread is parked in wait() is the case the
+    // whole thing exists for.
+    {
+        std::atomic<int> got{-1};
+        std::thread waiter([&got] {
+            got.store(static_cast<int>(sys::wakeup::wait()));
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        ::raise(SIGUSR1);
+
+        for(int i = 0; i < 100 && got.load() == -1; i++)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+        waiter.join();
+
+        ok("  a signal wakes a thread already parked in wait()",
+           got.load() == static_cast<int>(sys::wakeup::woken::signalled),
+           std::to_string(got.load()));
+    }
+
+    // **Delivered to the waiting thread, which is what exercises EINTR.**
+    //
+    // raise() above runs the handler on *this* thread, so the waiter's read()
+    // is never interrupted -- it simply finds the byte. pthread_kill aims the
+    // signal at the thread that is blocked, so its read() returns EINTR and
+    // the retry inside wait() is the only thing that finds the byte the
+    // handler just wrote. Without that retry this answers false.
+    {
+        std::atomic<int> got{-1};
+        std::atomic<bool> parked{false};
+        pthread_t who = 0;
+
+        std::thread waiter([&got, &parked, &who] {
+            who = ::pthread_self();
+            parked.store(true);
+            got.store(static_cast<int>(sys::wakeup::wait()));
+        });
+
+        for(int i = 0; i < 100 && !parked.load(); i++)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        // **Installed without SA_RESTART for this one case.**  std::signal()
+        // gives BSD semantics -- the kernel restarts an interrupted read()
+        // itself -- so with it EINTR never reaches wait() and the retry inside
+        // is unreachable. Asking for the other behaviour is the only way to
+        // put the retry under test, and it is what any caller using sigaction
+        // directly will get.
+        struct sigaction raw;
+
+        std::memset(&raw, 0, sizeof raw);
+
+        raw.sa_handler = sys::wakeup::on_signal;
+        sigemptyset(&raw.sa_mask);
+        raw.sa_flags = 0;
+
+        ::sigaction(SIGUSR1, &raw, 0);
+
+        ::pthread_kill(who, SIGUSR1);
+
+        for(int i = 0; i < 200 && got.load() == -1; i++)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+        waiter.join();
+
+        ok("  a signal delivered to the waiter survives EINTR",
+           got.load() == static_cast<int>(sys::wakeup::woken::signalled),
+           std::to_string(got.load()));
+
+        std::signal(SIGUSR1, sys::wakeup::on_signal);
+    }
+
+    ok("  an out-of-range signal counts nothing", sys::wakeup::count(-1) == 0);
+    ok("  and so does one past the end", sys::wakeup::count(NSIG) == 0);
+
+    // Closing ends any wait rather than leaving a thread parked forever.
+    {
+        std::atomic<int> got{-1};
+        std::thread waiter([&got] {
+            got.store(static_cast<int>(sys::wakeup::wait()));
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        sys::wakeup::disarm();
+        waiter.join();
+
+        // False here is the right answer, not a failure: the pipe is gone and
+        // there is nothing more to wait for.
+        ok("  disarm() ends a wait, calling it closed",
+           got.load() == static_cast<int>(sys::wakeup::woken::closed),
+           std::to_string(got.load()));
+    }
+
+    ok("  and a wait on a closed pipe answers closed at once",
+       sys::wakeup::wait() == sys::wakeup::woken::closed);
+
+    // **A signal and a poke in one read, which is the case that decides how
+    // wait() must look at the drain.**
+    //
+    // One read takes whatever has accumulated, so these come back together as
+    // "wp". A wait() that judged by the first byte, or by the last, would be
+    // a coin flip -- and losing it means answering `poked` with a signal in
+    // hand, so the caller returns without acting and Ctrl-C does nothing at
+    // all. Worse than the hang the enum exists to prevent, and quieter.
+    ok("  re-arming after disarm", sys::wakeup::arm());
+
+    {
+        const std::sig_atomic_t before = sys::wakeup::count(SIGUSR1);
+
+        ::raise(SIGUSR1);        // writes 'w'
+        sys::wakeup::poke();     // writes 'p', before anything reads
+
+        ok("  both landed before the read",
+           sys::wakeup::count(SIGUSR1) == before + 1);
+
+        ok("  a signal sharing a read with a poke still says signalled",
+           sys::wakeup::wait() == sys::wakeup::woken::signalled);
+    }
+
+    {
+        // And the other order, since the bytes would be "pw" this time.
+        const std::sig_atomic_t before = sys::wakeup::count(SIGUSR1);
+
+        sys::wakeup::poke();
+        ::raise(SIGUSR1);
+
+        ok("  and so does one that arrives after the poke",
+           sys::wakeup::count(SIGUSR1) == before + 1 &&
+               sys::wakeup::wait() == sys::wakeup::woken::signalled);
+    }
+
+    std::signal(SIGUSR1, SIG_DFL);
+    std::signal(SIGUSR2, SIG_DFL);
+}
+
 int main() {
+    a_signal_reaches_a_thread();
     std::cout << "sys_process_test\n";
 
     try {

@@ -31,10 +31,13 @@
 #include <vector>
 
 #include <signal.h>
+
+#include <csignal>
 #include <sys/socket.h>
 
 namespace jlib {
     namespace sys {
+
 
         class io_exception : public std::exception {
         public:
@@ -408,6 +411,125 @@ namespace jlib {
          */
         void secure_shell(const std::string& cmd, const std::string& in, std::string& out, std::string& err, bool in_file=false);
 
+        /**
+         * A self-pipe, so a signal handler can hand work to an ordinary thread.
+         *
+         * **What a handler may do is very short**, and almost nothing a
+         * program wants to do on SIGINT is on the list. Stopping a server
+         * takes locks and allocates; writing a message uses iostreams;
+         * re-reading a config file does I/O. A handler that does any of them
+         * can deadlock against the thread it interrupted -- if that thread
+         * already holds the mutex the handler now wants, nothing will ever
+         * release it.
+         *
+         * `write()` *is* on the list, which is the whole trick: the handler
+         * writes one byte and returns, a thread blocked on the other end wakes
+         * up, and that thread may do anything it likes.
+         *
+         * Static because a handler takes no context beyond its signal number,
+         * and a process has one signal disposition. Nothing here is a class
+         * you instantiate; it is the process's one wakeup.
+         *
+         * **Why a thread and not the reactor.** A reactor already multiplexes
+         * descriptors, and registering the read end with one would save the
+         * thread -- for a signal whose handling is quick. `stop()` is such a
+         * signal: it is explicitly safe on the reactor thread, which is where
+         * it would then run.
+         *
+         * SIGHUP is not. Re-reading a config file, loading a certificate and
+         * hashing a decoy with Argon2id all block, and a reactor callback that
+         * blocks stalls every connection the server is holding. So a program
+         * that reloads needs a thread whatever else it does -- and once it has
+         * one, giving the same thread the stop signal is one mechanism rather
+         * than two.
+         *
+         * The thread costs a stack. It is blocked in read(), not polling.
+         *
+         *     sys::wakeup::arm();
+         *     std::signal(SIGINT, sys::wakeup::on_signal);
+         *
+         *     // ...on a thread of its own:
+         *     while(sys::wakeup::wait()) {
+         *         if(sys::wakeup::count(SIGINT) != acted) { acted = ...; stop(); }
+         *     }
+         */
+        class wakeup {
+        public:
+            /**
+             * Open the pipe.  Call before installing any handler.
+             *
+             * Both ends close across exec and the write end never blocks: a
+             * full pipe means a wakeup nobody has read, which is what was
+             * wanted anyway, and a handler that blocked on it could stop the
+             * very thread that drains it.
+             *
+             * @return false if the pipe could not be made
+             */
+            static bool arm();
+
+            /**
+             * A handler: count the signal and poke the pipe.
+             *
+             * Async-signal-safe, and it restores errno -- it can interrupt a
+             * thread between a failing syscall and its errno check, and the
+             * write() in here would otherwise overwrite the value that thread
+             * is about to read.
+             */
+            static void on_signal(int sig);
+
+            /** Why wait() came back. */
+            enum class woken {
+                signalled,   ///< at least one signal arrived
+                poked,       ///< poke() only; no signal behind it
+                closed       ///< the pipe is gone, and nothing more will come
+            };
+
+            /**
+             * Block until a signal arrives or somebody pokes.
+             *
+             * **Three answers rather than two, because two was a trap.** A
+             * bool cannot separate "a signal arrived" from "somebody poked",
+             * so every looping caller had to carry a flag saying which it had
+             * asked for -- and forgetting it means waking on the shutdown poke,
+             * finding nothing, and blocking again while a join waits forever.
+             * That bug was written here, in the second of two callers, by the
+             * author of the first. An API whose misuse is invisible in every
+             * manual test and fatal in production is worth the wider return
+             * type.
+             *
+             * `closed` was the old `false`, and separating it is worth
+             * something on its own: a caller can now tell an orderly shutdown
+             * from a pipe that broke.
+             *
+             * **This does not replace count().** The enum says why you woke;
+             * the counts say how many signals you have not acted on yet, and
+             * one wakeup can carry several.
+             */
+            static woken wait();
+
+            /**
+             * Wake a waiter without a signal, to shut it down.
+             *
+             * wait() answers `poked` for this and `signalled` for a signal,
+             * so a caller can tell them apart. It did not always: the return
+             * was a bool, every looping caller had to carry a flag saying
+             * which it had asked for, and the one that forgot hung a join
+             * forever.
+             */
+            static void poke();
+
+            /** Close the pipe, ending any wait(). */
+            static void disarm();
+
+            /**
+             * How many times `sig` has arrived.
+             *
+             * A count rather than a flag a reader clears, so a signal landing
+             * between the read and the clear cannot be lost. A caller keeps
+             * the value it last acted on and compares.
+             */
+            static std::sig_atomic_t count(int sig);
+        };
 
     }
 }

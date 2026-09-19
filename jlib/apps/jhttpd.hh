@@ -24,6 +24,7 @@
 #include <jlib/net/http_server.hh>
 
 #include <jlib/sys/sync.hh>
+#include <jlib/sys/sys.hh>
 #include <jlib/util/conf.hh>
 
 #ifdef HAVE_PWHASH
@@ -253,10 +254,7 @@ std::string hash_password(const std::string& password);
  * exists to fix, reintroduced in the fix.  Each file remembers the count it
  * last acted on.
  */
-extern volatile std::sig_atomic_t reopen_requested;
 
-/** The SIGHUP handler.  Does nothing but raise the count. */
-void reopen_on_hup(int);
 
 /**
  * A log file written by **one thread of its own**, which nothing else touches.
@@ -1162,126 +1160,25 @@ inline void read_config(const std::string& path, options& o) {
     }
 }
 
-inline volatile std::sig_atomic_t reopen_requested = 0;
-
 /**
- * The write end of a self-pipe, for the handler; -1 until opened.
+ * How many times SIGHUP has arrived.
  *
- * `sig_atomic_t` rather than `int` because a handler may read it while another
- * thread is still writing it, and that is the one type the standard says can
- * be accessed from a handler without a data race.
+ * A counter rather than a flag, so a signal landing between a reader's test
+ * and its clear cannot be lost: each reader keeps the value it last acted on.
+ * The log files notice it when they next write; the reload thread has
+ * sys::wakeup to block on instead.
+ *
+ * Now a thin read of sys::wakeup rather than its own variable, so there is one
+ * handler in the process and one place that counts.
  */
-inline volatile std::sig_atomic_t hup_wake = -1;
+inline std::sig_atomic_t hups() { return jlib::sys::wakeup::count(SIGHUP); }
 
-/** The read end, touched only by ordinary threads. */
-inline int hup_woken = -1;
-
-/**
- * Open the self-pipe SIGHUP is announced on.
- *
- * **Why a pipe and not a flag somebody polls.** A handler may call very
- * little, but `write()` is on POSIX's async-signal-safe list precisely so this
- * works -- it is the sanctioned way to get a signal out of a handler and into
- * an ordinary thread that can then do whatever it likes. What is *not* safe is
- * anything that takes a lock or allocates, which rules out posting to the
- * reactor from here: a handler that interrupts a thread already holding that
- * mutex would deadlock the process.
- *
- * So the handler writes a byte, a thread blocks on the other end, and the
- * reload happens there. No polling interval to choose, no wakeups while
- * nothing is happening, and no latency between the signal and the work.
- *
- * @return false if the pipe could not be made, in which case reload is off
- */
-inline bool open_hup_pipe() {
-    int fd[2];
-
-    if(::pipe(fd) != 0) return false;
-
-    // Both ends close across exec, and the write end never blocks: if the
-    // pipe is full there is already a wakeup nobody has read, and one more
-    // byte would say nothing a reader is not about to be told anyway. A
-    // handler that blocked on a full pipe would stop the thread it
-    // interrupted, which could be the thread that drains it.
-    ::fcntl(fd[0], F_SETFD, FD_CLOEXEC);
-    ::fcntl(fd[1], F_SETFD, FD_CLOEXEC);
-    ::fcntl(fd[1], F_SETFL, ::fcntl(fd[1], F_GETFL, 0) | O_NONBLOCK);
-
-    hup_woken = fd[0];
-    hup_wake = fd[1];
-
-    return true;
-}
-
-/**
- * The SIGHUP handler.  Raises the count and pokes the pipe.
- *
- * **errno is saved and restored**, which is the bug this shape invites: the
- * handler can interrupt a thread between a failing syscall and its errno
- * check, and a write() in here would otherwise overwrite the value that thread
- * is about to read. It costs two assignments and the failure it prevents is
- * one nobody would ever reproduce.
- *
- * The counter stays for the log files, which notice it when they next write.
- * The pipe is for the reload thread, which has nothing else to notice.
- */
-inline void reopen_on_hup(int) {
-    const int kept = errno;
-
-    reopen_requested++;
-
-    if(hup_wake >= 0) {
-        const char one = 'h';
-
-        // The result is deliberately discarded: a full pipe (EAGAIN) means a
-        // wakeup is already pending, which is exactly what this wanted.
-        ssize_t n = ::write(static_cast<int>(hup_wake), &one, 1);
-
-        (void)n;
-    }
-
-    errno = kept;
-}
-
-/**
- * Block until SIGHUP arrives, or until somebody pokes the pipe.
- *
- * @return false when the pipe is gone, which is how the reload thread is told
- *         to stop
- */
-inline bool wait_for_hup() {
-    if(hup_woken < 0) return false;
-
-    for(;;) {
-        char drain[64];
-        const ssize_t n = ::read(hup_woken, drain, sizeof drain);
-
-        if(n > 0) return true;
-
-        // A signal arriving *during* the read is not a reason to give up; it
-        // is very often the signal being waited for, whose handler has just
-        // written the byte this will find on the retry.
-        if(n < 0 && errno == EINTR) continue;
-
-        return false;
-    }
-}
-
-/** Wake the reload thread without a signal, to shut it down. */
-inline void poke_hup() {
-    if(hup_wake < 0) return;
-
-    const char one = 'q';
-    ssize_t n = ::write(static_cast<int>(hup_wake), &one, 1);
-
-    (void)n;
-}
 
 inline bool logfile::open(const std::string& path) {
     if(path.empty()) return true;
 
     m_path = path;
-    m_acted_on = reopen_requested;
+    m_acted_on = hups();
 
     m_out.open(path.c_str(), std::ios::out | std::ios::app);
 
@@ -1329,7 +1226,7 @@ inline void logfile::close() {
 
 /** **Writer thread only**, which is what makes it safe to touch the stream. */
 inline void logfile::reopen_if_asked() {
-    const std::sig_atomic_t asked = reopen_requested;
+    const std::sig_atomic_t asked = hups();
 
     if(asked == m_acted_on || m_path.empty()) return;
 
