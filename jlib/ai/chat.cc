@@ -21,6 +21,8 @@
 
 #include <jlib/ai/chat.hh>
 
+#include <jlib/util/json.hh>
+
 #include <cctype>
 #include <sstream>
 
@@ -51,9 +53,81 @@ std::string squeeze(const std::string& s)
  * end-of-sequence marker are the template's own text; a message's content is
  * a stranger's, and is the one thing here marked as not the template's.
  */
+/**
+ * Arbitrary JSON as a jinja value, so a template can render it.
+ *
+ * **Nothing here may assume a shape.** A tool's `parameters` is a JSON Schema
+ * written by whoever wrote the tool, so this walks whatever it is given --
+ * which is what `util::json::object::keys()` was added for.
+ *
+ * Everything lands **untrusted**, the same as message content. Only the
+ * template's own text is trusted (see the note on encode()): a tool
+ * description is supplied by the application, not by the template, and a
+ * description containing `<|im_start|>` must be four-and-some characters
+ * rather than a turn marker.
+ */
+util::jinja::value from_json(util::json::object::ptr o);
+
+util::jinja::value from_array(util::json::array::ptr a)
+{
+    std::vector<util::jinja::value> items;
+
+    for(int i = 0; i < a->size(); i++) {
+        switch(a->kind(unsigned(i))) {
+        case util::json::object::type_object:
+            items.push_back(from_json(a->obj(unsigned(i))));
+            break;
+        case util::json::object::type_array:
+            items.push_back(from_array(a->arr(unsigned(i))));
+            break;
+        case util::json::object::type_boolean:
+            items.push_back(util::jinja::value(a->get(unsigned(i)).bool_or(false)));
+            break;
+        case util::json::object::type_int:
+            items.push_back(util::jinja::value(
+                static_cast<long>(a->get(unsigned(i)).int_or(0))));
+            break;
+        default:
+            items.push_back(util::jinja::value(
+                a->get(unsigned(i)).str_or(std::string()), false));
+            break;
+        }
+    }
+
+    return util::jinja::value::of(items);
+}
+
+util::jinja::value from_json(util::json::object::ptr o)
+{
+    std::map<std::string, util::jinja::value> f;
+
+    const std::vector<std::string> ks = o->keys();
+
+    for(std::size_t i = 0; i < ks.size(); i++) {
+        const std::string& k = ks[i];
+
+        switch(o->kind(k)) {
+        case util::json::object::type_object: f[k] = from_json(o->obj(k)); break;
+        case util::json::object::type_array:  f[k] = from_array(o->arr(k)); break;
+        case util::json::object::type_boolean:
+            f[k] = util::jinja::value(o->get(k).bool_or(false));
+            break;
+        case util::json::object::type_int:
+            f[k] = util::jinja::value(static_cast<long>(o->get(k).int_or(0)));
+            break;
+        default:
+            f[k] = util::jinja::value(o->get(k).str_or(std::string()), false);
+            break;
+        }
+    }
+
+    return util::jinja::value::of(f);
+}
+
 util::jinja::value context(const std::vector<message>& turns,
                            const std::string& eos,
-                           bool add_generation_prompt)
+                           bool add_generation_prompt,
+                           const std::string& tools)
 {
     std::vector<util::jinja::value> msgs;
 
@@ -62,6 +136,40 @@ util::jinja::value context(const std::vector<message>& turns,
 
         m["role"] = util::jinja::value(turns[i].role, true);
         m["content"] = util::jinja::value(turns[i].content, false);
+
+        // Only when there are any: Qwen's template asks
+        // `message.tool_calls is defined`-ish by iterating it, and a template
+        // that never mentions them must see an assistant turn exactly as it
+        // did before tools existed.
+        if(!turns[i].tool_calls.empty()) {
+            std::vector<util::jinja::value> calls;
+
+            for(std::size_t j = 0; j < turns[i].tool_calls.size(); j++) {
+                const tool_call& tc = turns[i].tool_calls[j];
+
+                std::map<std::string, util::jinja::value> one;
+
+                one["name"] = util::jinja::value(tc.name, false);
+
+                // The arguments are JSON text and the template renders them
+                // with `| tojson`, so they go in parsed rather than as a
+                // string -- a string would come back out quoted and escaped.
+                try {
+                    one["arguments"] =
+                        from_json(util::json::object::create(tc.arguments));
+                }
+                catch(std::exception&) {
+                    // Not JSON.  Rendered as the text it is rather than
+                    // dropped, so a malformed call shows up in the prompt as
+                    // what the model actually said.
+                    one["arguments"] = util::jinja::value(tc.arguments, false);
+                }
+
+                calls.push_back(util::jinja::value::of(one));
+            }
+
+            m["tool_calls"] = util::jinja::value::of(calls);
+        }
 
         msgs.push_back(util::jinja::value::of(m));
     }
@@ -78,6 +186,12 @@ util::jinja::value context(const std::vector<message>& turns,
     c["bos_token"] = util::jinja::value(std::string(), true);
 
     c["add_generation_prompt"] = util::jinja::value(add_generation_prompt);
+
+    // Bound only when there are some, so `{% if tools %}` is false rather
+    // than true-but-empty for every caller that has none.
+    if(!tools.empty()) {
+        c["tools"] = from_array(util::json::array::create(tools));
+    }
 
     return util::jinja::value::of(c);
 }
@@ -154,10 +268,11 @@ chat::chat(const std::string& tmpl, const std::string& eos)
 {}
 
 std::string chat::format(const std::vector<message>& turns,
-                         bool add_generation_prompt) const
+                         bool add_generation_prompt,
+                         const std::string& tools) const
 {
     const util::jinja::text out =
-        m_tmpl.render(context(turns, m_eos, add_generation_prompt));
+        m_tmpl.render(context(turns, m_eos, add_generation_prompt, tools));
 
     check_nothing_vanished(turns, out);
 
@@ -166,10 +281,11 @@ std::string chat::format(const std::vector<message>& turns,
 
 std::vector<int> chat::encode(const std::vector<message>& turns,
                               const tokenizer& tok,
-                              bool add_generation_prompt) const
+                              bool add_generation_prompt,
+                              const std::string& tools) const
 {
     const util::jinja::text out =
-        m_tmpl.render(context(turns, m_eos, add_generation_prompt));
+        m_tmpl.render(context(turns, m_eos, add_generation_prompt, tools));
 
     check_nothing_vanished(turns, out);
 

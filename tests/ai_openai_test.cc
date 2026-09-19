@@ -109,7 +109,7 @@ static void content_may_be_parts() {
        r.messages[0].content.find("image") == std::string::npos);
 }
 
-/** A request this cannot honour has to be visible, not silently answered. */
+/** A tool request reaches the caller whole, in either spelling. */
 static void a_tool_request_is_visible() {
     std::cout << "\na tool request is visible:\n";
 
@@ -126,6 +126,139 @@ static void a_tool_request_is_visible() {
         " \"functions\":[{\"name\":\"f\"}]}");
 
     ok("  including by the older spelling", old.wants_tools);
+
+    // The definitions themselves, kept as text: a tool's `parameters` is a
+    // JSON Schema and there is no struct that holds one without losing
+    // something.  #311.
+    const oa::request full = oa::request::parse(
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        " \"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"read_file\","
+        " \"parameters\":{\"type\":\"object\",\"properties\":"
+        "{\"path\":{\"type\":\"string\"}}}}}]}");
+
+    ok("  the schema survives, nested and entire",
+       full.tools.find("\"properties\"") != std::string::npos &&
+       full.tools.find("\"path\"") != std::string::npos);
+
+    // The older spelling is a bare function list; it is wrapped so a template
+    // sees one shape whichever arrived.
+    ok("  and the older spelling is wrapped into the newer one's shape",
+       old.tools.find("\"type\"") != std::string::npos &&
+       old.tools.find("\"function\"") != std::string::npos &&
+       old.tools.find("\"name\"") != std::string::npos);
+
+    // Wrapping used to move the parsed function into a new array, which
+    // borrowed it from the request and then freed it twice.  Reading it after
+    // the request is gone is what that would have shown up as.
+    std::string kept;
+
+    {
+        const oa::request tmp = oa::request::parse(
+            "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+            " \"functions\":[{\"name\":\"f\",\"description\":\"d\"}]}");
+
+        kept = tmp.tools;
+    }
+
+    ok("  and outlives the request it came from",
+       kept.find("\"f\"") != std::string::npos);
+
+    // tool_choice is carried rather than obeyed, in both shapes the protocol
+    // allows -- a server that ignores it answers "required" with prose.
+    const oa::request chose = oa::request::parse(
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        " \"tools\":[{\"type\":\"function\"}], \"tool_choice\":\"required\"}");
+
+    ok("  tool_choice arrives as a string", chose.tool_choice == "required");
+
+    const oa::request named = oa::request::parse(
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+        " \"tools\":[{\"type\":\"function\"}],"
+        " \"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":\"f\"}}}");
+
+    ok("  and as an object naming one",
+       named.tool_choice.find("\"f\"") != std::string::npos);
+
+    // Nothing asked for, nothing carried.
+    const oa::request none = oa::request::parse(
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
+
+    ok("  and a request with none carries none",
+       !none.wants_tools && none.tools.empty() && none.tool_choice.empty());
+}
+
+/**
+ * A model emits text, not JSON: reading the calls back out of it.
+ *
+ * #311. Everything here is about what happens when the markup is *not* what
+ * the template asked for, because that is what a model under a temperature
+ * above zero will occasionally produce -- and because the alternative to
+ * noticing is a reply with a sentence silently missing.
+ *
+ * The convention is Qwen's and ChatML's. A model whose template asks for
+ * something else -- Llama's `<|python_tag|>`, Mistral's `[TOOL_CALLS]` --
+ * produces text this does not recognise, which comes back as content rather
+ * than as a mangled call.
+ */
+static void calls_are_read_out_of_the_text() {
+    std::cout << "\ncalls are read out of the text:\n";
+
+    std::string left;
+
+    ok("  prose is prose",
+       oa::calls_in("just text", left).empty() && left == "just text");
+
+    const std::vector<oa::call> one = oa::calls_in(
+        "<tool_call>\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.c\"}}\n"
+        "</tool_call>", left);
+
+    ok("  a call is read, and its arguments stay JSON",
+       one.size() == 1 && one[0].name == "read_file" &&
+       one[0].arguments.find("a.c") != std::string::npos);
+
+    ok("  and the block is not left in the content", left.empty());
+
+    const std::vector<oa::call> after = oa::calls_in(
+        "Sure.<tool_call>{\"name\":\"f\",\"arguments\":{}}</tool_call>", left);
+
+    ok("  a sentence before the call is kept as content",
+       after.size() == 1 && left == "Sure.");
+
+    ok("  two calls are two calls",
+       oa::calls_in("<tool_call>{\"name\":\"a\",\"arguments\":{}}</tool_call>"
+                    "<tool_call>{\"name\":\"b\",\"arguments\":{}}</tool_call>",
+                    left).size() == 2);
+
+    // The three ways it can be wrong, and none of them lose text.  A reply
+    // cut short mid-call is what a client needs in order to know it was cut
+    // short, and a block this cannot read is what the model actually said.
+    ok("  an unterminated block stays as content",
+       oa::calls_in("<tool_call>{\"name\":\"f\"", left).empty() &&
+       left == "<tool_call>{\"name\":\"f\"");
+
+    ok("  a block that is not JSON stays as content",
+       oa::calls_in("<tool_call>nope</tool_call>", left).empty() &&
+       left == "<tool_call>nope</tool_call>");
+
+    ok("  and so does one with no name",
+       oa::calls_in("<tool_call>{\"arguments\":{}}</tool_call>", left).empty() &&
+       left == "<tool_call>{\"arguments\":{}}</tool_call>");
+
+    // finish_reason round-trips, because a client that reads tool_calls as
+    // stop shows the user an empty turn.
+    ok("  tool_calls is a finish reason of its own",
+       std::string(oa::spell(oa::finish::tool_calls)) == "tool_calls");
+
+    const oa::answer a = oa::answer::parse(
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":"
+        "{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"c1\","
+        "\"type\":\"function\",\"function\":{\"name\":\"read_file\","
+        "\"arguments\":\"{\\\"path\\\":\\\"a.c\\\"}\"}}]}}]}");
+
+    ok("  and an answer carrying one parses",
+       a.why == oa::finish::tool_calls && a.calls.size() == 1 &&
+       a.calls[0].name == "read_file" && a.calls[0].id == "c1" &&
+       a.calls[0].arguments.find("a.c") != std::string::npos);
 }
 
 static void what_it_refuses() {
@@ -670,6 +803,7 @@ int main() {
     absent_is_not_zero();
     content_may_be_parts();
     a_tool_request_is_visible();
+    calls_are_read_out_of_the_text();
     what_it_refuses();
     it_writes_a_completion();
     it_writes_chunks();

@@ -33,9 +33,32 @@ namespace jlib {
 namespace ai {
 
 /** One turn of a conversation. */
+/**
+ * One call a model asked for, as the protocol spells it.
+ *
+ * `arguments` is the raw JSON text of the object, not a parsed structure: a
+ * tool's parameters are whatever its schema says, so nothing here can know
+ * their shape. The template writes it back out with `| tojson`.
+ */
+struct tool_call {
+    std::string id;         ///< the protocol's, echoed back on the result
+    std::string name;
+    std::string arguments;  ///< a JSON object, as text
+};
+
 struct message {
-    std::string role;       ///< "system", "user" or "assistant"
+    std::string role;       ///< "system", "user", "assistant" or "tool"
     std::string content;
+
+    /**
+     * What an assistant turn asked for, if it asked for anything.
+     *
+     * A template that supports tools renders these into its own markup --
+     * Qwen's writes `<tool_call>` blocks -- and a conversation that replays a
+     * call has to carry them, or the model is shown its own turn with the
+     * call missing and asks again.
+     */
+    std::vector<tool_call> tool_calls;
 };
 
 /**
@@ -126,8 +149,21 @@ public:
      *        user's turn.  What you want for asking; not what you want for
      *        scoring an exchange that already happened.
      */
+    /**
+     * @param tools a JSON array of tool definitions, as the caller was given
+     *        them -- empty for none.  Passed through rather than modelled:
+     *        each one's `parameters` is a JSON Schema, so its shape belongs to
+     *        whoever wrote the tool.
+     *
+     * A template that does not mention tools ignores them, which is what
+     * every template did before they existed.  One that does takes its
+     * `{% if tools %}` branch and describes them to the model in its own
+     * words -- Qwen's writes a `# Tools` section and asks for `<tool_call>`
+     * blocks back.
+     */
     std::string format(const std::vector<message>& turns,
-                       bool add_generation_prompt = true) const;
+                       bool add_generation_prompt = true,
+                       const std::string& tools = std::string()) const;
 
     /**
      * The token ids for a conversation -- **use this rather than tokenizing
@@ -158,7 +194,8 @@ public:
      */
     std::vector<int> encode(const std::vector<message>& turns,
                             const tokenizer& tok,
-                            bool add_generation_prompt = true) const;
+                            bool add_generation_prompt = true,
+                            const std::string& tools = std::string()) const;
 
 private:
     std::string m_eos;

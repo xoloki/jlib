@@ -506,10 +506,93 @@ static void the_file_says_the_same(int argc, char** argv) {
        ai::chat(ZEPHYR, "</s>").format({ { "user", "Hi" } }));
 }
 
+/**
+ * A template that supports tools renders them; one that does not is unchanged.
+ *
+ * #311. The second half is the one that could regress quietly: every template
+ * in the tree predates tools, and binding a `tools` name into the context must
+ * not alter what any of them produce.
+ *
+ * **Do not compare this against a reference implementation by text.** jlib's
+ * `tojson` emits object keys sorted, because the value behind it is a
+ * std::map; python-jinja2 emits them in insertion order. The renderings are
+ * equivalent JSON and different strings, so an oracle comparison has to parse
+ * both sides. The expectations below are jlib's own output and say so.
+ */
+static void it_renders_tools_when_the_template_asks() {
+    std::cout << "\nit renders tools when the template asks:\n";
+
+    // ChatML with a tools block, cut down from Qwen 2.5's to what is being
+    // tested -- the real one is 2507 bytes of which this is the shape.
+    static const char* WITH_TOOLS =
+        "{%- if tools %}"
+        "{{- '<tools>' }}"
+        "{%- for tool in tools %}{{- tool | tojson }}{%- endfor %}"
+        "{{- '</tools>' }}"
+        "{%- endif %}"
+        "{%- for message in messages %}"
+        "{{- '<|im_start|>' + message.role + '\n' }}"
+        "{%- if message.content %}{{- message.content }}{%- endif %}"
+        "{%- for c in message.tool_calls %}"
+        "{{- '<tool_call>' }}{{- c.name }}{{- ':' }}{{- c.arguments | tojson }}"
+        "{{- '</tool_call>' }}"
+        "{%- endfor %}"
+        "{{- '<|im_end|>\n' }}"
+        "{%- endfor %}";
+
+    const ai::chat c(WITH_TOOLS, "<|im_end|>");
+
+    const std::string one =
+        R"([{"name":"read_file","parameters":{"path":"string"}}])";
+
+    ok("  the tools block appears, and the schema passes through whole",
+       c.format({ { "user", "hi" } }, false, one) ==
+       "<tools>{\"name\": \"read_file\", \"parameters\": "
+       "{\"path\": \"string\"}}</tools>"
+       "<|im_start|>user\nhi<|im_end|>\n");
+
+    ok("  and no block at all when there are none",
+       c.format({ { "user", "hi" } }, false) ==
+       "<|im_start|>user\nhi<|im_end|>\n");
+
+    // The arguments go in as JSON and must come out as an object, not as a
+    // quoted string -- which is what passing the text through would give.
+    ai::message called;
+
+    called.role = "assistant";
+    called.tool_calls.push_back({ "call_1", "read_file", R"({"path":"main.c"})" });
+
+    ok("  a call the model made is replayed as an object, not a string",
+       c.format({ { "user", "hi" }, called }, false, one) ==
+       "<tools>{\"name\": \"read_file\", \"parameters\": "
+       "{\"path\": \"string\"}}</tools>"
+       "<|im_start|>user\nhi<|im_end|>\n"
+       "<|im_start|>assistant\n<tool_call>read_file:{\"path\": \"main.c\"}"
+       "</tool_call><|im_end|>\n");
+
+    // Arguments that are not JSON reach the prompt as the text the model
+    // actually emitted, rather than being dropped.
+    ai::message broken;
+
+    broken.role = "assistant";
+    broken.tool_calls.push_back({ "call_2", "read_file", "{not json" });
+
+    ok("  arguments that are not JSON are shown rather than dropped",
+       c.format({ broken }, false, one).find("{not json") != std::string::npos);
+
+    // Every template that predates tools has to render identically.
+    const ai::chat z(ZEPHYR, "</s>");
+
+    ok("  a template that never mentions tools is unaffected by them",
+       z.format({ { "user", "Hi" } }, true, one) ==
+       z.format({ { "user", "Hi" } }));
+}
+
 int main(int argc, char** argv) {
     std::cout << std::unitbuf;
 
     it_renders_the_template_it_is_given();
+    it_renders_tools_when_the_template_asks();
     it_reads_the_families_the_scanner_refused();
     a_turn_the_template_ignores_is_an_error();
     turns_that_share_text_are_still_told_apart();

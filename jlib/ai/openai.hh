@@ -43,22 +43,73 @@ namespace ai {
  * `aider` and the other coding harnesses speak this.  aider in particular is
  * the target because its **`whole` edit format needs no tool calling**: the
  * model answers with a filename and a fenced block of the whole file, which
- * is prose.  `tools`/`tool_calls` are a larger contract and are not here.
+ * is prose.  That is still the shortest path to a working harness, and it is
+ * the one #242 took.
+ *
+ * `tools` and `tool_calls` are here as of #311, because the models already
+ * speak them: Qwen 2.5's own chat template renders a tool list and asks for
+ * `<tool_call>` blocks back, and jlib was discarding a protocol both ends
+ * already knew.
  *
  * ## What is deliberately not modelled
  *
- * `tools`, `tool_choice`, `functions`, `logprobs`, `n` above one, images, and
- * the `response_format` schemas.  A request carrying them is not refused --
- * they are ignored -- because a harness that sends `"n": 1` alongside things
- * this does not read should still work, and because refusing an unknown field
- * is how a server becomes brittle against a client that gained one.
+ * `logprobs`, `n` above one, images, and the `response_format` schemas.  A
+ * request carrying them is not refused -- they are ignored -- because a
+ * harness that sends `"n": 1` alongside things this does not read should still
+ * work, and because refusing an unknown field is how a server becomes brittle
+ * against a client that gained one.
  *
  * The cost of ignoring rather than refusing: a caller asking for `"n": 3` is
- * silently given one choice.  That is the wrong trade for `tools`, where
- * silence would look like a model that cannot call them -- so a caller that
- * cares should ask `request::wants_tools()` and say so itself.
+ * silently given one choice.  **`tool_choice` is carried but not obeyed** for
+ * the same reason it was the exception before: silence there looks like a
+ * model that would not call, so a server should read it and refuse what it
+ * cannot do rather than answer as if it had complied.
  */
 namespace openai {
+
+/**
+ * One call, as the protocol spells it on the wire.
+ *
+ * `arguments` is the raw JSON text of the object rather than a parsed
+ * structure, for the same reason `request::tools` is: its shape belongs to
+ * whoever wrote the tool. A client that knows the tool parses it; this does
+ * not, and cannot.
+ *
+ * **Streaming delivers this in pieces.** A chunk carries an `index`, and the
+ * name arrives once while `arguments` accumulates across chunks -- so a
+ * reader has to append rather than assign. See delta.
+ */
+struct call {
+    std::string id;
+    std::string name;
+    std::string arguments;
+};
+
+/**
+ * The calls in a model's own output, by the `<tool_call>` convention.
+ *
+ * A model does not emit JSON tool calls: it emits **text**, in whatever markup
+ * its template asked for. Qwen 2.5's asks for
+ *
+ *     <tool_call>
+ *     {"name": <function-name>, "arguments": <args-json-object>}
+ *     </tool_call>
+ *
+ * and this reads that. It is the convention ChatML-derived templates share,
+ * and it is the one jlib's own models use.
+ *
+ * **It is not universal, and nothing here can make it so.** Llama 3.1 emits a
+ * bare JSON object after `<|python_tag|>`; Mistral uses `[TOOL_CALLS]`. Those
+ * are per-architecture constants the file does not state -- the same shape of
+ * problem as the RoPE layout, which #180 is the worked example of getting
+ * wrong. A model whose template asks for something else will produce text this
+ * does not recognise, and the calls come back empty rather than mangled.
+ *
+ * @param text what the model generated
+ * @param[out] left the text with the call blocks removed, which is what a
+ *        client should be shown as content
+ */
+std::vector<call> calls_in(const std::string& text, std::string& left);
 
 /** A parsed POST /v1/chat/completions body. */
 struct request {
@@ -82,13 +133,37 @@ struct request {
     std::vector<std::string> stop;
 
     /**
-     * Whether the caller asked for tools, which this does not implement.
+     * Whether the caller asked for tools.
      *
-     * Exposed so a caller can refuse loudly.  Answering a tool request with
-     * prose looks like a model too weak to call tools, which is a much harder
-     * thing to diagnose than a 400 saying so.
+     * True for either spelling -- `tools`, and the older `functions` that
+     * some clients still send.
      */
     bool wants_tools = false;
+
+    /**
+     * The tool definitions, as the caller wrote them: a JSON array, or empty.
+     *
+     * **Not modelled, on purpose.** A tool's `parameters` is a JSON Schema
+     * belonging to whoever wrote the tool, so there is no struct that can
+     * hold one without losing something. The text goes to `chat::format`,
+     * which renders it through the model's own template.
+     *
+     * The older `functions` spelling is lifted into the same field, wrapped
+     * so it has the shape `tools` has -- a client sending the old name gets
+     * the same prompt as one sending the new.
+     */
+    std::string tools;
+
+    /**
+     * `tool_choice`, if the caller sent one: "auto", "none", "required", or a
+     * JSON object naming a function.
+     *
+     * Carried rather than obeyed. A server that ignores it answers a
+     * "required" with prose and looks like a model that would not call --
+     * which is the failure this whole field exists to let a caller refuse
+     * loudly instead of diagnose.
+     */
+    std::string tool_choice;
 
     /**
      * @throws util::json::exception if the body is not an object, or
@@ -122,7 +197,15 @@ struct request {
 };
 
 /** What ends a reply, as the protocol spells it. */
-enum class finish { stop, length };
+/**
+ * Why a reply ended.
+ *
+ * `tool_calls` is the protocol's own spelling and means the model stopped
+ * because it asked for a call rather than because it ran out of things to say
+ * -- a client that treats it as `stop` will answer the user with an empty
+ * turn.
+ */
+enum class finish { stop, length, tool_calls };
 
 const char* spell(finish f);
 
@@ -220,6 +303,15 @@ struct answer {
     std::string model;
     std::string content;
 
+    /**
+     * What the model asked to call, if anything.
+     *
+     * A reply is one or the other in practice -- content, or calls -- but the
+     * protocol permits both and some models emit a sentence before the call,
+     * so this does not assume.
+     */
+    std::vector<call> calls;
+
     finish why = finish::stop;
 
     unsigned int prompt_tokens = 0;
@@ -231,9 +323,7 @@ struct answer {
      *
      * Lenient about the rest: a reply with no usage block is a reply, and
      * several servers omit it.  `content` may be absent on a choice that was
-     * a tool call, and comes back empty rather than throwing -- this
-     * namespace does not model tool calls and a caller that asked for none
-     * will not receive one.
+     * a tool call, and comes back empty rather than throwing.
      */
     static answer parse(const std::string& body);
 };

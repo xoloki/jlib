@@ -450,6 +450,18 @@ std::string object::str(bool pretty) const {
     return ret;
 }
     
+std::vector<std::string> object::keys() const {
+    std::vector<std::string> out;
+
+    json_object_object_foreach(m_obj, k, v) {
+        (void)v;
+
+        out.push_back(k);
+    }
+
+    return out;
+}
+
 json_object* object::obj() {
     return m_obj;
 }
@@ -492,6 +504,17 @@ std::size_t object::size() const {
     return 0;
 }
     
+object::type object::kind(const std::string& key) const {
+    json_object* o = 0;
+
+    if(!json_object_object_get_ex(m_obj, key.c_str(), &o) || o == 0)
+        throw missing_key(key);
+
+    // The enum is json-c's, in its order -- see is(), which casts the same
+    // way and has done since this facade was written.
+    return (object::type)(int)json_object_get_type(o);
+}
+
 bool object::is(object::type t) const {
     return json_object_is_type(m_obj, (json_type)(int)t);
 }
@@ -577,6 +600,14 @@ array::ptr array::arr(unsigned int x) const {
     return ptr(new array(json_object_array_get_idx(m_obj, x)));
 }
     
+object::type array::kind(unsigned int x) const {
+    json_object* o = json_object_array_get_idx(m_obj, x);
+
+    if(o == 0) return object::type_null;
+
+    return (object::type)(int)json_object_get_type(o);
+}
+
 int array::size() const {
     return json_object_array_length(m_obj);
 }

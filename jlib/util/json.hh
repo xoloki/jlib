@@ -26,6 +26,7 @@
 #include <cstdint>
 
 #include <memory>
+#include <vector>
 
 struct json_object;
 
@@ -193,6 +194,31 @@ public:
      */
     arrayptr arr(const std::string& key);
 
+    /**
+     * Every key this object has, in the order json-c holds them.
+     *
+     * The facade could be asked about a key it already knew the name of and
+     * not which keys there were, so anything walking a structure it did not
+     * write had to reach past to json-c -- the same gap `arr(key)` was added
+     * to close.
+     *
+     * Wanted by a caller converting arbitrary JSON into something else: a
+     * tool's `parameters` is a JSON Schema, so its shape is the caller's and
+     * cannot be asked for field by field.
+     */
+    std::vector<std::string> keys() const;
+
+    /**
+     * What kind of value is at `key`.
+     *
+     * `is()` asks about this object; this asks about one of its members,
+     * which is what a caller walking a structure it did not write needs
+     * before it can choose between obj(), arr() and get().
+     *
+     * @throws missing_key if there is no such key
+     */
+    type kind(const std::string& key) const;
+
     bool is(type t) const;
     
     std::string str(bool pretty = false) const;
@@ -239,6 +265,9 @@ public:
     proxy get(unsigned int x) const;
     object::ptr obj(unsigned int x) const;
     ptr arr(unsigned int x) const;
+
+    /** What kind of value is at `x`; the counterpart of object::kind. */
+    object::type kind(unsigned int x) const;
     
     std::string str() const;
     
