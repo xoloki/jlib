@@ -305,6 +305,23 @@ unsigned short server::port(std::size_t i) const {
 
 bool server::tls(std::size_t i) const { return !m_bound.at(i).tls.empty(); }
 
+void server::reload_tls(std::size_t i, tls_context tls) {
+    // Checked here rather than inside the post, where a throw would reach the
+    // reactor's error handler instead of the caller that got the index wrong.
+    if(i >= m_bound.size()) throw exception("no such listener");
+
+    if(m_reactor.on_reactor_thread()) {
+        m_bound[i].tls = std::move(tls);
+
+        return;
+    }
+
+    // Not waited for.  There is nothing to wait for: the next accept picks up
+    // whichever context is there, and a caller that blocked until the swap
+    // landed would be blocking on a reactor that may be mid-request.
+    m_reactor.post([this, i, tls] { m_bound[i].tls = tls; });
+}
+
 std::vector<unsigned short> server::ports() const {
     std::vector<unsigned short> all;
 

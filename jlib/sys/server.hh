@@ -576,6 +576,30 @@ public:
     /** Every port, in the order they were given. */
     std::vector<unsigned short> ports() const;
 
+    /**
+     * Give listener `i` a different certificate, from any thread.
+     *
+     * For the case that makes a long-running server need it at all: an
+     * automatically renewed certificate changes on disk every couple of
+     * months, and without this the only way to pick it up is a restart.
+     *
+     * **Takes effect on the next connection, not on the ones in flight.**  A
+     * connection already established holds its own reference to the SSL_CTX it
+     * was built with -- a tls_context is a refcount, so the old context lives
+     * exactly as long as something is still using it -- and those connections
+     * finish under the old certificate. That is the right answer: a handshake
+     * cannot be redone underneath a conversation.
+     *
+     * The swap itself happens on the reactor thread, because that is the
+     * thread that reads it when accepting. Reading the file is the caller's
+     * job and must not be done there: build the context first, wherever
+     * blocking is allowed, and hand the finished thing to this.
+     *
+     * Note that tls(i) is then only safe to read from the reactor thread.
+     * Nothing in this tree reads it after startup.
+     */
+    void reload_tls(std::size_t i, tls_context tls);
+
     /** How many listeners there are; port(i) and tls(i) index them. */
     std::size_t listeners() const;
 

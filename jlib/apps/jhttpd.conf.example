@@ -15,6 +15,23 @@
 # user        www-data www-data;
 
 # daemon;              or `daemon off;` -- absent means off.
+#
+# SIGHUP re-reads this file and applies what a running server can change:
+#
+#   ssl_certificate / _key   re-read from disk, so a renewed certificate is
+#                            picked up without a restart -- which is the case
+#                            that needs it, since certbot rewrites the same
+#                            path every couple of months
+#   auth_basic_user_file     re-read, so a user can be added or removed
+#   request_rate / _burst    applied live
+#   access_log / error_log   reopened, for rotation
+#
+# Everything else -- listen, root, index, the server and location blocks, the
+# thread count, the user -- was consumed at startup and needs a restart. A
+# reload says so for each one it finds changed rather than keeping it quietly.
+#
+# A config that does not parse is refused whole: the server keeps running on
+# what it had, and says why.
 # pid         /var/run/jhttpd.pid;
 # allow_root;          run as root anyway, which you almost never want.
 

@@ -1062,6 +1062,196 @@ static void what_a_config_refuses() {
     else std::cout << "  ..     srcdir unset, not looking for the example\n";
 }
 
+
+/**
+ * What SIGHUP can change, and what it has to admit it cannot.
+ *
+ * The rule is apply-or-say: anything the running server cannot revisit is
+ * named out loud rather than silently kept, because otherwise the operator
+ * has a file on disk that does not describe the process that is running.
+ */
+static void what_a_reload_refuses_to_change() {
+    std::cout << "\nreload -- what needs a restart:\n";
+
+    jhttpd::options was;
+
+    was.listens.push_back(jhttpd::listen_spec());
+    was.root = "/srv/www";
+
+    ok("  an identical config changes nothing",
+       jhttpd::needs_a_restart(was, was).empty(),
+       std::to_string(jhttpd::needs_a_restart(was, was).size()));
+
+    struct { const char* wanted; const char* why; } cases[] = {
+        { "listen",                "a port" },
+        { "root",                  "the document root" },
+        { "prefix",                "the prefix" },
+        { "index",                 "the index list" },
+        { "cache_control",         "cache_control" },
+        { "access_log",            "a log path" },
+        { "threads",               "the thread count" },
+        { "user",                  "the user it drops to" },
+        { "max_connections",       "the connection cap" },
+        { "keepalive_timeout",     "an idle bound" },
+        { "server",                "a site" },
+        { "location",              "a guard" }
+    };
+
+    for(std::size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        jhttpd::options now = was;
+        const std::string w = cases[i].wanted;
+
+        if(w == "listen")                  now.listens[0].port = 9999;
+        else if(w == "root")               now.root = "/srv/other";
+        else if(w == "prefix")             now.prefix = "/pub";
+        else if(w == "index")              now.index.push_back("index.htm");
+        else if(w == "cache_control")      now.cache_control = "no-store";
+        else if(w == "access_log")         now.access_log = "/var/log/a.log";
+        else if(w == "threads")            now.threads = 8;
+        else if(w == "user")               now.user = "www-data";
+        else if(w == "max_connections")    now.max_connections = 64;
+        else if(w == "keepalive_timeout")  now.idle_timeout = 5;
+        else if(w == "server") {
+            jhttpd::site v;
+            v.name = "a.example";
+            v.root = "/srv/a";
+            now.vhosts.push_back(v);
+        }
+        else if(w == "location") {
+            jhttpd::guard g;
+            g.prefix = "/x";
+            g.realm = "r";
+            g.file = "/f";
+            now.protect.push_back(g);
+        }
+
+        const std::vector<std::string> got = jhttpd::needs_a_restart(was, now);
+        bool named = false;
+
+        for(std::size_t j = 0; j < got.size(); j++) {
+            if(got[j] == cases[i].wanted) named = true;
+        }
+
+        ok(std::string("  changing ") + cases[i].why + " needs a restart", named,
+           got.empty() ? "nothing reported" : got[0]);
+    }
+
+    // **The two that must NOT be in that list**, because they are the whole
+    // point of a reload: a renewed certificate and an edited password file
+    // both keep their paths, so nothing here would notice them -- they are
+    // re-read unconditionally instead.
+    {
+        jhttpd::options now = was;
+
+        now.cert = "/etc/c.pem";
+        now.key = "/etc/c.key";
+
+        ok("  a certificate path is not on it, being reloadable",
+           jhttpd::needs_a_restart(was, now).empty(),
+           jhttpd::needs_a_restart(was, now).empty()
+               ? "" : jhttpd::needs_a_restart(was, now)[0]);
+    }
+
+    {
+        jhttpd::options now = was;
+
+        now.rate = 10;
+        now.burst = 20;
+
+        ok("  and neither is a rate limit, which is applied live",
+           jhttpd::needs_a_restart(was, now).empty(),
+           jhttpd::needs_a_restart(was, now).empty()
+               ? "" : jhttpd::needs_a_restart(was, now)[0]);
+    }
+}
+
+/**
+ * Loading a credential file again, while it is in use.
+ *
+ * This is the half of SIGHUP that matters operationally: adding a user should
+ * not need a restart. What makes it safe is that load() builds the new table
+ * to the side and publishes a pointer, so a check() already running holds the
+ * old one alive until it finishes -- it is reading a hash across an Argon2id
+ * verification that takes milliseconds.
+ */
+static void reloading_a_credential_file() {
+    std::cout << "\nreload -- credentials:\n";
+
+    char pattern[] = "/tmp/jlib_reload_XXXXXX";
+    const std::string dir = ::mkdtemp(pattern);
+    const std::string path = dir + "/creds";
+
+    std::string one;
+
+    try { one = jhttpd::hash_password("alpha"); }
+    catch(std::exception& e) {
+        std::cout << "  skip  no libsodium in this build\n";
+
+        return;
+    }
+
+    const std::string two = jhttpd::hash_password("beta");
+
+    {
+        std::ofstream out(path.c_str());
+        out << "alice:" << one << "\n";
+    }
+
+    ::chmod(path.c_str(), 0600);
+
+    jhttpd::credentials who;
+
+    who.load(path);
+
+    ok("  the first user is known", who.check("alice", "alpha"));
+    ok("  and a second is not", !who.check("bob", "beta"));
+    ok("  one user counted", who.size() == 1, std::to_string(who.size()));
+
+    // Add one, the way an operator would.
+    {
+        std::ofstream out(path.c_str(), std::ios::app);
+        out << "bob:" << two << "\n";
+    }
+
+    who.load(path);
+
+    ok("  after reloading, the second is known too", who.check("bob", "beta"));
+    ok("  and the first still is", who.check("alice", "alpha"));
+    ok("  two users counted", who.size() == 2, std::to_string(who.size()));
+    ok("  a wrong password is still wrong", !who.check("bob", "alpha"));
+
+    // Remove one.
+    {
+        std::ofstream out(path.c_str());
+        out << "bob:" << two << "\n";
+    }
+
+    who.load(path);
+
+    ok("  a user removed from the file stops working",
+       !who.check("alice", "alpha"));
+
+    // **A reload that fails changes nothing.**  This is what keeps a typo in a
+    // password file from locking everyone out of a running server: the new
+    // table is built to the side and only published on the last line of
+    // load(), so every throw before that leaves the old one in use.
+    {
+        std::ofstream out(path.c_str());
+        out << "not a credential line at all\n";
+    }
+
+    bool threw = false;
+
+    try { who.load(path); } catch(std::exception&) { threw = true; }
+
+    ok("  a malformed file is refused", threw);
+    ok("  and the credentials that were working still work",
+       who.check("bob", "beta"));
+
+    std::remove(path.c_str());
+    ::rmdir(dir.c_str());
+}
+
 int main() {
     std::cout << "app_jhttpd_test\n";
 
@@ -1080,6 +1270,8 @@ int main() {
         what_a_config_sets();
         sites_and_guards();
         what_a_config_refuses();
+        what_a_reload_refuses_to_change();
+        reloading_a_credential_file();
     }
     catch(std::exception& e) {
         std::cerr << "app_jhttpd_test: " << e.what() << "\n";
