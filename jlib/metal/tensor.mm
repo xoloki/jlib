@@ -554,6 +554,44 @@ constant uint Q8_LANES [[function_constant(0)]];
  * is wide enough to spread it over. See stream::multiply_tn.
  */
 /**
+ * The blocks of the requested columns, copied together, in whatever encoding
+ * they are already in.
+ *
+ * **The size of a block is the whole of what a quantised gather needs to know
+ * about the format.** Every layout jlib reads puts its blocks along the
+ * contiguous dimension, so a column of a (K x N) table is exactly K/vals
+ * whole blocks and a lookup is a run of block copies -- no unpacking, no
+ * partial blocks, nothing per-format. That is why there is one of these and
+ * not three.
+ *
+ * What comes out is a (K x ids) table in the same encoding, small enough to
+ * unpack with the ordinary kernel afterwards: 512 tokens of Qwen2.5-Coder 7B
+ * is 1.8 M values against the table's 545 M.
+ *
+ * One thread per (column, block), copying a byte at a time -- a q6_K block is
+ * 210 bytes, which is not a multiple of four, so nothing wider is safe for
+ * all three formats.
+ */
+kernel void k_qblocks_gather(device const uchar* table [[buffer(0)]],
+                             device const int* ids [[buffer(1)]],
+                             device uchar* out [[buffer(2)]],
+                             constant uint& nb [[buffer(3)]],
+                             constant uint& bytes [[buffer(4)]],
+                             constant uint& units [[buffer(5)]],
+                             uint gid [[thread_position_in_grid]])
+{
+    if(gid >= units) return;
+
+    const uint i = gid / nb;          // which requested column
+    const uint b = gid % nb;          // which block of it
+
+    device const uchar* src = table + ((ulong)ids[i] * nb + b) * bytes;
+    device uchar* dst = out + ((ulong)i * nb + b) * bytes;
+
+    for(uint k = 0; k < bytes; k++) dst[k] = src[k];
+}
+
+/**
  * The little-endian f16 at `p`, which every quantised block begins or ends
  * with.
  *
@@ -1312,6 +1350,7 @@ struct stream<T>::impl {
     id<MTLComputePipelineState> q8_dequant = nil;     // one thread per block
     id<MTLComputePipelineState> q4k_dequant = nil;    // one thread per block
     id<MTLComputePipelineState> q6k_dequant = nil;    // one thread per block
+    id<MTLComputePipelineState> qblocks_gather = nil; // one thread per block
     id<MTLComputePipelineState> q8_gemv_simd = nil;   // a SIMD group per row
     id<MTLComputePipelineState> q4k_gemv = nil;
     id<MTLComputePipelineState> q4k_gemv_simd = nil;
@@ -1500,6 +1539,7 @@ struct pipelines {
     id<MTLComputePipelineState> q8_dequant = nil;     // one thread per block
     id<MTLComputePipelineState> q4k_dequant = nil;    // one thread per block
     id<MTLComputePipelineState> q6k_dequant = nil;    // one thread per block
+    id<MTLComputePipelineState> qblocks_gather = nil; // one thread per block
     id<MTLComputePipelineState> q8_gemv_simd = nil;   // a SIMD group per row
     id<MTLComputePipelineState> q4k_gemv = nil;
     id<MTLComputePipelineState> q4k_gemv_simd = nil;
@@ -1610,6 +1650,22 @@ pipelines& compiled(id<MTLDevice> gpu) {
         }
     }
 
+    {
+        // No suffix: this one copies bytes and is not templated on T, so
+        // there is one of it rather than one per element type.
+        id<MTLFunction> fn = [lib newFunctionWithName:@"k_qblocks_gather"];
+
+        if(fn == nil)
+            throw ai::backend_error("no kernel called k_qblocks_gather");
+
+        p.qblocks_gather =
+            [gpu newComputePipelineStateWithFunction:fn error:&err];
+
+        if(p.qblocks_gather == nil)
+            throw ai::backend_error("could not build a pipeline for "
+                                    "k_qblocks_gather");
+    }
+
     for(auto& w : wanted) {
         const std::string name = std::string(w.base) + traits<T>::suffix();
 
@@ -1683,6 +1739,7 @@ stream<T>::stream(std::shared_ptr<device> d)
         m_impl->dequant_cap = d->working_set() / share;
     m_impl->q4k_dequant = p.q4k_dequant;
     m_impl->q6k_dequant = p.q6k_dequant;
+    m_impl->qblocks_gather = p.qblocks_gather;
 
 
     m_impl->q8_gemv_simd = p.q8_gemv_simd;
@@ -2110,6 +2167,103 @@ tensor<T>& stream<T>::dequantised(const qweight& w, unsigned int K,
     m_impl->pending++;
 
     return *slot;
+}
+
+template<typename T>
+void stream<T>::gather(const qweight& table, const std::vector<int>& ids,
+                       tensor<T>& out)
+{
+    const unsigned int rows = table.rows();
+    const unsigned int n = static_cast<unsigned int>(ids.size());
+
+    if(out.rows() != rows || out.cols() != n)
+        throw typename tensor<T>::exception("gather: out must be the table's "
+                                            "height by the number of ids");
+
+    // Here, where there is somewhere to throw from -- the kernel indexes with
+    // whatever it is given and a bad id would read another column silently.
+    for(std::size_t i = 0; i < ids.size(); i++) {
+        if(ids[i] < 0 || static_cast<unsigned int>(ids[i]) >= table.cols()) {
+            std::ostringstream e;
+
+            e << "gather: token id " << ids[i] << " is outside a table of "
+              << table.cols();
+
+            throw typename tensor<T>::exception(e.str());
+        }
+    }
+
+    if(n == 0) return;
+
+    const ai::quant fmt = table.format();
+
+    const unsigned int vals = ai::quant_values(fmt);
+    const unsigned int size = ai::quant_bytes(fmt);
+
+    if(rows % vals)
+        throw typename tensor<T>::exception("gather: the table's height is not "
+                                            "a multiple of the block size");
+
+    const unsigned int nb = rows / vals;          // blocks in one column
+
+    open();
+
+    id<MTLBuffer> idbuf =
+        [m_device->m_impl->gpu newBufferWithBytes:ids.data()
+                                           length:ids.size() * sizeof(int)
+                                          options:MTLResourceStorageModeShared];
+
+    // The picked columns, still encoded.  One buffer per call rather than a
+    // kept scratch: it is the size of the *prompt*, not of the table -- 1 MB
+    // for 512 tokens of a 7B -- and holding one would mean holding it for the
+    // life of the model to save an allocation that does not show up.
+    id<MTLBuffer> packed =
+        [m_device->m_impl->gpu newBufferWithLength:(NSUInteger)nb * size * n
+                                           options:MTLResourceStorageModePrivate];
+
+    if(idbuf == nil || packed == nil)
+        throw typename tensor<T>::exception("gather: could not allocate");
+
+    [m_impl->held addObject:idbuf];
+    [m_impl->held addObject:packed];
+
+    const unsigned int copies = nb * n;
+
+    [m_impl->enc setComputePipelineState:m_impl->qblocks_gather];
+    [m_impl->enc setBuffer:table.m_impl->buf offset:0 atIndex:0];
+    [m_impl->enc setBuffer:idbuf offset:0 atIndex:1];
+    [m_impl->enc setBuffer:packed offset:0 atIndex:2];
+    [m_impl->enc setBytes:&nb length:sizeof(nb) atIndex:3];
+    [m_impl->enc setBytes:&size length:sizeof(size) atIndex:4];
+    [m_impl->enc setBytes:&copies length:sizeof(copies) atIndex:5];
+
+    dispatch(m_impl->enc, m_impl->qblocks_gather, copies);
+
+    m_impl->pending++;
+
+    // Then the ordinary unpack over what was picked, which is why there is no
+    // gather kernel per format.  Encoders run in the order they were created,
+    // so the copy above is complete before this reads it.
+    id<MTLComputePipelineState> pipe = nil;
+    unsigned int per_block = 1;
+
+    switch(fmt) {
+    case ai::quant::q8_0: pipe = m_impl->q8_dequant;  per_block = 1;  break;
+    case ai::quant::q4_K: pipe = m_impl->q4k_dequant; per_block = 8;  break;
+    case ai::quant::q6_K: pipe = m_impl->q6k_dequant; per_block = 16; break;
+    }
+
+    const unsigned int units = copies * per_block;
+
+    [m_impl->enc setComputePipelineState:pipe];
+    [m_impl->enc setBuffer:packed offset:0 atIndex:0];
+    [m_impl->enc setBuffer:out.m_impl->buf offset:0 atIndex:1];
+    [m_impl->enc setBytes:&rows length:sizeof(rows) atIndex:2];
+    [m_impl->enc setBytes:&units length:sizeof(units) atIndex:3];
+
+    dispatch(m_impl->enc, pipe, units);
+
+    m_impl->pending++;
 }
 
 template<typename T>

@@ -915,6 +915,124 @@ static void the_gather(const char* name, std::vector<ai::backend<T>*>& backends)
     }
 }
 
+/**
+ * The same gather, from a table that was never dequantised.
+ *
+ * The reference is the *plain* gather over the unpacked table, so this asks
+ * exactly the question #300 rests on: does reading a column out of the file's
+ * encoding give what dequantising the whole table and then reading it gives.
+ *
+ * All three formats, because the device path gathers blocks and then unpacks
+ * them with the format's own kernel -- one shared copy and three unpacks, so
+ * a format could be wrong on its own.
+ *
+ * The ids repeat and descend on purpose: a token occurs twice in most
+ * sentences, and nothing says they ascend.
+ */
+template<typename T>
+static void the_quantised_gather(const char* name,
+                                 std::vector<ai::backend<T>*>& backends)
+{
+    std::cout << "\nquantised gather, " << name << ":\n";
+
+    const ai::quant formats[] = { ai::quant::q8_0, ai::quant::q4_K,
+                                  ai::quant::q6_K };
+
+    for(ai::quant fmt : formats) {
+        // A multiple of the block size in rows, and a few columns to pick
+        // from.  512 covers both 32 and 256.
+        const uint d = 512;
+        const uint vocab = 9;
+
+        std::mt19937 gen(8081);
+
+        const std::size_t vals = ai::quant_values(fmt);
+        const std::size_t size = ai::quant_bytes(fmt);
+        const std::size_t nb = (std::size_t(d) * vocab) / vals;
+
+        std::vector<char> raw(nb * size);
+
+        for(char& c : raw) c = char(gen() & 0xFF);
+
+        for(std::size_t b = 0; b < nb; b++) {
+            char* p = raw.data() + b * size;
+
+            const _Float16 dd = _Float16(0.002 + (gen() % 100) / 50000.0);
+
+            if(fmt == ai::quant::q4_K) {
+                const _Float16 dm = _Float16(0.001 + (gen() % 50) / 50000.0);
+
+                std::memcpy(p, &dd, sizeof(dd));
+                std::memcpy(p + 2, &dm, sizeof(dm));
+            }
+            else if(fmt == ai::quant::q6_K)
+                std::memcpy(p + 208, &dd, sizeof(dd));
+            else
+                std::memcpy(p, &dd, sizeof(dd));
+        }
+
+        const std::vector<int> ids{ 3, 0, 8, 3 };
+
+        for(ai::backend<T>* b : backends) {
+            typename ai::backend<T>::quantised_ptr q =
+                b->make_quantised(fmt, d, vocab, raw.data(), raw.size());
+
+            typename ai::backend<T>::tensor_ptr got =
+                b->make(d, uint(ids.size()));
+
+            b->gather(q, ids, got);
+
+            // The reference: unpack the whole table, then gather plainly.
+            matrix<T> table(d, vocab);
+
+            {
+                std::vector<float> block(vals);
+
+                for(std::size_t bl = 0; bl < nb; bl++) {
+                    ai::dequantise_block(fmt, raw.data() + bl * size,
+                                         block.data());
+
+                    for(std::size_t i = 0; i < vals; i++) {
+                        const std::size_t at = bl * vals + i;
+
+                        table(uint(at % d), uint(at / d)) = T(block[i]);
+                    }
+                }
+            }
+
+            typename ai::backend<T>::tensor_ptr t = b->make(table);
+            typename ai::backend<T>::tensor_ptr want =
+                b->make(d, uint(ids.size()));
+
+            b->gather(t, ids, want);
+            b->wait();
+
+            ok(std::string("  ") + b->name() + ": " + ai::quant_name(fmt) +
+               " columns match dequantising the whole table first",
+               worst(got->read(), want->read()) == 0.0,
+               std::to_string(worst(got->read(), want->read())));
+
+            // The bounds check has to happen before the kernel runs, same as
+            // the plain gather -- a bad id reads another column silently.
+            bool threw = false;
+
+            try { b->gather(q, std::vector<int>{ 0, 9 }, got); b->wait(); }
+            catch(std::exception&) { threw = true; }
+
+            ok(std::string("  ") + b->name() + ": " + ai::quant_name(fmt) +
+               " an id past the end is refused", threw);
+
+            threw = false;
+
+            try { b->gather(q, std::vector<int>{ 0, -1 }, got); b->wait(); }
+            catch(std::exception&) { threw = true; }
+
+            ok(std::string("  ") + b->name() + ": " + ai::quant_name(fmt) +
+               " and so is a negative one", threw);
+        }
+    }
+}
+
 /** The write half of gather: columns placed where they are asked for. */
 template<typename T>
 static void the_column_copy(const char* name, std::vector<ai::backend<T>*>& backends) {
@@ -1769,6 +1887,7 @@ int main() {
         tanh_survives_a_large_argument<float>("float", b);
         a_bias_reaches_every_column<float>("float", b);
         the_gather<float>("float", b);
+        the_quantised_gather<float>("float", b);
         the_column_copy<float>("float", b);
         the_offset_mask<float>("float", b);
         beta_zero_does_not_read_the_output<float>("float", b);
@@ -1790,6 +1909,7 @@ int main() {
         tanh_survives_a_large_argument<float>("float", b);
         a_bias_reaches_every_column<float>("float", b);
         the_gather<float>("float", b);
+        the_quantised_gather<float>("float", b);
         the_column_copy<float>("float", b);
         the_offset_mask<float>("float", b);
         beta_zero_does_not_read_the_output<float>("float", b);
@@ -1822,6 +1942,7 @@ int main() {
         tanh_survives_a_large_argument<_Float16>("_Float16", b);
         a_bias_reaches_every_column<_Float16>("_Float16", b);
         the_gather<_Float16>("_Float16", b);
+        the_quantised_gather<_Float16>("_Float16", b);
         the_column_copy<_Float16>("_Float16", b);
         the_offset_mask<_Float16>("_Float16", b);
         beta_zero_does_not_read_the_output<_Float16>("_Float16", b);

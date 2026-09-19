@@ -252,6 +252,21 @@ void backend<T>::gather(const tensor_ptr& table, const std::vector<int>& ids,
 }
 
 template<typename T>
+void backend<T>::gather(const typename ai::backend<T>::quantised_ptr& table,
+                        const std::vector<int>& ids, tensor_ptr& out)
+{
+    // dynamic_cast, as everywhere here: a table made by another backend would
+    // otherwise be reinterpreted rather than refused.
+    metal_quantised<T>* q = dynamic_cast<metal_quantised<T>*>(table.get());
+
+    if(!q)
+        throw ai::backend_error("gather: that quantised table belongs to "
+                                "another backend");
+
+    m_stream->gather(q->w, ids, at<T>(out));
+}
+
+template<typename T>
 void backend<T>::rope(tensor_ptr& x, unsigned int base_pos, float theta,
                       ai::rope_layout layout, unsigned int d_head)
 {

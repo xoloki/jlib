@@ -206,7 +206,7 @@ private:
     std::vector<std::shared_ptr<block<T> > > m_layers;
 
     tensor_ptr m_embed, m_final_norm, m_head;
-    quantised_ptr m_head_q;
+    quantised_ptr m_embed_q, m_head_q;
     tensor_ptr m_x, m_y;
 
     unsigned int m_seq = 0;
@@ -384,8 +384,27 @@ void model<T>::load(const gguf& g) {
     // No transposition for either of these.  The embedding is a table of
     // columns and gather reads columns; the head is used through multiply_tn,
     // which wants exactly the file's orientation.
+    // **Kept in the file's encoding when the backend can read it there.**
+    //
+    // A lookup touches one column per token, so materialising the whole table
+    // as floats is work and memory spent on the columns no prompt will ask
+    // for. Qwen2.5-Coder 7B's table is 3584 x 152064: 306 MB as q4_K against
+    // 1.09 GB as fp16, and building the fp16 copy cost a 2.18 GB transient
+    // besides. See #300 and backend::gather(quantised_ptr, ...).
     expect(g, "token_embd.weight", d, m_conf.vocab);
-    m_embed->write(narrowed(g.read("token_embd.weight")));
+
+    if(quant qf; device_quant(g.tensor("token_embd.weight").type, qf)) {
+        // Released first: the constructor sizes it for the float path, and
+        // holding both copies at once is the spike this exists to avoid.
+        m_embed.reset();
+
+        const std::vector<char> raw = g.read_raw("token_embd.weight");
+
+        m_embed_q = m_b.make_quantised(qf, d, m_conf.vocab,
+                                       raw.data(), raw.size());
+    }
+    else
+        m_embed->write(narrowed(g.read("token_embd.weight")));
 
     // Tied embeddings.  Llama 3.2 and others ship no output.weight at all:
     // the projection back to the vocabulary *is* the embedding table, reused.
@@ -397,10 +416,21 @@ void model<T>::load(const gguf& g) {
 
     expect(g, head, d, m_conf.vocab);
 
+    // **When they are tied, one device copy serves both**, now that the table
+    // stays in the file's encoding too.  It is the same tensor, the same
+    // bytes and the same orientation; reading it twice would put two
+    // identical buffers on the device -- 0.48 GB of them for Gemma 2 2B,
+    // whose table is 589.8 M values.
+    //
+    // Untied models (Qwen 2.5, TinyLlama) ship a separate output.weight and
+    // take the branch below, where there is nothing to share.
+    if(head == "token_embd.weight" && m_embed_q)
+        set_head(m_embed_q);
+
     // Kept quantised where the file quantised it.  These are the tensors whose
     // blocks run along the dimension they are used on, so nothing has to be
     // rearranged and the file's bytes go to the device unchanged.
-    if(quant qf; device_quant(g.tensor(head).type, qf)) {
+    else if(quant qf; device_quant(g.tensor(head).type, qf)) {
         const std::vector<char> raw = g.read_raw(head);
 
         set_head(m_b.make_quantised(qf, d, m_conf.vocab,
@@ -564,7 +594,8 @@ void model<T>::forward(const std::vector<int>& ids, tensor_ptr& logits,
     if(logits->rows() != m_conf.vocab || logits->cols() != m_seq)
         throw backend_error("model: logits must be vocab by the reserved length");
 
-    m_b.gather(m_embed, ids, m_x);
+    if(m_embed_q) m_b.gather(m_embed_q, ids, m_x);
+    else m_b.gather(m_embed, ids, m_x);
 
     // Scaled after the lookup and not in the table, because the table is also
     // the output head when the file ties them -- as Gemma's does -- and
