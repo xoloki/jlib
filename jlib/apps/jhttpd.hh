@@ -191,21 +191,33 @@ private:
     };
 
     /**
-     * Guarded by a mutex rather than by `std::atomic<std::shared_ptr<T>>`.
+     * Guarded by a mutex, which is a choice rather than a constraint.
      *
-     * Not because of the language level -- this is built as C++20 on both
-     * platforms. That specialisation (P0718) is a C++20 *library* feature, and
-     * the two standard libraries disagree about having it: libstdc++ defines
-     * `__cpp_lib_atomic_shared_ptr`, the libc++ shipped with Xcode does not,
-     * and there it falls back to the primary template and fails a
-     * `is_trivially_copyable` assertion.
+     * Both platforms build as C++20. Two ways to do this without a lock, and
+     * neither was ruled out by the language level:
      *
-     * It could be selected on that macro, with a mutex behind an #else. It is
-     * not worth two code paths: the lock is held for a pointer copy and
-     * nothing else. The Argon2id verification -- the expensive part, and the
-     * whole reason the hash is worth anything -- happens after it is released.
-     * Holding it across the verify would serialise every authentication in the
-     * server, and *that* would be worth writing code to avoid.
+     * - `std::atomic<std::shared_ptr<T>>`, the C++20 specialisation, is
+     *   **absent from the libc++ shipped with Xcode** -- libstdc++ defines
+     *   `__cpp_lib_atomic_shared_ptr` and libc++ does not, so there it falls
+     *   through to the primary template and fails an `is_trivially_copyable`
+     *   assertion. That one would need the macro and an #else.
+     *
+     * - `std::atomic_load` / `std::atomic_store` on a plain shared_ptr, the
+     *   C++11 spelling, compile and run on both with no warning. They are
+     *   deprecated in favour of the specialisation above, which is the only
+     *   thing against them.
+     *
+     * The second would work here and is a reasonable thing to prefer; a
+     * sibling codebase uses exactly it for exactly this shape. The mutex wins
+     * on the numbers rather than on principle: it is held for a refcount bump
+     * and released, while the Argon2id verification that follows -- the
+     * expensive part, and the whole reason the hash is worth anything -- takes
+     * milliseconds. A lock that is a rounding error next to the work it
+     * guards is not worth a deprecated API to avoid.
+     *
+     * What would be worth avoiding is holding it *across* the verify, which
+     * would serialise every authentication in the server. That is why the
+     * snapshot is taken and the lock dropped before check() does any work.
      */
     mutable std::mutex                 m_lock;
     std::shared_ptr<const table>       m_table;
