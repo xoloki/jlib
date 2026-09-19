@@ -191,14 +191,21 @@ private:
     };
 
     /**
-     * Guarded by a mutex rather than an atomic shared_ptr, because
-     * `std::atomic<std::shared_ptr<T>>` is C++20 and this libc++ does not
-     * have it.
+     * Guarded by a mutex rather than by `std::atomic<std::shared_ptr<T>>`.
      *
-     * The lock is held for a pointer copy and nothing else -- the Argon2id
-     * verification, which is the expensive part and the whole reason the hash
-     * is worth anything, happens after it is released. Holding it across the
-     * verify would serialise every authentication in the server.
+     * Not because of the language level -- this is built as C++20 on both
+     * platforms. That specialisation (P0718) is a C++20 *library* feature, and
+     * the two standard libraries disagree about having it: libstdc++ defines
+     * `__cpp_lib_atomic_shared_ptr`, the libc++ shipped with Xcode does not,
+     * and there it falls back to the primary template and fails a
+     * `is_trivially_copyable` assertion.
+     *
+     * It could be selected on that macro, with a mutex behind an #else. It is
+     * not worth two code paths: the lock is held for a pointer copy and
+     * nothing else. The Argon2id verification -- the expensive part, and the
+     * whole reason the hash is worth anything -- happens after it is released.
+     * Holding it across the verify would serialise every authentication in the
+     * server, and *that* would be worth writing code to avoid.
      */
     mutable std::mutex                 m_lock;
     std::shared_ptr<const table>       m_table;
