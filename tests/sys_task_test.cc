@@ -678,10 +678,40 @@ static void a_task_destroyed_mid_hop() {
 
     sys::reactor r;
 
-    // No pool thread, and nothing draining: a posted job sits there.
     sys::job_queue q(1);
 
     std::atomic<bool> ran(false);
+
+    // **The worker is occupied first, and that is the whole of this test.**
+    //
+    // The point is to destroy the task while its resume is still queued, and
+    // then see that the resume finds the frame gone. With a free worker that
+    // is a race: the job is posted by start() and the frame is destroyed a few
+    // instructions later at the closing brace, so whichever of the two wins
+    // decides the answer. Normally the brace wins and the test passes.
+    //
+    // It does not always. This failed once under `make distcheck` -- on a
+    // machine that was also building, and being closed -- and reproduces every
+    // time if the main thread is stalled for 50ms between start() and the
+    // brace, which is what a suspend does to it. `ran` comes back true, the
+    // resume having run against a frame that was still alive, and the
+    // assertion reports a use-after-free guard that never had to work.
+    //
+    // Holding the one worker on a job of our own removes the race rather than
+    // narrowing it: the hop queues behind this, and cannot be taken until
+    // after the task is gone.
+    //
+    // Note `job_queue(0)` is not the answer either -- it means "run each job
+    // on the thread that posts it", so the resume would happen inside start().
+    std::mutex held;
+    std::condition_variable release;
+    bool may_go = false;
+
+    q.post([&held, &release, &may_go] {
+        std::unique_lock<std::mutex> lock(held);
+
+        release.wait(lock, [&may_go] { return may_go; });
+    });
 
     {
         // Hops to the pool and is destroyed before the reactor ever turns.
@@ -694,6 +724,16 @@ static void a_task_destroyed_mid_hop() {
 
         t.start();
     }
+
+    // The frame is gone; now let the worker reach the resume that was queued
+    // behind the blocker.
+    {
+        std::lock_guard<std::mutex> lock(held);
+
+        may_go = true;
+    }
+
+    release.notify_all();
 
     // Whatever the pool was going to do, it must not have resumed a frame that
     // no longer exists.  Without the weak_ptr this is a use-after-free that
