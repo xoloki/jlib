@@ -100,6 +100,49 @@ request request::parse(const std::string& body) {
 
     r.wants_tools = root->has("tools") || root->has("functions");
 
+    // Kept as text: a tool's parameters are a JSON Schema and there is no
+    // struct that holds one without losing something.  See request::tools.
+    if(root->has("tools") && root->kind("tools") == util::json::object::type_array)
+        r.tools = root->arr("tools")->str();
+    else if(root->has("functions") &&
+            root->kind("functions") == util::json::object::type_array) {
+        // The older spelling is a bare function list where `tools` wraps each
+        // one in {"type":"function","function":{...}}.  Wrapped here so a
+        // template sees one shape and the caller does not have to care which
+        // spelling arrived.
+        //
+        // **Assembled as text rather than as objects.** `array::obj(i)`
+        // borrows -- it hands back a handle with no reference of its own --
+        // and `object::add` steals one, so moving a function from the parsed
+        // request into a new array would leave both owning it and both
+        // freeing it. The destination is a string either way.
+        util::json::array::ptr in = root->arr("functions");
+
+        std::string out = "[";
+
+        for(int i = 0; i < in->size(); i++) {
+            if(in->kind(unsigned(i)) != util::json::object::type_object) continue;
+
+            if(out.size() > 1) out += ",";
+
+            out += "{\"type\":\"function\",\"function\":";
+            out += in->obj(unsigned(i))->str();
+            out += "}";
+        }
+
+        r.tools = out + "]";
+    }
+
+    if(root->has("tool_choice")) {
+        // A string or an object, both of which the protocol allows -- the
+        // same shape hazard `stop` has above, so the object is asked about
+        // first for the same reason.
+        if(root->kind("tool_choice") == util::json::object::type_object)
+            r.tool_choice = root->obj("tool_choice")->str();
+        else
+            r.tool_choice = root->get("tool_choice").str_or(std::string());
+    }
+
     if(root->has("stop")) {
         // A string or an array of them, both of which the protocol allows --
         // and the array is asked about **first**.
@@ -156,11 +199,125 @@ request request::parse(const std::string& body) {
     return r;
 }
 
+std::vector<call> calls_in(const std::string& text, std::string& left)
+{
+    static const std::string OPEN = "<tool_call>";
+    static const std::string CLOSE = "</tool_call>";
+
+    std::vector<call> out;
+
+    left.clear();
+
+    std::size_t at = 0;
+
+    for(;;) {
+        const std::size_t b = text.find(OPEN, at);
+
+        if(b == std::string::npos) { left += text.substr(at); break; }
+
+        left += text.substr(at, b - at);
+
+        const std::size_t body = b + OPEN.size();
+        const std::size_t e = text.find(CLOSE, body);
+
+        // An unterminated block is not a call.  The text is kept as content
+        // rather than dropped: a reply cut short mid-call is what a client
+        // needs to see to know it was cut short.
+        if(e == std::string::npos) { left += text.substr(b); break; }
+
+        const std::string json = text.substr(body, e - body);
+
+        call c;
+
+        try {
+            util::json::object::ptr o = util::json::object::create(json);
+
+            c.name = o->get("name").str_or(std::string());
+
+            // `arguments` is an object here, where the wire format nests it
+            // as a string.  Serialised back so both sides carry the same
+            // thing -- see openai::call.
+            if(o->has("arguments")) {
+                if(o->kind("arguments") == util::json::object::type_object)
+                    c.arguments = o->obj("arguments")->str();
+                else
+                    c.arguments = o->get("arguments").str_or(std::string());
+            }
+        }
+        catch(std::exception&) {
+            // Not JSON between the markers.  Not a call, and the text is kept
+            // so the caller can see what the model actually said.
+            left += text.substr(b, e + CLOSE.size() - b);
+
+            at = e + CLOSE.size();
+
+            continue;
+        }
+
+        // A block with no name is not a call, and the text is kept for the
+        // same reason a malformed one is: dropping it would remove what the
+        // model said without saying so, and a reader would see a reply that
+        // was simply missing a sentence.
+        if(c.name.empty()) left += text.substr(b, e + CLOSE.size() - b);
+        else out.push_back(c);
+
+        at = e + CLOSE.size();
+    }
+
+    return out;
+}
+
 const char* spell(finish f) {
-    return f == finish::length ? "length" : "stop";
+    if(f == finish::length) return "length";
+    if(f == finish::tool_calls) return "tool_calls";
+
+    return "stop";
 }
 
 namespace {
+
+/**
+ * The `tool_calls` on a message, if any.
+ *
+ * Shaped `[{"id":..,"type":"function","function":{"name":..,"arguments":..}}]`,
+ * where `arguments` is a **string** holding JSON rather than an object -- the
+ * protocol nests it that way and a reader that expects an object gets nothing.
+ * It is carried as that string; see openai::call.
+ */
+std::vector<call> calls_of(util::json::object::ptr m)
+{
+    std::vector<call> out;
+
+    if(!m->has("tool_calls") ||
+       m->kind("tool_calls") != util::json::object::type_array)
+        return out;
+
+    util::json::array::ptr a = m->arr("tool_calls");
+
+    for(int i = 0; i < a->size(); i++) {
+        if(a->kind(unsigned(i)) != util::json::object::type_object) continue;
+
+        util::json::object::ptr one = a->obj(unsigned(i));
+
+        call c;
+
+        c.id = one->get("id").str_or(std::string());
+
+        if(one->has("function") &&
+           one->kind("function") == util::json::object::type_object) {
+            util::json::object::ptr f = one->obj("function");
+
+            c.name = f->get("name").str_or(std::string());
+            c.arguments = f->get("arguments").str_or(std::string());
+        }
+
+        // A call with no name is not a call.  Dropped rather than carried as
+        // an empty one, which a caller would have to check for anyway.
+        if(!c.name.empty()) out.push_back(c);
+    }
+
+    return out;
+}
 
 /** The fields every completion and chunk carries. */
 util::json::object::ptr envelope(const std::string& id,
@@ -392,18 +549,23 @@ answer answer::parse(const std::string& body) {
 
     const std::string why = choice->get("finish_reason").str_or("");
 
-    a.why = why == "length" ? finish::length : finish::stop;
+    a.why = why == "length"      ? finish::length
+          : why == "tool_calls"  ? finish::tool_calls
+                                 : finish::stop;
 
     util::json::object::ptr m;
 
     try { m = choice->obj("message"); }
     catch(util::json::exception&) {}
 
-    // A choice with no content is a tool call, which this namespace does not
-    // model.  Empty rather than an exception: a caller that asked for no
-    // tools will not be given one, and a caller that did was told this
-    // server refuses them.
-    if(m) a.content = content_of(m);
+    // A choice may carry content, calls, or both: the protocol allows a
+    // sentence before a call and some models emit one.  Content stays empty
+    // rather than throwing when there is none.
+    if(m) {
+        a.content = content_of(m);
+
+        a.calls = calls_of(m);
+    }
 
     util::json::object::ptr usage;
 
