@@ -432,6 +432,17 @@ int main(int argc, char** argv) {
     // aside, send SIGHUP, get a new one.  Without this the process keeps
     // writing to an inode with no name, and the log silently stops existing
     // for anybody looking at the path.
+    // Before the handler, so it always has somewhere to write.  The daemon
+    // fork below inherits both ends, which is what is wanted: FD_CLOEXEC
+    // closes them on exec, not on fork.
+    //
+    // A failure here costs the config reload and nothing else -- the log files
+    // notice the counter rather than the pipe, so rotation still works.
+    if(!jhttpd::open_hup_pipe()) {
+        std::cerr << "jhttpd: no pipe for SIGHUP, so the config will not "
+                  << "reload; log rotation still will\n";
+    }
+
     std::signal(SIGHUP, jhttpd::reopen_on_hup);
 
     // **Absolute before anything forks or chdirs**, because --daemon moves to
@@ -765,21 +776,45 @@ int main(int argc, char** argv) {
         // disk, and hashing a decoy password with Argon2id, which is slow by
         // design. On the reactor that would stall every connection at once.
         //
-        // It polls rather than waking on the signal, because the only thing a
-        // handler may safely do is raise a counter -- and a second of latency
-        // on a configuration change is not worth a self-pipe.
+        // It blocks on a pipe the handler writes to, rather than polling a
+        // flag: write() is async-signal-safe, so the signal reaches an
+        // ordinary thread directly. No interval to pick, no wakeups while
+        // nothing is happening, and no latency.
         std::atomic<bool> reloading{true};
-        std::sig_atomic_t acted_on = jhttpd::reopen_requested;
 
-        std::thread reloader([&] {
+        /**
+         * Owns the reload thread and joins it however this scope ends.
+         *
+         * **Not tidiness.** A std::thread destroyed while still joinable calls
+         * std::terminate, and `s->run()` below can throw -- which would jump
+         * past a bare join() straight to the catch, and take the process down
+         * with an abort instead of the error message it was about to print.
+         *
+         * The order matters too: the flag before the poke, because the thread
+         * tests it after the read returns. Poking first lets it wake, see a
+         * flag that is still true, and block again on a pipe nobody will
+         * write to -- and then the join waits forever.
+         */
+        struct joining {
+            joining(std::atomic<bool>& f, std::thread t)
+                : m_flag(f), m_thread(std::move(t)) {}
+
+            ~joining() {
+                m_flag.store(false);
+                jhttpd::poke_hup();
+
+                if(m_thread.joinable()) m_thread.join();
+            }
+
+            std::atomic<bool>& m_flag;
+            std::thread        m_thread;
+        };
+
+        std::thread worker([&] {
             while(reloading.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                if(!jhttpd::wait_for_hup()) break;
 
-                const std::sig_atomic_t asked = jhttpd::reopen_requested;
-
-                if(asked == acted_on || o.config.empty()) continue;
-
-                acted_on = asked;
+                if(!reloading.load() || o.config.empty()) continue;
 
                 jhttpd::options fresh;
 
@@ -895,10 +930,13 @@ int main(int argc, char** argv) {
             }
         });
 
-        s->run();
+        const joining reloader(reloading, std::move(worker));
 
-        reloading.store(false);
-        reloader.join();
+        // Never returns today: nothing in jhttpd calls stop(), and there is no
+        // SIGINT or SIGTERM handler, so the process ends by signal. The guard
+        // above is for the path that *does* happen -- run() throwing -- and
+        // for whenever a graceful shutdown arrives.
+        s->run();
     }
     catch(std::exception& e) {
         std::cerr << "jhttpd: " << e.what() << "\n";
