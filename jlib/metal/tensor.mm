@@ -645,6 +645,7 @@ kernel void k_q4k_dequant(device const uchar* w [[buffer(0)]],
                           device T* out [[buffer(1)]],
                           constant uint& K [[buffer(2)]],
                           constant uint& units [[buffer(3)]],
+                          constant uint& first [[buffer(4)]],
                           uint gid [[thread_position_in_grid]])
 {
     if(gid >= units) return;
@@ -657,7 +658,7 @@ kernel void k_q4k_dequant(device const uchar* w [[buffer(0)]],
     const uint b  = gid / 8;
     const uint sb = gid % 8;
 
-    device const uchar* p = w + (ulong)b * 144;
+    device const uchar* p = w + ((ulong)first + b) * 144;
 
     const float d    = half_le(p);
     const float dmin = half_le(p + 2);
@@ -696,6 +697,7 @@ kernel void k_q6k_dequant(device const uchar* w [[buffer(0)]],
                           device T* out [[buffer(1)]],
                           constant uint& K [[buffer(2)]],
                           constant uint& units [[buffer(3)]],
+                          constant uint& first [[buffer(4)]],
                           uint gid [[thread_position_in_grid]])
 {
     if(gid >= units) return;
@@ -709,7 +711,7 @@ kernel void k_q6k_dequant(device const uchar* w [[buffer(0)]],
     const uint g = (sb % 8) / 2;
     const uint k = sb & 1;
 
-    device const uchar* p = w + (ulong)b * 210;
+    device const uchar* p = w + ((ulong)first + b) * 210;
 
     device const uchar* ql = p;
     device const uchar* qh = p + 128;
@@ -738,11 +740,15 @@ kernel void k_q8_dequant(device const uchar* w [[buffer(0)]],
                          device T* out [[buffer(1)]],
                          constant uint& K [[buffer(2)]],
                          constant uint& blocks [[buffer(3)]],
+                         constant uint& first [[buffer(4)]],
                          uint gid [[thread_position_in_grid]])
 {
     if(gid >= blocks) return;
 
-    device const uchar* p = w + (ulong)gid * 34;
+    // `first` is where this dispatch's column block starts in the weight;
+    // the destination is always indexed from zero, because the scratch holds
+    // only the block.  See multiply_tn(qweight...).
+    device const uchar* p = w + ((ulong)first + gid) * 34;
 
     const ushort bits = ushort(p[0]) | (ushort(p[1]) << 8);
     const float d = float(as_type<half>(bits));
@@ -1174,17 +1180,23 @@ INSTANTIATE(k_copy_columns, half, "_f16")(device const half*, device half*,
                                           constant uint&, constant uint&,
                                           constant uint&, uint);
 INSTANTIATE(k_q8_dequant, float, "_f32")(device const uchar*, device float*,
-                                          constant uint&, constant uint&, uint);
+                                          constant uint&, constant uint&,
+                                          constant uint&, uint);
 INSTANTIATE(k_q8_dequant, half, "_f16")(device const uchar*, device half*,
-                                        constant uint&, constant uint&, uint);
+                                        constant uint&, constant uint&,
+                                        constant uint&, uint);
 INSTANTIATE(k_q4k_dequant, float, "_f32")(device const uchar*, device float*,
-                                          constant uint&, constant uint&, uint);
+                                      constant uint&, constant uint&,
+                                      constant uint&, uint);
 INSTANTIATE(k_q4k_dequant, half, "_f16")(device const uchar*, device half*,
-                                         constant uint&, constant uint&, uint);
+                                      constant uint&, constant uint&,
+                                      constant uint&, uint);
 INSTANTIATE(k_q6k_dequant, float, "_f32")(device const uchar*, device float*,
-                                          constant uint&, constant uint&, uint);
+                                      constant uint&, constant uint&,
+                                      constant uint&, uint);
 INSTANTIATE(k_q6k_dequant, half, "_f16")(device const uchar*, device half*,
-                                         constant uint&, constant uint&, uint);
+                                      constant uint&, constant uint&,
+                                      constant uint&, uint);
 INSTANTIATE(k_q4k_gemv, float, "_f32")(device const uchar*, device const float*,
                                        device float*, constant uint&,
                                        constant uint&, constant uint&,
@@ -1397,10 +1409,6 @@ struct stream<T>::impl {
     std::map<std::pair<unsigned int, unsigned int>,
              std::unique_ptr<tensor<T> > > dequantised;
 
-    // The largest scratch the map is allowed to hold, in bytes.  A device
-    // constant, so it is asked for once rather than at every multiply.
-    unsigned long dequant_cap = 0;
-
 
 
     // Buffers made for one encoded operation and needed until the command
@@ -1470,44 +1478,26 @@ unsigned int q8_dequant_above() {
 }
 
 /**
- * The largest scratch this will keep, as a fraction of what the device wants
- * resident.  0 removes the cap.
+ * How many bytes of unpacked weight to hold at once.
  *
- * **The column threshold is not the whole question.** It asks whether a batch
- * is wide enough to pay for an unpack. It does not ask what the unpack costs
- * to *keep* -- and the scratch is permanent GPU residency, competing with the
- * weights themselves. On Qwen2.5-Coder 7B, unpacking the 1.09 GB output head
- * beside an 8.1 GB model turned a 4x win into a 4x loss (#286).
+ * **This is what replaced the cap.** Unpacking a whole weight made the scratch
+ * as large as the weight -- 1.09 GB for Qwen2.5-Coder 7B's output head -- and
+ * that is permanent GPU residency competing with the model itself. #286 dealt
+ * with it by refusing to unpack anything too big, which is a workaround with
+ * two costs: the biggest matrix in the model stays on the slow path, and the
+ * threshold is a number fitted to one machine.
  *
- * **It is too blunt, and the amount is measured.** A per-weight limit cannot
- * tell "this weight is big" from "there is no room for it", so it refuses a
- * head that a smaller model has ample room for:
+ * Unpacking a block of output rows at a time removes the question. The traffic
+ * is identical -- every weight byte is still read once, written once and read
+ * once -- and the scratch is this, whatever the weight's size. A model's
+ * largest is then a few tens of megabytes rather than a gigabyte, so there is
+ * nothing to refuse and no threshold to fit.
  *
- *     Gemma 2 2B, prefill512    q8_0     0.998 s capped, 0.549 s uncapped
- *                               Q4_K_M   1.427 s capped, 0.563 s uncapped
- *
- * That is 1.8x on an 8-bit model and 2.5x on a 4-bit one, paid on every
- * large-vocabulary model small enough to have had the room.
- *
- * Replacing it with a `device::allocated()` room check was tried and is not
- * here: it fixes the 2B and costs the 7B everything, because an 8.1 GB model
- * exceeds any sensible fraction on its own and then even a 136 MB scratch is
- * refused. One scalar cannot express both, and the thresholds that might are
- * unmeasurable on this machine -- a 7B run leaves enough memory pressure that
- * the 2B run after it reads 0.93 s where it reads 0.53 s alone.
- *
- * The fix is to stop needing the question answered: unpacking a block of rows
- * at a time bounds the scratch whatever the weight's size. **#292.**
+ * The number itself is measured; see the branch that added it. Overridable
+ * because it trades scratch against how many GEMMs a multiply becomes, and
+ * that trade is a property of the device.
  */
-unsigned int q8_dequant_share() {
-    static const unsigned int n = [] {
-        const char* e = std::getenv("JLIB_Q8_DEQUANT_SHARE");
-
-        return e ? unsigned(std::atoi(e)) : 32u;
-    }();
-
-    return n;
-}
+unsigned long q8_dequant_budget() { return dequant_budget(); }
 
 unsigned int q8_reduce_below() {
     // Overridable so the two paths can be compared inside one process, which
@@ -1734,9 +1724,6 @@ stream<T>::stream(std::shared_ptr<device> d)
     m_impl->gather = p.gather;
     m_impl->q8_gemv = p.q8_gemv;
     m_impl->q8_dequant = p.q8_dequant;
-
-    if(const unsigned int share = q8_dequant_share())
-        m_impl->dequant_cap = d->working_set() / share;
     m_impl->q4k_dequant = p.q4k_dequant;
     m_impl->q6k_dequant = p.q6k_dequant;
     m_impl->qblocks_gather = p.qblocks_gather;
@@ -2084,6 +2071,25 @@ struct qweight::impl {
     id<MTLBuffer> buf = nil;
 };
 
+namespace {
+
+unsigned long& dequant_budget_bytes() {
+    static unsigned long n = [] {
+        const char* e = std::getenv("JLIB_Q8_DEQUANT_BUDGET");
+
+        return e ? (unsigned long)std::atol(e) * 1024 * 1024
+                 : 64ul * 1024 * 1024;
+    }();
+
+    return n;
+}
+
+}
+
+unsigned long dequant_budget() { return dequant_budget_bytes(); }
+
+void dequant_budget(unsigned long bytes) { dequant_budget_bytes() = bytes; }
+
 qweight::qweight(std::shared_ptr<device> d, ai::quant fmt, unsigned int rows,
                  unsigned int cols, const void* blocks, std::size_t bytes)
     : m_format(fmt),
@@ -2119,48 +2125,46 @@ qweight::~qweight() {}
 
 template<typename T>
 tensor<T>& stream<T>::dequantised(const qweight& w, unsigned int K,
-                                  unsigned int N)
+                                  unsigned int first, unsigned int cols,
+                                  unsigned int width)
 {
+    // Keyed by the *block* shape rather than the weight's, which is the whole
+    // point: a model has a handful of K values and one width, so this holds a
+    // few tens of megabytes however large the weights are.
     std::unique_ptr<tensor<T> >& slot =
-        m_impl->dequantised[std::make_pair(K, N)];
+        m_impl->dequantised[std::make_pair(K, width)];
 
-    if(!slot) slot.reset(new tensor<T>(m_device, K, N));
+    if(!slot) slot.reset(new tensor<T>(m_device, K, width));
 
     open();
 
-    // One thread per block, whatever a block is for this format: 32 values
-    // for q8_0 and 256 for either K-quant.  The kernels differ only in how
-    // they unpack; the destination index is the same argument in all three.
+    const unsigned int vals = ai::quant_values(w.format());
+
     id<MTLComputePipelineState> pipe = nil;
-
-    switch(w.format()) {
-    case ai::quant::q8_0: pipe = m_impl->q8_dequant;  break;
-    case ai::quant::q4_K: pipe = m_impl->q4k_dequant; break;
-    case ai::quant::q6_K: pipe = m_impl->q6k_dequant; break;
-    }
-
-    const unsigned int blocks =
-        (K / ai::quant_values(w.format())) * N;
-
-    // How many threads one block is worth.  A q8_0 block is one thread's
-    // work; a K-quant super-block is split so that a thread still covers
-    // about thirty-two values, because one thread per 256 leaves the machine
-    // idle -- the same mistake the gemv kernels started with.
     unsigned int per_block = 1;
 
     switch(w.format()) {
-    case ai::quant::q8_0: per_block = 1;  break;
-    case ai::quant::q4_K: per_block = 8;  break;
-    case ai::quant::q6_K: per_block = 16; break;
+    case ai::quant::q8_0: pipe = m_impl->q8_dequant;  per_block = 1;  break;
+    case ai::quant::q4_K: pipe = m_impl->q4k_dequant; per_block = 8;  break;
+    case ai::quant::q6_K: pipe = m_impl->q6k_dequant; per_block = 16; break;
     }
 
+    const unsigned int per_col = K / vals;          // blocks in one column
+    const unsigned int blocks = per_col * cols;
     const unsigned int units = blocks * per_block;
+
+    // Where this block of columns starts in the weight.  Passed as a value
+    // rather than by binding the buffer at an offset, because a q8_0 column
+    // is 34 * K/32 bytes and that is not reliably four-byte aligned, which
+    // setBuffer:offset: requires.
+    const unsigned int first_block = first * per_col;
 
     [m_impl->enc setComputePipelineState:pipe];
     [m_impl->enc setBuffer:w.m_impl->buf offset:0 atIndex:0];
     [m_impl->enc setBuffer:slot->m_impl->buf offset:0 atIndex:1];
     [m_impl->enc setBytes:&K length:sizeof(K) atIndex:2];
     [m_impl->enc setBytes:&units length:sizeof(units) atIndex:3];
+    [m_impl->enc setBytes:&first_block length:sizeof(first_block) atIndex:4];
 
     dispatch(m_impl->enc, pipe, units);
 
@@ -2255,92 +2259,16 @@ void stream<T>::gather(const qweight& table, const std::vector<int>& ids,
 
     const unsigned int units = copies * per_block;
 
+    const unsigned int from_start = 0;   // `packed` holds only what was asked
+
     [m_impl->enc setComputePipelineState:pipe];
     [m_impl->enc setBuffer:packed offset:0 atIndex:0];
     [m_impl->enc setBuffer:out.m_impl->buf offset:0 atIndex:1];
     [m_impl->enc setBytes:&rows length:sizeof(rows) atIndex:2];
     [m_impl->enc setBytes:&units length:sizeof(units) atIndex:3];
+    [m_impl->enc setBytes:&from_start length:sizeof(from_start) atIndex:4];
 
     dispatch(m_impl->enc, pipe, units);
-
-    m_impl->pending++;
-}
-
-template<typename T>
-void stream<T>::multiply_tn(const qweight& w, const tensor<T>& x, tensor<T>& y,
-                            float alpha, float beta)
-{
-    const unsigned int K = w.rows();
-    const unsigned int N = w.cols();
-
-    if(x.rows() != K)
-        throw typename tensor<T>::exception("quantised multiply_tn: the input is not "
-                                            "as tall as the weight is wide");
-
-    if(y.rows() != N || y.cols() != x.cols())
-        throw typename tensor<T>::exception("quantised multiply_tn: the output shape "
-                                            "does not match");
-
-    const unsigned int ncols = x.cols();
-
-    // **Wide enough to pay for unpacking the weights first.**
-    //
-    // MPS does 11-13 TFLOP/s on these matrices and the kernel below does 1.5,
-    // so for a prefill batch the fastest thing this can do is stop being
-    // clever: dequantise into a scratch and hand the problem to the GEMM that
-    // is already linked in. One pass over the weights, spread over every
-    // column in the batch.
-    //
-    // Not at decode, where the batch is one column and that pass would cost
-    // eight times the matmul it replaces. See q8_dequant_above().
-    // Wide enough to pay for the unpack, and small enough to keep.
-    const unsigned long bytes = (unsigned long)K * N * sizeof(T);
-    const unsigned long cap = m_impl->dequant_cap;
-
-    if(q8_dequant_above() && ncols >= q8_dequant_above() &&
-       (!cap || bytes <= cap)) {
-        // The plain path rather than the encoder underneath it: same GEMM,
-        // and it is the one every other caller has been using.
-        multiply_tn(dequantised(w, K, N), x, y, alpha, beta);
-
-        return;
-    }
-
-    open();
-
-    // One thread per output row per tile of columns.  A "unit" is that pair.
-    const unsigned int tiles = (ncols + 8 - 1) / 8;
-    const unsigned int units = N * tiles;
-
-    // A SIMD group per row only when there are too few units to fill the GPU.
-    // Decode is the case that needs it: one column means one unit per output
-    // row, and k and v have 256 of them.  Prefill already has a unit per row
-    // per column tile, and a reduction there only costs -- measured at 19-26%
-    // before this was made conditional.  See Q8_LANES and q8_reduce_below.
-    const bool reduce = units < q8_reduce_below();
-
-    id<MTLComputePipelineState> pipe = nil;
-
-    switch(w.format()) {
-    case ai::quant::q8_0:
-        pipe = reduce ? m_impl->q8_gemv_simd  : m_impl->q8_gemv;  break;
-    case ai::quant::q4_K:
-        pipe = reduce ? m_impl->q4k_gemv_simd : m_impl->q4k_gemv; break;
-    case ai::quant::q6_K:
-        pipe = reduce ? m_impl->q6k_gemv_simd : m_impl->q6k_gemv; break;
-    }
-
-    [m_impl->enc setComputePipelineState:pipe];
-    [m_impl->enc setBuffer:w.m_impl->buf offset:0 atIndex:0];
-    [m_impl->enc setBuffer:x.m_impl->buf offset:0 atIndex:1];
-    [m_impl->enc setBuffer:y.m_impl->buf offset:0 atIndex:2];
-    [m_impl->enc setBytes:&K length:sizeof(K) atIndex:3];
-    [m_impl->enc setBytes:&N length:sizeof(N) atIndex:4];
-    [m_impl->enc setBytes:&ncols length:sizeof(ncols) atIndex:5];
-    [m_impl->enc setBytes:&alpha length:sizeof(alpha) atIndex:6];
-    [m_impl->enc setBytes:&beta length:sizeof(beta) atIndex:7];
-
-    dispatch(m_impl->enc, pipe, units * (reduce ? 32u : 1u));
 
     m_impl->pending++;
 }
@@ -2437,12 +2365,25 @@ namespace {
  * same argument as gemm.mm, which has it at length; the difference here is
  * that the buffers already live on the device, so there is nothing to copy.
  */
+/**
+ * @param cstride elements between one column of C and the next in the buffer,
+ *        when C is a *row block* of a taller matrix rather than the whole of
+ *        one.  0 means C is contiguous and the stride is its own height.
+ * @param coffset elements from the start of `bc` to C's first element
+ *
+ * Those two are what let a caller produce rows [j0, j0+B) of an (N x ncols)
+ * result without a separate buffer and a copy: MPS takes a row stride
+ * independent of the column count, so a block of a column-major matrix is
+ * describable in place.  See multiply_tn(qweight...), which is the only
+ * caller that needs it.
+ */
 template<typename T>
 void encode_gemm(id<MTLCommandBuffer> cmd, id<MTLDevice> gpu,
                  id<MTLBuffer> ba, unsigned int arows, unsigned int acols, bool ta,
                  id<MTLBuffer> bb, unsigned int brows, unsigned int bcols, bool tb,
                  id<MTLBuffer> bc, unsigned int crows, unsigned int ccols,
-                 float alpha, float beta)
+                 float alpha, float beta,
+                 unsigned int cstride = 0, unsigned int coffset = 0)
 {
     const NSUInteger M = crows, N = ccols;
     const NSUInteger K = ta ? arows : acols;
@@ -2456,14 +2397,20 @@ void encode_gemm(id<MTLCommandBuffer> cmd, id<MTLDevice> gpu,
         [MPSMatrixDescriptor matrixDescriptorWithRows:bcols columns:brows
                                              rowBytes:brows * sizeof(T)
                                              dataType:dt];
+    // C's rows are `cstride` elements apart, which is its own height unless
+    // the caller is writing a block of a taller matrix.
+    const unsigned int cpitch = cstride ? cstride : crows;
+
     MPSMatrixDescriptor* dc =
         [MPSMatrixDescriptor matrixDescriptorWithRows:ccols columns:crows
-                                             rowBytes:crows * sizeof(T)
+                                             rowBytes:cpitch * sizeof(T)
                                              dataType:dt];
 
     MPSMatrix* ma = [[MPSMatrix alloc] initWithBuffer:ba descriptor:da];
     MPSMatrix* mb = [[MPSMatrix alloc] initWithBuffer:bb descriptor:db];
-    MPSMatrix* mc = [[MPSMatrix alloc] initWithBuffer:bc descriptor:dc];
+    MPSMatrix* mc = [[MPSMatrix alloc] initWithBuffer:bc
+                                               offset:coffset * sizeof(T)
+                                           descriptor:dc];
 
     // Reading column-major as row-major already transposes, so a requested
     // transpose is the *absence* of one in this world and vice versa.
@@ -2529,6 +2476,112 @@ void stream<T>::multiply_nt(const tensor<T>& a, const tensor<T>& b, tensor<T>& c
                    a.m_impl->buf, a.rows(), a.cols(), false,
                    b.m_impl->buf, b.rows(), b.cols(), true,
                    c.m_impl->buf, c.rows(), c.cols(), alpha, beta);
+
+    m_impl->pending++;
+}
+
+template<typename T>
+void stream<T>::multiply_tn(const qweight& w, const tensor<T>& x, tensor<T>& y,
+                            float alpha, float beta)
+{
+    const unsigned int K = w.rows();
+    const unsigned int N = w.cols();
+
+    if(x.rows() != K)
+        throw typename tensor<T>::exception("quantised multiply_tn: the input is not "
+                                            "as tall as the weight is wide");
+
+    if(y.rows() != N || y.cols() != x.cols())
+        throw typename tensor<T>::exception("quantised multiply_tn: the output shape "
+                                            "does not match");
+
+    const unsigned int ncols = x.cols();
+
+    // **Wide enough to pay for unpacking the weights first.**
+    //
+    // MPS does 11-13 TFLOP/s on these matrices and the kernel below does 1.5,
+    // so for a prefill batch the fastest thing this can do is stop being
+    // clever: dequantise into a scratch and hand the problem to the GEMM that
+    // is already linked in. One pass over the weights, spread over every
+    // column in the batch.
+    //
+    // Not at decode, where the batch is one column and that pass would cost
+    // eight times the matmul it replaces. See q8_dequant_above().
+    if(q8_dequant_above() && ncols >= q8_dequant_above()) {
+        // **A block of output rows at a time.**
+        //
+        // y = w^T x, so rows [j0, j0 + b) of y are columns [j0, j0 + b) of w
+        // -- and a column of a quantised weight is whole blocks, contiguous.
+        // So the weight is unpacked a piece at a time into a scratch bounded
+        // by q8_dequant_budget() rather than by the weight, and each piece is
+        // multiplied straight into its own rows of y.
+        //
+        // No copy afterwards: those rows are a strided submatrix of a
+        // column-major y, which MPS describes with a row stride and an offset.
+        const unsigned long each = (unsigned long)K * sizeof(T);
+
+        unsigned int width =
+            (unsigned int)std::max(1ul, q8_dequant_budget() / each);
+
+        // A multiple of 128 so the offset into y stays 256-byte aligned, and
+        // never wider than the weight.
+        width = std::max(128u, width & ~127u);
+        width = std::min(width, N);
+
+        for(unsigned int j0 = 0; j0 < N; j0 += width) {
+            const unsigned int b = std::min(width, N - j0);
+
+            tensor<T>& part = dequantised(w, K, j0, b, width);
+
+            close();
+
+            encode_gemm<T>(m_impl->cmd, m_device->m_impl->gpu,
+                           part.m_impl->buf, K, b, true,
+                           x.m_impl->buf, K, ncols, false,
+                           y.m_impl->buf, b, ncols, alpha, beta,
+                           N, j0);
+
+            m_impl->pending++;
+        }
+
+        return;
+    }
+
+    open();
+
+    // One thread per output row per tile of columns.  A "unit" is that pair.
+    const unsigned int tiles = (ncols + 8 - 1) / 8;
+    const unsigned int units = N * tiles;
+
+    // A SIMD group per row only when there are too few units to fill the GPU.
+    // Decode is the case that needs it: one column means one unit per output
+    // row, and k and v have 256 of them.  Prefill already has a unit per row
+    // per column tile, and a reduction there only costs -- measured at 19-26%
+    // before this was made conditional.  See Q8_LANES and q8_reduce_below.
+    const bool reduce = units < q8_reduce_below();
+
+    id<MTLComputePipelineState> pipe = nil;
+
+    switch(w.format()) {
+    case ai::quant::q8_0:
+        pipe = reduce ? m_impl->q8_gemv_simd  : m_impl->q8_gemv;  break;
+    case ai::quant::q4_K:
+        pipe = reduce ? m_impl->q4k_gemv_simd : m_impl->q4k_gemv; break;
+    case ai::quant::q6_K:
+        pipe = reduce ? m_impl->q6k_gemv_simd : m_impl->q6k_gemv; break;
+    }
+
+    [m_impl->enc setComputePipelineState:pipe];
+    [m_impl->enc setBuffer:w.m_impl->buf offset:0 atIndex:0];
+    [m_impl->enc setBuffer:x.m_impl->buf offset:0 atIndex:1];
+    [m_impl->enc setBuffer:y.m_impl->buf offset:0 atIndex:2];
+    [m_impl->enc setBytes:&K length:sizeof(K) atIndex:3];
+    [m_impl->enc setBytes:&N length:sizeof(N) atIndex:4];
+    [m_impl->enc setBytes:&ncols length:sizeof(ncols) atIndex:5];
+    [m_impl->enc setBytes:&alpha length:sizeof(alpha) atIndex:6];
+    [m_impl->enc setBytes:&beta length:sizeof(beta) atIndex:7];
+
+    dispatch(m_impl->enc, pipe, units * (reduce ? 32u : 1u));
 
     m_impl->pending++;
 }
