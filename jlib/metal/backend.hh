@@ -91,6 +91,8 @@ public:
                             unsigned int kv_heads, unsigned int d_head);
     void copy_columns(const tensor_ptr& src, tensor_ptr& dst,
                       unsigned int dst_first);
+    void gather(const typename ai::backend<T>::quantised_ptr& table,
+                const std::vector<int>& ids, tensor_ptr& out);
     void gather(const tensor_ptr& table, const std::vector<int>& ids,
                 tensor_ptr& out);
     void rope(tensor_ptr& x, unsigned int base_pos = 0, float theta = 10000.0f,

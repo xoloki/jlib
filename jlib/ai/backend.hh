@@ -393,6 +393,27 @@ public:
                         tensor_ptr& out) = 0;
 
     /**
+     * The same, from a table still in the file's encoding.
+     *
+     * **An embedding table does not need to be dequantised to be read.** A
+     * lookup touches one column per token -- 512 of a vocabulary's 152064 for
+     * a long prompt, one for a decode step -- so materialising all of it as
+     * floats is work and memory spent on the 99.7% that will not be looked at.
+     *
+     * Measured on Qwen2.5-Coder 7B, whose table is 3584 x 152064: held as
+     * q4_K it is 306 MB and as fp16 it is 1.09 GB, and the fp16 copy was
+     * built every load at a 2.18 GB transient (#300).
+     *
+     * A column is whole blocks, because every format jlib reads puts its
+     * blocks along the contiguous dimension -- so this is a lookup and not a
+     * partial-block problem.
+     *
+     * @throws backend_error if any id is outside the table
+     */
+    virtual void gather(const quantised_ptr& table, const std::vector<int>& ids,
+                        tensor_ptr& out) = 0;
+
+    /**
      * Rotary position embedding, in place.
      *
      * Rotates each column by an angle that grows with its position, in
@@ -495,6 +516,8 @@ public:
                             unsigned int kv_heads, unsigned int d_head);
     void gather(const tensor_ptr& table, const std::vector<int>& ids,
                 tensor_ptr& out);
+    void gather(const typename backend<T>::quantised_ptr& table,
+                const std::vector<int>& ids, tensor_ptr& out);
     void rope(tensor_ptr& x, unsigned int base_pos = 0, float theta = 10000.0f,
               rope_layout layout = rope_layout::interleaved,
               unsigned int d_head = 0);
@@ -976,6 +999,41 @@ void host_backend<T>::causal_mask(tensor_ptr& s, unsigned int key_offset,
     for(uint c = 0; c < x.N; c++)
         for(uint r = (c % per_head) + key_offset + 1; r < x.M; r++)
             x(r,c) = neg_inf;
+}
+
+template<typename T>
+void host_backend<T>::gather(const typename backend<T>::quantised_ptr& table,
+                             const std::vector<int>& ids, tensor_ptr& out)
+{
+    // The host backend unpacks a quantised weight at construction and keeps
+    // the matrix, so there is nothing to unpack here and nothing saved by not
+    // unpacking. It is the reference the device is checked against, and
+    // anything clever in it would be something to be wrong about twice.
+    host_quantised<T>* q = dynamic_cast<host_quantised<T>*>(table.get());
+
+    if(!q)
+        throw backend_error("gather: that quantised table belongs to another "
+                            "backend");
+
+    math::matrix<T>& o = at(out);
+
+    if(o.M != q->m.M || o.N != ids.size())
+        throw backend_error("gather: out must be the table's height by the "
+                            "number of ids");
+
+    for(std::size_t i = 0; i < ids.size(); i++) {
+        if(ids[i] < 0 || std::size_t(ids[i]) >= q->m.N) {
+            std::ostringstream e;
+
+            e << "gather: token id " << ids[i] << " is outside a table of "
+              << q->m.N;
+
+            throw backend_error(e.str());
+        }
+
+        for(uint r = 0; r < q->m.M; r++)
+            o(r, uint(i)) = q->m(r, uint(ids[i]));
+    }
 }
 
 template<typename T>

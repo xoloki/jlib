@@ -16,11 +16,16 @@ AM_CPPFLAGS = -I$(top_srcdir) -I$(top_builddir)
 # fail rather than quietly build nothing.
 if HAVE_PERF
 if HAVE_METAL
-noinst_PROGRAMS = jperf-bench jperf-quick jperf-ops jperf-bwmax jperf-counters
+noinst_PROGRAMS = jperf-bench jperf-quick jperf-ops jperf-bwmax jperf-counters \
+                  jperf-devmem
 
 jperf_bench_SOURCES  = bench.cc
 jperf_quick_SOURCES  = quick.cc
 jperf_ops_SOURCES    = ops.cc
+
+# Objective-C++ because it asks Metal directly, but it links jlib because
+# what it measures is what a jlib model costs.
+jperf_devmem_SOURCES = devmem.mm
 
 # The two that talk to Metal directly rather than through jlib, because what
 # they measure is the device rather than the library.
@@ -41,4 +46,4 @@ jperf_counters_LDADD = $(METAL_LIBS)
 endif
 endif
 
-EXTRA_DIST = bench.cc quick.cc ops.cc bwmax.mm counters.mm README.md
+EXTRA_DIST = bench.cc quick.cc ops.cc devmem.mm bwmax.mm counters.mm README.md

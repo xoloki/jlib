@@ -13,6 +13,26 @@ What a change to the compute path costs, measured. Built only with `--enable-per
 | `jperf-ops` | every backend kernel, alone, at the shapes one layer uses while decoding |
 | `jperf-bwmax` | what the device will actually move: scalar copy, vector copy, read-only |
 | `jperf-counters` | which counter sets the device exposes to a profiler |
+| `jperf-devmem` | what a model costs the **GPU**, loaded and after a prefill |
+
+## Peak RSS does not measure GPU memory
+
+`/usr/bin/time -l` reports maximum resident set, which counts host pages.
+Metal allocations are not host pages, so a model's weights, its KV cache and
+any scratch a kernel keeps are all invisible to it.
+
+This is not a subtlety that stays theoretical. Twice it produced a confident
+wrong answer:
+
+- #286 moved 1.4 GB of dequantisation scratch onto the device. Peak RSS
+  differed by **4.6 MB**, which read as "no memory cost" and was used to rule
+  out memory pressure. Memory pressure was the cause.
+- #196 took a model from 8.60 GB of device memory to 5.46 GB. Peak RSS went
+  **up** by 0.24 GB, because what it was measuring was the float transient
+  during load, identical in both.
+
+`jperf-devmem` asks Metal directly, through `currentAllocatedSize`. Use it for
+any claim about what a model costs, and do not quote RSS for one.
 
 ## Why these are in the tree
 

@@ -265,6 +265,14 @@ public:
               unsigned int d_head);
 
     /** Column gather: out[:,i] = table[:,ids[i]]. */
+    /**
+     * The same, from a table still quantised: gather the blocks, then unpack
+     * the handful that were asked for.  See ai/backend.hh on why a table does
+     * not need dequantising to be read.
+     */
+    void gather(const qweight& table, const std::vector<int>& ids,
+                tensor<T>& out);
+
     void gather(const tensor<T>& table, const std::vector<int>& ids,
                 tensor<T>& out);
 
