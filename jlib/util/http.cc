@@ -501,6 +501,32 @@ Request read_request_head(std::istream& is, std::size_t cap) {
     return parse_request_head(read_head(is, cap));
 }
 
+bool read_request_head_if_any(std::istream& is, Request& into,
+                              std::size_t cap)
+{
+    std::string head;
+
+    while(!head_complete(head)) {
+        const int c = is.get();
+
+        if(c == std::char_traits<char>::eof()) {
+            // Nothing arrived at all: the peer is done, and said so the way
+            // HTTP says it.  Anything else is a message cut in half.
+            if(head.empty()) return false;
+
+            throw error(ended_early(head));
+        }
+
+        head += static_cast<char>(c);
+
+        refuse_if_too_long(head, cap);
+    }
+
+    into = parse_request_head(head);
+
+    return true;
+}
+
 /** The same, suspending.  read_head() then the same parser, unchanged. */
 sys::task<Request> read_request_head(sys::async_reader& in, std::size_t cap) {
     co_return parse_request_head(co_await read_head(in, cap));

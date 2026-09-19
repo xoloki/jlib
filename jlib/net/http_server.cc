@@ -1057,6 +1057,7 @@ namespace {
         case 403: return "Forbidden";
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
+        case 408: return "Request Timeout";
         case 429: return "Too Many Requests";
         case 503: return "Service Unavailable";
         case 413: return "Content Too Large";
@@ -2451,7 +2452,28 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
                     &noted_bytes };
 
     try {
-        q = util::http::read_request_head(s, m_options.max_head);
+        // **A peer that says nothing has not sent a broken message.**
+        //
+        // A connection opened and closed without a byte on it is a browser's
+        // speculative preconnect, a health check, or a scanner knocking. It
+        // used to throw, which made it a 400 written down a socket that had
+        // already gone, plus a line in the *error* log for something that is
+        // not an error.
+        //
+        // Answered the way Apache answers it, which is 408 rather than 400:
+        // nothing malformed arrived, nothing arrived at all, and "the server
+        // did not receive a complete request message within the time that it
+        // was prepared to wait" is what RFC 9110 15.5.9 is for.
+        //
+        // The access-log line stays. Apache keeps it too, and it is the only
+        // record that somebody is knocking -- twenty-five of them in a day on
+        // this tree's own server, from two addresses, which is a fact worth
+        // being able to see.
+        if(!util::http::read_request_head_if_any(s, q, m_options.max_head)) {
+            noted_status = 408;
+
+            return;
+        }
 
         // RFC 9110 10.1.1.  curl sends this for any POST over about a kilobyte
         // and then waits for it; a server that ignores it makes every such
@@ -3141,6 +3163,12 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
 
         if(!co_await util::http::read_head_if_any(c.reader(),
                                                   m_options.max_head, head)) {
+            // Logged as 408, the same as the blocking path and the same as
+            // Apache. This used to fall out with noted_status still 0, which
+            // put `"-" 0 0` in the access log -- a line saying a request
+            // happened and that its status is a number HTTP does not have.
+            noted_status = 408;
+
             co_return false;
         }
 

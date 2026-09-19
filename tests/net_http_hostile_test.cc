@@ -331,6 +331,12 @@ static std::string complaint;
 /** The site the server decided the last request named.  See on_request(). */
 static std::string last_site;
 
+/** The status of the last thing the access log was told about. */
+static int last_status = 0;
+
+/** How many access records there have been. */
+static int noted = 0;
+
 /**
  * How many header fields one message may carry.
  *
@@ -722,6 +728,115 @@ static void furnish(http::server& s, const tree& t) {
               });
 }
 
+
+/**
+ * A peer that connects and says nothing.
+ *
+ * Browsers do this constantly -- a speculative preconnect, opened to have the
+ * socket warm and abandoned when the page turns out not to need it -- and so
+ * do health checks and anything scanning the address space.
+ *
+ * **It is not a bad request, because it is not a request.** It used to be
+ * read as a head that ended after zero octets, which threw, which meant a 400
+ * written down a socket that had already gone, an access record for a request
+ * nobody made, and a line in the *error* log for something that is not an
+ * error.
+ *
+ * Measured against Apache on the server this tree's own sites run on, because
+ * the right answer here is a convention rather than a deduction:
+ *
+ *   - Apache logs it, as `"-" 408`. Twenty-five in nineteen hours, from two
+ *     addresses, several times each. That is somebody knocking, and dropping
+ *     the record would make the server quietly blind to it.
+ *   - Apache's *error* log mentions those clients zero times. What is in there
+ *     is traversal attempts and access denials -- nineteen lines against nine
+ *     thousand access lines, all of them things an operator would act on.
+ *
+ * So: logged, 408 rather than 400, and nothing in the error log.
+ */
+static void a_peer_that_says_nothing(http::server& s) {
+    std::cout << "\na connection with no request on it:\n";
+
+    {
+        std::lock_guard<std::mutex> hold(said);
+
+        complaint.clear();
+        last_status = 0;
+        noted = 0;
+    }
+
+    // Connect and close, which is the whole of a preconnect.
+    {
+        sys::socketstream c("127.0.0.1", s.port(), 5);
+    }
+
+    for(int i = 0; i < 200; i++) {
+        {
+            std::lock_guard<std::mutex> hold(said);
+
+            if(noted > 0) break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    {
+        std::lock_guard<std::mutex> hold(said);
+
+        ok("  it is still written down", noted == 1, std::to_string(noted));
+
+        // 408, not 400: nothing malformed arrived, nothing arrived at all.
+        // RFC 9110 15.5.9 -- the server did not receive a complete request
+        // within the time it was prepared to wait.
+        ok("  as a timeout rather than a bad request", last_status == 408,
+           std::to_string(last_status));
+
+        // The half that made the error log useless: one line per preconnect
+        // buries the traversal attempt somebody should be reading.
+        ok("  and the operator is told nothing, because nothing went wrong",
+           complaint.empty(), complaint);
+    }
+
+    // **The line that must stay on the other side of it.**  A head cut short
+    // after some octets is a real truncated request: somebody sent something
+    // broken, and that is worth both the 400 and the diagnosis. Without this
+    // the section above passes on a server that had stopped noticing either.
+    {
+        std::lock_guard<std::mutex> hold(said);
+
+        complaint.clear();
+        last_status = 0;
+        noted = 0;
+    }
+
+    {
+        sys::socketstream c("127.0.0.1", s.port(), 5);
+
+        c << "GET /ok HTTP/1.1\r\nHost: x" << std::flush;
+    }
+
+    for(int i = 0; i < 200; i++) {
+        {
+            std::lock_guard<std::mutex> hold(said);
+
+            if(noted > 0) break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    {
+        std::lock_guard<std::mutex> hold(said);
+
+        ok("  a head cut off part way is still a bad request",
+           last_status == 400, std::to_string(last_status));
+        ok("  and the operator is still told why",
+           complaint.find("ended") != std::string::npos ||
+               complaint.find("octets") != std::string::npos,
+           complaint);
+    }
+}
+
 static void everything(http::server& s, const tree& t) {
     a_refusal_does_not_quote_the_client(s);
     a_control_character_in_the_target(s);
@@ -731,6 +846,7 @@ static void everything(http::server& s, const tree& t) {
     too_many_header_fields(s);
     what_site_a_request_names(s);
     which_site_answers(s, t);
+    a_peer_that_says_nothing(s);
 }
 
 int main() {
@@ -760,6 +876,8 @@ int main() {
                 std::lock_guard<std::mutex> hold(said);
 
                 last_site = a.host;
+                last_status = a.status;
+                noted++;
             });
 
             running go(s);
@@ -782,6 +900,8 @@ int main() {
                 std::lock_guard<std::mutex> hold(said);
 
                 last_site = a.host;
+                last_status = a.status;
+                noted++;
             });
 
             running go(s);

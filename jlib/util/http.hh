@@ -239,6 +239,32 @@ Request parse_request_head(std::string_view head);
 /** read_head() then parse_request_head(). */
 Request read_request_head(std::istream& is, std::size_t cap = 8192);
 
+/**
+ * The same, but **a peer that says nothing is not an error**.
+ *
+ * A connection that is opened and closed without a byte on it has not sent a
+ * broken message; it has not sent one at all. Browsers do this constantly --
+ * a speculative preconnect, opened to have the socket warm and abandoned when
+ * the page turns out not to need it -- and so do health checks and scanners.
+ *
+ * read_request_head() calls that "a head that ended after zero octets" and
+ * throws, which turns a routine non-event into a 400 written down a socket
+ * that is already gone, an access-log line for a request nobody made, and an
+ * error-log line for an error that did not happen.
+ *
+ * The distinction is exactly zero: a head cut short after *some* octets is a
+ * real truncated request and still throws, because somebody sent something
+ * broken and that is worth both the 400 and the log.
+ *
+ * The suspending path has had this since keep-alive (#217), where a reused
+ * connection made it unmissable. This is the same answer for the blocking
+ * one, which did not get it then and met it in production instead.
+ *
+ * @return false if the peer closed without sending anything; `into` untouched
+ */
+bool read_request_head_if_any(std::istream& is, Request& into,
+                              std::size_t cap = 8192);
+
 /** The same, suspending.  Additive; see read_head. */
 sys::task<Request> read_request_head(sys::async_reader& in,
                                      std::size_t cap = 8192);
