@@ -110,10 +110,19 @@ struct fake_tokenizer {
 
 /** A template that spells each turn as "role:content\n", so ids are countable. */
 struct fake_template {
+    /**
+     * @param tools counted as tokens, exactly as a real template's `# Tools`
+     *        block is -- a tool list that cost nothing here would let a test
+     *        pass while lay_out overshot the real context by hundreds.
+     */
     std::vector<int> encode(const std::vector<ai::message>& turns,
-                            const fake_tokenizer&) const
+                            const fake_tokenizer&,
+                            bool = true,
+                            const std::string& tools = std::string()) const
     {
         std::vector<int> ids;
+
+        for(char c : tools) ids.push_back(int(static_cast<unsigned char>(c)));
 
         for(const ai::message& m : turns) {
             if(g_script.refuses_system && m.role == "system")
@@ -579,9 +588,18 @@ static void the_refusals(jlib::net::http::server& s) {
         { "a request with no messages", R"({"model":"m"})", 400, "" },
         { "a model it does not have",
           R"({"model":"nope","messages":[{"role":"user","content":"hi"}]})", 404, "nope" },
-        { "a request asking for tools",
-          R"({"model":"m","tools":[{"type":"function"}],"messages":[{"role":"user","content":"hi"}]})",
-          400, "tool calling" },
+        // Not "a request asking for tools" any more -- that is implemented
+        // (#316).  What is still refused is asking to *force* a call, which
+        // nothing here can do: the model decides.
+        { "a request demanding a tool call",
+          R"({"model":"m","tools":[{"type":"function"}],"tool_choice":"required",)"
+          R"("messages":[{"role":"user","content":"hi"}]})",
+          400, "cannot force" },
+        { "or naming the function it must call",
+          R"({"model":"m","tools":[{"type":"function"}],)"
+          R"("tool_choice":{"type":"function","function":{"name":"f"}},)"
+          R"("messages":[{"role":"user","content":"hi"}]})",
+          400, "cannot force" },
     };
 
     for(const auto& c : cases) {
@@ -695,6 +713,168 @@ static void a_template_that_refuses_a_system_turn(jlib::net::http::server& s) {
 
     ok("  and no system role left in it",
        prompt.find("system:") == std::string::npos, prompt);
+}
+
+/**
+ * A tool call the model emitted comes back as one, streamed and not.
+ *
+ * #316. The model does not emit JSON -- it emits the markup its template asked
+ * for -- so what is being tested is that jserve reads it back out and reframes
+ * it, and that the streaming path gets the same answer when the marker is cut
+ * across chunk boundaries.
+ */
+static void a_tool_call_comes_back_as_one(jlib::net::http::server& s) {
+    std::cout << "\na tool call the model made:\n";
+
+    static const char* TOOLS =
+        R"([{"type":"function","function":{"name":"read_file",)"
+        R"("parameters":{"type":"object"}}}])";
+
+    static const std::string SAID =
+        "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.c\"}}"
+        "</tool_call>";
+
+    g_script = script();
+
+    for(char c : SAID) g_script.tokens.push_back(int(c));
+
+    const reply a = post(s,
+        std::string(R"({"model":"m","tools":)") + TOOLS +
+        R"(,"messages":[{"role":"user","content":"read a.c"}]})");
+
+    ok("answers 200 rather than refusing", a.status == 200,
+       std::to_string(a.status) + " " + a.body);
+
+    try {
+        json::object::ptr o = json::object::create(a.body);
+        json::object::ptr choice = o->arr("choices")->obj(0);
+
+        ok("  the finish reason says a call, not a stop",
+           std::string(choice->get("finish_reason")) == "tool_calls", a.body);
+
+        json::object::ptr m = choice->obj("message");
+
+        json::object::ptr fn = m->arr("tool_calls")->obj(0)->obj("function");
+
+        ok("  naming the function", std::string(fn->get("name")) == "read_file",
+           a.body);
+
+        // A **string** holding JSON, which is how the protocol nests it -- an
+        // object here is what a client expecting a string reads as nothing.
+        ok("  with its arguments as a JSON string",
+           std::string(fn->get("arguments")).find("a.c") != std::string::npos,
+           a.body);
+
+        ok("  and no markup left in the content",
+           std::string(m->get("content")).find("<tool_call>") ==
+               std::string::npos, a.body);
+    }
+    catch(std::exception& e) { ok("  it unwraps", false, e.what()); }
+
+    // **The tool list is part of the prompt.**  The fake template counts it as
+    // tokens, so a layout that ignored tools would show a shorter one here.
+    ok("  and the tools reached the prompt",
+       g_script.saw_prompt.size() > std::string(TOOLS).size());
+
+    // tool_choice "none" withholds the list: the model is never told it may
+    // call, which is the only sense in which "none" can be honoured.
+    g_script = script();
+
+    for(char c : std::string("plain")) g_script.tokens.push_back(int(c));
+
+    const reply n = post(s,
+        std::string(R"({"model":"m","tools":)") + TOOLS +
+        R"(,"tool_choice":"none","messages":[{"role":"user","content":"hi"}]})");
+
+    ok("  tool_choice none is answered, not refused", n.status == 200,
+       std::to_string(n.status));
+
+    ok("  and withholds the list from the prompt",
+       g_script.saw_prompt.size() < std::string(TOOLS).size());
+}
+
+/**
+ * The same call, streamed -- where the marker is cut at every byte.
+ *
+ * #316's awkward half, end to end. The fake tokenizer emits **one byte per
+ * token**, so `<tool_call>` arrives eleven pieces at a time and the splitter
+ * is exercised at its worst case without the test having to arrange it.
+ *
+ * What a broken splitter looks like here is specific: the marker leaks into
+ * the content deltas and no `tool_calls` appears, which is what the assertions
+ * below separate.
+ */
+static void a_streamed_tool_call(jlib::net::http::server& s) {
+    std::cout << "\na tool call that streams:\n";
+
+    static const char* TOOLS =
+        R"([{"type":"function","function":{"name":"read_file"}}])";
+
+    static const std::string SAID =
+        "Reading.<tool_call>{\"name\":\"read_file\","
+        "\"arguments\":{\"path\":\"a.c\"}}</tool_call>";
+
+    g_script = script();
+
+    for(char c : SAID) g_script.tokens.push_back(int(c));
+
+    const reply a = post(s,
+        std::string(R"({"model":"m","stream":true,"tools":)") + TOOLS +
+        R"(,"messages":[{"role":"user","content":"read a.c"}]})");
+
+    ok("answers 200", a.status == 200, std::to_string(a.status));
+
+    const std::vector<std::string> evs = events(a.body);
+
+    ok("  and ends with [DONE]", !evs.empty() && evs.back() == "[DONE]",
+       evs.empty() ? "no events" : evs.back());
+
+    int bad = 0;
+
+    const std::string text = streamed(evs, bad);
+
+    ok("  every event is JSON that parses", bad == 0,
+       std::to_string(bad) + " bad");
+
+    // The sentence before the call is content; the markup is not.  A splitter
+    // that held nothing back would put the whole marker here.
+    ok("  the content deltas are the prose and nothing else", text == "Reading.",
+       text);
+
+    // And the call itself arrives, once, with its name.
+    std::size_t calls = 0;
+    std::string named, why;
+
+    for(const std::string& e : evs) {
+        if(e == "[DONE]") continue;
+
+        try {
+            json::object::ptr o = json::object::create(e);
+            json::object::ptr c = o->arr("choices")->obj(0);
+
+            if(c->has("finish_reason"))
+                why = c->get("finish_reason").str_or(std::string());
+
+            json::object::ptr d = c->obj("delta");
+
+            if(!d->has("tool_calls")) continue;
+
+            json::array::ptr tc = d->arr("tool_calls");
+
+            for(int i = 0; i < tc->size(); i++) {
+                calls++;
+
+                named = std::string(tc->obj(i)->obj("function")->get("name"));
+            }
+        }
+        catch(std::exception&) {}
+    }
+
+    ok("  exactly one call is delivered", calls == 1, std::to_string(calls));
+
+    ok("  naming the function", named == "read_file", named);
+
+    ok("  and the last chunk says why it stopped", why == "tool_calls", why);
 }
 
 static void the_models_route(jlib::net::http::server& s) {
@@ -920,6 +1100,8 @@ int main() {
     std::thread t([&s]{ s.run(); });
 
     what_the_trimmer_gave_up();
+    a_tool_call_comes_back_as_one(s);
+    a_streamed_tool_call(s);
     the_models_route(s);
     a_busy_model_answers_rather_than_waits(s);
     a_client_that_hangs_up(s);

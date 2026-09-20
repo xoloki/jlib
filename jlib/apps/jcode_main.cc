@@ -361,9 +361,24 @@ int main(int argc, char** argv) {
     for(const std::string& g : parsed.guesses())
         std::cerr << "jcode: guessed: " << g << "\n";
 
+    // **Said rather than swallowed.**  jcode declares no tools, so a model
+    // asking to call one has gone somewhere it was not sent -- but a reply
+    // that is entirely a call would otherwise print "no files in that reply",
+    // which is what a model too weak to follow the format looks like. They
+    // are different problems and silence cannot tell them apart. #316.
+    for(const oa::call& c : parsed.calls)
+        std::cerr << "jcode: the model asked to call " << c.name
+                  << (c.arguments.empty() ? std::string()
+                                          : " with " + c.arguments)
+                  << ", which jcode cannot do yet\n";
+
     if(parsed.edits.empty() && parsed.refusals.empty()) {
         std::cerr << "jcode: no files in that reply\n";
 
+        // Not distinguished in the exit status: jcode documents none beyond
+        // 0 and 1, and inventing one here would be a contract nobody could
+        // find. When #310 gives jcode tools it can actually call, that
+        // question has a real case behind it.
         return 0;
     }
 

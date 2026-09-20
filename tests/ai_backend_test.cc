@@ -1394,6 +1394,15 @@ static const unsigned int Q8_ROW_COUNTS[] = { 8, 16384 };
  * The last block is deliberately partial: 1000 columns at a width of 128 is
  * seven whole blocks and one of 104, and an off-by-one in the tail would
  * survive a count that divided evenly.
+ *
+ * **The host assertions here cannot fail, and are not evidence.** `backends`
+ * carries host as well, and the host multiply does not read the budget --
+ * blocking is a Metal implementation detail -- so its three comparisons are of
+ * a result against itself. They are kept because every test in this file loops
+ * over the backends the same way, and a vacuous pass is not a false one; but a
+ * reader should not take them for coverage of host blocking, because there is
+ * no host blocking. The same reasoning is why #318 deleted this test's
+ * `#else`-branch call outright rather than guarding it.
  */
 // **The guard has to be here, not only on the call sites.**
 //

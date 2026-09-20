@@ -437,7 +437,9 @@ util_utf8_test_SOURCES  = util_utf8_test.cc
 # because jcode is an app, and this is the same arrangement jserve.hh has.
 app_jcode_test_SOURCES  = app_jcode_test.cc $(top_srcdir)/jlib/apps/jcode.cc
 app_jcode_test_CPPFLAGS = $(AM_CPPFLAGS)
-app_jcode_test_LDADD    = $(JUTIL_LA) $(JSYS_LA)
+# jcode::parse reads tool calls out of a reply now (#316), so it needs
+# ai::openai and therefore libjai.
+app_jcode_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 
 # jcode end to end: the program, against a scripted endpoint, with no model.
 app_jcode_run_test_SOURCES = app_jcode_run_test.cc
