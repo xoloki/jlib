@@ -24,7 +24,9 @@
 #                            path every couple of months
 #   auth_basic_user_file     re-read, so a user can be added or removed
 #   request_rate / _burst    applied live
-#   access_log / error_log   reopened, for rotation
+#   access_log / error_log   reopened, for rotation -- the *paths* and the
+#                            error log's level need a restart, which a reload
+#                            says rather than applying half of it
 #
 # Everything else -- listen, root, index, the server and location blocks, the
 # thread count, the user -- was consumed at startup and needs a restart. A
@@ -37,7 +39,25 @@
 
 threads     4;
 # async;               the coroutine server rather than thread-per-connection.
-error_log   -;         # "-" is stderr
+# The error log, and the level below which nothing is written.
+#
+#   error_log PATH [LEVEL];     "-" is stderr
+#
+# Levels are Apache's, most urgent first:
+#
+#   emerg alert crit error warn notice info debug
+#
+# `notice` is the default and is where the lifecycle lines live -- started,
+# reloaded, caught a signal -- which are what let a log be dated against a
+# deploy.  A misspelled level is refused at startup rather than assumed,
+# because a log that is quieter than you asked for reads like a quiet day.
+#
+# **`info` is where the noise is.**  Measured on six live sites: 540 error
+# lines in a day, of which 351 were failed TLS handshakes from scanners and
+# 151 were peers that connected and went away.  None of it is actionable, so
+# none of it is an error -- but `error_log ... info;` brings it all back for
+# the afternoon you are debugging a client that cannot connect.
+error_log   -;
 
 # --- the server --------------------------------------------------------
 
@@ -77,6 +97,18 @@ http {
     index       index.html index.htm;
     prefix      /;
     access_log  -;
+
+    # combined (the default) or vhost_combined, both spelled as Apache spells
+    # them so that existing log tools already read either:
+    #
+    #   combined        %h %l %u %t "%r" %>s %O "%{Referer}i" "%{User-Agent}i"
+    #   vhost_combined  %v:%p  prefixed onto that
+    #
+    # Worth turning on once one process serves both 80 and 443: combined
+    # cannot say which listener answered, and "is anything still using http?"
+    # is the question you ask before turning http off.  The port comes from
+    # the listener rather than from Host, so a client cannot lie about it.
+    # log_format  vhost_combined;
 
     # Sent with every 200, 206 and 304.  Quoted because it has a comma and a
     # space in it, which is the whole reason quoting exists here.

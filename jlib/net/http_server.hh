@@ -1272,6 +1272,16 @@ public:
         /** Numeric, from the accepting side.  Never a name. */
         std::string peer;
 
+        /**
+         * The peer's ephemeral port.
+         *
+         * Not in the Combined format and never logged by it. It is here
+         * because an *error* line identifies a client as `ip:port`, the way
+         * Apache's does, and a refusal has to name the connection it refused
+         * rather than merely the address it came from.
+         */
+        unsigned short peer_port = 0;
+
         /** Who `protect()` let through, or empty.  Combined's third field. */
         std::string user;
 
@@ -1303,6 +1313,35 @@ public:
 
         /** Body octets, not counting the head or chunk framing. */
         std::size_t bytes = 0;
+
+        /**
+         * Which listener answered, and whether it speaks TLS.
+         *
+         * Apache had no need of these because each `<VirtualHost *:80>` wrote
+         * its own log. One process serving both ports is what created the
+         * question, and `host` alone cannot answer it -- the same name is
+         * served on both.
+         *
+         * Apache spells the pair `%p` and puts it, with `%v`, in the
+         * `vhost_combined` format rather than in Combined.
+         */
+        unsigned short local_port = 0;
+        bool           secure = false;
+
+        /**
+         * Why this request was refused, or empty if it was not.
+         *
+         * **Set only for a refusal the server diagnosed**, not for an ordinary
+         * 404: a missing file is the normal traffic of the web and logging it
+         * as an error is how an error log becomes unreadable. A target that
+         * could not be parsed, a host that could not be resolved to a site, a
+         * guard that said no -- those are the lines Apache writes and this
+         * server did not.
+         *
+         * Client-supplied, like every other string here: it quotes the value
+         * that caused the refusal, which is a value the client chose.
+         */
+        std::string reason;
     };
 
     /**
@@ -1440,7 +1479,7 @@ private:
     /** Build and deliver one access record, if anybody asked for them. */
     void note(const util::http::Request& q, const sys::peer& from,
               const std::string& user, const std::string& host, int status,
-              std::size_t bytes) const;
+              std::size_t bytes, const std::string& reason) const;
 
     /**
      * Decide the 429, if there is one.

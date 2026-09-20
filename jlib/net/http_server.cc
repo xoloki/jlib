@@ -1487,13 +1487,14 @@ void server::on_request(std::function<void(const access&)> h) {
 
 void server::note(const util::http::Request& q, const sys::peer& from,
                   const std::string& user, const std::string& host, int status,
-                  std::size_t bytes) const
+                  std::size_t bytes, const std::string& reason) const
 {
     if(!m_on_request) return;
 
     access a;
 
     a.peer = from.address;
+    a.peer_port = from.port;
     a.user = user;
     a.host = host;
     a.method = q.method();
@@ -1503,6 +1504,14 @@ void server::note(const util::http::Request& q, const sys::peer& from,
     a.user_agent = q.fields().get("User-Agent");
     a.status = status;
     a.bytes = bytes;
+
+    // From the peer, which sys::server filled after accept(): the only channel
+    // that reaches both kinds of handler, and therefore the only place these
+    // could have come from.
+    a.local_port = from.local_port;
+    a.secure = from.secure;
+
+    a.reason = reason;
 
     // Raw and undecoded.  See on_request(): escaping here would make the
     // record fit for a log and nothing else, and the server does not know
@@ -2455,6 +2464,7 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
     std::size_t noted_bytes = 0;
     std::string noted_user;
     std::string noted_site;
+    std::string noted_reason;
 
     // Noted however this returns, **including by throwing** -- a 500 is the
     // line an operator most wants and the one an early return is most likely
@@ -2467,10 +2477,13 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
         const std::string* host;
         const int*         status;
         const std::size_t* bytes;
+        const std::string* reason;
 
-        ~noting() { self->note(*q, *from, *user, *host, *status, *bytes); }
+        ~noting() {
+            self->note(*q, *from, *user, *host, *status, *bytes, *reason);
+        }
     } note_on_exit{ this, &q, &from, &noted_user, &noted_site, &noted_status,
-                    &noted_bytes };
+                    &noted_bytes, &noted_reason };
 
     try {
         // **A peer that says nothing has not sent a broken message.**
@@ -2531,6 +2544,12 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
     if(!path_of(q.target(), path, why)) {
         r.status(400).type("text/plain").body(why);
 
+        // **Told to the operator as well as the client** (#312). The client
+        // is the one that sent it and learns nothing; the operator is the one
+        // who wants to know a traversal was tried, and until now the only
+        // record was a 400 in the access log with no cause beside it.
+        noted_reason = why;
+
         noted_status = r.status();
         noted_bytes = r.body().size();
 
@@ -2543,6 +2562,8 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
     // whose *target* cannot be read, and one whose *site* cannot be.
     if(!authority_of(q, noted_site, why)) {
         r.status(400).type("text/plain").body(why);
+
+        noted_reason = why;
 
         noted_status = r.status();
         noted_bytes = r.body().size();
@@ -3080,6 +3101,7 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     std::size_t noted_bytes = 0;
     std::string noted_user;
     std::string noted_site;
+    std::string noted_reason;
 
     async_responder out(c.writer(), m_options.server_name, c.reactor(),
                         c.pool(), &c);
@@ -3129,15 +3151,16 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
         const int*            status;
         const std::size_t*    bytes;
         const async_responder* out;
+        const std::string*    reason;
 
         ~noting() {
             const int st = out->status() != 0 ? out->status() : *status;
             const std::size_t n = out->status() != 0 ? out->wrote() : *bytes;
 
-            self->note(*q, *from, *user, *host, st, n);
+            self->note(*q, *from, *user, *host, st, n, *reason);
         }
     } note_on_exit{ this, &q, &from, &noted_user, &noted_site, &noted_status,
-                    &noted_bytes, &out };
+                    &noted_bytes, &out, &noted_reason };
 
     // **co_await cannot appear in a catch handler.**  That is a language rule,
     // not a limitation of anything here, and it shapes every error path below:
@@ -3269,6 +3292,9 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
 
         r.status(400).type("text/plain").body(bad);
 
+        // See the blocking half: #312, and the same reason.
+        noted_reason = bad;
+
         co_await out.send(r);
 
         co_return false;
@@ -3279,6 +3305,8 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
         response r;
 
         r.status(400).type("text/plain").body(bad);
+
+        noted_reason = bad;
 
         co_await out.send(r);
 

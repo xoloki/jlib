@@ -27,11 +27,15 @@
 #include <jlib/sys/sys.hh>
 #include <jlib/util/conf.hh>
 
+#include <functional>
+#include <thread>
+
 #ifdef HAVE_PWHASH
 #include <sodium.h>
 #endif
 
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <fcntl.h>
 #include <grp.h>
@@ -380,11 +384,27 @@ inline std::string escaped(const std::string& field) {
     return out;
 }
 
+/**
+ * Month and day names in the C locale, shared by both log formats.
+ *
+ * Spelled out rather than taken from `strftime`, because `%b` and `%a` follow
+ * the locale: a server started under a different `LANG` would write a log
+ * whose dates no existing parser reads, and the failure would be invisible
+ * until something tried to read it.
+ */
+inline constexpr const char* const MONTH_NAME[] = {
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+};
+
+inline constexpr const char* const DAY_NAME[] = {
+    "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
+};
+
 /** Combined's date: 17/Sep/2026:12:00:00 +0000, and always UTC. */
 inline std::string log_date(std::time_t when) {
-    static const char* const MONTH[] = { "Jan", "Feb", "Mar", "Apr", "May",
-                                         "Jun", "Jul", "Aug", "Sep", "Oct",
-                                         "Nov", "Dec" };
+    const char* const* MONTH = MONTH_NAME;
+
     std::tm tm;
 
     // UTC rather than local time.  A log that changes meaning twice a year is
@@ -401,8 +421,31 @@ inline std::string log_date(std::time_t when) {
     return buf;
 }
 
+/**
+ * Which access-log format to write.
+ *
+ * Both are Apache's, spelled exactly as Apache spells them, because the point
+ * of either is that existing tools already read it:
+ *
+ *     combined        %h %l %u %t "%r" %>s %O "%{Referer}i" "%{User-Agent}i"
+ *     vhost_combined  %v:%p %h %l %u %t "%r" %>s %O "%{Referer}i" ...
+ *
+ * `combined` stays the default. Changing the shape of a log that is already
+ * being parsed is a change to somebody's tooling, and #315 is a question an
+ * operator asks occasionally -- not one worth breaking every reader for.
+ */
+enum class log_shape { combined, vhost_combined };
+
+inline bool log_shape_named(const std::string& name, log_shape& out) {
+    if(name == "combined")       { out = log_shape::combined; return true; }
+    if(name == "vhost_combined") { out = log_shape::vhost_combined; return true; }
+
+    return false;
+}
+
 inline std::string combined(const jlib::net::http::server::access& a,
-                     std::time_t when)
+                     std::time_t when,
+                     log_shape shape = log_shape::combined)
 {
     std::ostringstream o;
 
@@ -426,6 +469,17 @@ inline std::string combined(const jlib::net::http::server::access& a,
         if(!a.version.empty()) request += " " + escaped(a.version);
     }
 
+    // **`%v:%p`**, and the port from the listener rather than the Host header.
+    //
+    // A client may put a port in Host, or the wrong one, or none; the listener
+    // knows which socket accepted the connection and cannot be lied to. That
+    // is the whole value of the field -- "is anything still using http?" is
+    // only answerable if the answer does not come from the client.
+    if(shape == log_shape::vhost_combined) {
+        o << (a.host.empty() ? "-" : escaped(a.host))
+          << ":" << a.local_port << " ";
+    }
+
     o << (a.peer.empty() ? "-" : a.peer)
       << " - "                       // identd, which nothing has run since 1995
       << user
@@ -437,6 +491,275 @@ inline std::string combined(const jlib::net::http::server::access& a,
       << " \"" << agent << "\"";
 
     return o.str();
+}
+
+/**
+ * Apache's error-log levels, with Apache's names and in Apache's order.
+ *
+ * **Most urgent first**, so "write everything at or above `notice`" is a `<=`
+ * on the enum. Both `LogLevel` and nginx's `error_log` level argument work
+ * that way round, and a comparison written the other way silently logs either
+ * nothing or all of it -- neither of which announces itself.
+ */
+enum class level { emerg, alert, crit, error, warn, notice, info, debug };
+
+inline const char* level_name(level l) {
+    switch(l) {
+        case level::emerg:  return "emerg";
+        case level::alert:  return "alert";
+        case level::crit:   return "crit";
+        case level::error:  return "error";
+        case level::warn:   return "warn";
+        case level::notice: return "notice";
+        case level::info:   return "info";
+        case level::debug:  return "debug";
+    }
+
+    return "error";
+}
+
+/**
+ * The level of that name, or false.
+ *
+ * False rather than a default, so `error_log /var/log/jhttpd/error.log notic;`
+ * is refused at startup instead of quietly meaning something else. A typo in a
+ * level is not detectable later: the log simply has less in it than expected,
+ * which reads like a quiet day.
+ */
+inline bool level_named(const std::string& name, level& out) {
+    static const struct { const char* name; level l; } KNOWN[] = {
+        { "emerg",  level::emerg  }, { "alert", level::alert },
+        { "crit",   level::crit   }, { "error", level::error },
+        { "warn",   level::warn   }, { "notice", level::notice },
+        { "info",   level::info   }, { "debug", level::debug  }
+    };
+
+    for(std::size_t i = 0; i < sizeof KNOWN / sizeof KNOWN[0]; i++) {
+        if(name == KNOWN[i].name) {
+            out = KNOWN[i].l;
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * The error log's date: `Sat Sep 20 16:03:22.487000 2026`.
+ *
+ * Apache's `ErrorLogFormat` default, down to the microseconds, because the
+ * point of matching it is that existing tooling reads it.
+ *
+ * **UTC, for the same reason the access log is** -- a log that changes meaning
+ * twice a year cannot have its timestamps compared across the change, and the
+ * hour that repeats in autumn is the one an incident lands in. Apache writes
+ * local time here and no zone at all, which is a real weakness of the format;
+ * a server whose clock is UTC, as a server's should be, is indistinguishable.
+ */
+inline std::string error_date(std::time_t sec, long usec) {
+    std::tm tm;
+
+    ::gmtime_r(&sec, &tm);
+
+    char buf[64];
+
+    std::snprintf(buf, sizeof buf, "%s %s %02d %02d:%02d:%02d.%06ld %04d",
+                  DAY_NAME[tm.tm_wday], MONTH_NAME[tm.tm_mon], tm.tm_mday,
+                  tm.tm_hour, tm.tm_min, tm.tm_sec, usec, tm.tm_year + 1900);
+
+    return buf;
+}
+
+/** Now, to the microsecond, for an error line. */
+inline void error_now(std::time_t& sec, long& usec) {
+    struct timeval tv;
+
+    ::gettimeofday(&tv, 0);
+
+    sec = tv.tv_sec;
+    usec = tv.tv_usec;
+}
+
+/**
+ * One error line, in the shape Apache's default `ErrorLogFormat` produces:
+ *
+ *     [Sat Sep 20 16:03:22.487000 2026] [http:error] [pid 619:tid 4310] \
+ *         [client 45.43.62.37:51834] an encoded path separator in the target
+ *
+ * `module` is this server's equivalent of Apache's -- `core` for lifecycle,
+ * `http` for a request, `ssl` for a handshake. It is not a module system; it
+ * is the field an operator greps, and having it empty would waste the shape.
+ *
+ * **No `AH#####` code.** Apache's exist for a message registry, and minting
+ * our own would commit us to numbering every message forever for greppability
+ * that stable message text already gives.
+ *
+ * The client field is omitted entirely when there is no client, which is what
+ * Apache does for its lifecycle notices -- an empty `[client ]` would be a
+ * field every parser has to special-case.
+ */
+inline std::string error_line(level l, const char* module,
+                              const std::string& client,
+                              const std::string& message,
+                              std::time_t sec, long usec)
+{
+    std::ostringstream o;
+
+    o << "[" << error_date(sec, usec) << "] "
+      << "[" << module << ":" << level_name(l) << "] "
+      << "[pid " << static_cast<long>(::getpid())
+      << ":tid " << static_cast<unsigned long>(
+             std::hash<std::thread::id>()(std::this_thread::get_id()))
+      << "]";
+
+    if(!client.empty()) o << " [client " << client << "]";
+
+    // Escaped for the same reason the access log is: an error message quotes
+    // the value that caused it, and that value is one the client chose. A log
+    // an attacker can write a newline into is worse than no log.
+    o << " " << escaped(message);
+
+    return o.str();
+}
+
+/**
+ * The error log: a file, a level, and Apache's line shape.
+ *
+ * The level is the whole point of this type. #322 measured 540 error lines in
+ * a day on six sites, of which **none was something an operator could act
+ * on** -- failed handshakes from scanners, peers that connected and went away.
+ * A log that is 98% noise is one nobody reads, which costs more than the noise
+ * does: the four lines that mattered were in there too.
+ *
+ * So nothing is deleted; it is levelled. Handshake failures and peers that say
+ * nothing are `info`, below the `notice` default, and `error_log <path> info;`
+ * brings them back for the afternoon somebody is debugging a client.
+ */
+class error_log {
+public:
+    /**
+     * `-` means stderr, which is what a foreground run wants -- and what the
+     * systemd unit relies on to put lines in the journal.
+     */
+    bool open(const std::string& path, level at) {
+        m_at = at;
+        m_stderr = path == "-";
+
+        if(m_stderr) return true;
+
+        return m_file.open(path);
+    }
+
+    /**
+     * Whether a line at this level would be written.
+     *
+     * Exposed so a caller can skip *building* a message it is about to throw
+     * away. The noisy paths are the ones that would pay for it.
+     */
+    bool says(level l) const { return l <= m_at; }
+
+    void write(level l, const char* module, const std::string& client,
+               const std::string& message)
+    {
+        if(!says(l)) return;
+
+        std::time_t sec = 0;
+        long        usec = 0;
+
+        error_now(sec, usec);
+
+        const std::string line = error_line(l, module, client, message,
+                                            sec, usec);
+
+        if(m_stderr) std::cerr << line << "\n";
+        else         m_file.write(line);
+    }
+
+    void drain() { if(!m_stderr) m_file.drain(); }
+
+    void close() { if(!m_stderr) m_file.close(); }
+
+private:
+    logfile m_file;
+    bool    m_stderr = true;
+    level   m_at = level::notice;
+};
+
+/**
+ * A refusal's text as one line.
+ *
+ * The same string is a response body, where it ends in a newline because a
+ * body should, and a log message, where a newline would end the line early --
+ * or be escaped into a visible `\n` that reads like a mistake.
+ */
+inline std::string one_line(const std::string& s) {
+    std::string out = s;
+
+    while(!out.empty() && (out[out.size() - 1] == '\n' ||
+                           out[out.size() - 1] == '\r' ||
+                           out[out.size() - 1] == ' '))
+        out.erase(out.size() - 1);
+
+    return out;
+}
+
+/** Apache's `[client 1.2.3.4:51834]`, or empty when there is no peer. */
+inline std::string client_of(const jlib::sys::peer& p) {
+    if(p.address.empty()) return "";
+
+    return p.address + ":" + std::to_string(p.port);
+}
+
+/** Which subsystem a failure belongs to, and how much it matters. */
+struct sorted_error {
+    const char* module;
+    level       at;
+};
+
+/**
+ * Sort an exception into a module and a level.
+ *
+ * **The levels here are the whole of #322.** Measured over a day on six live
+ * sites, 540 error lines: 351 failed handshakes, 151 peers that connected and
+ * said nothing or stopped mid-head, and a handful that meant something. At
+ * `error` the log was unreadable and therefore unread.
+ *
+ * Nothing is dropped. A failed handshake is still a fact, and
+ * `error_log <path> info;` still writes it. It is simply not an *error*: the
+ * peer offered ciphers we do not have, spoke a protocol we do not, or went
+ * away -- none of which is a thing an operator does anything about, and all of
+ * which Apache leaves below its default level too.
+ *
+ * Matched on message text rather than exception type because the type does not
+ * carry the distinction: a handshake failure and a malformed request line are
+ * both thrown as the same class, and the difference that matters -- whose
+ * fault it is -- lives only in the message.
+ */
+inline sorted_error sort_error(const std::exception& e) {
+    const std::string what = e.what();
+
+    // The peer's problem, in every case: what it offered, what it spoke, or
+    // that it left. 351 of the 540.
+    if(what.find("SSL_accept failed") != std::string::npos)
+        return { "ssl", level::info };
+
+    // Connected and said nothing, or stopped part-way through. Already
+    // answered with a 408 in the access log, which is where Apache puts it and
+    // where it can be counted.
+    if(what.find("closed before the message head ended") != std::string::npos ||
+       what.find("octets short of the body it promised") != std::string::npos)
+        return { "http", level::info };
+
+    // A request we could read enough of to refuse: a bad request line, a
+    // header section that made no sense. This *is* evidence -- it is what
+    // Apache logs as AH00126 at error -- so it stays at error.
+    if(dynamic_cast<const jlib::util::http::error*>(&e))
+        return { "http", level::error };
+
+    // Anything else is ours until proven otherwise, and a server's own failure
+    // is the one thing that must never be filtered out by a level.
+    return { "core", level::error };
 }
 
 inline std::string hash_password(const std::string& password) {
@@ -643,6 +966,18 @@ struct options {
     std::string    prefix = "/";
     std::string    access_log = "-";
     std::string    error_log = "-";
+
+    /**
+     * The level at or above which an error line is written.
+     *
+     * `notice` rather than `error`, because the lifecycle lines this default
+     * exists to keep -- started, reloaded, shutting down -- are notices, and
+     * they are the ones that let a log be dated against a deploy.
+     */
+    level          error_level = level::notice;
+
+    /** Combined, unless the config asks for vhost_combined.  See #315. */
+    log_shape      log_format = log_shape::combined;
     std::string    cache_control;
 
     /**
@@ -966,6 +1301,14 @@ inline void apply_http(const jlib::util::conf::directive& d, options& o) {
         else if(e.name == "root") { plain(e, 1, 1); o.root = e.arg(0); }
         else if(e.name == "prefix") { plain(e, 1, 1); o.prefix = e.arg(0); }
         else if(e.name == "access_log") { plain(e, 1, 1); o.access_log = e.arg(0); }
+        else if(e.name == "log_format") {
+            plain(e, 1, 1);
+
+            if(!log_shape_named(e.arg(0), o.log_format))
+                throw jlib::util::conf::error(
+                    "\"" + e.arg(0) + "\" is not a log format; "
+                    "combined or vhost_combined", e.line);
+        }
         else if(e.name == "cache_control") { plain(e, 1, 1); o.cache_control = e.arg(0); }
         else if(e.name == "index") {
             // Zero arguments is legal and means "no index", which is the only
@@ -1081,6 +1424,8 @@ inline std::vector<std::string> needs_a_restart(const options& was,
     // under the same path, which SIGHUP already handles by reopening it.
     if(was.access_log != now.access_log)       changed.push_back("access_log");
     if(was.error_log != now.error_log)         changed.push_back("error_log");
+    if(was.error_level != now.error_level)     changed.push_back("error_log level");
+    if(was.log_format != now.log_format)       changed.push_back("log_format");
 
     if(was.threads != now.threads)             changed.push_back("threads");
     if(was.async != now.async)                 changed.push_back("async");
@@ -1179,7 +1524,16 @@ inline void read_config(const std::string& path, options& o) {
         else if(d.name == "allow_root") { plain(d, 0, 1); o.allow_root = as_flag(d); }
         else if(d.name == "pid") { plain(d, 1, 1); o.pidfile = d.arg(0); }
         else if(d.name == "threads") { plain(d, 1, 1); o.threads = unsigned(as_count(d, 0)); }
-        else if(d.name == "error_log") { plain(d, 1, 1); o.error_log = d.arg(0); }
+        else if(d.name == "error_log") {
+            // Two arguments, nginx's shape: a path and an optional level.
+            plain(d, 1, 2);
+
+            o.error_log = d.arg(0);
+
+            if(d.args.size() == 2 && !level_named(d.arg(1), o.error_level))
+                throw jlib::util::conf::error(
+                    "\"" + d.arg(1) + "\" is not a log level", d.line);
+        }
         else throw jlib::util::conf::error("\"" + d.name + "\" is not a directive here", d.line);
     }
 }

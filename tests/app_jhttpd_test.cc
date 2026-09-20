@@ -705,13 +705,14 @@ static void what_a_config_sets() {
         "daemon;\n"
         "pid /var/run/jhttpd.pid;\n"
         "user www-data www-group;\n"
-        "error_log /var/log/err.log;\n"
+        "error_log /var/log/err.log info;\n"
         "\n"
         "http {\n"
         "    listen 127.0.0.1:9443;\n"
         "    root /srv/www;\n"
         "    prefix /pub;\n"
         "    access_log /var/log/acc.log;\n"
+        "    log_format vhost_combined;\n"
         "    cache_control \"public, max-age=60\";\n"
         "    ssl_certificate /etc/c.pem;\n"
         "    ssl_certificate_key /etc/k.pem;\n"
@@ -728,6 +729,12 @@ static void what_a_config_sets() {
     ok("  it is accepted", why.empty(), why);
 
     ok("  threads", o.threads == 7, std::to_string(o.threads));
+
+    ok("  the error log's level, which is what makes #322 tractable",
+       o.error_level == jhttpd::level::info);
+
+    ok("  and the access log's format",
+       o.log_format == jhttpd::log_shape::vhost_combined);
     ok("  daemon", o.daemon);
     ok("  pid", o.pidfile == "/var/run/jhttpd.pid", o.pidfile);
     ok("  user and group", o.user == "www-data" && o.group == "www-group",
@@ -982,6 +989,12 @@ static void what_a_config_refuses() {
           "a port that is not one" },
         { "http { listen 8080 quic; }", "does not know",
           "a listen option nobody implements" },
+        // A level that is nearly right is the dangerous kind: the server
+        // starts, and the log is quieter than the operator asked for.
+        { "error_log /var/log/err.log notic;\nhttp { listen 80; root /srv; }",
+          "is not a log level", "a misspelled log level" },
+        { "http { listen 80; root /srv; log_format cmbined; }",
+          "is not a log format", "and a misspelled log format" },
         { "http { listen 443 ssl; }", "needs ssl_certificate",
           "an ssl listener with nothing to present" },
         { "http { listen 80 redirect; }", "needs a \"listen ... ssl\"",
@@ -1332,11 +1345,180 @@ static void what_test_walks() {
        std::to_string(jhttpd::every_root(same).size()));
 }
 
+/**
+ * The error log: Apache's shape, and the levels that make it readable.
+ *
+ * #312, #314, #315 and #322 are one change because they are one mechanism --
+ * a line with a level on it. Measured on six live sites, the error log was
+ * 540 lines a day of which none was actionable; the four that mattered over
+ * nineteen hours were in Apache's log and not in ours.
+ */
+static void the_error_line() {
+    std::cout << "\nthe error line:\n";
+
+    ok("  Apache's date, to the microsecond",
+       jhttpd::error_date(WHEN, 487000) == "Thu Sep 17 00:00:00.487000 2026",
+       jhttpd::error_date(WHEN, 487000));
+
+    {
+        const std::string l =
+            jhttpd::error_line(jhttpd::level::error, "http", "203.0.113.7:51834",
+                               "an encoded path separator", WHEN, 487000);
+
+        ok("  opens with the bracketed date every parser keys on",
+           l.find("[Thu Sep 17 00:00:00.487000 2026]") == 0, l);
+
+        ok("  carries module and level, as [http:error]",
+           l.find("[http:error]") != std::string::npos, l);
+
+        ok("  names the client as ip:port, the way Apache does",
+           l.find("[client 203.0.113.7:51834]") != std::string::npos, l);
+
+        ok("  and ends with the message",
+           l.size() > 25 &&
+           l.compare(l.size() - 25, 25, "an encoded path separator") == 0, l);
+    }
+
+    {
+        // A lifecycle notice has no client, and Apache omits the field rather
+        // than writing an empty one -- a `[client ]` would be a field every
+        // reader has to special-case.
+        const std::string l =
+            jhttpd::error_line(jhttpd::level::notice, "core", "",
+                               "jhttpd/2.0.0 configured", WHEN, 0);
+
+        ok("  a line with no client has no client field at all",
+           l.find("[client") == std::string::npos, l);
+    }
+
+    {
+        // Log forging: the message quotes a value the client chose, and a
+        // newline in it would end the line and start one an attacker wrote.
+        const std::string l =
+            jhttpd::error_line(jhttpd::level::error, "http", "203.0.113.7:1",
+                               "not a request line: \"GET /\n[forged] evil\"",
+                               WHEN, 0);
+
+        ok("  a newline in the message cannot start a line of its own",
+           l.find('\n') == std::string::npos, l);
+    }
+
+    std::cout << "\nwhat a level means:\n";
+
+    {
+        jhttpd::level l = jhttpd::level::debug;
+
+        ok("  a name that exists is taken", jhttpd::level_named("info", l));
+        ok("  and is the level it names", l == jhttpd::level::info);
+
+        // Refused rather than defaulted: a typo in a level is undetectable
+        // later, because the log simply has less in it than expected -- which
+        // reads exactly like a quiet day.
+        ok("  a name that does not is refused",
+           !jhttpd::level_named("notic", l));
+    }
+
+    std::cout << "\nwhat is worth an error line:\n";
+
+    {
+        // 351 of the 540 daily lines. The peer offered ciphers we do not have
+        // or spoke a protocol we do not: nothing an operator acts on.
+        // A plain exception carrying the real message, because the sort is
+        // by text and not by type: a handshake failure and a malformed
+        // request line are thrown as the same class, and the difference that
+        // matters -- whose fault it is -- lives only in the message.
+        const std::runtime_error ssl(
+            "socket exception: SSL_accept failed: no shared cipher");
+        const jhttpd::sorted_error s = jhttpd::sort_error(ssl);
+
+        ok("  a failed handshake is ssl, and only info",
+           std::string(s.module) == "ssl" && s.at == jhttpd::level::info,
+           std::string(s.module) + ":" + jhttpd::level_name(s.at));
+    }
+
+    {
+        const jlib::util::http::error gone(
+            "the connection closed before the message head ended, after 23 octets");
+        const jhttpd::sorted_error s = jhttpd::sort_error(gone);
+
+        ok("  a peer that stopped mid-head is http, and only info",
+           std::string(s.module) == "http" && s.at == jhttpd::level::info,
+           std::string(s.module) + ":" + jhttpd::level_name(s.at));
+    }
+
+    {
+        // This one *is* evidence: it is what Apache logs as AH00126.
+        const jlib::util::http::error bad("not a request line: \"GARBAGE\"");
+        const jhttpd::sorted_error s = jhttpd::sort_error(bad);
+
+        ok("  a request we could read enough of to refuse stays at error",
+           std::string(s.module) == "http" && s.at == jhttpd::level::error,
+           std::string(s.module) + ":" + jhttpd::level_name(s.at));
+    }
+
+    {
+        // A server's own failure is the one thing a level must never hide.
+        const std::runtime_error ours("cannot read /etc/ssl/private/key.pem");
+        const jhttpd::sorted_error s = jhttpd::sort_error(ours);
+
+        ok("  and anything unrecognised is ours, at error",
+           std::string(s.module) == "core" && s.at == jhttpd::level::error,
+           std::string(s.module) + ":" + jhttpd::level_name(s.at));
+    }
+
+    ok("  a reason loses the newline its response body needed",
+       jhttpd::one_line("an encoded path separator\n") ==
+           "an encoded path separator");
+
+    std::cout << "\nwhich listener answered:\n";
+
+    {
+        // #315: one process serves both ports now, and the access log could
+        // not say which. Apache never had the problem because each
+        // <VirtualHost *:80> wrote its own file.
+        http::server::access a;
+
+        a.peer = "203.0.113.7";
+        a.host = "draconism.org";
+        a.local_port = 443;
+        a.secure = true;
+        a.method = "GET";
+        a.target = "/";
+        a.version = "HTTP/1.1";
+        a.status = 200;
+        a.bytes = 12;
+
+        ok("  vhost_combined leads with %v:%p",
+           jhttpd::combined(a, WHEN, jhttpd::log_shape::vhost_combined) ==
+               "draconism.org:443 203.0.113.7 - - "
+               "[17/Sep/2026:00:00:00 +0000] \"GET / HTTP/1.1\" 200 12 "
+               "\"-\" \"-\"",
+           jhttpd::combined(a, WHEN, jhttpd::log_shape::vhost_combined));
+
+        ok("  and combined is untouched, so existing parsers keep working",
+           jhttpd::combined(a, WHEN) ==
+               "203.0.113.7 - - [17/Sep/2026:00:00:00 +0000] "
+               "\"GET / HTTP/1.1\" 200 12 \"-\" \"-\"",
+           jhttpd::combined(a, WHEN));
+
+        // HTTP/1.0 with no Host is the one case the RFC still allows, and the
+        // port is known regardless -- it came from the listener, not the
+        // client, which is the whole reason the field can be trusted.
+        a.host.clear();
+
+        ok("  a request with no Host still names the port it arrived on",
+           jhttpd::combined(a, WHEN, jhttpd::log_shape::vhost_combined)
+               .compare(0, 6, "-:443 ") == 0,
+           jhttpd::combined(a, WHEN, jhttpd::log_shape::vhost_combined));
+    }
+}
+
 int main() {
     std::cout << "app_jhttpd_test\n";
 
     try {
         the_line();
+        the_error_line();
         credentials_file();
         rotation();
         what_a_client_can_put_in_a_field();
