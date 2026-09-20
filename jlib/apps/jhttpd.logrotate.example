@@ -1,0 +1,40 @@
+# Log rotation for jhttpd.
+#
+#     sudo cp jhttpd.logrotate.example /etc/logrotate.d/jhttpd
+#
+# jhttpd reopens its log files on SIGHUP, which is the convention every log
+# tool already knows: move the file aside, send the signal, get a new one.
+# Without the signal the process keeps writing to an inode with no name and
+# the log silently stops existing for anybody looking at the path.
+
+/var/log/jhttpd/*.log {
+        daily
+        rotate 14
+        compress
+        delaycompress
+        missingok
+        notifempty
+
+        # **The mode and owner matter more here than they usually do.** The
+        # files are opened as root when jhttpd starts, but the reopen happens
+        # on a thread that runs *after* privileges are dropped -- so a file
+        # www-data cannot create is a rotation that quietly does nothing from
+        # the second day onwards.
+        #
+        # Match this to whatever `user` says in the config.
+        create 0640 www-data www-data
+
+        sharedscripts
+        postrotate
+                # Under systemd, so the unit's ExecReload is the single place
+                # that knows how to signal it. Without systemd:
+                #
+                #     kill -HUP $(cat /run/jhttpd.pid)
+                #
+                # Note SIGHUP now also re-reads the config, not only the logs.
+                # That is harmless if nothing changed, and if something did,
+                # the reloadable parts of it take effect here -- which is worth
+                # knowing before it surprises somebody at 3am.
+                systemctl reload jhttpd >/dev/null 2>&1 || true
+        endscript
+}

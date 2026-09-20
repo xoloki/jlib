@@ -2,7 +2,7 @@ Source: jlib
 Section: libs
 Priority: optional
 Maintainer: Joey Yandle <xoloki@gmail.com>
-Build-Depends: debhelper (>= 12),
+Build-Depends: debhelper-compat (= 13),
                autoconf,
                automake,
                autoconf-archive,
@@ -26,6 +26,18 @@ Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: C++ cornucopia
  C++ libraries for crypto, net, media, gl, sys
+
+Package: jhttpd
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: static web server built on jlib
+ An HTTP/1.1 server for static files: virtual hosts by name, TLS with SNI,
+ basic authentication, rate limiting and a per-address connection cap, all
+ from one nginx-shaped configuration file.
+ .
+ Ships a systemd unit and a logrotate snippet. The unit checks the
+ configuration with "jhttpd --test" before replacing a running server, so a
+ typo fails the start rather than the site.
 
 Package: jlib-doc
 Architecture: all

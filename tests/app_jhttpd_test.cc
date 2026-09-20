@@ -1267,6 +1267,71 @@ static void reloading_a_credential_file() {
     ::rmdir(dir.c_str());
 }
 
+
+/**
+ * `every_root`, which is what --test walks.
+ *
+ * The check itself shells out to stat() and a TLS context and is exercised by
+ * running the binary; what is worth a unit test is that the walk covers every
+ * root a config names, because a --test that quietly skipped the virtual hosts
+ * would pass on exactly the config that is about to fail.
+ */
+static void what_test_walks() {
+    std::cout << "\n--test walks every root:\n";
+
+    jhttpd::options o;
+
+    o.root = "/srv/www";
+
+    ok("  a config with no sites has one root",
+       jhttpd::every_root(o).size() == 1,
+       std::to_string(jhttpd::every_root(o).size()));
+
+    ok("  and it is the default one, named as such",
+       jhttpd::every_root(o)[0].root == "/srv/www" &&
+           jhttpd::every_root(o)[0].name == "(default)");
+
+    jhttpd::site a;
+    jhttpd::site b;
+
+    a.name = "a.example";
+    a.root = "/srv/a";
+    b.name = "b.example";
+    b.root = "/srv/b";
+
+    o.vhosts.push_back(a);
+    o.vhosts.push_back(b);
+
+    const std::vector<jhttpd::site> all = jhttpd::every_root(o);
+
+    ok("  every site adds one", all.size() == 3, std::to_string(all.size()));
+    ok("  the default stays first", all[0].name == "(default)");
+    ok("  and the sites keep their order and their roots",
+       all[1].name == "a.example" && all[1].root == "/srv/a" &&
+           all[2].name == "b.example" && all[2].root == "/srv/b");
+
+    // Two names for one root is the ordinary case -- server_name takes a list
+    // and each name is a site -- so the walk reports the root twice rather
+    // than deduplicating. That is right: it is checking names, and a reader
+    // wants to see the one that is wrong.
+    jhttpd::options same;
+    jhttpd::site    one;
+    jhttpd::site    two;
+
+    same.root = "/srv/www";
+    one.name = "x.example";
+    one.root = "/srv/shared";
+    two.name = "y.example";
+    two.root = "/srv/shared";
+
+    same.vhosts.push_back(one);
+    same.vhosts.push_back(two);
+
+    ok("  two names for one root are two entries, not one",
+       jhttpd::every_root(same).size() == 3,
+       std::to_string(jhttpd::every_root(same).size()));
+}
+
 int main() {
     std::cout << "app_jhttpd_test\n";
 
@@ -1287,6 +1352,7 @@ int main() {
         what_a_config_refuses();
         what_a_reload_refuses_to_change();
         reloading_a_credential_file();
+        what_test_walks();
     }
     catch(std::exception& e) {
         std::cerr << "app_jhttpd_test: " << e.what() << "\n";

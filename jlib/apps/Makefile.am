@@ -70,7 +70,8 @@ dist_pkgdata_DATA = wow-buttons-ps3.map wow-axes-ps3.map \
                     tor-axes-ps3.map tor-buttons-ps3.map
 
 EXTRA_DIST = Hyper.hh color.hh magick.hh jserve.hh jcode.hh jhttpd.hh \
-             jhttpd.conf.example
+             jhttpd.conf.example jhttpd.service.example \
+             jhttpd.logrotate.example
 
 JCRYPT_LA  = $(top_builddir)/jlib/crypt/libjcrypt.la
 JNET_LA    = $(top_builddir)/jlib/net/libjnet.la
