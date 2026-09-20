@@ -127,6 +127,7 @@ void usage(std::ostream& o, const char* argv0) {
       << "  --group NAME      and this group (default: the user's own)\n"
       << "  --pidfile FILE    written after binding, before dropping\n"
       << "  --allow-root      run as root anyway, which is refused by default\n"
+      << "  --test            check the config and what it names, then exit\n"
       << "  --daemon          fork into the background; the command does not\n"
       << "                    return until the server is bound and serving,\n"
       << "                    and exits non-zero if it never got there\n"
@@ -145,6 +146,7 @@ bool parse(int argc, char** argv, options& o) {
         if(a == "--hash-password") { o.hash_password = true; continue; }
         if(a == "--allow-root") { o.allow_root = true; continue; }
         if(a == "--daemon") { o.daemon = true; continue; }
+        if(a == "--test") { o.test = true; continue; }
 
         if(a.size() > 2 && a.compare(0, 2, "--") == 0) {
             if(i + 1 >= argc) {
@@ -484,6 +486,82 @@ int main(int argc, char** argv) {
             o.vhosts[i].cert = sys::absolute_path(o.vhosts[i].cert);
             o.vhosts[i].key  = sys::absolute_path(o.vhosts[i].key);
         }
+    }
+
+    // **--test: everything that can be checked without binding a port.**
+    //
+    // `apachectl configtest` checks syntax. This checks syntax and then the
+    // things a config *names*, because a file that parses and points at a root
+    // that is not there is the failure an operator actually has -- and the
+    // difference between finding it here and finding it after stopping the old
+    // server is the difference between a typo and an outage.
+    //
+    // Not bound, not served: the port is the one thing that cannot be tested
+    // without taking it, and taking it is what the running server is doing.
+    if(o.test) {
+        int wrong = 0;
+
+        const std::vector<jhttpd::site> roots = jhttpd::every_root(o);
+
+        for(std::size_t i = 0; i < roots.size(); i++) {
+            struct stat st;
+
+            if(::stat(roots[i].root.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+                std::cout << "  ok    " << roots[i].name << " -> "
+                          << roots[i].root << "\n";
+            }
+            else {
+                std::cerr << "  FAIL  " << roots[i].name << " -> "
+                          << roots[i].root << ": not a directory\n";
+
+                wrong++;
+            }
+        }
+
+        if(!o.cert.empty()) {
+            try {
+                sys::tls_context::server(o.cert, o.key);
+
+                std::cout << "  ok    certificate " << o.cert << "\n";
+            }
+            catch(std::exception& e) {
+                std::cerr << "  FAIL  certificate " << o.cert << ": "
+                          << e.what() << "\n";
+
+                wrong++;
+            }
+        }
+
+        for(std::size_t i = 0; i < o.protect.size(); i++) {
+            jhttpd::credentials who;
+
+            try {
+                who.load(o.protect[i].file);
+
+                std::cout << "  ok    " << o.protect[i].prefix << " needs a "
+                          << "credential from " << o.protect[i].file << " ("
+                          << who.size() << ")\n";
+            }
+            catch(std::exception& e) {
+                std::cerr << "  FAIL  " << o.protect[i].prefix << ": "
+                          << e.what() << "\n";
+
+                wrong++;
+            }
+        }
+
+        for(std::size_t i = 0; i < o.listens.size(); i++) {
+            std::cout << "  ..    would bind "
+                      << (o.listens[i].host.empty() ? "*" : o.listens[i].host)
+                      << ":" << o.listens[i].port
+                      << (o.listens[i].ssl ? " (tls)" : "")
+                      << (o.listens[i].redirect ? " (redirect)" : "") << "\n";
+        }
+
+        std::cout << (wrong ? "jhttpd: " + std::to_string(wrong) + " problem(s)\n"
+                            : std::string("jhttpd: config is usable\n"));
+
+        return wrong ? 1 : 0;
     }
 
     // **Before any thread exists.**  The log writer and the server's pool are

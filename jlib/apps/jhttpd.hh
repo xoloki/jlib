@@ -691,6 +691,9 @@ struct options {
 
     bool           hash_password = false;
 
+    /** --test: check the config and what it names, then exit. */
+    bool           test = false;
+
     // Read before any flag is applied, so a flag overrides what it says.
     std::string    config;
 
@@ -1125,6 +1128,27 @@ inline std::vector<std::string> needs_a_restart(const options& was,
     }
 
     return changed;
+}
+
+/**
+ * Every root the config serves, the default one first.
+ *
+ * So --test can walk them without repeating how a default site and a named
+ * one differ -- which is only that one of them answers for a name nobody
+ * claimed.
+ */
+inline std::vector<site> every_root(const options& o) {
+    std::vector<site> all;
+    site              first;
+
+    first.name = "(default)";
+    first.root = o.root;
+
+    all.push_back(first);
+
+    for(std::size_t i = 0; i < o.vhosts.size(); i++) all.push_back(o.vhosts[i]);
+
+    return all;
 }
 
 inline void read_config(const std::string& path, options& o) {

@@ -1,137 +1,42 @@
 #!/usr/bin/make -f
-# -*- makefile -*-
-# Sample debian/rules that uses debhelper.
 #
-# This file was originally written by Joey Hess and Craig Small.
-# As a special exception, when this file is copied by dh-make into a
-# dh-make output file, you may use that output file without restriction.
-# This special exception was added by Craig Small in version 0.37 of dh-make.
+# Three lines of dh(1) where there were two hundred of hand-written targets.
 #
-# Modified to make a template file for a multi-binary package with separated
-# build-arch and build-indep targets  by Bill Allombert 2001
+# What was here was the pre-dh multi-binary template from dh-make, with
+# `#INSTALLDOC#` and `#DOCS#` placeholders that were never filled in and a
+# `debian/compat` of 7 sitting under a `debhelper (>= 12)` build-dependency.
+# dh does all of it, and correctly.
 
-# Uncomment this to turn on verbose mode.
-#export DH_VERBOSE=1
+# Assigned with ?= so a cross-build can turn something off from the environment
+# without editing this file.  Ubuntu enables LTO by default, and LTO is what
+# makes gcc hit an internal compiler error under qemu emulation -- so building
+# an amd64 package on an arm64 host wants optimize=-lto, while a native build
+# should keep it.
+DEB_BUILD_MAINT_OPTIONS ?= hardening=+all
+export DEB_BUILD_MAINT_OPTIONS
 
-# This has to be exported to make some magic below work.
-export DH_OPTIONS
+%:
+	dh $@ --with autoreconf
 
-# These are used for cross-compiling and for saving the configure script
-# from having to guess our platform (since we know it already)
-DEB_HOST_GNU_TYPE   ?= $(shell dpkg-architecture -qDEB_HOST_GNU_TYPE)
-DEB_BUILD_GNU_TYPE  ?= $(shell dpkg-architecture -qDEB_BUILD_GNU_TYPE)
-ifneq ($(DEB_HOST_GNU_TYPE),$(DEB_BUILD_GNU_TYPE))
-CROSS= --build $(DEB_BUILD_GNU_TYPE) --host $(DEB_HOST_GNU_TYPE)
-else
-CROSS= --build $(DEB_BUILD_GNU_TYPE)
-endif
+# The tree ships configure.ac rather than configure, so autoreconf runs first
+# -- that is the --with above. Everything else is stock: dh_auto_configure
+# passes the right --prefix, --libdir and build triplet by itself.
+override_dh_auto_configure:
+	dh_auto_configure -- --disable-static
 
+# The suite needs about four minutes and binds loopback ports. Run it, because
+# a package built from code that does not pass its own tests is not worth
+# shipping, but say so when it is skipped with DEB_BUILD_OPTIONS=nocheck.
+override_dh_auto_test:
+	dh_auto_test || { echo "jlib: the test suite failed"; exit 1; }
 
-
-
-
-config.status: configure
-	dh_testdir
-	# Add here commands to configure the package.
-ifneq "$(wildcard /usr/share/misc/config.sub)" ""
-	cp -f /usr/share/misc/config.sub config.sub
-endif
-ifneq "$(wildcard /usr/share/misc/config.guess)" ""
-	cp -f /usr/share/misc/config.guess config.guess
-endif
-	./configure $(CROSS) --prefix=/usr --mandir=\$${prefix}/share/man --infodir=\$${prefix}/share/info CXXFLAGS="$(CXXFLAGS)" LDFLAGS="-Wl,-z,defs"
-
-
-#Architecture
-build: build-arch build-indep
-
-build-arch: build-arch-stamp
-build-arch-stamp:  config.status 
-
-	# Add here commands to compile the arch part of the package.
-	$(MAKE)
-	touch $@
-
-build-indep: build-indep-stamp
-build-indep-stamp:  config.status 
-
-	# Add here commands to compile the indep part of the package.
-	#$(MAKE) doc
-	touch $@
-
-clean: 
-	dh_testdir
-	dh_testroot
-	rm -f build-arch-stamp build-indep-stamp 
-
-	# Add here commands to clean up after the build process.
-	[ ! -f Makefile ] || $(MAKE) distclean
-	rm -f config.sub config.guess
-
-	dh_clean 
-
-install: install-indep install-arch
-install-indep:
-	dh_testdir
-	dh_testroot
-	dh_prep -i 
-	dh_installdirs -i
-
-	# Add here commands to install the indep part of the package into
-	# debian/<package>-doc.
-	#INSTALLDOC#
-
-	dh_install -i
-
-install-arch:
-	dh_testdir
-	dh_testroot
-	dh_prep -s 
-	dh_installdirs -s
-
-	# Add here commands to install the arch part of the package into
-	# debian/tmp.
-	$(MAKE) DESTDIR=$(CURDIR)/debian/jlib install
-
-	dh_install -s
-# Must not depend on anything. This is to be called by
-# binary-arch/binary-indep
-# in another 'make' thread.
-binary-common:
-	dh_testdir
-	dh_testroot
-	dh_installchangelogs ChangeLog
-	dh_installdocs
-	dh_installexamples
-#	dh_installmenu
-#	dh_installdebconf
-#	dh_installlogrotate
-#	dh_installemacsen
-#	dh_installpam
-#	dh_installmime
-#	dh_python
-#	dh_installinit
-#	dh_installcron
-#	dh_installinfo
-	dh_installman
-	dh_link
-	dh_strip
-	dh_compress
-	dh_fixperms
-#	dh_perl
-	dh_makeshlibs
-	dh_installdeb
-	dh_shlibdeps
-	dh_gencontrol
-	dh_md5sums
-	dh_builddeb
-# Build architecture independant packages using the common target.
-binary-indep: build-indep install-indep
-	$(MAKE) -f debian/rules DH_OPTIONS=-i binary-common
-
-# Build architecture dependant packages using the common target.
-binary-arch: build-arch install-arch
-	$(MAKE) -f debian/rules DH_OPTIONS=-s binary-common
-
-binary: binary-arch binary-indep
-.PHONY: build clean binary-indep binary-arch binary install install-indep install-arch 
+# **jlib takes everything, then gives one file back.**
+#
+# The alternative is enumerating the binaries, and bin_PROGRAMS is mostly
+# conditional -- alpaca, curve, neural, cuda, media, x, xjoy, joy, glx, glfw --
+# so a list here would be right on the machine it was written on and short by
+# one every time a dependency appears or goes. Taking the directory and
+# removing the file that belongs to the other package cannot drift.
+override_dh_install:
+	dh_install
+	rm -f debian/jlib/usr/bin/jhttpd

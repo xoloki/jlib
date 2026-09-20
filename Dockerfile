@@ -34,6 +34,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
+        debhelper \
+        dh-autoreconf \
+        fakeroot \
         g++ \
         gdb \
         make \
@@ -68,6 +71,12 @@ COPY m4/ ./m4/
 COPY jlib/ ./jlib/
 COPY tests/ ./tests/
 COPY tools/ ./tools/
+
+# The packaging, so the image can build a .deb as well as run the suite. Small,
+# and it means `debian/` is tested by the same container that tests the code --
+# a rules file that only works on the maintainer's machine is the sort of thing
+# that is discovered at release time.
+COPY debian/ ./debian/
 
 RUN ./autogen.sh
 

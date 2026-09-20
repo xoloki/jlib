@@ -1,0 +1,78 @@
+# jhttpd under systemd.
+#
+#     sudo cp jhttpd.service.example /etc/systemd/system/jhttpd.service
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now jhttpd
+#
+# Then the usual verbs work, and each maps onto something jhttpd does:
+#
+#     systemctl status jhttpd     is it up, what did it say
+#     systemctl reload jhttpd     SIGHUP: re-read the config, reopen the logs
+#     systemctl restart jhttpd    for the parts a reload cannot change
+#     journalctl -u jhttpd        everything it printed
+#
+# **Do not put `daemon;` in the config.** systemd wants the process in the
+# foreground -- Type=simple below -- and a jhttpd that forks would look to it
+# like one that died immediately. Leaving it in the foreground is also what
+# puts the startup lines in the journal, which is where you look when a site
+# is dark and is exactly what was missing the day this bound loopback-only and
+# said so to a stderr nobody was reading.
+
+[Unit]
+Description=jhttpd
+Documentation=man:jhttpd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# **The config is checked before the old process is replaced.** A start that
+# would fail on a missing root or an unreadable certificate fails here instead,
+# with the reason, and whatever was running keeps running.
+ExecStartPre=/usr/local/bin/jhttpd --config /etc/jhttpd.conf --test
+ExecStart=/usr/local/bin/jhttpd --config /etc/jhttpd.conf
+
+# SIGHUP re-reads the config and reopens the logs. What it cannot change --
+# ports, roots, the thread count -- it names, so `journalctl -u jhttpd` after a
+# reload tells you whether you actually got what you edited.
+ExecReload=/bin/kill -HUP $MAINPID
+
+# SIGTERM, which jhttpd handles: it stops accepting, ends the connections it
+# holds, and returns from run(). 5s is generous for that; it is normally about
+# a hundred milliseconds.
+KillSignal=SIGTERM
+TimeoutStopSec=5
+
+Restart=on-failure
+RestartSec=2
+
+# Started as root because binding 80 and 443 needs it, then jhttpd drops to
+# whatever `user` says in the config -- after binding, and after reading the
+# certificate, so the key can stay root-only on disk.
+#
+# The alternative is AmbientCapabilities=CAP_NET_BIND_SERVICE and User=www-data
+# here, which never runs as root at all. That is stricter and it means the
+# certificate has to be readable by www-data, which is a real trade rather than
+# a free win.
+User=root
+
+# Modest hardening. Not a complete list -- these are the ones that are clearly
+# right for a static file server and do not interfere with dropping privileges
+# or reading a certificate.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# Where the logs go, if the config names files rather than "-". Must be
+# writable by the user jhttpd drops to: the files are opened as root at
+# startup, but SIGHUP reopens them *after* the drop, so a root-only directory
+# means rotation silently stops working.
+LogsDirectory=jhttpd
+LogsDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target
