@@ -27,6 +27,7 @@
 #include <jlib/sys/sys.hh>
 #include <jlib/util/conf.hh>
 
+#include <atomic>
 #include <functional>
 #include <thread>
 
@@ -643,7 +644,7 @@ public:
      * systemd unit relies on to put lines in the journal.
      */
     bool open(const std::string& path, level at) {
-        m_at = at;
+        level_now(at);
         m_stderr = path == "-";
 
         if(m_stderr) return true;
@@ -657,7 +658,27 @@ public:
      * Exposed so a caller can skip *building* a message it is about to throw
      * away. The noisy paths are the ones that would pay for it.
      */
-    bool says(level l) const { return l <= m_at; }
+    bool says(level l) const {
+        return l <= m_at.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * Change the level on a running server (#324).
+     *
+     * **Relaxed, and that is sufficient rather than merely cheap.** No
+     * invariant ties the level to any other state, so the only consequence of
+     * a stale read is that a line either side of the change is sorted by the
+     * old value -- which is already true of any implementation, because a line
+     * in flight was sorted before the change arrived.
+     *
+     * A mutex would have been wrong here for a reason the rest of this type
+     * already answers: `says()` is called on whichever thread answered the
+     * request, and on the async server that is the reactor thread. Taking a
+     * lock per log line on the reactor is the thing `logfile` exists to avoid.
+     */
+    void level_now(level at) { m_at.store(at, std::memory_order_relaxed); }
+
+    level at() const { return m_at.load(std::memory_order_relaxed); }
 
     void write(level l, const char* module, const std::string& client,
                const std::string& message)
@@ -683,7 +704,10 @@ public:
 private:
     logfile m_file;
     bool    m_stderr = true;
-    level   m_at = level::notice;
+
+    // Atomic because a reload changes it from the reload thread while the
+    // reactor thread is reading it on every request.  See level_now().
+    std::atomic<level> m_at{level::notice};
 };
 
 /**
@@ -1424,7 +1448,6 @@ inline std::vector<std::string> needs_a_restart(const options& was,
     // under the same path, which SIGHUP already handles by reopening it.
     if(was.access_log != now.access_log)       changed.push_back("access_log");
     if(was.error_log != now.error_log)         changed.push_back("error_log");
-    if(was.error_level != now.error_level)     changed.push_back("error_log level");
     if(was.log_format != now.log_format)       changed.push_back("log_format");
 
     if(was.threads != now.threads)             changed.push_back("threads");

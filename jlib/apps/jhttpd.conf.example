@@ -24,9 +24,11 @@
 #                            path every couple of months
 #   auth_basic_user_file     re-read, so a user can be added or removed
 #   request_rate / _burst    applied live
-#   access_log / error_log   reopened, for rotation -- the *paths* and the
-#                            error log's level need a restart, which a reload
-#                            says rather than applying half of it
+#   access_log / error_log   reopened, for rotation.  The *paths* need a
+#                            restart, which a reload says rather than applying
+#                            half of it
+#   the error log's level    applied live, because the moment you want `info`
+#                            is the moment you can least afford a restart
 #
 # Everything else -- listen, root, index, the server and location blocks, the
 # thread count, the user -- was consumed at startup and needs a restart. A
@@ -51,6 +53,10 @@ threads     4;
 # reloaded, caught a signal -- which are what let a log be dated against a
 # deploy.  A misspelled level is refused at startup rather than assumed,
 # because a log that is quieter than you asked for reads like a quiet day.
+#
+# **Changing it takes effect on SIGHUP**, without a restart and without
+# dropping a connection: edit this line, `systemctl reload jhttpd`, and the
+# next request is sorted by the new level.
 #
 # **`info` is where the noise is.**  Measured on six live sites: 540 error
 # lines in a day, of which 351 were failed TLS handshakes from scanners and
