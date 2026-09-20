@@ -240,6 +240,23 @@ static void calls_are_read_out_of_the_text() {
        oa::calls_in("<tool_call>nope</tool_call>", left).empty() &&
        left == "<tool_call>nope</tool_call>");
 
+    // **The variant a real model emits.**  Qwen2.5-Coder at Q4_K_M, told
+    // `<tool_call>` by its own template, answers with `<function_call>`.
+    const std::vector<oa::call> variant = oa::calls_in(
+        "```xml\n<function_call>\n  {\"name\":\"read_file\","
+        "\"arguments\":{\"path\":\"util.h\"}}\n</function_call>\n```", left);
+
+    ok("  the marker a model actually emits is taken too",
+       variant.size() == 1 && variant[0].name == "read_file",
+       std::to_string(variant.size()));
+
+    ok("  leaving the fence it wrapped it in as content",
+       left.find("```") != std::string::npos, left);
+
+    // Anything else is still content, not a guess at a third convention.
+    ok("  but an unrecognised marker is not invented into a call",
+       oa::calls_in("<invoke>{\"name\":\"f\"}</invoke>", left).empty());
+
     ok("  and so does one with no name",
        oa::calls_in("<tool_call>{\"arguments\":{}}</tool_call>", left).empty() &&
        left == "<tool_call>{\"arguments\":{}}</tool_call>");
