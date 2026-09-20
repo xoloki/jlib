@@ -183,9 +183,29 @@ laid_out lay_out(Session& s, std::vector<ai::message> turns,
 
         if(at == turns.size()) break;
 
-        turns.erase(turns.begin() + long(at));
+        // **A call and its results are one unit.**
+        //
+        // Dropping a turn at a time cut them apart: the assistant turn
+        // carrying the calls went and its `tool` results stayed, so the model
+        // was shown a `<tool_response>` with no `<tool_call>` before it -- an
+        // answer to a question nobody asked. That is the failure
+        // ai::message::tool_calls exists to prevent (#311), arriving from the
+        // trimmer rather than from the client. See #336.
+        //
+        // So the results go with the call. A `tool` turn that is oldest on its
+        // own is dropped alone, because it is already an orphan and keeping it
+        // helps nobody.
+        std::size_t upto = at + 1;
 
-        out.dropped++;
+        while(upto < turns.size() && turns[upto].role == "tool") upto++;
+
+        // Never the newest: the request being answered is not droppable, and
+        // a unit that would take it is left alone rather than half-taken.
+        if(upto >= turns.size()) break;
+
+        turns.erase(turns.begin() + long(at), turns.begin() + long(upto));
+
+        out.dropped += upto - at;
     }
 
     out.ids = s.templ().encode(turns, s.tok(), true, tools);

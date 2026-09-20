@@ -128,7 +128,15 @@ struct fake_template {
             if(g_script.refuses_system && m.role == "system")
                 throw std::runtime_error("this template has no system role");
 
-            const std::string line = m.role + ":" + m.content + "\n";
+            // Calls are rendered too, so a turn that lost them is visible
+            // here -- without this an orphaned tool result looks exactly like
+            // a well-formed conversation. #336.
+            std::string line = m.role + ":" + m.content;
+
+            for(const ai::tool_call& c : m.tool_calls)
+                line += "<call:" + c.name + ">";
+
+            line += "\n";
 
             for(char c : line) ids.push_back(int(static_cast<unsigned char>(c)));
         }
@@ -893,6 +901,103 @@ static void the_models_route(jlib::net::http::server& s) {
     catch(std::exception& e) { ok("the route answers", false, e.what()); }
 }
 
+/**
+ * A call and its result are dropped together, or not at all.
+ *
+ * #336. The trimmer took one turn at a time, so the assistant turn carrying a
+ * call could go while its `tool` result stayed -- leaving the model an answer
+ * to a question nobody asked, which is the failure ai::message::tool_calls
+ * exists to prevent (#311) arriving from this end instead.
+ *
+ * Called directly rather than over HTTP, like the test below it: what is being
+ * checked is what lay_out produced, and that is not in a response.
+ */
+static void a_call_and_its_result_go_together() {
+    std::cout << "\na call and its result are trimmed together:\n";
+
+    fake_session s;
+
+    // **Swept rather than tuned.**  A single context size is worthless here:
+    // the first version of this test used one, and the drops happened to land
+    // on an exchange boundary, so it passed with the trimmer still splitting
+    // pairs. Some cut in this range must fall mid-pair.
+    bool any_orphan = false;
+    bool any_dropped = false;
+    std::string worst;
+
+    for(unsigned int context = 120; context <= 320; context += 10) {
+        g_script = script();
+        g_script.context = context;
+
+        std::vector<ai::message> turns;
+
+        for(int i = 0; i < 3; i++) {
+            ai::message asked;
+
+            asked.role = "user";
+            asked.content = "question " + std::to_string(i);
+
+            ai::message called;
+
+            called.role = "assistant";
+            called.tool_calls.push_back({ "c", "read_file", "{}" });
+
+            ai::message got;
+
+            got.role = "tool";
+            got.content = "the contents of file " + std::to_string(i);
+
+            turns.push_back(asked);
+            turns.push_back(called);
+            turns.push_back(got);
+        }
+
+        turns.push_back({ "user", "and now the real question" });
+
+        const apps::laid_out plan = apps::lay_out(s, turns, 32);
+
+        if(plan.dropped) any_dropped = true;
+
+        std::string shown;
+
+        for(int id : plan.ids) shown += char(id);
+
+        // Every `tool:` line must have a turn carrying a call ahead of it; a
+        // result whose call was trimmed is the bug.
+        bool seen_call = false;
+
+        std::istringstream lines(shown);
+        std::string line;
+
+        while(std::getline(lines, line)) {
+            if(line.compare(0, 5, "tool:") == 0 && !seen_call) {
+                any_orphan = true;
+
+                if(worst.empty())
+                    worst = "at context " + std::to_string(context) + ":\n" +
+                            shown;
+            }
+
+            if(line.find("<call:") != std::string::npos) seen_call = true;
+
+            // A call answers the results that follow it and nothing later.
+            if(line.compare(0, 5, "user:") == 0) seen_call = false;
+        }
+
+        // The newest turn is never dropped, whatever else goes.
+        if(shown.find("and now the real question") == std::string::npos)
+            worst = "the live question went at context " +
+                    std::to_string(context);
+    }
+
+    ok("the sweep reaches sizes that trim", any_dropped);
+
+    ok("  and no cut leaves a result without its call", !any_orphan, worst);
+
+    ok("  while the question being answered always survives",
+       worst.find("the live question went") == std::string::npos, worst);
+}
+
 static void what_the_trimmer_gave_up() {
     std::cout << "\nwhat the trimmer reports giving up:\n";
 
@@ -1099,6 +1204,7 @@ int main() {
 
     std::thread t([&s]{ s.run(); });
 
+    a_call_and_its_result_go_together();
     what_the_trimmer_gave_up();
     a_tool_call_comes_back_as_one(s);
     a_streamed_tool_call(s);
