@@ -1132,6 +1132,36 @@ int main(int argc, char** argv) {
                     o.burst = fresh.burst;
                 }
 
+                // --- the error log's level ---
+                //
+                // #324. The moment you want `info` is the moment you can
+                // least afford a restart: a client is failing to connect now,
+                // and the evidence is in the handshake being filtered out.
+                //
+                // Logged at the *new* level as well as announced, and the
+                // order matters -- raising the level then saying so means the
+                // notice is written under the level that produced it, so
+                // lowering to something above `notice` still records the last
+                // thing it did before going quiet.
+                if(fresh.error_level != o.error_level) {
+                    const jhttpd::level was = o.error_level;
+
+                    o.error_level = fresh.error_level;
+
+                    errors.level_now(o.error_level);
+
+                    std::cerr << "jhttpd: error log level now "
+                              << jhttpd::level_name(o.error_level) << "\n";
+
+                    // At `notice` so it survives the default, and naming both
+                    // ends: a level that changed silently is indistinguishable
+                    // from one that did not take.
+                    errors.write(jhttpd::level::notice, "core", "",
+                                 std::string("error log level ") +
+                                     jhttpd::level_name(was) + " -> " +
+                                     jhttpd::level_name(o.error_level));
+                }
+
                 std::cerr << "jhttpd: reloaded " << o.config << "\n";
 
                 // The other half of the refusal notice above: a log that says

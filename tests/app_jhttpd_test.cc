@@ -1110,6 +1110,29 @@ static void what_a_reload_refuses_to_change() {
        jhttpd::needs_a_restart(was, was).empty(),
        std::to_string(jhttpd::needs_a_restart(was, was).size()));
 
+    {
+        // #324: the level used to be on this list, and taking it off is the
+        // whole change. The log *path* stays on it -- opening a different
+        // file is a different job from changing what is written to it, and
+        // may need privilege the server has already dropped.
+        jhttpd::options louder = was;
+
+        louder.error_level = jhttpd::level::info;
+
+        ok("  the error log's level is applied live, not deferred to a restart",
+           jhttpd::needs_a_restart(was, louder).empty(),
+           jhttpd::needs_a_restart(was, louder).empty()
+               ? ""
+               : jhttpd::needs_a_restart(was, louder)[0]);
+
+        jhttpd::options elsewhere = was;
+
+        elsewhere.error_log = "/var/log/other.log";
+
+        ok("  while its path still needs one",
+           !jhttpd::needs_a_restart(was, elsewhere).empty());
+    }
+
     struct { const char* wanted; const char* why; } cases[] = {
         { "listen",                "a port" },
         { "root",                  "the document root" },
@@ -1513,12 +1536,78 @@ static void the_error_line() {
     }
 }
 
+/**
+ * Raising the level on a running server, #324.
+ *
+ * The argument for levelling rather than deleting was that nothing is lost --
+ * `info` brings it back. That was only half true while it took a restart: the
+ * moment you want `info` is the moment a client is failing to connect, which
+ * is the worst moment to drop every connection.
+ */
+static void a_level_that_changes_under_a_running_server() {
+    std::cout << "\nchanging the level without a restart:\n";
+
+    char pattern[] = "/tmp/jlib_lvl_XXXXXX";
+    const std::string dir = ::mkdtemp(pattern);
+    const std::string path = dir + "/error.log";
+
+    jhttpd::error_log log;
+
+    ok("  it opens at the level it was given",
+       log.open(path, jhttpd::level::notice) &&
+           log.at() == jhttpd::level::notice);
+
+    ok("  and says so for a level at or above it",
+       log.says(jhttpd::level::notice) && log.says(jhttpd::level::error));
+
+    ok("  and not for one below",
+       !log.says(jhttpd::level::info) && !log.says(jhttpd::level::debug));
+
+    log.write(jhttpd::level::info, "http", "203.0.113.7:1", "filtered out");
+    log.drain();
+
+    ok("  a line below the level is not written",
+       lines_of(path).empty(),
+       std::to_string(lines_of(path).size()));
+
+    // What a SIGHUP does.
+    log.level_now(jhttpd::level::info);
+
+    ok("  after the change it says yes to what it refused",
+       log.says(jhttpd::level::info));
+
+    log.write(jhttpd::level::info, "http", "203.0.113.7:1", "now recorded");
+    log.drain();
+
+    {
+        const std::vector<std::string> got = lines_of(path);
+
+        ok("  and the same line is written", got.size() == 1,
+           std::to_string(got.size()));
+
+        ok("  at the level that let it through",
+           got.size() == 1 && got[0].find("[http:info]") != std::string::npos,
+           got.empty() ? "" : got[0]);
+    }
+
+    // Lowering it again, which is the case that can hide its own evidence:
+    // a level raised to `debug` and dropped back must not take the record of
+    // having been dropped with it.
+    log.level_now(jhttpd::level::error);
+
+    ok("  lowering it takes effect too",
+       !log.says(jhttpd::level::notice) && log.says(jhttpd::level::error));
+
+    log.close();
+}
+
 int main() {
     std::cout << "app_jhttpd_test\n";
 
     try {
         the_line();
         the_error_line();
+        a_level_that_changes_under_a_running_server();
         credentials_file();
         rotation();
         what_a_client_can_put_in_a_field();
