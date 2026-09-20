@@ -837,6 +837,77 @@ static void a_peer_that_says_nothing(http::server& s) {
     }
 }
 
+
+/**
+ * An encoded separator is a path problem, not a target problem.
+ *
+ * `%2F` in a path is refused because decoding it would change how many
+ * segments the path has, which is the shape of a traversal. In a *query* it is
+ * an ordinary character: RFC 3986 2.2 makes "/" a sub-delimiter there, so
+ * `%2F` means a literal slash inside a value and has no separator meaning to
+ * strip.
+ *
+ * The check used to run over the whole request target, before the query was
+ * split off, so every request carrying an encoded slash in its query was
+ * refused (#320). Found in the access log of a live server, from a scanner
+ * that happened to send the same endpoint both ways and got 405 for one and
+ * 400 for the other. What it would break for a real caller is an OAuth
+ * redirect_uri, an API taking a URL as a parameter, or a search for anything
+ * with a slash in it.
+ */
+static void an_encoded_separator_is_about_the_path(http::server& s) {
+    std::cout << "\nan encoded separator, and where it is:\n";
+
+    struct { const char* target; int want; const char* why; } cases[] = {
+        // In the path: refused, exactly as before.
+        { "/static/page%2Ehtml",          200, "an encoded dot is not a separator" },
+        { "/static%2Fpage.html",          400, "an encoded slash in the path" },
+        // 404 rather than 400, and the difference is which defence catches
+        // it: %2E is an encoded *dot*, not a separator, so this decodes to
+        // /static/../secret.txt and is refused by containment in locate()
+        // rather than by the separator check above. Asserted as "refused and
+        // leaks nothing" below, because which of the two stops it is not a
+        // property worth pinning -- only that one of them does.
+        { "/static/%2E%2E/secret.txt",    404, "an encoded dot-dot with a real slash" },
+        { "/static%5Cpage.html",          400, "an encoded backslash in the path" },
+
+        // In the query: served, which is the change.
+        { "/static/page.html?a=%2Fb",     200, "an encoded slash in the query" },
+        { "/static/page.html?a=%5Cb",     200, "an encoded backslash in the query" },
+        { "/static/page.html?u=https%3A%2F%2Fx.example%2Fy", 200,
+          "a whole URL as a parameter, which is what bit" },
+
+        // Both: the path decides.
+        { "/static%2Fx?a=%2Fb",           400, "a path with one, whatever the query has" }
+    };
+
+    for(std::size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const std::string r = get(s.port(), cases[i].target);
+
+        ok(std::string("  ") + cases[i].why, status_of(r) == cases[i].want,
+           std::string(cases[i].target) + " -> " + std::to_string(status_of(r)));
+    }
+
+    // Whichever defence refused it, nothing came back from outside the root.
+    {
+        const std::string r = get(s.port(), "/static/%2E%2E/secret.txt");
+
+        ok("  and an encoded dot-dot serves nothing from outside the root",
+           body_of(r).find("never see this") == std::string::npos,
+           first_line(body_of(r)));
+    }
+
+    // **The refusal still says nothing back.**  A 400 that quoted the target
+    // would hand an attacker their own bytes, which is what #240 removed.
+    {
+        const std::string r = get(s.port(), "/static%2F<script>alert(1)</script>");
+
+        ok("  and a refused target is not quoted back",
+           body_of(r).find("script") == std::string::npos,
+           first_line(body_of(r)));
+    }
+}
+
 static void everything(http::server& s, const tree& t) {
     a_refusal_does_not_quote_the_client(s);
     a_control_character_in_the_target(s);
@@ -847,6 +918,7 @@ static void everything(http::server& s, const tree& t) {
     what_site_a_request_names(s);
     which_site_answers(s, t);
     a_peer_that_says_nothing(s);
+    an_encoded_separator_is_about_the_path(s);
 }
 
 int main() {

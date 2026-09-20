@@ -1773,11 +1773,43 @@ bool server::authority_of(const util::http::Request& q, std::string& into,
 bool server::path_of(const std::string& target, std::string& path,
                      std::string& why)
 {
+    std::string encoded;
+
+    try {
+        util::URL u;
+
+        u.parse_reference(target);
+
+        encoded = u.get_path();
+    }
+    catch(std::exception&) {
+        why = "not a request target\n";
+
+        return false;
+    }
+
     // An encoded separator is refused rather than decoded: decoding one would
     // change how many segments the path has, which is the shape of a traversal
     // bug.  Everything else is decoded, because RFC 3986 2.1 makes "%65" and
     // "e" the same character.
-    const std::string lowered = util::http::fold(target);
+    //
+    // **The path, not the target** (#320).  This used to run over the whole
+    // target, before the query was split off -- which refused every request
+    // whose *query* contained an encoded slash, and that is an ordinary thing
+    // for a query to contain. RFC 3986 2.2 makes "/" a sub-delimiter there, so
+    // "%2F" in a query means a literal slash inside a value and has no
+    // separator meaning to strip.
+    //
+    // Found in production, from a scanner of all things: it sent the same
+    // WordPress endpoint as `?rest_route=/batch/v1` and as
+    // `?rest_route=%2Fbatch%2Fv1` and got 405 for one and 400 for the other.
+    // What it would break for a real caller is an OAuth redirect_uri, an API
+    // taking a URL as a parameter, or a search for anything with a slash in
+    // it.
+    //
+    // The defence is unchanged: the path is still checked, still before it is
+    // decoded, and a traversal still cannot get through.
+    const std::string lowered = util::http::fold(encoded);
 
     if(lowered.find("%2f") != std::string::npos ||
        lowered.find("%5c") != std::string::npos) {
@@ -1786,18 +1818,7 @@ bool server::path_of(const std::string& target, std::string& path,
         return false;
     }
 
-    try {
-        util::URL u;
-
-        u.parse_reference(target);
-
-        path = util::uri::decode(u.get_path());
-    }
-    catch(std::exception&) {
-        why = "not a request target\n";
-
-        return false;
-    }
+    path = util::uri::decode(encoded);
 
     // **A decoded control character is refused, and NUL is why.**
     //
