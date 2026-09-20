@@ -3103,6 +3103,21 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     std::string noted_site;
     std::string noted_reason;
 
+    /**
+     * Suppress the access record entirely (#330).
+     *
+     * `serve_request_async` is called in a loop and writes one record per
+     * *call*, not per request -- so the call that discovers the connection has
+     * ended produces a record for a request that never happened. On six live
+     * sites that was 105 of 117 408s: one per keepalive connection, which made
+     * every ordinary visit look like it ended in a timeout.
+     *
+     * A status cannot express "nothing to report" -- that was the `"-" 0 0`
+     * line, a status HTTP does not have -- so this is a flag rather than a
+     * sentinel value.
+     */
+    bool noted_nothing = false;
+
     async_responder out(c.writer(), m_options.server_name, c.reactor(),
                         c.pool(), &c);
 
@@ -3152,15 +3167,19 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
         const std::size_t*    bytes;
         const async_responder* out;
         const std::string*    reason;
+        const bool*           nothing;
 
         ~noting() {
+            // A connection that ended between requests is not a request.
+            if(*nothing) return;
+
             const int st = out->status() != 0 ? out->status() : *status;
             const std::size_t n = out->status() != 0 ? out->wrote() : *bytes;
 
             self->note(*q, *from, *user, *host, st, n, *reason);
         }
     } note_on_exit{ this, &q, &from, &noted_user, &noted_site, &noted_status,
-                    &noted_bytes, &out, &noted_reason };
+                    &noted_bytes, &out, &noted_reason, &noted_nothing };
 
     // **co_await cannot appear in a catch handler.**  That is a language rule,
     // not a limitation of anything here, and it shapes every error path below:
@@ -3207,11 +3226,19 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
 
         if(!co_await util::http::read_head_if_any(c.reader(),
                                                   m_options.max_head, head)) {
-            // Logged as 408, the same as the blocking path and the same as
-            // Apache. This used to fall out with noted_status still 0, which
-            // put `"-" 0 0` in the access log -- a line saying a request
-            // happened and that its status is a number HTTP does not have.
-            noted_status = 408;
+            // **Only when nothing was ever served on this connection.**
+            //
+            // `served == 0` is somebody knocking: connected, said nothing,
+            // went away. Apache records that as a 408 and so does this, which
+            // is what #313 was for.
+            //
+            // `served > 0` is the case the comment above describes -- the peer
+            // *has finished* -- and a connection that has finished is not a
+            // timeout. Apache writes nothing at all, and writing something put
+            // one spurious 408 on every keepalive connection: 6.7% of all
+            // traffic here against 0.27% of Apache's, on the same sites.
+            if(served == 0) noted_status = 408;
+            else            noted_nothing = true;
 
             co_return false;
         }
@@ -3258,6 +3285,22 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
         // finished asking, and a 408 down a connection whose peer is still
         // mid-request is as likely to be missed as read.  The connection
         // closes when this returns.
+        //
+        // **Recorded the same way the clean close is** (#330). This path used
+        // to fall out with the status unset, which wrote `"-" 0 0` -- 41 lines
+        // in under two hours, each claiming a request whose status is a number
+        // HTTP does not have. The comment on the 408 above said that bug was
+        // fixed; only the other path was.
+        //
+        // A timed-out silence and a closed silence are the same event to an
+        // operator, so they get the same line. The limitation worth naming:
+        // a *second* request that begins and then stalls also lands here, and
+        // is now silent rather than mislabelled -- `served` cannot tell it
+        // from an idle connection. Silence is the better of the two, and a
+        // third discriminator is not worth inventing on this evidence.
+        if(served == 0) noted_status = 408;
+        else            noted_nothing = true;
+
         co_return false;
     }
 
@@ -3363,7 +3406,42 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     {
         response denied;
 
-        if(!allowed_through(q, path, noted_site, denied, noted_user)) {
+        // **On the pool, because verifying a password is Argon2id** (#331).
+        //
+        // Everything from the hop back at the top of this function to the
+        // handler dispatch below runs on the reactor, and this is the one
+        // thing in that span with an unbounded cost attached: the verifier is
+        // a deliberately slow hash, and on the reactor it stalls every other
+        // connection for its duration.
+        //
+        // Measured before this hop existed, with four workers idle:
+        //
+        //     plain GET, baseline                 ~3ms
+        //     one authenticated request           137ms
+        //     plain GET, 4 auth requests running  524ms
+        //
+        // And the cost is not the authenticated user's to pay: a wrong
+        // password costs the same as a right one by design -- `credentials`
+        // hashes a decoy for an unknown user so that an unknown user cannot
+        // be told apart from a known one -- so an unauthenticated attacker
+        // sets the reactor's workload at about seven requests a second.
+        //
+        // **Only when there is a guard**, so an ordinary request keeps its two
+        // hops rather than four. guard_for() is the same lookup
+        // allowed_through does first, and it is a lookup rather than work.
+        const bool guarded = guard_for(path, noted_site) != 0;
+
+        if(guarded) co_await sys::on_pool(c.pool());
+
+        const bool through =
+            allowed_through(q, path, noted_site, denied, noted_user);
+
+        // Back before anything is written: the writer belongs to the reactor,
+        // and send() from a pool thread would be the bug this is fixing with
+        // the sides swapped.
+        if(guarded) co_await sys::on_reactor(c.reactor());
+
+        if(!through) {
             co_await out.send(denied);
 
             co_return false;

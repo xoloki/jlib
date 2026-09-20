@@ -30,6 +30,9 @@ Type=simple
 # **The config is checked before the old process is replaced.** A start that
 # would fail on a missing root or an unreadable certificate fails here instead,
 # with the reason, and whatever was running keeps running.
+# /usr/local/bin is where `make install` puts it with autotools' default
+# prefix.  **If you installed the .deb, this is /usr/bin** -- the packaged
+# unit says so and you do not need this file at all.
 ExecStartPre=/usr/local/bin/jhttpd --config /etc/jhttpd.conf --test
 ExecStart=/usr/local/bin/jhttpd --config /etc/jhttpd.conf
 
@@ -55,7 +58,21 @@ RestartSec=2
 # here, which never runs as root at all. That is stricter and it means the
 # certificate has to be readable by www-data, which is a real trade rather than
 # a free win.
+# **Group must match the group the config drops to.**
+#
+# systemd creates LogsDirectory owned by User:Group, so without this it is
+# root:root 0750 -- and jhttpd reopens its logs *after* dropping privilege,
+# on the SIGHUP that logrotate's postrotate sends. www-data would have no
+# search permission on that directory, the reopen would fail, and logging
+# would stop silently after the first rotation.
+#
+# root:www-data 0750 gives the dropped process exactly what it needs: it can
+# traverse the directory and open a log that already exists. It deliberately
+# cannot *create* one, which is why the `create` line in the logrotate snippet
+# is load-bearing rather than decorative -- and why a log deleted by hand
+# needs a restart rather than a reload to come back.
 User=root
+Group=www-data
 
 # Modest hardening. Not a complete list -- these are the ones that are clearly
 # right for a static file server and do not interfere with dropping privileges

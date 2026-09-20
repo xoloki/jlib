@@ -20,7 +20,10 @@
 
 [Unit]
 Description=jhttpd
-Documentation=man:jhttpd
+# The example config, which the package installs.  There is no man page, and
+# pointing at one that does not exist makes `systemctl show` advertise a
+# document nobody can open.
+Documentation=file:/usr/share/doc/jhttpd/jhttpd.conf.example
 After=network-online.target
 Wants=network-online.target
 
@@ -30,8 +33,20 @@ Type=simple
 # **The config is checked before the old process is replaced.** A start that
 # would fail on a missing root or an unreadable certificate fails here instead,
 # with the reason, and whatever was running keeps running.
-ExecStartPre=/usr/local/bin/jhttpd --config /etc/jhttpd.conf --test
-ExecStart=/usr/local/bin/jhttpd --config /etc/jhttpd.conf
+# /usr/bin, not /usr/local/bin: this is the packaged unit, and the package
+# installs to /usr/bin.  The example unit in jlib/apps/ says /usr/local/bin
+# because that is where `make install` puts it with the default prefix -- the
+# two differ on purpose, and getting it wrong fails the start with "No such
+# file or directory" rather than anything that names the real problem.
+# **The package ships no /etc/jhttpd.conf**, deliberately: a web server that
+# bound :80 the moment it was installed would fight whatever is already
+# serving there, which on the machine this was written for was Apache.  Copy
+# /usr/share/doc/jhttpd/jhttpd.conf.example and edit it.
+#
+# Until you do, ExecStartPre fails and the service does not start -- which is
+# the intended behaviour, and says so rather than starting on a guess.
+ExecStartPre=/usr/bin/jhttpd --config /etc/jhttpd.conf --test
+ExecStart=/usr/bin/jhttpd --config /etc/jhttpd.conf
 
 # SIGHUP re-reads the config and reopens the logs. What it cannot change --
 # ports, roots, the thread count -- it names, so `journalctl -u jhttpd` after a
@@ -55,7 +70,21 @@ RestartSec=2
 # here, which never runs as root at all. That is stricter and it means the
 # certificate has to be readable by www-data, which is a real trade rather than
 # a free win.
+# **Group must match the group the config drops to.**
+#
+# systemd creates LogsDirectory owned by User:Group, so without this it is
+# root:root 0750 -- and jhttpd reopens its logs *after* dropping privilege,
+# on the SIGHUP that logrotate's postrotate sends. www-data would have no
+# search permission on that directory, the reopen would fail, and logging
+# would stop silently after the first rotation.
+#
+# root:www-data 0750 gives the dropped process exactly what it needs: it can
+# traverse the directory and open a log that already exists. It deliberately
+# cannot *create* one, which is why the `create` line in the logrotate snippet
+# is load-bearing rather than decorative -- and why a log deleted by hand
+# needs a restart rather than a reload to come back.
 User=root
+Group=www-data
 
 # Modest hardening. Not a complete list -- these are the ones that are clearly
 # right for a static file server and do not interfere with dropping privileges
