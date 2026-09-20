@@ -376,6 +376,110 @@ static void streaming_splits_the_same_way_however_it_arrives() {
     }
 }
 
+/**
+ * What a client sends survives being read back.
+ *
+ * #328 found the gap this guards: `tools` and a message's `tool_calls` could
+ * be *parsed* off a request and not *written* to one, so jcode could
+ * understand a tool list it had no way to send. A round trip is the shape of
+ * test that catches a one-directional field, and nothing here had one.
+ */
+static void a_request_survives_a_round_trip() {
+    std::cout << "\na request survives a round trip:\n";
+
+    oa::request r;
+
+    r.model = "m";
+    r.tools = R"([{"type":"function","function":{"name":"read_file",)"
+              R"("parameters":{"type":"object","properties":{"path":)"
+              R"({"type":"string"}}}}}])";
+
+    r.messages.push_back({ "user", "read main.c" });
+
+    // An assistant turn that called something, and the result it was given.
+    ai::message said;
+
+    said.role = "assistant";
+    said.tool_calls.push_back({ "c1", "read_file", R"({"path":"main.c"})" });
+
+    r.messages.push_back(said);
+    r.messages.push_back({ "tool", "int main(void){}" });
+
+    const oa::request back = oa::request::parse(r.str());
+
+    ok("the tool list comes back", back.wants_tools, r.str());
+
+    ok("  with its schema whole",
+       back.tools.find("properties") != std::string::npos &&
+       back.tools.find("path") != std::string::npos, back.tools);
+
+    ok("  and three turns", back.messages.size() == 3,
+       std::to_string(back.messages.size()));
+
+    ok("  the assistant turn still knows what it called",
+       back.messages.size() == 3 &&
+       back.messages[1].tool_calls.size() == 1 &&
+       back.messages[1].tool_calls[0].name == "read_file",
+       r.str());
+
+    ok("  with the arguments it gave",
+       back.messages.size() == 3 &&
+       back.messages[1].tool_calls.size() == 1 &&
+       back.messages[1].tool_calls[0].arguments.find("main.c") !=
+           std::string::npos);
+
+    ok("  and the tool result is still a tool turn",
+       back.messages.size() == 3 && back.messages[2].role == "tool" &&
+       back.messages[2].content == "int main(void){}");
+
+    // tool_choice both ways.
+    oa::request named;
+
+    named.model = "m";
+    named.messages.push_back({ "user", "hi" });
+    named.tools = R"([{"type":"function"}])";
+    named.tool_choice = "auto";
+
+    ok("tool_choice as a string round-trips",
+       oa::request::parse(named.str()).tool_choice == "auto");
+
+    // **The streaming direction has the same hazard**, and had the same gap:
+    // chunk() wrote calls that delta::parse did not read, and a finish reason
+    // of tool_calls came back as stop.
+    oa::delta d;
+
+    d.calls.push_back({ "c1", "read_file", R"({"path":"main.c"})" });
+
+    const oa::delta chunked =
+        oa::delta::parse(oa::chunk("id", "m", 0, d));
+
+    ok("a chunk's calls come back",
+       chunked.calls.size() == 1 && chunked.calls[0].name == "read_file",
+       oa::chunk("id", "m", 0, d));
+
+    oa::delta last;
+
+    last.done = true;
+    last.why = oa::finish::tool_calls;
+
+    ok("  and tool_calls survives as the reason, not as stop",
+       oa::delta::parse(oa::chunk("id", "m", 0, last)).why ==
+           oa::finish::tool_calls);
+
+    // A request with none carries none, which is what every client that
+    // predates this sends.
+    oa::request plain;
+
+    plain.model = "m";
+    plain.messages.push_back({ "user", "hi" });
+
+    const oa::request none = oa::request::parse(plain.str());
+
+    ok("and a request with no tools still has none",
+       !none.wants_tools && none.tools.empty() &&
+       none.messages.size() == 1 && none.messages[0].tool_calls.empty());
+}
+
 static void what_it_refuses() {
     std::cout << "\nwhat it refuses:\n";
 
@@ -918,6 +1022,7 @@ int main() {
     absent_is_not_zero();
     content_may_be_parts();
     a_tool_request_is_visible();
+    a_request_survives_a_round_trip();
     calls_are_read_out_of_the_text();
     streaming_splits_the_same_way_however_it_arrives();
     what_it_refuses();

@@ -48,6 +48,8 @@
 #include <jlib/apps/jcode.hh>
 
 #include <jlib/ai/openai.hh>
+
+#include <memory>
 #include <jlib/net/http.hh>
 #include <jlib/util/URL.hh>
 #include <jlib/util/util.hh>
@@ -106,6 +108,16 @@ struct options {
     double timeout = 600;
 
     bool stream = true;
+    /**
+     * How many times round the tool loop before stopping.
+     *
+     * A model that calls the same tool forever is the ordinary failure of a
+     * loop like this rather than an exotic one, so there is a bound and
+     * reaching it is said out loud. Nothing can be called yet, so today every
+     * run takes exactly one round.
+     */
+    unsigned int rounds = 8;
+
     bool dry_run = false;
     bool yes = false;
 };
@@ -128,6 +140,8 @@ void usage(std::ostream& o, const char* me) {
       << "  --timeout S     seconds to wait for a reply (default 600; a\n"
       << "                  cold model can take a minute to say anything)\n"
       << "  --no-stream     wait for the whole reply rather than watching it\n"
+      << "  --rounds N      most times round the tool loop\n"
+      << "                  (default 8; nothing calls tools yet)\n"
       << "  --dry-run       decide everything, write nothing\n"
       << "  --yes           do not ask before writing\n"
       << "  --help\n";
@@ -155,6 +169,13 @@ bool parse_args(int argc, char** argv, options& o, std::string& request,
         }
         else if(a == "--timeout" && has_next) o.timeout = std::atof(argv[++i]);
         else if(a == "--no-stream") o.stream = false;
+        else if(a == "--rounds" && has_next) {
+            o.rounds = unsigned(std::atoi(argv[++i]));
+
+            // Zero rounds would ask nothing at all, which is not a thing
+            // anyone means by it.
+            if(!o.rounds) o.rounds = 1;
+        }
         else if(a == "--dry-run") o.dry_run = true;
         else if(a == "--yes") o.yes = true;
         else if(!a.empty() && a[0] == '-') {
@@ -240,38 +261,53 @@ int main(int argc, char** argv) {
               << " file(s), about " << plan.estimate << " tokens of "
               << o.context << "\n";
 
-    oa::request req;
-
-    req.model = o.model;
-    req.stream = o.stream;
-    req.max_tokens = o.tokens;
-    req.has_temperature = o.has_temp;
-    req.temperature = o.temp;
-
-    for(const std::pair<std::string, std::string>& t : plan.turns)
-        req.messages.push_back({ t.first, t.second });
-
-    std::string text;
+    // **One exchange, whichever transport the options ask for.**
+    //
+    // Handed to jcode::converse rather than called directly, so the loop that
+    // drives it can be tested with no server at all (#328). The connection is
+    // made once, outside: a harness that opens one per call is #221, and a
+    // loop would do it once a round.
     std::size_t prompt_tokens = 0;
 
-    try {
-        const util::URL base(o.url);
+    bool first = true;
 
-        http::options net;
+    std::string text;
 
-        net.timeout = o.timeout;
+    const util::URL base(o.url);
 
-        // A whole file of source, and the protocol's envelope around it.  The
-        // 1 MiB default is for a token endpoint's reply.
-        net.max_body = 32 << 20;
+    http::options net;
 
-        http::connection c(base, net);
+    net.timeout = o.timeout;
 
-        const util::URL target(o.url + "/chat/completions");
+    // A whole file of source, and the protocol's envelope around it.  The
+    // 1 MiB default is for a token endpoint's reply.
+    net.max_body = 32 << 20;
+
+    const util::URL target(o.url + "/chat/completions");
+
+    std::unique_ptr<http::connection> conn;
+
+    const jcode::exchange once =
+        [&](const std::vector<ai::message>& turns,
+            const std::string& tools) -> oa::answer
+    {
+        oa::request req;
+
+        req.model = o.model;
+        req.stream = o.stream;
+        req.max_tokens = o.tokens;
+        req.has_temperature = o.has_temp;
+        req.temperature = o.temp;
+        req.tools = tools;
+        req.messages = turns;
+
+        if(!conn) conn.reset(new http::connection(base, net));
 
         util::http::fields send;
 
         send.add("Content-Type", "application/json");
+
+        oa::answer a;
 
         if(o.stream) {
             // The whole chain, first time in one place: the connection reads
@@ -279,7 +315,9 @@ int main(int argc, char** argv) {
             // deltas concatenate to the reply.
             oa::event_reader events;
 
-            const util::http::Response r = c.request(
+            std::string got;
+
+            const util::http::Response r = conn->request(
                 "POST", target, send, req.str(),
                 [&](std::string_view piece) {
                     for(const std::string& one :
@@ -288,7 +326,12 @@ int main(int argc, char** argv) {
                         try {
                             const oa::delta d = oa::delta::parse(one);
 
-                            text += d.content;
+                            got += d.content;
+
+                            // Whole calls, because jserve sends them whole --
+                            // see openai::delta::calls.
+                            for(std::size_t i = 0; i < d.calls.size(); i++)
+                                a.calls.push_back(d.calls[i]);
 
                             std::cout << d.content << std::flush;
                         }
@@ -303,49 +346,77 @@ int main(int argc, char** argv) {
 
             std::cout << "\n";
 
+            // Thrown rather than returned: converse turns it into an ending
+            // that says the far end refused, which is a different outcome
+            // from the model having nothing to say.
             if(!r.ok()) {
                 oa::failure f;
 
-                std::cerr << "jcode: the server refused: "
-                          << (oa::failure::parse(r.body(), f) ? f.message
-                                                              : r.reason())
-                          << "\n";
-
-                return 1;
+                throw std::runtime_error(
+                    "the server refused: " +
+                    (oa::failure::parse(r.body(), f) ? f.message : r.reason()));
             }
 
             if(!events.done())
                 std::cerr << "jcode: the stream ended without [DONE], so the "
                           << "reply may be short\n";
+
+            a.content = got;
         }
         else {
-            const util::http::Response r = c.request("POST", target, send,
-                                                     req.str());
+            const util::http::Response r =
+                conn->request("POST", target, send, req.str());
 
             if(!r.ok()) {
                 oa::failure f;
 
-                std::cerr << "jcode: the server refused: "
-                          << (oa::failure::parse(r.body(), f) ? f.message
-                                                              : r.reason())
-                          << "\n";
-
-                return 1;
+                throw std::runtime_error(
+                    "the server refused: " +
+                    (oa::failure::parse(r.body(), f) ? f.message : r.reason()));
             }
 
-            const oa::answer a = oa::answer::parse(r.body());
+            a = oa::answer::parse(r.body());
 
-            text = a.content;
-            prompt_tokens = a.prompt_tokens;
-
-            std::cout << text << "\n";
+            std::cout << a.content << "\n";
         }
-    }
-    catch(std::exception& e) {
-        std::cerr << "jcode: " << e.what() << "\n";
+
+        // The first reply is the one the estimate was made against.
+        if(first) { prompt_tokens = a.prompt_tokens; first = false; }
+
+        return a;
+    };
+
+    std::vector<ai::message> opening;
+
+    for(const std::pair<std::string, std::string>& t : plan.turns)
+        opening.push_back({ t.first, t.second });
+
+    // **No tools yet**, so this sends once and returns exactly as it did
+    // before: converse with an empty list asks, gets no calls, and stops.
+    // #310's third piece is what fills the list; the loop is here first so
+    // that filling it is an addition rather than a rewrite.
+    const std::vector<jcode::tool> tools;
+
+    const jcode::conversation talk =
+        jcode::converse(opening, tools, once, o.rounds);
+
+    for(const jcode::ran& c : talk.calls)
+        std::cerr << "jcode: called " << c.name
+                  << (c.arguments.empty() ? std::string()
+                                          : " with " + c.arguments)
+                  << (c.known ? (c.failed.empty() ? "" : " -- failed: ")
+                              : " -- no such tool")
+                  << c.failed << "\n";
+
+    if(talk.why != jcode::ending::answered) {
+        std::cerr << "jcode: " << jcode::spell(talk.why)
+                  << (talk.detail.empty() ? std::string() : ": " + talk.detail)
+                  << "\n";
 
         return 1;
     }
+
+    text = talk.text;
 
     // What the guess was worth, said out loud.  The streaming path gets no
     // usage block -- the protocol does not put one in the chunks -- so this
