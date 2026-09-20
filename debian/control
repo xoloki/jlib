@@ -39,6 +39,17 @@ Description: static web server built on jlib
  configuration with "jhttpd --test" before replacing a running server, so a
  typo fails the start rather than the site.
 
+Package: jlib-gl
+Architecture: any
+Depends: jlib (= ${binary:Version}), ${shlibs:Depends}, ${misc:Depends}
+Description: the graphical and audio half of jlib
+ The jlib libraries and programs that link OpenGL, GLFW, X11 or portaudio,
+ and the runtime dependencies that come with them.
+ .
+ Separate from jlib so that a headless machine -- a web server running
+ jhttpd, say -- does not acquire an X11 stack in order to install a
+ library it uses for sockets and strings.
+
 Package: jlib-doc
 Architecture: all
 Depends: ${misc:Depends}

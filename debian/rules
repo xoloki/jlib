@@ -45,6 +45,36 @@ override_dh_auto_test:
 # Checked at dh_builddeb, by which point everything is staged under
 # debian/jhttpd/ and both facts are present at once.  This exists because the
 # unit really did say /usr/local/bin while the package installed /usr/bin.
+# **The check that would have caught this**, and the one that matters.
+#
+# split-by-linkage.sh moves files by reading NEEDED entries, and then checks
+# its own work with the same regex -- which can only catch a disagreement
+# between two patterns I wrote.  This asks dpkg instead: after dh_shlibdeps
+# has computed what jlib depends on, does that answer mention an X11 stack?
+#
+# `jlib-gl` is in the pattern for a reason found the hard way: the first
+# version of this check looked only for the runtime libraries by name, and
+# passed while jlib depended on *jlib-gl* -- which pulls the identical X11
+# stack through one more hop, and circularly.  Checking for the symptom's
+# usual spelling is not the same as checking the property.
+#
+# That is the property that failed on a live server -- `jlib depends on
+# libgl1; however: Package libgl1 is not installed` -- and it is computed by
+# the same tool that will be believed at install time.
+override_dh_shlibdeps:
+	dh_shlibdeps
+	@set -e; \
+	bad=`grep -hoE '(libgl1|libglfw3|libglu1|libportaudio2|libx11-6|jlib-gl)[^,]*' \
+	     debian/jlib.substvars 2>/dev/null || true`; \
+	if [ -n "$$bad" ]; then \
+	    echo "jlib would depend on an X11 stack:"; \
+	    echo "$$bad"; \
+	    echo "(a headless server installing jlib for sockets and strings"; \
+	    echo " should not acquire one -- see debian/split-by-linkage.sh)"; \
+	    exit 1; \
+	fi
+	@echo "jlib: Depends names no GL, X or audio runtime"
+
 override_dh_builddeb:
 	@set -e; \
 	for exe in `sed -n 's/^Exec[A-Za-z]*=\([^ ]*\).*/\1/p' \
@@ -73,6 +103,23 @@ override_dh_builddeb:
 override_dh_compress:
 	dh_compress -Xjhttpd.conf.example
 
+# **The graphical half is split out by what it links, not by a list.**
+#
+# configure detects GL, GLFW, X and portaudio and builds against whatever the
+# machine has.  That is why a tarball build on a headless server produces a
+# headless jlib and the container -- which has every -dev package, for the
+# test suite -- produces one that drags in libgl1, libglfw3, libglu1-mesa and
+# libportaudio2.  Installing that on a web server wants an X11 stack to run a
+# program that speaks HTTP.
+#
+# Derived rather than enumerated, because a list is the thing that goes stale:
+# a new GL program added to jlib/apps would otherwise land in jlib and put
+# libgl1 back into a headless server's dependency set, and nothing would say
+# so until somebody tried to install it.
 override_dh_install:
 	dh_install
 	rm -f debian/jlib/usr/bin/jhttpd
+	# Debian policy: no .la files for shared libraries.  find, not a glob:
+	# the libraries install to a multiarch directory, usr/lib/<triplet>/.
+	find debian/jlib/usr/lib -name '*.la' -delete
+	debian/split-by-linkage.sh debian/jlib debian/jlib-gl
