@@ -236,8 +236,20 @@ namespace {
      * whole reason to care is that a recipient which disagrees with the one in
      * front of it about where a line ends is how one message becomes two --
      * and the only way to disagree with nobody is to insist on CRLF.
+     *
+     * **`what` names which head is being parsed**, and it is not decoration.
+     * This is called for requests and for responses, and it used to say
+     * "response" either way -- so a scanner sending a malformed request line
+     * produced, in a server's error log:
+     *
+     *     [client 152.32.183.27:52808] the response head does not end in CRLF
+     *
+     * which tells the operator their own server emitted something broken. It
+     * was the second error line the six sites running this logged after a
+     * deploy whose entire point was making that log trustworthy.
      */
-    std::vector<std::string> split_lines(std::string_view head) {
+    std::vector<std::string> split_lines(std::string_view head,
+                                         const char* what) {
         std::vector<std::string> lines;
         std::size_t i = 0;
 
@@ -245,13 +257,15 @@ namespace {
             const std::size_t nl = head.find("\r\n", i);
 
             if(nl == std::string_view::npos)
-                throw error("the response head does not end in CRLF");
+                throw error(std::string("the ") + what +
+                            " head does not end in CRLF");
 
             const std::string_view line = head.substr(i, nl - i);
 
             if(line.find('\r') != std::string_view::npos ||
                line.find('\n') != std::string_view::npos) {
-                throw error("a bare CR or LF inside the response head");
+                throw error(std::string("a bare CR or LF inside the ") +
+                            what + " head");
             }
 
             if(line.empty()) {
@@ -263,7 +277,8 @@ namespace {
             i = nl + 2;
         }
 
-        throw error("the response head has no blank line at the end of it");
+        throw error(std::string("the ") + what +
+                    " head has no blank line at the end of it");
     }
 
     bool all_digits(const std::string& s) {
@@ -470,7 +485,7 @@ bool persistent(const Request& q) {
 }
 
 Request parse_request_head(std::string_view head) {
-    const std::vector<std::string> lines = split_lines(head);
+    const std::vector<std::string> lines = split_lines(head, "request");
 
     if(lines.empty()) throw error("the request head is empty");
 
@@ -533,7 +548,7 @@ sys::task<Request> read_request_head(sys::async_reader& in, std::size_t cap) {
 }
 
 Response parse_head(std::string_view head, bool head_request) {
-    const std::vector<std::string> lines = split_lines(head);
+    const std::vector<std::string> lines = split_lines(head, "response");
 
     if(lines.empty()) throw error("the response head is empty");
 
