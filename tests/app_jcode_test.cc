@@ -134,6 +134,47 @@ static void the_format_as_asked_for() {
  * silence, and the whole point of the guess log (#265) is that jcode does not
  * decide quietly.
  */
+/**
+ * A reply that gives the same file several times writes it once.
+ *
+ * Measured, not imagined: asked to fix three functions, a model wrote six
+ * illustrative snippets and then the file, and jcode announced seven writes of
+ * util.c. apply() wrote them in order so the result was the last one anyway --
+ * the other six were announcements of a write that did not survive.
+ */
+static void a_file_given_twice_is_written_once() {
+    std::cout << "\na file given more than once:\n";
+
+    const jcode::reply r = jcode::parse(
+        "Here is the idea:\n\n" +
+        fence("main.cc", "int main() { return 1; }\n") +
+        "\nand here is the file:\n\n" +
+        fence("main.cc", "int main() { return 0; }\n"), KNOWN);
+
+    ok("one edit, not two", r.edits.size() == 1,
+       std::to_string(r.edits.size()));
+
+    // The last, because that is what writing them in order already produced
+    // and because a model correcting itself means the correction.
+    ok("  and it is the last one given",
+       r.edits.size() == 1 && r.edits[0].content == "int main() { return 0; }\n",
+       r.edits.empty() ? "" : r.edits[0].content);
+
+    // Superseded rather than silently dropped: a reply needing this was not
+    // in the format asked for, and the user should see how far off it was.
+    ok("  with the superseded one refused, not forgotten",
+       r.refusals.size() == 1 &&
+       r.refusals[0].why.find("superseded") != std::string::npos,
+       r.refusals.empty() ? "none" : r.refusals[0].why);
+
+    // Different files are untouched by any of this.
+    const jcode::reply two = jcode::parse(
+        fence("main.cc", "a\n") + "\n" + fence("util.cc", "b\n"), KNOWN);
+
+    ok("two different files are still two edits", two.edits.size() == 2,
+       std::to_string(two.edits.size()));
+}
+
 static void a_tool_call_in_the_reply() {
     std::cout << "\na reply that asks to call something:\n";
 
@@ -521,6 +562,25 @@ static void the_tools_and_their_root() {
     ok("  and refuses an empty search",
        find->run("{}").find("error:") == 0);
 
+    // **A model searching code writes code**, and code is full of regex
+    // metacharacters. Read as a regular expression, `char*` means "cha and
+    // then zero or more r" and matches nothing -- which is what a live run
+    // did, silently, for every search worth making.
+    {
+        std::ofstream f((root + "/sig.c").c_str());
+
+        f << "void reverse(char* s)\n{\n}\n";
+    }
+
+    ok("a search containing regex characters is still a string search",
+       find->run(R"J({"text":"void reverse(char* s)"})J").find("sig.c") !=
+           std::string::npos,
+       find->run(R"J({"text":"void reverse(char* s)"})J"));
+
+    ok("  and one that would only match as a regex does not",
+       find->run(R"({"text":"cha.* s"})") == "no matches",
+       find->run(R"({"text":"cha.* s"})"));
+
     // The secret is outside the root, so a search must not reach it.
     ok("  and does not reach outside the root",
        find->run(R"({"text":"should never be read"})") == "no matches",
@@ -610,22 +670,32 @@ static void a_block_with_no_name() {
             fence("main.cc", "first\n") + "\nSorry, better:\n\n```\nsecond\n```\n",
             KNOWN);
 
-        ok("the second block takes the name of the first",
-           r.edits.size() == 2 && r.edits[1].name == "main.cc",
+        // **One edit, and it is the correction.**  This asserted two until
+        // the duplicate collapse landed: both blocks named main.cc, apply()
+        // wrote them in order, and the file ended as the second anyway. What
+        // the first bought was an announced write that did not survive.
+        ok("the correction is the edit, and it is alone",
+           r.edits.size() == 1 && r.edits[0].name == "main.cc" &&
+           r.edits[0].content == "second\n",
            std::to_string(r.edits.size()) + " edits");
 
-        ok("  and says it did", r.edits.size() == 2 &&
-           !r.edits[1].guesses.empty() &&
-           r.edits[1].guesses[0].find("used the one before it") !=
+        ok("  having taken the name of the block before it",
+           r.edits.size() == 1 && !r.edits[0].guesses.empty() &&
+           r.edits[0].guesses[0].find("used the one before it") !=
                std::string::npos,
-           r.edits.size() < 2 || r.edits[1].guesses.empty()
-               ? "nothing logged" : r.edits[1].guesses[0]);
+           r.edits.empty() || r.edits[0].guesses.empty()
+               ? "nothing logged" : r.edits[0].guesses[0]);
 
         // The line before that second fence was "Sorry, better:", which the
         // first version of this took for a filename and wrote an edit to.
         ok("  and did not take the prose line for a filename",
-           r.edits.size() == 2 && r.edits[1].name != "Sorry, better",
-           r.edits.size() < 2 ? "" : r.edits[1].name);
+           r.edits.size() == 1 && r.edits[0].name != "Sorry, better",
+           r.edits.empty() ? "" : r.edits[0].name);
+
+        ok("  with the one it replaced refused rather than forgotten",
+           r.refusals.size() == 1 &&
+           r.refusals[0].why.find("superseded") != std::string::npos,
+           r.refusals.empty() ? "none" : r.refusals[0].why);
     }
 
     {
@@ -963,6 +1033,7 @@ int main() {
     std::cout << std::unitbuf;
 
     the_format_as_asked_for();
+    a_file_given_twice_is_written_once();
     a_tool_call_in_the_reply();
     the_tools_and_their_root();
     the_agent_loop();

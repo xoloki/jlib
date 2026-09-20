@@ -531,9 +531,18 @@ std::vector<tool> toolbox(const std::string& root, const std::string& build,
             if(!::realpath(root.c_str(), rootbuf))
                 return "error: the project root does not resolve";
 
-            // grep through sys::run rather than a shell, and with `--` so a
-            // pattern starting with a dash is a pattern rather than a flag.
-            std::vector<std::string> argv{ "grep", "-rnI", "--", want,
+            // **-F, because this searches for a string and says so.**
+            //
+            // Without it grep reads the pattern as a basic regular
+            // expression, and a model looking for code writes code: asked for
+            // `void reverse(char* s)` it matched nothing at all, because
+            // `char*` there means "cha and then zero or more r". Every
+            // interesting search a coding model makes contains `*`, `(`, `.`
+            // or `[`, and every one of them silently found nothing.
+            //
+            // `--` as well, so a pattern starting with a dash is a pattern
+            // rather than a flag, and through sys::run rather than a shell.
+            std::vector<std::string> argv{ "grep", "-rnIF", "--", want,
                                            std::string(rootbuf) };
 
             std::string got, err;
@@ -823,6 +832,37 @@ reply parse(const std::string& text, const std::vector<std::string>& known) {
                                  "this file is only as complete as the reply "
                                  "was; nothing was written" });
     }
+
+    // **One block per file wins, and it is the last.**
+    //
+    // A reply that illustrates before it answers produces several blocks for
+    // the same name -- measured, a model asked to fix three functions wrote
+    // six snippets and then the file, and jcode announced seven writes of
+    // util.c. apply() wrote them in order, so the file ended as the last one
+    // anyway; what the other six bought was six announcements of a write that
+    // did not survive, and six passes over the disk.
+    //
+    // The last is kept because that is what the sequence already produced,
+    // and because a model correcting itself mid-reply means the correction.
+    // The superseded ones are refusals rather than silence: a reply needing
+    // this is not in the format that was asked for, and the user should see
+    // how far off it was.
+    std::vector<edit> kept;
+
+    for(std::size_t i = 0; i < out.edits.size(); i++) {
+        std::size_t later = out.edits.size();
+
+        for(std::size_t j = i + 1; j < out.edits.size(); j++)
+            if(out.edits[j].name == out.edits[i].name) { later = j; break; }
+
+        if(later == out.edits.size()) { kept.push_back(out.edits[i]); continue; }
+
+        out.refusals.push_back({ out.edits[i].name,
+                                 "a later block in the same reply gave this "
+                                 "file again, so this one was superseded" });
+    }
+
+    out.edits.swap(kept);
 
     return out;
 }
