@@ -52,6 +52,7 @@
 
 #include <jlib/ai/openai.hh>
 
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -217,6 +218,101 @@ plan lay_out(const std::string& request, const std::vector<source>& files,
  * ever visible: the vocabulary is on the other side of the wire.
  */
 std::string estimate_drift(std::size_t estimated, std::size_t actual);
+
+/**
+ * Something the model may ask for, and what happens when it does.
+ *
+ * `parameters` is a JSON Schema as text, for the same reason
+ * `openai::request::tools` is: the shape belongs to whoever wrote the tool and
+ * there is no struct that holds one without losing something.
+ *
+ * `run` is given the call's arguments as JSON text and returns what the model
+ * is shown. It may throw: the loop turns that into a result saying so, because
+ * a model waiting for an answer it will never get is worse than a model told
+ * the tool failed.
+ */
+struct tool {
+    std::string name;
+    std::string description;
+    std::string parameters;
+
+    std::function<std::string(const std::string& arguments)> run;
+};
+
+/** The tool list as the protocol wants it, for `openai::request::tools`. */
+std::string declare(const std::vector<tool>& tools);
+
+/**
+ * Why a conversation stopped.
+ *
+ * Four outcomes rather than a bool, because a harness that exits the same way
+ * for all of them is telling the user nothing -- which is the failure this
+ * whole arc keeps finding in different clothes.
+ */
+enum class ending {
+    answered,    ///< the model replied without asking for anything
+    bounded,     ///< the round limit was reached, and it had more to say
+    refused,     ///< the far end refused; see detail
+    failed       ///< the exchange threw; see detail
+};
+
+const char* spell(ending e);
+
+/** One call the loop dispatched, for announcing and for tests. */
+struct ran {
+    std::string name;
+    std::string arguments;
+    bool known = false;    ///< false when no tool by that name is registered
+    std::string failed;    ///< set when the handler threw
+};
+
+/** How a conversation ended, and everything it did on the way. */
+struct conversation {
+    std::vector<ai::message> turns;   ///< the whole exchange, as it ended
+    std::string text;                 ///< the final reply's prose
+
+    ending why = ending::answered;
+    std::string detail;
+
+    unsigned int rounds = 0;
+    std::vector<ran> calls;
+};
+
+/**
+ * One exchange with the far end: the turns and the tool list in, a reply out.
+ *
+ * Injected rather than called directly so the loop can be tested with no
+ * model, no server and no disk -- which is most of why it is here rather than
+ * in jcode_main.
+ */
+typedef std::function<ai::openai::answer(const std::vector<ai::message>&,
+                                         const std::string& tools)> exchange;
+
+/**
+ * Drive a conversation until the model stops asking for tools.
+ *
+ * Each round: send, and if the reply carries calls, run them and go round with
+ * the results appended. **The assistant turn carries the calls themselves**,
+ * not only the results -- `ai::chat` renders them into the model's own markup
+ * (#311), and without them the model is shown a result for a call it cannot
+ * see itself having made, and asks again.
+ *
+ * A call naming a tool that is not registered is refused, and the refusal is
+ * sent back as that call's result. A model that asked for something which does
+ * not exist should be told so rather than left waiting -- and the refusal is
+ * recorded in `conversation::calls` rather than hidden, which is jcode's rule
+ * from #265 applied to a new kind of guess.
+ *
+ * @param max_rounds a bound, because a model that calls the same tool forever
+ *        is the ordinary failure of a loop like this rather than an exotic one
+ *
+ * Never writes anything. Applying the edits in the final reply is still
+ * apply()'s, and still the caller's decision.
+ */
+conversation converse(std::vector<ai::message> turns,
+                      const std::vector<tool>& tools,
+                      const exchange& send,
+                      unsigned int max_rounds = 8);
 
 /** What became of one edit. */
 enum class outcome {

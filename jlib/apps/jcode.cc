@@ -20,6 +20,8 @@
 
 #include <jlib/apps/jcode.hh>
 
+#include <jlib/util/json.hh>
+
 #include <jlib/util/util.hh>
 
 #include <algorithm>
@@ -314,6 +316,150 @@ const char* spell(outcome o) {
     }
 
     return "refused";
+}
+
+const char* spell(ending e) {
+    switch(e) {
+    case ending::answered: return "answered";
+    case ending::bounded:  return "the round limit was reached";
+    case ending::refused:  return "refused";
+    case ending::failed:   return "failed";
+    }
+
+    return "?";
+}
+
+std::string declare(const std::vector<tool>& tools) {
+    if(tools.empty()) return std::string();
+
+    util::json::array::ptr out = util::json::array::create();
+
+    for(std::size_t i = 0; i < tools.size(); i++) {
+        util::json::object::ptr fn = util::json::object::create();
+
+        fn->add(std::string("name"), tools[i].name);
+
+        if(!tools[i].description.empty())
+            fn->add(std::string("description"), tools[i].description);
+
+        // Parsed and re-emitted rather than spliced as text, so a schema that
+        // is not JSON is caught here -- where the tool was declared -- rather
+        // than by the far end as a malformed request.
+        //
+        // Safe to hand over: `create` owns what it parses and `add` takes that
+        // ownership. The hazard is the other direction, handing `add` an
+        // object *borrowed* from something else, which is the double free
+        // #311 found in the `functions` wrapper.
+        fn->add(std::string("parameters"),
+                util::json::object::create(tools[i].parameters.empty()
+                                               ? "{\"type\":\"object\"}"
+                                               : tools[i].parameters));
+
+        util::json::object::ptr one = util::json::object::create();
+
+        one->add(std::string("type"), std::string("function"));
+        one->add(std::string("function"), fn);
+
+        out->add(one);
+    }
+
+    return out->str();
+}
+
+conversation converse(std::vector<ai::message> turns,
+                      const std::vector<tool>& tools,
+                      const exchange& send,
+                      unsigned int max_rounds)
+{
+    conversation out;
+
+    const std::string declared = declare(tools);
+
+    for(;;) {
+        if(out.rounds >= max_rounds) {
+            out.turns = turns;
+            out.why = ending::bounded;
+            out.detail = "stopped after " + std::to_string(max_rounds) +
+                         " round(s) with the model still asking for tools";
+
+            return out;
+        }
+
+        out.rounds++;
+
+        ai::openai::answer a;
+
+        try { a = send(turns, declared); }
+        catch(std::exception& e) {
+            out.turns = turns;
+            out.why = ending::failed;
+            out.detail = e.what();
+
+            return out;
+        }
+
+        // The model's own turn, carrying the calls it made -- see converse()
+        // in the header for why the calls and not only their results.
+        ai::message said;
+
+        said.role = "assistant";
+        said.content = a.content;
+
+        for(std::size_t i = 0; i < a.calls.size(); i++)
+            said.tool_calls.push_back({ a.calls[i].id, a.calls[i].name,
+                                        a.calls[i].arguments });
+
+        turns.push_back(said);
+
+        if(a.calls.empty()) {
+            out.turns = turns;
+            out.text = a.content;
+            out.why = ending::answered;
+
+            return out;
+        }
+
+        for(std::size_t i = 0; i < a.calls.size(); i++) {
+            const ai::openai::call& c = a.calls[i];
+
+            ran did;
+
+            did.name = c.name;
+            did.arguments = c.arguments;
+
+            std::string result;
+
+            const tool* found = 0;
+
+            for(std::size_t j = 0; j < tools.size(); j++)
+                if(tools[j].name == c.name) { found = &tools[j]; break; }
+
+            if(!found)
+                // Sent back rather than dropped: a model waiting for an answer
+                // it will never get asks again, forever, and the bound above
+                // becomes the only thing that stops it.
+                result = "error: no tool called \"" + c.name + "\"";
+            else {
+                did.known = true;
+
+                try { result = found->run(c.arguments); }
+                catch(std::exception& e) {
+                    did.failed = e.what();
+
+                    result = std::string("error: ") + e.what();
+                }
+            }
+
+            out.calls.push_back(did);
+
+            ai::message back;
+
+            back.role = "tool";
+            back.content = result;
+
+            turns.push_back(back);
+        }
+    }
 }
 
 reply parse(const std::string& text, const std::vector<std::string>& known) {

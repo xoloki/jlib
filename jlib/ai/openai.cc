@@ -35,6 +35,50 @@ namespace openai {
 namespace {
 
 /**
+ * The `tool_calls` on a message, if any.
+ *
+ * Shaped `[{"id":..,"type":"function","function":{"name":..,"arguments":..}}]`,
+ * where `arguments` is a **string** holding JSON rather than an object -- the
+ * protocol nests it that way and a reader that expects an object gets nothing.
+ * It is carried as that string; see openai::call.
+ */
+std::vector<call> calls_of(util::json::object::ptr m)
+{
+    std::vector<call> out;
+
+    if(!m->has("tool_calls") ||
+       m->kind("tool_calls") != util::json::object::type_array)
+        return out;
+
+    util::json::array::ptr a = m->arr("tool_calls");
+
+    for(int i = 0; i < a->size(); i++) {
+        if(a->kind(unsigned(i)) != util::json::object::type_object) continue;
+
+        util::json::object::ptr one = a->obj(unsigned(i));
+
+        call c;
+
+        c.id = one->get("id").str_or(std::string());
+
+        if(one->has("function") &&
+           one->kind("function") == util::json::object::type_object) {
+            util::json::object::ptr f = one->obj("function");
+
+            c.name = f->get("name").str_or(std::string());
+            c.arguments = f->get("arguments").str_or(std::string());
+        }
+
+        // A call with no name is not a call.  Dropped rather than carried as
+        // an empty one, which a caller would have to check for anyway.
+        if(!c.name.empty()) out.push_back(c);
+    }
+
+    return out;
+}
+
+
+/**
  * A message's content, which may be a string or an array of parts.
  *
  * The older clients send a string and the newer ones send
@@ -193,6 +237,18 @@ request request::parse(const std::string& body) {
 
         turn.role = m->get("role").str_or("user");
         turn.content = content_of(m);
+
+        // **A replayed conversation carries the calls it made.**  Without
+        // this the server sees an assistant turn with the call missing, the
+        // template has nothing to render, and the model is shown a result for
+        // a question it cannot see itself asking -- so it asks again.
+        //
+        // The reply direction has read these since #311; this direction did
+        // not, and a round trip is what showed it.
+        const std::vector<call> cs = calls_of(m);
+
+        for(std::size_t k = 0; k < cs.size(); k++)
+            turn.tool_calls.push_back({ cs[k].id, cs[k].name, cs[k].arguments });
 
         r.messages.push_back(turn);
     }
@@ -367,49 +423,6 @@ const char* spell(finish f) {
 }
 
 namespace {
-
-/**
- * The `tool_calls` on a message, if any.
- *
- * Shaped `[{"id":..,"type":"function","function":{"name":..,"arguments":..}}]`,
- * where `arguments` is a **string** holding JSON rather than an object -- the
- * protocol nests it that way and a reader that expects an object gets nothing.
- * It is carried as that string; see openai::call.
- */
-std::vector<call> calls_of(util::json::object::ptr m)
-{
-    std::vector<call> out;
-
-    if(!m->has("tool_calls") ||
-       m->kind("tool_calls") != util::json::object::type_array)
-        return out;
-
-    util::json::array::ptr a = m->arr("tool_calls");
-
-    for(int i = 0; i < a->size(); i++) {
-        if(a->kind(unsigned(i)) != util::json::object::type_object) continue;
-
-        util::json::object::ptr one = a->obj(unsigned(i));
-
-        call c;
-
-        c.id = one->get("id").str_or(std::string());
-
-        if(one->has("function") &&
-           one->kind("function") == util::json::object::type_object) {
-            util::json::object::ptr f = one->obj("function");
-
-            c.name = f->get("name").str_or(std::string());
-            c.arguments = f->get("arguments").str_or(std::string());
-        }
-
-        // A call with no name is not a call.  Dropped rather than carried as
-        // an empty one, which a caller would have to check for anyway.
-        if(!c.name.empty()) out.push_back(c);
-    }
-
-    return out;
-}
 
 /** The fields every completion and chunk carries. */
 util::json::object::ptr envelope(const std::string& id,
@@ -597,10 +610,39 @@ std::string request::str() const {
         t->add("role", m.role);
         t->add("content", m.content);
 
+        // **An assistant turn that called something has to say so.**  The
+        // far end renders these back into the model's own markup, and a
+        // conversation that replays only the *results* shows the model an
+        // answer to a question it cannot see itself asking -- so it asks
+        // again. See ai::message::tool_calls.
+        if(!m.tool_calls.empty()) {
+            std::vector<call> cs;
+
+            for(std::size_t i = 0; i < m.tool_calls.size(); i++)
+                cs.push_back({ m.tool_calls[i].id, m.tool_calls[i].name,
+                               m.tool_calls[i].arguments });
+
+            t->add("tool_calls", calls_json(cs));
+        }
+
         turns->add(t);
     }
 
     root->add("messages", turns);
+
+    // The tool list, as the caller was given it.  Spliced by parsing rather
+    // than by string, so a list that is not JSON fails here rather than as a
+    // malformed request the far end has to diagnose.
+    if(!tools.empty()) root->add("tools", util::json::array::create(tools));
+
+    if(!tool_choice.empty()) {
+        // A string or an object, both of which the protocol allows -- and the
+        // object is recognised first, for the same reason `stop` is.
+        if(tool_choice.find('{') == 0)
+            root->add("tool_choice", util::json::object::create(tool_choice));
+        else
+            root->add("tool_choice", tool_choice);
+    }
 
     // Every one of these is written only when it was asked for.  A server
     // reads an absent field as "you decide"; writing the struct's zero would
@@ -648,13 +690,23 @@ delta delta::parse(const std::string& json) {
 
     if(!why.empty()) {
         d.done = true;
-        d.why = why == "length" ? finish::length : finish::stop;
+
+        // `tool_calls` is a reason of its own, and reading it as `stop` is
+        // how a client ends up showing the user an empty turn.
+        d.why = why == "length"     ? finish::length
+              : why == "tool_calls" ? finish::tool_calls
+                                    : finish::stop;
     }
 
     util::json::object::ptr dj;
 
     try { dj = choice->obj("delta"); }
     catch(util::json::exception&) {}
+
+    // The calls this chunk carries.  Written by chunk() since #316 and not
+    // read back until now -- the same one-directional field the request's
+    // round trip turned up, in the streaming direction.
+    if(dj) d.calls = calls_of(dj);
 
     if(dj) {
         d.role = !dj->get("role").str_or("").empty();

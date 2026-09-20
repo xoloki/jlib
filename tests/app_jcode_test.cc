@@ -42,6 +42,8 @@
 #include <unistd.h>
 
 namespace jcode = jlib::apps::jcode;
+namespace oa = jlib::ai::openai;
+namespace ai = jlib::ai;
 
 static int failures = 0;
 
@@ -181,6 +183,233 @@ static void a_tool_call_in_the_reply() {
 
     ok("and a reply with no markup carries no calls",
        plain.calls.empty() && plain.edits.size() == 1);
+}
+
+/**
+ * The loop: a call is run, its result goes back, and the round ends.
+ *
+ * #328. No model, no server, no disk -- the exchange is a lambda handing back
+ * scripted replies, which is most of why `converse` takes one rather than
+ * speaking HTTP itself.
+ */
+static void the_agent_loop() {
+    std::cout << "\nthe loop that answers a call:\n";
+
+    // A tool that records what it was asked and answers.
+    std::vector<std::string> asked;
+
+    jcode::tool reader;
+
+    reader.name = "read_file";
+    reader.parameters = R"({"type":"object","properties":{"path":{"type":"string"}}})";
+    reader.run = [&](const std::string& args) {
+        asked.push_back(args);
+
+        return std::string("int main(void){}");
+    };
+
+    // The script: first reply asks, second answers.
+    auto call_then_answer = [](std::size_t& n) {
+        return [&n](const std::vector<ai::message>&,
+                    const std::string&) -> oa::answer {
+            oa::answer a;
+
+            if(n++ == 0) {
+                oa::call c;
+
+                c.id = "c1";
+                c.name = "read_file";
+                c.arguments = R"({"path":"main.c"})";
+
+                a.calls.push_back(c);
+                a.why = oa::finish::tool_calls;
+            }
+            else a.content = "Looks fine.";
+
+            return a;
+        };
+    };
+
+    std::size_t n = 0;
+
+    const jcode::conversation c =
+        jcode::converse({ { "user", "check main.c" } }, { reader },
+                        call_then_answer(n));
+
+    ok("it ends by being answered", c.why == jcode::ending::answered,
+       jcode::spell(c.why));
+
+    ok("  after two rounds", c.rounds == 2, std::to_string(c.rounds));
+
+    ok("  having run the tool once", c.calls.size() == 1 && asked.size() == 1,
+       std::to_string(c.calls.size()) + "/" + std::to_string(asked.size()));
+
+    ok("  with the arguments the model gave",
+       asked.size() == 1 && asked[0].find("main.c") != std::string::npos,
+       asked.empty() ? "" : asked[0]);
+
+    ok("  and the last reply is the prose", c.text == "Looks fine.", c.text);
+
+    // **The assistant turn carries the call**, not only the result -- without
+    // it the model is shown an answer to a question it cannot see itself
+    // asking. #311 renders these into the model's own markup.
+    bool carried = false;
+
+    for(const ai::message& m : c.turns)
+        if(m.role == "assistant" && !m.tool_calls.empty() &&
+           m.tool_calls[0].name == "read_file") carried = true;
+
+    ok("  and the conversation keeps the call the model made", carried);
+
+    bool answered = false;
+
+    for(const ai::message& m : c.turns)
+        if(m.role == "tool" && m.content == "int main(void){}") answered = true;
+
+    ok("  alongside the result it was given", answered);
+}
+
+/** The three ways it stops that are not "answered". */
+static void the_loop_knows_why_it_stopped() {
+    std::cout << "\nthe loop knows why it stopped:\n";
+
+    jcode::tool forever;
+
+    forever.name = "again";
+    forever.run = [](const std::string&) { return std::string("ok"); };
+
+    // A model that asks forever is the ordinary failure, not an exotic one.
+    const auto always = [](const std::vector<ai::message>&,
+                           const std::string&) -> oa::answer {
+        oa::answer a;
+        oa::call c;
+
+        c.name = "again";
+        c.arguments = "{}";
+
+        a.calls.push_back(c);
+
+        return a;
+    };
+
+    const jcode::conversation b =
+        jcode::converse({ { "user", "go" } }, { forever }, always, 3);
+
+    ok("a model that never stops is bounded", b.why == jcode::ending::bounded,
+       jcode::spell(b.why));
+
+    ok("  at the bound it was given", b.rounds == 3, std::to_string(b.rounds));
+
+    ok("  and says so", b.detail.find("3") != std::string::npos, b.detail);
+
+    // An exchange that throws is not an answer.
+    const jcode::conversation f = jcode::converse(
+        { { "user", "go" } }, { forever },
+        [](const std::vector<ai::message>&, const std::string&) -> oa::answer {
+            throw std::runtime_error("connection refused");
+        });
+
+    ok("an exchange that throws ends as failed", f.why == jcode::ending::failed,
+       jcode::spell(f.why));
+
+    ok("  carrying the reason", f.detail == "connection refused", f.detail);
+
+    // A call for a tool nobody registered is refused *to the model*, so it is
+    // told rather than left waiting -- and recorded rather than hidden.
+    std::size_t rounds = 0;
+
+    const jcode::conversation u = jcode::converse(
+        { { "user", "go" } }, { forever },
+        [&rounds](const std::vector<ai::message>& turns,
+                  const std::string&) -> oa::answer {
+            oa::answer a;
+
+            if(rounds++ == 0) {
+                oa::call c;
+
+                c.name = "rm_rf";
+                c.arguments = "{}";
+
+                a.calls.push_back(c);
+            }
+            else {
+                // The refusal came back as this call's result.
+                for(const ai::message& m : turns)
+                    if(m.role == "tool" &&
+                       m.content.find("no tool called") != std::string::npos)
+                        a.content = "saw the refusal";
+            }
+
+            return a;
+        });
+
+    ok("an unknown tool is refused rather than guessed",
+       u.calls.size() == 1 && !u.calls[0].known, 
+       u.calls.empty() ? "none" : u.calls[0].name);
+
+    ok("  and the model is told, not left waiting",
+       u.text == "saw the refusal", u.text);
+
+    // A handler that throws is the tool failing, not the loop failing.
+    jcode::tool breaks;
+
+    breaks.name = "breaks";
+    breaks.run = [](const std::string&) -> std::string {
+        throw std::runtime_error("disk on fire");
+    };
+
+    std::size_t r2 = 0;
+
+    const jcode::conversation t = jcode::converse(
+        { { "user", "go" } }, { breaks },
+        [&r2](const std::vector<ai::message>&, const std::string&) -> oa::answer {
+            oa::answer a;
+
+            if(r2++ == 0) {
+                oa::call c;
+
+                c.name = "breaks";
+                c.arguments = "{}";
+
+                a.calls.push_back(c);
+            }
+            else a.content = "oh well";
+
+            return a;
+        });
+
+    ok("a handler that throws does not end the conversation",
+       t.why == jcode::ending::answered, jcode::spell(t.why));
+
+    ok("  but is recorded as having failed",
+       t.calls.size() == 1 && t.calls[0].failed == "disk on fire",
+       t.calls.empty() ? "none" : t.calls[0].failed);
+}
+
+/** The declaration the far end is sent. */
+static void what_the_tools_look_like_on_the_wire() {
+    std::cout << "\nwhat the tool list looks like on the wire:\n";
+
+    jcode::tool t;
+
+    t.name = "read_file";
+    t.description = "Read a file";
+    t.parameters = R"({"type":"object","properties":{"path":{"type":"string"}}})";
+
+    const std::string j = jcode::declare({ t });
+
+    ok("it is a JSON array of functions",
+       j.find("\"type\"") != std::string::npos &&
+       j.find("\"function\"") != std::string::npos, j);
+
+    ok("  naming the tool", j.find("read_file") != std::string::npos, j);
+
+    // The schema is the tool author's and has to survive whole.
+    ok("  and the schema survives nested",
+       j.find("properties") != std::string::npos &&
+       j.find("path") != std::string::npos, j);
+
+    ok("no tools is no list at all", jcode::declare({}).empty());
 }
 
 static void the_envelope_a_model_actually_sends() {
@@ -577,6 +806,9 @@ int main() {
 
     the_format_as_asked_for();
     a_tool_call_in_the_reply();
+    the_agent_loop();
+    the_loop_knows_why_it_stopped();
+    what_the_tools_look_like_on_the_wire();
     the_envelope_a_model_actually_sends();
     a_block_with_no_name();
     a_reply_that_stopped();
