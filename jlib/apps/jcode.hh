@@ -133,6 +133,26 @@ reply parse(const std::string& text, const std::vector<std::string>& known);
 // ---------------------------------------------------------------- the prompt
 
 /**
+ * Something the model may ask for, and what happens when it does.
+ *
+ * `parameters` is a JSON Schema as text, for the same reason
+ * `openai::request::tools` is: the shape belongs to whoever wrote the tool and
+ * there is no struct that holds one without losing something.
+ *
+ * `run` is given the call's arguments as JSON text and returns what the model
+ * is shown. It may throw: the loop turns that into a result saying so, because
+ * a model waiting for an answer it will never get is worse than a model told
+ * the tool failed.
+ */
+struct tool {
+    std::string name;
+    std::string description;
+    std::string parameters;
+
+    std::function<std::string(const std::string& arguments)> run;
+};
+
+/**
  * What to tell a model so that parse() can read what comes back.
  *
  * **Beside the parser on purpose.** The prompt and the parser are two halves
@@ -141,7 +161,8 @@ reply parse(const std::string& text, const std::vector<std::string>& known);
  * different files and they drift, and the drift shows up as a harness that
  * quietly stops applying edits.
  */
-std::string system_prompt();
+std::string system_prompt(const std::vector<tool>& tools =
+                              std::vector<tool>());
 
 /**
  * How many tokens a string is likely to be, erring high.
@@ -205,7 +226,8 @@ struct plan {
  * can read.
  */
 plan lay_out(const std::string& request, const std::vector<source>& files,
-             std::size_t budget);
+             std::size_t budget,
+             const std::vector<tool>& tools = std::vector<tool>());
 
 /**
  * How far the estimate was out, once a reply says what it really cost.
@@ -218,26 +240,6 @@ plan lay_out(const std::string& request, const std::vector<source>& files,
  * ever visible: the vocabulary is on the other side of the wire.
  */
 std::string estimate_drift(std::size_t estimated, std::size_t actual);
-
-/**
- * Something the model may ask for, and what happens when it does.
- *
- * `parameters` is a JSON Schema as text, for the same reason
- * `openai::request::tools` is: the shape belongs to whoever wrote the tool and
- * there is no struct that holds one without losing something.
- *
- * `run` is given the call's arguments as JSON text and returns what the model
- * is shown. It may throw: the loop turns that into a result saying so, because
- * a model waiting for an answer it will never get is worse than a model told
- * the tool failed.
- */
-struct tool {
-    std::string name;
-    std::string description;
-    std::string parameters;
-
-    std::function<std::string(const std::string& arguments)> run;
-};
 
 /** The tool list as the protocol wants it, for `openai::request::tools`. */
 std::string declare(const std::vector<tool>& tools);
@@ -313,6 +315,54 @@ conversation converse(std::vector<ai::message> turns,
                       const std::vector<tool>& tools,
                       const exchange& send,
                       unsigned int max_rounds = 8);
+
+/**
+ * The tools jcode offers, bounded by `root`.
+ *
+ * ## What each one may do
+ *
+ * - **`read_file`** returns a file's contents. #269 answered which files fit;
+ *   this answers which are *relevant*, which it could not ask before -- a
+ *   model needing a header it was not handed had no way to say so.
+ * - **`search`** finds a string in the tree, and answers the same question one
+ *   step earlier: which files are worth reading at all.
+ * - **`build`** runs the command named in `build`, and **is not registered at
+ *   all when that is empty**. A jcode given no `--build` cannot run anything.
+ *
+ * ## What bounds them
+ *
+ * **Containment is by resolution, not inspection.** Every path is resolved
+ * with `realpath` and compared against the resolved root, which is the same
+ * mechanism apply() uses for writes -- so `..`, an absolute path and a symlink
+ * pointing out are one refusal rather than three checks that happen to agree.
+ *
+ * **No shell.** `build` is split on whitespace and run through
+ * `sys::run(argv, ...)`, which starts a program with no `/bin/sh` involved.
+ * So `&&`, `|` and `>` do not work, deliberately: `sys.hh` records that jlib
+ * had five `shell()` callers interpolating strings they did not choose, two of
+ * them `rm` and `mv` on a folder name from a mail server. A build that needs a
+ * shell needs a script, and the script is what gets named.
+ *
+ * **Every result is capped**, and says so when it was cut. A tool result goes
+ * into the next prompt, so an unbounded one is a context wall reached by
+ * accident -- and a silently shortened file is worse than a refusal, because
+ * the model believes it read the whole thing.
+ *
+ * ## What is deliberately absent
+ *
+ * **Nothing here writes.** Editing stays where it is: the model answers with
+ * whole files and apply() puts them on disk, announced and confirmed. A
+ * `write_file` tool would move that decision inside the loop where nobody
+ * sees it, which is exactly the erosion #242 names and this arc is under
+ * instruction not to perform quietly.
+ *
+ * @param root  what every path is relative to, and cannot escape
+ * @param build the build command, split on whitespace; empty for none
+ * @param cap   the most bytes any one result may carry
+ */
+std::vector<tool> toolbox(const std::string& root,
+                          const std::string& build = std::string(),
+                          std::size_t cap = 64 * 1024);
 
 /** What became of one edit. */
 enum class outcome {

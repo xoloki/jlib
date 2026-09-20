@@ -256,11 +256,28 @@ request request::parse(const std::string& body) {
     return r;
 }
 
+/**
+ * The markers a call may arrive in, in the order they are looked for.
+ *
+ * `<tool_call>` is what Qwen 2.5's template asks for. **`<function_call>` is
+ * what it actually emits**, measured against Qwen2.5-Coder-7B at Q4_K_M: told
+ * `<tool_call>` in its own rendered prompt, it answered with a fenced xml
+ * block containing `<function_call>`. A model improvising its own markup is
+ * the ordinary case rather than the exotic one, and refusing the variant means
+ * that model cannot call a tool at all.
+ *
+ * Both are taken, which is jcode's standing policy -- lenient about the shape,
+ * never silent about it -- applied one layer down. What is *not* taken is
+ * anything else: an unrecognised marker still comes back as content rather
+ * than as a mangled call.
+ */
+const char* const MARKERS[][2] = {
+    { "<tool_call>",     "</tool_call>"     },
+    { "<function_call>", "</function_call>" },
+};
+
 std::vector<call> calls_in(const std::string& text, std::string& left)
 {
-    static const std::string OPEN = "<tool_call>";
-    static const std::string CLOSE = "</tool_call>";
-
     std::vector<call> out;
 
     left.clear();
@@ -268,7 +285,17 @@ std::vector<call> calls_in(const std::string& text, std::string& left)
     std::size_t at = 0;
 
     for(;;) {
-        const std::size_t b = text.find(OPEN, at);
+        // Whichever marker comes first, so a reply mixing them -- which one
+        // correcting itself mid-answer would produce -- is read in order.
+        std::size_t b = std::string::npos;
+
+        std::string OPEN, CLOSE;
+
+        for(const auto& m : MARKERS) {
+            const std::size_t here = text.find(m[0], at);
+
+            if(here < b) { b = here; OPEN = m[0]; CLOSE = m[1]; }
+        }
 
         if(b == std::string::npos) { left += text.substr(at); break; }
 

@@ -21,6 +21,8 @@
 #include <jlib/apps/jcode.hh>
 
 #include <jlib/util/json.hh>
+#include <climits>
+#include <jlib/sys/sys.hh>
 
 #include <jlib/util/util.hh>
 
@@ -204,7 +206,43 @@ std::size_t estimate_tokens(const std::string& text) {
     return std::size_t(double(text.size()) / BYTES_PER_TOKEN) + 1;
 }
 
-std::string system_prompt() {
+std::string system_prompt(const std::vector<tool>& tools) {
+    // **Registering a tool is not the same as telling the model it has one.**
+    //
+    // Measured: with read_file and search registered but unmentioned here, a
+    // model asked about a header it had not been given answered "Please
+    // provide the contents of util.h" -- which is the rule three lines below
+    // doing exactly what it says. The template renders the tool list, and the
+    // instructions still won.
+    std::string asking;
+
+    if(!tools.empty()) {
+        asking = "\nYou can ask for what you need before answering. Rather "
+                 "than asking the user for a file or for where something is "
+                 "defined, call one of these and then answer with what it "
+                 "told you: ";
+
+        for(std::size_t i = 0; i < tools.size(); i++)
+            asking += (i ? ", " : "") + tools[i].name;
+
+        // **The markup is named here because the model's own is not stable.**
+        //
+        // Measured against Qwen2.5-Coder-7B at Q4_K_M: asked with no system
+        // turn it answers `<function_call>` inside a fenced xml block; asked
+        // with the one above it answers bare JSON and no markers at all. Its
+        // template asked for `<tool_call>` in both cases.
+        //
+        // Bare JSON is the one thing that cannot be accepted by the reader:
+        // jcode sends whole files, so a reply containing a .json file would
+        // have it read as a call and swallowed out of the content. Naming the
+        // markup is the half of the contract this end controls -- the same
+        // arrangement as the filename-and-fence rules above, and for the same
+        // reason.
+        asking += ".\n\nTo call one, answer with exactly this and nothing "
+                  "else:\n\n<tool_call>\n{\"name\": \"the tool\", "
+                  "\"arguments\": {\"...\": \"...\"}}\n</tool_call>\n";
+    }
+
     // Deliberately close to what aider asks for, because that is the format
     // jserve was verified against end to end and the one models have been
     // trained on the shape of.  What differs is that this says what happens
@@ -229,15 +267,15 @@ std::string system_prompt() {
         "you return replaces the file, so anything you leave out is deleted\n"
         "- return a file only if you changed it\n"
         "- if a change is not needed, or the request is unclear, say so in "
-        "prose and return no file at all\n";
+        "prose and return no file at all\n" + asking;
 }
 
 plan lay_out(const std::string& request, const std::vector<source>& files,
-             std::size_t budget)
+             std::size_t budget, const std::vector<tool>& tools)
 {
     plan out;
 
-    const std::string system = system_prompt();
+    const std::string system = system_prompt(tools);
 
     // The two that are never dropped, costed first: without the system turn
     // the reply is in no format at all, and without the request there is
@@ -364,6 +402,221 @@ std::string declare(const std::vector<tool>& tools) {
     }
 
     return out->str();
+}
+
+namespace {
+
+/**
+ * A path under `root`, resolved -- or empty if it is not under `root`.
+ *
+ * The same rule apply() enforces for writes, asked here for reads. Resolution
+ * rather than inspection: `..`, an absolute path and a symlink pointing out
+ * are one question with one answer, where three string checks would be three
+ * chances to disagree.
+ */
+std::string under(const std::string& root, const std::string& name) {
+    char rootbuf[PATH_MAX];
+
+    if(!::realpath(root.c_str(), rootbuf)) return std::string();
+
+    const std::string resolved_root(rootbuf);
+
+    // Resolved whole, not by parent: a read has no reason to accept a name
+    // that does not exist, and the file itself is what must be inside.
+    const std::string full = name.empty() || name[0] == '/'
+                                 ? name : root + "/" + name;
+
+    char buf[PATH_MAX];
+
+    if(!::realpath(full.c_str(), buf)) return std::string();
+
+    const std::string resolved(buf);
+
+    if(resolved == resolved_root) return resolved;
+
+    // The separator matters: /rootlike must not pass for being under /root.
+    if(resolved.size() > resolved_root.size() &&
+       resolved.compare(0, resolved_root.size(), resolved_root) == 0 &&
+       resolved[resolved_root.size()] == '/')
+        return resolved;
+
+    return std::string();
+}
+
+/** The argument a call gave, or empty. */
+std::string argument(const std::string& json, const std::string& key) {
+    try {
+        util::json::object::ptr o = util::json::object::create(json);
+
+        return o->get(key).str_or(std::string());
+    }
+    catch(std::exception&) { return std::string(); }
+}
+
+/** `text`, cut to `cap` and saying so when it was. */
+std::string capped(const std::string& text, std::size_t cap) {
+    if(text.size() <= cap) return text;
+
+    // Said in the result rather than left to be noticed. A model shown a
+    // silently shortened file believes it read the whole thing, which is a
+    // worse answer than a refusal.
+    return text.substr(0, cap) + "\n[truncated: " +
+           std::to_string(text.size()) + " bytes, showing " +
+           std::to_string(cap) + "]";
+}
+
+}
+
+std::vector<tool> toolbox(const std::string& root, const std::string& build,
+                          std::size_t cap)
+{
+    std::vector<tool> out;
+
+    {
+        tool t;
+
+        t.name = "read_file";
+        t.description = "Read a file from the project, by a path relative to "
+                        "the project root.";
+        t.parameters =
+            R"({"type":"object","properties":{"path":{"type":"string",)"
+            R"("description":"path relative to the project root"}},)"
+            R"("required":["path"]})";
+
+        t.run = [root, cap](const std::string& args) -> std::string {
+            const std::string name = argument(args, "path");
+
+            if(name.empty()) return "error: no path given";
+
+            const std::string at = under(root, name);
+
+            // The refusal is the *result*, not an exception: a model that
+            // asked for something it may not have should be told so and get
+            // another turn, rather than having the conversation end.
+            if(at.empty())
+                return "error: \"" + name + "\" is not a readable file under "
+                       "the project root";
+
+            std::ifstream in(at.c_str(), std::ios::binary);
+
+            if(!in) return "error: cannot read \"" + name + "\"";
+
+            std::ostringstream buf;
+
+            buf << in.rdbuf();
+
+            return capped(buf.str(), cap);
+        };
+
+        out.push_back(t);
+    }
+
+    {
+        tool t;
+
+        t.name = "search";
+        t.description = "Find a string in the project's files. Answers with "
+                        "path:line:text for each match.";
+        t.parameters =
+            R"({"type":"object","properties":{"text":{"type":"string",)"
+            R"("description":"the string to look for"}},"required":["text"]})";
+
+        t.run = [root, cap](const std::string& args) -> std::string {
+            const std::string want = argument(args, "text");
+
+            if(want.empty()) return "error: nothing to search for";
+
+            char rootbuf[PATH_MAX];
+
+            if(!::realpath(root.c_str(), rootbuf))
+                return "error: the project root does not resolve";
+
+            // grep through sys::run rather than a shell, and with `--` so a
+            // pattern starting with a dash is a pattern rather than a flag.
+            std::vector<std::string> argv{ "grep", "-rnI", "--", want,
+                                           std::string(rootbuf) };
+
+            std::string got, err;
+
+            try {
+                const int status = sys::run(argv, got, err);
+
+                // grep answers 1 for "no matches", which is an answer.
+                if(status > 1)
+                    return "error: search failed: " +
+                           (err.empty() ? std::to_string(status) : err);
+            }
+            catch(std::exception& e) {
+                return std::string("error: could not search: ") + e.what();
+            }
+
+            if(got.empty()) return "no matches";
+
+            // Paths come back absolute because grep was given an absolute
+            // root; shown relative, which is what the model may ask for.
+            const std::string prefix = std::string(rootbuf) + "/";
+
+            std::string shown;
+
+            std::istringstream lines(got);
+            std::string line;
+
+            while(std::getline(lines, line)) {
+                if(line.compare(0, prefix.size(), prefix) == 0)
+                    line = line.substr(prefix.size());
+
+                shown += line + "\n";
+            }
+
+            return capped(shown, cap);
+        };
+
+        out.push_back(t);
+    }
+
+    // **Only when one was named.**  A jcode given no --build has no way to run
+    // anything at all, which is the default this arc is under instruction to
+    // keep.
+    if(!build.empty()) {
+        std::vector<std::string> argv;
+
+        {
+            std::istringstream words(build);
+            std::string one;
+
+            while(words >> one) argv.push_back(one);
+        }
+
+        if(!argv.empty()) {
+            tool t;
+
+            t.name = "build";
+            t.description = "Run the project's build command (" + build +
+                            ") and answer with its output.";
+            t.parameters = R"({"type":"object","properties":{}})";
+
+            t.run = [argv, cap](const std::string&) -> std::string {
+                std::string got, err;
+
+                try {
+                    const int status = sys::run(argv, got, err);
+
+                    // Reported rather than swallowed: a build that failed is
+                    // the answer the model asked for.
+                    return capped("exit " + std::to_string(status) + "\n" +
+                                  got + err, cap);
+                }
+                catch(std::exception& e) {
+                    return std::string("error: could not run the build: ") +
+                           e.what();
+                }
+            };
+
+            out.push_back(t);
+        }
+    }
+
+    return out;
 }
 
 conversation converse(std::vector<ai::message> turns,

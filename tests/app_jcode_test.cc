@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -410,6 +411,163 @@ static void what_the_tools_look_like_on_the_wire() {
        j.find("path") != std::string::npos, j);
 
     ok("no tools is no list at all", jcode::declare({}).empty());
+}
+
+/**
+ * The tools, and the root they cannot leave.
+ *
+ * #333. Containment is the load-bearing part: a read that escapes the root is
+ * this harness doing the thing #242 says it must not, and "refused" and "read
+ * something it should not have" both look like a call that returned -- so each
+ * refusal is broken once below and watched to fail.
+ *
+ * The refusals are **results, not exceptions**: a model that asked for
+ * something it may not have is told so and gets another turn, rather than
+ * having the conversation end underneath it.
+ */
+static void the_tools_and_their_root() {
+    std::cout << "\nthe tools, and the root they cannot leave:\n";
+
+    // A little tree: root/in.txt, and a secret outside it.
+    const std::string base = "/tmp/jcode-tools-test";
+
+    ::system(("rm -rf " + base).c_str());
+    ::system(("mkdir -p " + base + "/root/sub").c_str());
+
+    {
+        std::ofstream f((base + "/root/in.txt").c_str());
+
+        f << "hello from inside\nsecond line\n";
+    }
+
+    {
+        std::ofstream f((base + "/secret.txt").c_str());
+
+        f << "should never be read\n";
+    }
+
+    ::symlink((base + "/secret.txt").c_str(),
+              (base + "/root/link.txt").c_str());
+
+    const std::string root = base + "/root";
+
+    const std::vector<jcode::tool> box = jcode::toolbox(root);
+
+    ok("two tools without a build command", box.size() == 2,
+       std::to_string(box.size()));
+
+    const jcode::tool* read = 0;
+    const jcode::tool* find = 0;
+
+    for(const jcode::tool& t : box) {
+        if(t.name == "read_file") read = &t;
+        if(t.name == "search") find = &t;
+    }
+
+    ok("  read_file and search", read && find);
+
+    if(!read || !find) return;
+
+    ok("a file inside is read",
+       read->run(R"({"path":"in.txt"})").find("hello from inside") !=
+           std::string::npos,
+       read->run(R"({"path":"in.txt"})"));
+
+    // The three ways out, which are one question with one answer.
+    ok("  a path climbing out is refused",
+       read->run(R"({"path":"../secret.txt"})").find("error:") == 0,
+       read->run(R"({"path":"../secret.txt"})"));
+
+    ok("  an absolute path is refused",
+       read->run(std::string(R"({"path":")") + base +
+                 R"(/secret.txt"})").find("error:") == 0);
+
+    // The one inspection would miss: the name is innocent and the file is not.
+    ok("  and a symlink pointing out is refused",
+       read->run(R"({"path":"link.txt"})").find("error:") == 0,
+       read->run(R"({"path":"link.txt"})"));
+
+    ok("  a file that is not there is refused, not invented",
+       read->run(R"({"path":"nope.txt"})").find("error:") == 0);
+
+    ok("  and a call with no path at all",
+       read->run("{}").find("error:") == 0);
+
+    // Truncation has to be visible: a silently shortened file is worse than a
+    // refusal, because the model believes it read the whole thing.
+    {
+        std::ofstream f((root + "/big.txt").c_str());
+
+        for(int i = 0; i < 2000; i++) f << "xxxxxxxxxxxxxxxxxxxx\n";
+    }
+
+    const std::string cut =
+        jcode::toolbox(root, std::string(), 256)[0].run(R"({"path":"big.txt"})");
+
+    ok("a result at the cap says it was cut",
+       cut.find("[truncated:") != std::string::npos &&
+       cut.size() < 400, std::to_string(cut.size()));
+
+    // search
+    ok("search finds a line",
+       find->run(R"({"text":"hello from inside"})").find("in.txt") !=
+           std::string::npos,
+       find->run(R"({"text":"hello from inside"})"));
+
+    ok("  and says so when there is nothing",
+       find->run(R"({"text":"absolutely-not-present-anywhere"})") ==
+           "no matches");
+
+    ok("  and refuses an empty search",
+       find->run("{}").find("error:") == 0);
+
+    // The secret is outside the root, so a search must not reach it.
+    ok("  and does not reach outside the root",
+       find->run(R"({"text":"should never be read"})") == "no matches",
+       find->run(R"({"text":"should never be read"})"));
+
+    // build: absent unless named, and it runs the argv it was given.
+    ok("no build tool unless one was named",
+       jcode::toolbox(root).size() == 2);
+
+    const std::vector<jcode::tool> with =
+        jcode::toolbox(root, "echo built-ok");
+
+    ok("  and one when it was", with.size() == 3, std::to_string(with.size()));
+
+    const jcode::tool* run = 0;
+
+    for(const jcode::tool& t : with) if(t.name == "build") run = &t;
+
+    ok("  named build", run != 0);
+
+    if(run) {
+        const std::string said = run->run("{}");
+
+        ok("  which runs it and reports the status",
+           said.find("exit 0") != std::string::npos &&
+           said.find("built-ok") != std::string::npos, said);
+    }
+
+    // A build that fails is an answer, not an error.
+    const std::vector<jcode::tool> bad = jcode::toolbox(root, "false");
+
+    for(const jcode::tool& t : bad)
+        if(t.name == "build")
+            ok("  a build that fails reports its status rather than throwing",
+               t.run("{}").find("exit 1") != std::string::npos, t.run("{}"));
+
+    // **No shell.**  A command with a shell operator is argv, so the operator
+    // is an argument rather than a second command.
+    const std::vector<jcode::tool> shell =
+        jcode::toolbox(root, "echo one && echo two");
+
+    for(const jcode::tool& t : shell)
+        if(t.name == "build")
+            ok("  and a shell operator is an argument, not an operator",
+               t.run("{}").find("&&") != std::string::npos, t.run("{}"));
+
+    ::system(("rm -rf " + base).c_str());
 }
 
 static void the_envelope_a_model_actually_sends() {
@@ -806,6 +964,7 @@ int main() {
 
     the_format_as_asked_for();
     a_tool_call_in_the_reply();
+    the_tools_and_their_root();
     the_agent_loop();
     the_loop_knows_why_it_stopped();
     what_the_tools_look_like_on_the_wire();
