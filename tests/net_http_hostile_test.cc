@@ -156,6 +156,32 @@ static std::string raw_exchange(unsigned short port, const std::string& raw) {
     }
 }
 
+/**
+ * Read exactly one response off a connection and leave it open.
+ *
+ * `raw_exchange` reads to EOF, which is the right thing for every other test
+ * here and the wrong thing for a keepalive one: the whole point is that the
+ * connection is still there afterwards, and that the *client* is what ends it.
+ */
+static std::string one_response(sys::socketstream& c) {
+    std::string got;
+    char        ch = 0;
+
+    while(got.find("\r\n\r\n") == std::string::npos && c.get(ch)) got += ch;
+
+    const std::string lowered = util::http::fold(got);
+    const std::size_t at = lowered.find("content-length:");
+
+    std::size_t want = 0;
+
+    if(at != std::string::npos)
+        want = std::strtoul(got.c_str() + at + 15, 0, 10);
+
+    for(std::size_t i = 0; i < want && c.get(ch); i++) got += ch;
+
+    return got;
+}
+
 static std::string get(unsigned short port, const std::string& target) {
     return raw_exchange(port, "GET " + target +
                     " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
@@ -921,6 +947,81 @@ static void everything(http::server& s, const tree& t) {
     an_encoded_separator_is_about_the_path(s);
 }
 
+/**
+ * A connection that finished is not a connection that timed out (#330).
+ *
+ * `serve_request_async` is called in a loop and writes one access record per
+ * *call*. The call that discovers the peer has gone was writing a record too,
+ * so every keepalive connection ended with a 408 for a request nobody made.
+ *
+ * Measured on six live sites before the fix: 117 of 1748 requests were 408,
+ * 6.7% against Apache's 0.27% on the same traffic, and 105 of the 117 followed
+ * a request that had been served from the same address. Per-address it was
+ * exact -- fourteen 408s from a client that made fourteen requests.
+ *
+ * **Async only, by construction.** The keepalive loop is the async server's;
+ * `sys::server` hands a blocking connection to the handler once, so one
+ * connection is one request and the last-call problem cannot arise.
+ */
+static void a_keepalive_connection_that_finishes(http::server& s) {
+    std::cout << "\na keepalive connection the client closes:\n";
+
+    {
+        std::lock_guard<std::mutex> hold(said);
+
+        last_status = 0;
+        noted = 0;
+    }
+
+    {
+        sys::socketstream c("127.0.0.1", s.port(), 5);
+
+        c.set_timeout(30);
+
+        // Two requests, neither asking to close, then the client hangs up --
+        // which is what a browser does at the end of a visit and what 105 of
+        // those 117 lines were.
+        for(int i = 0; i < 2; i++) {
+            const std::string one =
+                "GET /static/page.html HTTP/1.1\r\nHost: x\r\n\r\n";
+
+            c.write(one.data(), std::streamsize(one.size()));
+            c.flush();
+
+            const std::string r = one_response(c);
+
+            ok("  request served on the same connection", status_of(r) == 200,
+               std::to_string(status_of(r)));
+        }
+    }
+
+    // Wait for both records, then keep waiting: the bug is an *extra* line
+    // arriving after the ones that should be there, so settling for "at least
+    // two" would pass with the bug still in.
+    for(int i = 0; i < 200; i++) {
+        {
+            std::lock_guard<std::mutex> hold(said);
+
+            if(noted >= 2) break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    {
+        std::lock_guard<std::mutex> hold(said);
+
+        ok("  two requests are two access lines, not three",
+           noted == 2, std::to_string(noted));
+
+        // 0 is not a status, and it is what the deadline path used to write.
+        ok("  and the last of them is the request, not a phantom timeout",
+           last_status == 200, std::to_string(last_status));
+    }
+}
+
 int main() {
     // Unbuffered, as 62 of the tests here already are.  Piped anywhere -- which
     // is what `make check` does -- this is otherwise block-buffered and the
@@ -988,6 +1089,7 @@ int main() {
             // responder::live(), and it learns the same thing the same way a
             // streaming handler always has: from a write that fails.
             a_handler_can_ask_if_the_client_left(s, gone_seen);
+            a_keepalive_connection_that_finishes(s);
         }
     }
     catch(std::exception& e) {

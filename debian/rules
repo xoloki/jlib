@@ -37,6 +37,42 @@ override_dh_auto_test:
 # so a list here would be right on the machine it was written on and short by
 # one every time a dependency appears or goes. Taking the directory and
 # removing the file that belongs to the other package cannot drift.
+# **The unit names absolute paths; the package installs to absolute paths; and
+# nothing else in this build relates the two.**  A mismatch is invisible until
+# `systemctl start` on the target machine, where it fails with "No such file
+# or directory" -- which names the symptom and not the cause.
+#
+# Checked at dh_builddeb, by which point everything is staged under
+# debian/jhttpd/ and both facts are present at once.  This exists because the
+# unit really did say /usr/local/bin while the package installed /usr/bin.
+override_dh_builddeb:
+	@set -e; \
+	for exe in `sed -n 's/^Exec[A-Za-z]*=\([^ ]*\).*/\1/p' \
+	                debian/jhttpd.service | sort -u`; do \
+	    case "$$exe" in /bin/kill|/bin/sh) continue ;; esac; \
+	    if [ ! -x "debian/jhttpd$$exe" ]; then \
+	        echo "jhttpd.service names $$exe, which this package does not install"; \
+	        exit 1; \
+	    fi; \
+	done; \
+	for doc in `sed -n 's/^Documentation=file:\([^ ]*\).*/\1/p' \
+	                debian/jhttpd.service`; do \
+	    if [ ! -f "debian/jhttpd$$doc" ]; then \
+	        echo "jhttpd.service documents $$doc, which this package does not install"; \
+	        echo "(dh_compress gzips /usr/share/doc; see override_dh_compress)"; \
+	        exit 1; \
+	    fi; \
+	done
+	@echo "jhttpd.service: every Exec and Documentation path is installed"
+	dh_builddeb
+
+# **The example config is not compressed.**  It is documentation you copy to
+# /etc/jhttpd.conf, and dh_compress gzips anything in /usr/share/doc over a
+# few kilobytes by default -- which turns the path the unit's Documentation=
+# names into a path that does not exist.
+override_dh_compress:
+	dh_compress -Xjhttpd.conf.example
+
 override_dh_install:
 	dh_install
 	rm -f debian/jlib/usr/bin/jhttpd
