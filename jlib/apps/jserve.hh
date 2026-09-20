@@ -143,9 +143,20 @@ struct laid_out {
     unsigned int reserved = 0;  ///< what they were given up for
 };
 
+/**
+ * @param tools the caller's tool definitions, or empty -- they are part of the
+ *        prompt and have to be counted like one
+ *
+ * **A tool list is not free.** Qwen's template renders each definition as JSON
+ * inside a `# Tools` section, so a handful of tools is hundreds of tokens that
+ * the trimmer must account for. Laying out against the untooled prompt and
+ * then rendering with tools would overshoot the context by exactly the amount
+ * nobody measured.
+ */
 template<typename Session>
 laid_out lay_out(Session& s, std::vector<ai::message> turns,
-                 unsigned int req_cap)
+                 unsigned int req_cap,
+                 const std::string& tools = std::string())
 {
     laid_out out;
 
@@ -162,7 +173,8 @@ laid_out lay_out(Session& s, std::vector<ai::message> turns,
     for(;;) {
         if(!context) break;
 
-        if(s.templ().encode(turns, s.tok()).size() + want <= context) break;
+        if(s.templ().encode(turns, s.tok(), true, tools).size() + want
+           <= context) break;
 
         std::size_t at = turns.size();
 
@@ -176,7 +188,7 @@ laid_out lay_out(Session& s, std::vector<ai::message> turns,
         out.dropped++;
     }
 
-    out.ids = s.templ().encode(turns, s.tok());
+    out.ids = s.templ().encode(turns, s.tok(), true, tools);
 
     // What the context has left, which is the question MIN_REPLY is about.
     const unsigned int room = context
@@ -309,11 +321,23 @@ private:
         if(!bad.empty())
             co_return co_await refuse(out, 400, bad, "invalid_request_error");
 
-        if(req.wants_tools)
+        // **`tool_choice` is read far enough to refuse what cannot be done.**
+        //
+        // The model decides whether to call; nothing here can force it. A
+        // caller that said "required" and is answered with prose sees a model
+        // that would not call, which is much harder to diagnose than a 400 --
+        // which is the trade openai.hh names for this field specifically.
+        //
+        // "auto" and "none" are honoured in the only sense available: "none"
+        // withholds the tool list, so the model is never told it may call.
+        if(req.tool_choice == "required" || req.tool_choice.find('{') == 0)
             co_return co_await refuse(out, 400,
-                          "this server does not implement tool calling; "
-                          "aider's whole edit format needs none",
+                          "this server cannot force a tool call; "
+                          "tool_choice must be \"auto\" or \"none\"",
                           "invalid_request_error");
+
+        const std::string tools =
+            req.tool_choice == "none" ? std::string() : req.tools;
 
         const std::string name = req.model.empty() ? m_default : req.model;
 
@@ -374,7 +398,7 @@ private:
         // A template that refuses.  Caught here, where a 400 is still
         // possible, rather than escaping into the streaming path where
         // nothing can be said.
-        try { plan = lay_out(s, req.messages, req.max_tokens); }
+        try { plan = lay_out(s, req.messages, req.max_tokens, tools); }
         catch(std::exception& first) {
             // Gemma 2 rejects a system role outright, and every coding
             // harness sends one on every turn -- so a refusal here makes the
@@ -391,7 +415,7 @@ private:
                 bad = first.what();
             }
             else {
-                try { plan = lay_out(s, folded, req.max_tokens); }
+                try { plan = lay_out(s, folded, req.max_tokens, tools); }
                 catch(std::exception& again) { bad = again.what(); }
             }
         }
@@ -427,9 +451,11 @@ private:
         const std::int64_t now = std::int64_t(std::time(0));
 
         if(req.stream)
-            co_await stream(out, s, plan, sampler, ends, req, id, now, name);
+            co_await stream(out, s, plan, sampler, ends, req, id, now,
+                            name, tools);
         else
-            co_await whole(out, s, plan, sampler, ends, req, id, now, name);
+            co_await whole(out, s, plan, sampler, ends, req, id, now,
+                           name, tools);
     }
 
     /**
@@ -512,7 +538,8 @@ private:
                            const laid_out& plan, ai::sampler& sampler,
                            const ai::stops& ends, const oa::request& req,
                            const std::string& id, std::int64_t now,
-                           const std::string& name)
+                           const std::string& name,
+                           const std::string& tools)
     {
         http::server::response head;
 
@@ -538,6 +565,15 @@ private:
 
         launch(ts, s, plan, sampler, ends, made, out);
 
+        // **The splitter, when tools are on the table.**
+        //
+        // `<tool_call>` arrives a token at a time, so each piece has to be
+        // sorted into content-to-send and marker-to-hold before it can be
+        // framed. See openai::call_stream: it releases everything but the
+        // ambiguous tail, so a reply with no markers streams with nothing
+        // held at all.
+        oa::call_stream split;
+
         // A write that throws is the client having gone.  There is no live()
         // to ask here and there does not need to be: the answer arrives as a
         // failed write, which is the same thing one layer earlier.
@@ -546,7 +582,17 @@ private:
             [&](const std::string& piece) -> sys::task<bool> {
                 oa::delta d;
 
-                d.content = piece;
+                d.content = tools.empty() ? piece : split.feed(piece);
+
+                // Taken once and carried, not asked twice: take() consumes,
+                // so using it as a test would answer the question and throw
+                // the answer away.
+                if(!tools.empty()) d.calls = split.take();
+
+                // Nothing to send yet: the whole piece was a partial marker.
+                // Sending an empty chunk is legal and wasteful, and a client
+                // counting chunks would see one per held token.
+                if(d.content.empty() && d.calls.empty()) co_return true;
 
                 // Framed outside the try, which exists for a failed *write*.
                 // chunk() refuses content that stops mid-character (#249), and
@@ -585,10 +631,25 @@ private:
         // the same thing said deliberately.
         if(!why.empty()) throw std::runtime_error(why);
 
+        // Whatever the splitter was still holding, which for a reply that
+        // ended mid-marker is the marker itself -- as content, because a
+        // reply cut short is what a client needs to see to know it was.
+        if(!tools.empty()) {
+            oa::delta tail;
+
+            tail.content = split.flush();
+            tail.calls = split.take();
+
+            if(!tail.content.empty() || !tail.calls.empty())
+                co_await out.write(oa::event(oa::chunk(id, name, now, tail)));
+        }
+
         oa::delta last;
 
         last.done = true;
-        last.why = made >= plan.budget ? oa::finish::length : oa::finish::stop;
+        last.why = split.saw_a_call() ? oa::finish::tool_calls
+                 : made >= plan.budget ? oa::finish::length
+                                       : oa::finish::stop;
 
         co_await out.write(oa::event(oa::chunk(id, name, now, last)));
         co_await out.write(oa::done());
@@ -599,7 +660,8 @@ private:
                           const laid_out& plan, ai::sampler& sampler,
                           const ai::stops& ends, const oa::request& req,
                           const std::string& id, std::int64_t now,
-                          const std::string& name)
+                          const std::string& name,
+                          const std::string& tools)
     {
         std::string body;
 
@@ -633,13 +695,30 @@ private:
         // not to the reply; decode() strips it and piece() does not.
         if(!body.empty() && body[0] == ' ') body.erase(0, 1);
 
+        // **What the model asked to call, if it asked.**
+        //
+        // A model does not emit JSON: it emits the markup its template asked
+        // for, and `calls_in` reads that back. Text it cannot read comes back
+        // as content, so a reply that got the markup wrong is shown rather
+        // than silently shortened -- see openai::calls_in.
+        std::string left = body;
+
+        const std::vector<oa::call> calls =
+            tools.empty() ? std::vector<oa::call>()
+                          : oa::calls_in(body, left);
+
+        // A call is why the model stopped, not merely something it did: a
+        // client reading `stop` here shows the user an empty turn.
+        const oa::finish why_done =
+            !calls.empty()          ? oa::finish::tool_calls
+          : made >= plan.budget     ? oa::finish::length
+                                    : oa::finish::stop;
+
         http::server::response r;
 
         r.status(200).type("application/json")
-         .body(oa::completion(id, name, now, body,
-                              made >= plan.budget ? oa::finish::length
-                                                  : oa::finish::stop,
-                              unsigned(plan.ids.size()), made));
+         .body(oa::completion(id, name, now, left, why_done,
+                              unsigned(plan.ids.size()), made, calls));
 
         co_await out.send(r);
     }

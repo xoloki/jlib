@@ -319,7 +319,17 @@ const char* spell(outcome o) {
 reply parse(const std::string& text, const std::vector<std::string>& known) {
     reply out;
 
-    std::istringstream in(text);
+    // **Lifted out before the edit parser sees the text**, because to that
+    // parser a `<tool_call>` block is prose: it would be skipped in silence
+    // and the reply would look like one containing nothing.
+    //
+    // What is left is parsed as usual, so a model that wrote a file *and*
+    // asked for a call gets both read.
+    std::string rest = text;
+
+    out.calls = ai::openai::calls_in(text, rest);
+
+    std::istringstream in(rest);
 
     std::string line;
 

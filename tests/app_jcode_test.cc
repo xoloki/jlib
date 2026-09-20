@@ -121,6 +121,68 @@ static void the_format_as_asked_for() {
     ok("  and nothing refused", r.refusals.empty());
 }
 
+/**
+ * A tool call is noticed rather than read as prose.
+ *
+ * #316. jcode declares no tools, so this is a model going somewhere it was not
+ * sent -- but the markup means nothing to the edit parser, so without this the
+ * reply reads as one containing no files, which is exactly what a model too
+ * weak to follow the format produces. A user cannot tell those apart from
+ * silence, and the whole point of the guess log (#265) is that jcode does not
+ * decide quietly.
+ */
+static void a_tool_call_in_the_reply() {
+    std::cout << "\na reply that asks to call something:\n";
+
+    const jcode::reply only = jcode::parse(
+        "<tool_call>\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.c\"}}\n"
+        "</tool_call>", KNOWN);
+
+    ok("the call is seen", only.calls.size() == 1,
+       std::to_string(only.calls.size()));
+
+    ok("  by name", !only.calls.empty() && only.calls[0].name == "read_file",
+       only.calls.empty() ? "" : only.calls[0].name);
+
+    ok("  with its arguments",
+       !only.calls.empty() &&
+       only.calls[0].arguments.find("a.c") != std::string::npos,
+       only.calls.empty() ? "" : only.calls[0].arguments);
+
+    ok("  and no edit invented from it", only.edits.empty());
+
+    // A model that does both gets both read: the call is lifted out and what
+    // is left goes through the edit parser as usual.
+    const jcode::reply both = jcode::parse(
+        "First I will look.\n"
+        "<tool_call>{\"name\":\"read_file\",\"arguments\":{}}</tool_call>\n"
+        "Then this:\n\n" +
+        fence("main.cc", "int main() { return 1; }\n"), KNOWN);
+
+    ok("a reply with a call and an edit yields both",
+       both.calls.size() == 1 && both.edits.size() == 1,
+       std::to_string(both.calls.size()) + " calls, " +
+       std::to_string(both.edits.size()) + " edits");
+
+    ok("  and the edit is the one that was written",
+       both.edits.size() == 1 &&
+       both.edits[0].content == "int main() { return 1; }\n");
+
+    // Markup that is not a call must not become one -- and must not vanish
+    // either, since it is what the model actually said.
+    const jcode::reply broken = jcode::parse(
+        "<tool_call>not json</tool_call>", KNOWN);
+
+    ok("markup that will not parse is not a call", broken.calls.empty());
+
+    // An ordinary reply is untouched by any of this.
+    const jcode::reply plain = jcode::parse(
+        "Here you go.\n\n" + fence("main.cc", "int main() {}\n"), KNOWN);
+
+    ok("and a reply with no markup carries no calls",
+       plain.calls.empty() && plain.edits.size() == 1);
+}
+
 static void the_envelope_a_model_actually_sends() {
     std::cout << "\nthe envelope a model actually sends:\n";
 
@@ -514,6 +576,7 @@ int main() {
     std::cout << std::unitbuf;
 
     the_format_as_asked_for();
+    a_tool_call_in_the_reply();
     the_envelope_a_model_actually_sends();
     a_block_with_no_name();
     a_reply_that_stopped();

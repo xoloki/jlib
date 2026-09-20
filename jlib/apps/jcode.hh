@@ -50,6 +50,8 @@
  * the contract and grows only with a failure to point at.
  */
 
+#include <jlib/ai/openai.hh>
+
 #include <string>
 #include <utility>
 #include <vector>
@@ -85,6 +87,19 @@ struct refusal {
 struct reply {
     std::vector<edit> edits;
     std::vector<refusal> refusals;
+
+    /**
+     * Calls the model asked for, which jcode cannot make yet (#316).
+     *
+     * **Recorded rather than ignored.** The markup is prose to the edit
+     * parser, so a reply that is entirely a tool call reads as a reply with
+     * no edits in it -- and "the model produced nothing usable" is what a
+     * model too weak to follow the format looks like. These are different
+     * problems and a user has no way to tell them apart from silence.
+     *
+     * Acting on one is the agent loop, which is #310's second piece.
+     */
+    std::vector<ai::openai::call> calls;
 
     /** Every guess across every edit, for a caller that just wants to print. */
     std::vector<std::string> guesses() const;

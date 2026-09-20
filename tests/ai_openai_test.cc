@@ -261,6 +261,121 @@ static void calls_are_read_out_of_the_text() {
        a.calls[0].arguments.find("a.c") != std::string::npos);
 }
 
+/**
+ * The same text, streamed, gives the same answer -- however it is cut up.
+ *
+ * #316's awkward half. `<tool_call>` arrives a token at a time, so a server
+ * has to decide per token whether to send it or hold it, and the failure is
+ * invisible unless the marker is split across a boundary. A single-chunk test
+ * cannot reach it.
+ *
+ * So this feeds the same text at **every** split point and one character at a
+ * time, and asserts the result is identical to reading it whole.
+ */
+static void streaming_splits_the_same_way_however_it_arrives() {
+    std::cout << "\nstreaming splits the same way however it arrives:\n";
+
+    static const char* TEXTS[] = {
+        "just text",
+        "<tool_call>{\"name\":\"f\",\"arguments\":{}}</tool_call>",
+        "Sure.<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.c\"}}"
+        "</tool_call>",
+        "<tool_call>{\"name\":\"a\",\"arguments\":{}}</tool_call>"
+        "between"
+        "<tool_call>{\"name\":\"b\",\"arguments\":{}}</tool_call>",
+        "a < b and 1<2",                       // a lone marker character
+        "<tool_call>unterminated",
+        "<tool_call>not json</tool_call>",
+        "trailing <tool_c",                    // stops inside the marker
+    };
+
+    bool all = true;
+
+    for(const char* t : TEXTS) {
+        const std::string text(t);
+
+        std::string whole_left;
+
+        const std::vector<oa::call> whole = oa::calls_in(text, whole_left);
+
+        // Every two-way split, plus one character at a time.
+        for(std::size_t cut = 0; cut <= text.size() + 1; cut++) {
+            oa::call_stream st;
+
+            std::string got;
+
+            if(cut > text.size()) {
+                for(std::size_t i = 0; i < text.size(); i++)
+                    got += st.feed(text.substr(i, 1));
+            }
+            else {
+                got += st.feed(text.substr(0, cut));
+                got += st.feed(text.substr(cut));
+            }
+
+            got += st.flush();
+
+            const std::vector<oa::call> calls = st.take();
+
+            if(got != whole_left || calls.size() != whole.size()) {
+                std::cout << "    split " << cut << " of \"" << text
+                          << "\" gave \"" << got << "\" (" << calls.size()
+                          << " calls), whole gave \"" << whole_left << "\" ("
+                          << whole.size() << ")\n";
+
+                all = false;
+
+                break;
+            }
+
+            for(std::size_t i = 0; i < calls.size(); i++)
+                if(calls[i].name != whole[i].name ||
+                   calls[i].arguments != whole[i].arguments) {
+                    std::cout << "    split " << cut << " differed in call "
+                              << i << "\n";
+
+                    all = false;
+
+                    break;
+                }
+        }
+    }
+
+    ok("  every split point agrees with reading it whole", all);
+
+    // **And it does not buffer.** The whole point is that content keeps
+    // flowing; holding it all back would pass the test above and defeat the
+    // purpose.
+    {
+        oa::call_stream st;
+
+        ok("  ordinary text is released at once", st.feed("hello") == "hello");
+
+        // Only the part that could still become a marker is held.
+        ok("  a marker character is held, and only it",
+           st.feed("a<") == "a");
+
+        ok("  and released when it turns out to be nothing",
+           st.feed("b") == "<b");
+    }
+
+    // A call spanning many feeds, which is what a real generation looks like.
+    {
+        oa::call_stream st;
+
+        std::string got;
+
+        for(const char* piece : { "<tool", "_call>", "{\"name\":", "\"f\",",
+                                  "\"arguments\":{}}", "</tool", "_call>" })
+            got += st.feed(piece);
+
+        got += st.flush();
+
+        ok("  a call assembled across seven feeds is one call",
+           got.empty() && st.take().size() == 1 && st.saw_a_call());
+    }
+}
+
 static void what_it_refuses() {
     std::cout << "\nwhat it refuses:\n";
 
@@ -804,6 +919,7 @@ int main() {
     content_may_be_parts();
     a_tool_request_is_visible();
     calls_are_read_out_of_the_text();
+    streaming_splits_the_same_way_however_it_arrives();
     what_it_refuses();
     it_writes_a_completion();
     it_writes_chunks();

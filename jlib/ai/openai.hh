@@ -111,6 +111,59 @@ struct call {
  */
 std::vector<call> calls_in(const std::string& text, std::string& left);
 
+/**
+ * Streamed model text, split into content and calls as it arrives.
+ *
+ * **The problem this solves is that `<tool_call>` arrives a token at a time.**
+ * A server streaming tokens through cannot know whether it is inside a call
+ * until it has seen enough of the marker to tell, and the two naive answers
+ * are both wrong: send everything and the client receives an opening marker it
+ * has to strip, or buffer the whole reply and lose the streaming that jserve
+ * is asynchronous for (#218).
+ *
+ * So it holds back exactly the ambiguous tail -- the longest suffix of what it
+ * has that could still be the start of a marker -- and releases everything
+ * else immediately. That is the same answer as a partial UTF-8 sequence at a
+ * chunk boundary (#249), for the same reason.
+ *
+ * The cost is bounded and small: at most the length of `<tool_call>` minus one
+ * is ever held for want of knowing, and a reply that contains no `<` streams
+ * with nothing held at all.
+ *
+ * Blocks that cannot be read -- unterminated, not JSON, no name -- come back
+ * out as **content**, as they do from calls_in(), so nothing the model said is
+ * lost by a marker it got wrong.
+ */
+class call_stream {
+public:
+    /**
+     * Take the next piece of generated text.
+     *
+     * @return what is now safe to send as content, which may be empty
+     */
+    std::string feed(const std::string& text);
+
+    /**
+     * No more text is coming.
+     *
+     * @return whatever was being held, as content -- an unterminated block
+     *         included, because a reply cut short mid-call is what a client
+     *         needs in order to know it was cut short
+     */
+    std::string flush();
+
+    /** The calls completed so far, and forget them. */
+    std::vector<call> take();
+
+    /** Whether any call has been seen, which decides the finish reason. */
+    bool saw_a_call() const { return m_saw; }
+
+private:
+    std::string m_pending;
+    std::vector<call> m_calls;
+    bool m_saw = false;
+};
+
 /** A parsed POST /v1/chat/completions body. */
 struct request {
     std::string model;
@@ -216,6 +269,18 @@ struct delta {
 
     std::string content;
 
+    /**
+     * The calls this chunk carries, if any.
+     *
+     * The protocol delivers a call in pieces, each with an `index` saying
+     * which call it belongs to, the name once and `arguments` accumulating.
+     * jserve sends a whole call in one chunk instead -- the streaming shape is
+     * about not making a client wait, and by the time a call has been read out
+     * of the text it is already complete, so there is nothing left to
+     * dribble. A client that appends deltas gets the same string either way.
+     */
+    std::vector<call> calls;
+
     /** Set on the last chunk, which carries no content. */
     bool done = false;
     finish why = finish::stop;
@@ -248,7 +313,8 @@ struct delta {
 std::string completion(const std::string& id, const std::string& model,
                        std::int64_t created, const std::string& content,
                        finish why, unsigned int prompt_tokens,
-                       unsigned int completion_tokens);
+                       unsigned int completion_tokens,
+                       const std::vector<call>& calls = std::vector<call>());
 
 /**
  * One `chat.completion.chunk`, for a request that did.

@@ -25,6 +25,7 @@
 #include <jlib/util/json.hh>
 
 #include <atomic>
+#include <algorithm>
 #include <sstream>
 
 namespace jlib {
@@ -267,6 +268,97 @@ std::vector<call> calls_in(const std::string& text, std::string& left)
     return out;
 }
 
+namespace {
+
+/**
+ * How much of `s`'s tail could still be the start of `marker`.
+ *
+ * The longest proper prefix of `marker` that `s` ends with -- which is exactly
+ * what must be held back, because the next token may complete it.
+ */
+std::size_t ambiguous_tail(const std::string& s, const std::string& marker)
+{
+    const std::size_t most = std::min(s.size(), marker.size() - 1);
+
+    for(std::size_t k = most; k > 0; k--)
+        if(s.compare(s.size() - k, k, marker, 0, k) == 0) return k;
+
+    return 0;
+}
+
+}
+
+std::string call_stream::feed(const std::string& text)
+{
+    static const std::string OPEN = "<tool_call>";
+    static const std::string CLOSE = "</tool_call>";
+
+    m_pending += text;
+
+    std::string out;
+
+    for(;;) {
+        const std::size_t b = m_pending.find(OPEN);
+
+        if(b == std::string::npos) {
+            // No marker yet.  Everything but a tail that could become one is
+            // safe to send.
+            const std::size_t hold = ambiguous_tail(m_pending, OPEN);
+
+            out += m_pending.substr(0, m_pending.size() - hold);
+            m_pending = m_pending.substr(m_pending.size() - hold);
+
+            break;
+        }
+
+        out += m_pending.substr(0, b);
+
+        const std::size_t e = m_pending.find(CLOSE, b + OPEN.size());
+
+        // An open marker with no close yet: hold it and wait.  This is the
+        // one case that can hold more than a marker's worth, and it is
+        // bounded by the call the model is writing.
+        if(e == std::string::npos) { m_pending = m_pending.substr(b); break; }
+
+        const std::string block = m_pending.substr(b, e + CLOSE.size() - b);
+
+        // Parsed by the same function the non-streaming path uses, so the two
+        // cannot disagree about what a call is.
+        std::string leftover;
+
+        const std::vector<call> got = calls_in(block, leftover);
+
+        if(got.empty()) out += leftover;    // unreadable: it is content
+        else {
+            m_calls.insert(m_calls.end(), got.begin(), got.end());
+
+            m_saw = true;
+        }
+
+        m_pending = m_pending.substr(e + CLOSE.size());
+    }
+
+    return out;
+}
+
+std::string call_stream::flush()
+{
+    const std::string out = m_pending;
+
+    m_pending.clear();
+
+    return out;
+}
+
+std::vector<call> call_stream::take()
+{
+    std::vector<call> out;
+
+    out.swap(m_calls);
+
+    return out;
+}
+
 const char* spell(finish f) {
     if(f == finish::length) return "length";
     if(f == finish::tool_calls) return "tool_calls";
@@ -372,10 +464,48 @@ void refuse_a_partial_character(const std::string& content, const char* what) {
 
 }
 
+namespace {
+
+/** The `tool_calls` array, as the protocol shapes it. */
+util::json::array::ptr calls_json(const std::vector<call>& calls)
+{
+    util::json::array::ptr a = util::json::array::create();
+
+    for(std::size_t i = 0; i < calls.size(); i++) {
+        util::json::object::ptr f = util::json::object::create();
+
+        f->add("name", calls[i].name);
+
+        // A **string** holding JSON, which is how the protocol nests it --
+        // an object here is what a client that expects a string reads as
+        // nothing.  See openai::call.
+        f->add("arguments", calls[i].arguments.empty() ? std::string("{}")
+                                                       : calls[i].arguments);
+
+        util::json::object::ptr one = util::json::object::create();
+
+        // An id is required by the protocol and is what a tool result is
+        // matched back to, so one is invented when the model gave none --
+        // which it always does, since the model emits a name and arguments
+        // and nothing else.
+        one->add("id", calls[i].id.empty()
+                           ? "call_" + std::to_string(i) : calls[i].id);
+        one->add("type", std::string("function"));
+        one->add("function", f);
+
+        a->add(one);
+    }
+
+    return a;
+}
+
+}
+
 std::string completion(const std::string& id, const std::string& model,
                        std::int64_t created, const std::string& content,
                        finish why, unsigned int prompt_tokens,
-                       unsigned int completion_tokens)
+                       unsigned int completion_tokens,
+                       const std::vector<call>& calls)
 {
     refuse_a_partial_character(content, "completion");
 
@@ -386,6 +516,8 @@ std::string completion(const std::string& id, const std::string& model,
 
     m->add("role", std::string("assistant"));
     m->add("content", content);
+
+    if(!calls.empty()) m->add("tool_calls", calls_json(calls));
 
     util::json::object::ptr choice = util::json::object::create();
 
@@ -426,6 +558,12 @@ std::string chunk(const std::string& id, const std::string& model,
     // which is what the clients expect and what stops a final empty string
     // being appended to a reply.
     if(!d.done) dj->add("content", d.content);
+
+    // A whole call in one chunk rather than dribbled across several: by the
+    // time it has been read out of the model's text it is complete, and the
+    // streaming shape exists to avoid making a client wait rather than to
+    // fragment for its own sake.  See delta::calls.
+    if(!d.calls.empty()) dj->add("tool_calls", calls_json(d.calls));
 
     util::json::object::ptr choice = util::json::object::create();
 
