@@ -70,6 +70,28 @@ RestartSec=2
 # here, which never runs as root at all. That is stricter and it means the
 # certificate has to be readable by www-data, which is a real trade rather than
 # a free win.
+# **There is deliberately no `User=` here, and adding one breaks the server.**
+#
+# A unit with no User= runs as root, which is what this needs: it binds 80 and
+# 443, reads a key out of /etc/ssl/private, and opens logs under /var/log --
+# all before jhttpd drops to the user its own config names.
+#
+# Setting `User=root` looks like harmless explicitness and is not. It makes
+# systemd take its change-identity path, and together with Group= and the
+# hardening below that strips **CAP_SETUID** from the effective set -- while
+# leaving it in the bounding set, so `systemctl show` still lists it. jhttpd
+# then fails at startup with
+#
+#     jhttpd: sys exception: setuid() failed: Operation not permitted
+#
+# which is the kernel refusing the privilege drop from a process that really
+# is uid 0. Measured: with User=root the effective mask is ...ff7f, and bit 7
+# is CAP_SETUID; without it, ...ffff, with every directive below still on.
+#
+# This cost a live deploy and four wrong diagnoses. It is one line, it reads
+# like documentation, and it is the only property in this file whose removal
+# is load-bearing.
+#
 # **Group must match the group the config drops to.**
 #
 # systemd creates LogsDirectory owned by User:Group, so without this it is
@@ -83,7 +105,6 @@ RestartSec=2
 # cannot *create* one, which is why the `create` line in the logrotate snippet
 # is load-bearing rather than decorative -- and why a log deleted by hand
 # needs a restart rather than a reload to come back.
-User=root
 Group=www-data
 
 # Modest hardening. Not a complete list -- these are the ones that are clearly

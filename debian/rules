@@ -93,6 +93,17 @@ override_dh_builddeb:
 	        exit 1; \
 	    fi; \
 	done
+	@set -e; \
+	if grep -qE '^User=' debian/jhttpd.service; then \
+	    echo "jhttpd.service sets User=, which strips CAP_SETUID from the"; \
+	    echo "effective set once Group= and the hardening are also set --"; \
+	    echo "and jhttpd then cannot drop privilege:"; \
+	    echo "  jhttpd: sys exception: setuid() failed: Operation not permitted"; \
+	    echo "A unit with no User= already runs as root.  See the comment"; \
+	    echo "in debian/jhttpd.service."; \
+	    exit 1; \
+	fi
+	@echo "jhttpd.service: no User=, so the privilege drop keeps CAP_SETUID"
 	@echo "jhttpd.service: every Exec and Documentation path is installed"
 	dh_builddeb
 

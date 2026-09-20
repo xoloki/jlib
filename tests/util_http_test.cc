@@ -410,6 +410,51 @@ static void reading_a_body() {
     }
 }
 
+/** What parsing this request head complained about, or empty. */
+static std::string why_refused_request(const std::string& head) {
+    try {
+        http::parse_request_head(head);
+
+        return std::string();
+    }
+    catch(http::error& e) {
+        return e.what();
+    }
+}
+
+/**
+ * A malformed request is reported as a malformed *request*.
+ *
+ * split_lines() serves both parsers and its messages all said "response", so
+ * a scanner sending a bad request line produced, in a live server's error log:
+ *
+ *     [client 152.32.183.27:52808] the response head does not end in CRLF
+ *
+ * which tells an operator their own server emitted something broken. Nothing
+ * asserted the noun, so nothing caught it -- and it was the second error line
+ * six live sites logged after a deploy whose point was a trustworthy log.
+ */
+static void a_refusal_says_whose_fault_it_is() {
+    std::cout << "\na refusal names the message it was reading:\n";
+
+    struct { const char* head; const char* why; } cases[] = {
+        { "GET / HTTP/1.1\r\nHost: x",        "no CRLF at the end" },
+        { "GET / HTTP/1.1\rHost: x\r\n\r\n", "a bare CR in the head" },
+        { "GET / HTTP/1.1\r\nHost: x\r\n",   "no blank line at the end" }
+    };
+
+    for(std::size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const std::string said = why_refused_request(cases[i].head);
+
+        ok(std::string("  ") + cases[i].why + " is refused",
+           !said.empty(), said);
+
+        // The point of the test: which noun it used.
+        ok("  and blamed on the request, not on our own response",
+           said.find("response") == std::string::npos, said);
+    }
+}
+
 /** Did parsing this request head throw? */
 static bool refused_request(const std::string& head) {
     try {
@@ -677,6 +722,7 @@ int main() {
     reading_a_head_off_a_stream();
     reading_a_body();
     a_request_head_reads_the_same_way();
+    a_refusal_says_whose_fault_it_is();
     a_relative_reference_parses_now();
 
     // What a green run does not establish.
