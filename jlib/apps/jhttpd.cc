@@ -43,6 +43,10 @@
  * safe to write down -- see jhttpd.hh, where that argument is made at length.
  */
 
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+
 #include <jlib/apps/jhttpd.hh>
 
 #include <jlib/net/http_server.hh>
@@ -605,8 +609,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    jhttpd::logfile access;
-    jhttpd::logfile errors;
+    jhttpd::logfile   access;
+    jhttpd::error_log errors;
 
     if(o.access_log != "-" && !access.open(o.access_log)) {
         std::cerr << "jhttpd: cannot write the access log \"" << o.access_log
@@ -615,7 +619,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if(o.error_log != "-" && !errors.open(o.error_log)) {
+    // Takes the level as well as the path, and handles "-" itself: an error
+    // line is built by one function now, so stderr and a file cannot drift
+    // into two different formats the way they had.
+    if(!errors.open(o.error_log, o.error_level)) {
         std::cerr << "jhttpd: cannot write the error log \"" << o.error_log
                   << "\"\n";
 
@@ -623,7 +630,6 @@ int main(int argc, char** argv) {
     }
 
     const bool access_to_stdout = o.access_log == "-";
-    const bool errors_to_stderr = o.error_log == "-";
 
     try {
         sys::server::policy p;
@@ -761,29 +767,51 @@ int main(int argc, char** argv) {
                       << (who.size() == 1 ? " user)" : " users)") << "\n";
         }
 
-        s->on_request([&access, access_to_stdout](
+        s->on_request([&access, &errors, access_to_stdout, &o](
                           const http::server::access& a) {
             // std::time() here rather than in the library: when a request was
             // answered is a log's business, and a record that carried a
             // timestamp would be carrying one format's opinion.
-            const std::string line = jhttpd::combined(a, std::time(0));
+            const std::string line = jhttpd::combined(a, std::time(0),
+                                                      o.log_format);
 
             if(access_to_stdout) std::cout << line << "\n" << std::flush;
             else                 access.write(line);
+
+            // **A refused request is an error-log line too** (#312).
+            //
+            // Apache writes both: the 400 in the access log says what the
+            // client was told, and `AH10244: invalid URI path (...)` in the
+            // error log says what the server objected to. With only the first,
+            // a traversal attempt is indistinguishable from a typo -- both are
+            // a 400 with no cause recorded anywhere.
+            //
+            // The target is quoted beside the reason, in Apache's parenthesis,
+            // because the reason alone does not say which request caused it.
+            if(!a.reason.empty()) {
+                errors.write(jhttpd::level::error, "http",
+                             a.peer.empty()
+                                 ? std::string()
+                                 : a.peer + ":" + std::to_string(a.peer_port),
+                             jhttpd::one_line(a.reason) +
+                                 " (" + a.target + ")");
+            }
         });
 
-        s->transport().on_error([&errors, errors_to_stderr](
-                                    const std::exception& e,
-                                    const sys::peer& from) {
-            // Escaped for the same reason the access log is: this is where a
-            // refused request's diagnosis arrives, and those messages quote
-            // the offending value -- which the client chose.
-            const std::string line =
-                (from.address.empty() ? std::string("-") : from.address) +
-                " " + jhttpd::escaped(e.what());
+        s->transport().on_error([&errors](const std::exception& e,
+                                          const sys::peer& from) {
+            // Sorted into a module and a level rather than written flat: a
+            // failed handshake and a server that cannot read its own key are
+            // not the same event, and a log that spells them identically
+            // cannot be read by anyone who is not already suspicious.
+            const jhttpd::sorted_error what = jhttpd::sort_error(e);
 
-            if(errors_to_stderr) std::cerr << line << "\n";
-            else                 errors.write(line);
+            // Asked before the line is built, because the levels that are
+            // filtered out are exactly the ones that arrive in volume.
+            if(!errors.says(what.at)) return;
+
+            errors.write(what.at, what.module, jhttpd::client_of(from),
+                         e.what());
         });
 
         // What it is actually doing, on one line, because the next question
@@ -858,6 +886,46 @@ int main(int argc, char** argv) {
                                         : std::string("unlimited"))
                   << "\n";
 
+        // **The lifecycle, in the error log** (#314).
+        //
+        // Ten of the nineteen error lines Apache wrote on this server in a day
+        // were these: configured, command line, caught a signal. They are how
+        // "is it running, which build, what did it bind" gets answered without
+        // attaching to the process -- and `daemon;` sends the banner above to
+        // /dev/null, which is how a loopback-only bind stayed invisible while
+        // six sites were dark.
+        //
+        // Only when the error log is a file. When it is stderr, the banner has
+        // just said all of this in a friendlier shape, and saying it twice
+        // down one stream helps nobody.
+        if(o.error_log != "-") {
+            std::string how = argv[0];
+
+            for(int i = 1; i < argc; i++) how += std::string(" ") + argv[i];
+
+            errors.write(jhttpd::level::notice, "core", "",
+                         std::string("jhttpd/") + PACKAGE_VERSION +
+                             " configured -- resuming normal operations");
+
+            errors.write(jhttpd::level::notice, "core", "",
+                         "command line: '" + how + "'");
+
+            // **One line per listener, and the address as bound.** This is the
+            // line whose absence cost six sites a morning: `listen 80` binds
+            // loopback, `listen :80` binds everything, and nothing in the log
+            // said which had happened.
+            for(std::size_t i = 0; i < o.listens.size(); i++) {
+                const jhttpd::listen_spec& b = o.listens[i];
+
+                errors.write(jhttpd::level::notice, "core", "",
+                             std::string("listening on ") +
+                                 (b.host.empty() ? "*" : b.host) + ":" +
+                                 std::to_string(s->ports()[i]) +
+                                 (b.ssl ? " (ssl)" : "") +
+                                 (b.redirect ? " (redirect)" : ""));
+            }
+        }
+
         // **The reload thread.**
         //
         // Its own thread, and not the reactor's, because everything a reload
@@ -924,6 +992,17 @@ int main(int argc, char** argv) {
 
                     std::cerr << "jhttpd: stopping\n";
 
+                    // Named, because "who stopped it" is the first question
+                    // after an unexplained restart: systemd sends SIGTERM, a
+                    // terminal sends SIGINT, and they mean different things
+                    // about who did it.
+                    errors.write(jhttpd::level::notice, "core", "",
+                                 std::string("caught ") +
+                                     (sys::wakeup::count(SIGTERM)
+                                          ? "SIGTERM"
+                                          : "SIGINT") +
+                                     ", shutting down");
+
                     s->stop();
 
                     break;
@@ -951,6 +1030,14 @@ int main(int argc, char** argv) {
                     // typo in it leaves the server exactly as it was.
                     std::cerr << "jhttpd: reload refused, keeping what is "
                               << "running: " << e.what() << "\n";
+
+                    // At `error`: a reload that was asked for and refused is
+                    // the one lifecycle event an operator has to act on, and
+                    // it is invisible from outside -- the server carries on
+                    // serving the old config perfectly well.
+                    errors.write(jhttpd::level::error, "core", "",
+                                 std::string("reload refused, keeping what is "
+                                             "running: ") + e.what());
 
                     continue;
                 }
@@ -1046,6 +1133,23 @@ int main(int argc, char** argv) {
                 }
 
                 std::cerr << "jhttpd: reloaded " << o.config << "\n";
+
+                // The other half of the refusal notice above: a log that says
+                // only when a reload failed leaves "did my SIGHUP arrive at
+                // all" unanswerable, and that is the question a rotation or a
+                // certbot hook actually raises.
+                errors.write(jhttpd::level::notice, "core", "",
+                             "reloaded " + o.config);
+
+                // At `warn`, because this is a reload that half-happened: the
+                // operator edited something and the running server did not
+                // take it, which looks exactly like a successful reload from
+                // outside.
+                for(std::size_t i = 0; i < stuck.size(); i++) {
+                    errors.write(jhttpd::level::warn, "core", "",
+                                 "\"" + stuck[i] + "\" changed and needs a "
+                                 "restart; still using the old one");
+                }
             }
         });
 
