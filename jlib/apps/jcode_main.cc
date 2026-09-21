@@ -151,8 +151,9 @@ void usage(std::ostream& o, const char* me) {
       << "                  cold model can take a minute to say anything)\n"
       << "  --no-stream     wait for the whole reply rather than watching it\n"
       << "  --build CMD     a command the model may run, split on\n"
-      << "                  spaces and run without a shell; without\n"
-      << "                  this it cannot run anything\n"
+      << "                  spaces and run without a shell; also run\n"
+      << "                  after writing, to say whether it still\n"
+      << "                  builds; without this it cannot run anything\n"
       << "  --rounds N      most times round the tool loop\n"
       << "                  (default 8; nothing calls tools yet)\n"
       << "  --dry-run       decide everything, write nothing\n"
@@ -522,9 +523,60 @@ int main(int argc, char** argv) {
 
     if(going.edits.empty()) return 0;
 
-    for(const jcode::result& r : jcode::apply(going, o.root))
+    bool wrote = false;
+
+    for(const jcode::result& r : jcode::apply(going, o.root)) {
         std::cerr << "jcode: " << jcode::spell(r.what) << " " << r.name
                   << (r.why.empty() ? "" : ": " + r.why) << "\n";
+
+        if(r.what == jcode::outcome::written ||
+           r.what == jcode::outcome::created) wrote = true;
+    }
+
+    // **"written" is not the same as "and it still works".**
+    //
+    // Measured: a model asked to fix three functions returned a file that
+    // kept all three bugs and called three functions it had not defined, and
+    // jcode said "written util.c" and exited 0. The tree no longer compiled.
+    // Announcing a write and not what the write did is the harness lie this
+    // arc keeps finding in different clothes.
+    //
+    // Only when a build command was named -- the same one the model may call,
+    // and the one #242 requires be named rather than inferred. Nothing is
+    // reverted: undoing a write the user confirmed is a larger decision than
+    // this, and a build that fails is information rather than grounds to
+    // discard their work.
+    if(wrote && !o.build.empty()) {
+        const std::vector<jcode::tool> check = jcode::toolbox(o.root, o.build);
+
+        for(const jcode::tool& t : check) {
+            if(t.name != "build") continue;
+
+            const std::string said = t.run("{}");
+
+            // Named, not paraphrased. `--build 'make check'` runs the
+            // tests as well as the compiler, so "it still builds" would be
+            // a claim about something this did not measure -- a correct fix
+            // that leaves one test failing is not a broken build.
+            if(said.compare(0, 7, "exit 0\n") == 0) {
+                std::cerr << "jcode: and `" << o.build << "` passes\n";
+
+                break;
+            }
+
+            std::cerr << "jcode: but `" << o.build << "` now fails:\n";
+
+            // The first lines only: the point is that it broke and roughly
+            // where, and the whole log is what --build is for.
+            std::istringstream lines(said);
+            std::string line;
+
+            for(int i = 0; i < 12 && std::getline(lines, line); i++)
+                std::cerr << "  " << line << "\n";
+
+            return 1;
+        }
+    }
 
     return 0;
 }
