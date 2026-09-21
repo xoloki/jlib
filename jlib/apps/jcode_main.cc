@@ -119,6 +119,18 @@ struct options {
     unsigned int rounds = 8;
 
     /**
+     * How many times to write, build, and try again on what the build said.
+     *
+     * Separate from `rounds`, which bounds tool calls inside one exchange: a
+     * model calling read_file forever and a model rewriting a file forever
+     * are different loops and one number cannot serve both.
+     *
+     * Small by default. Each attempt writes to the tree, and the tree is left
+     * at the last one -- see jcode::until_built, which does not revert.
+     */
+    unsigned int attempts = 3;
+
+    /**
      * The build command the model may run, split on whitespace.
      *
      * **Empty by default, and that is the point.** A jcode given no --build
@@ -154,6 +166,9 @@ void usage(std::ostream& o, const char* me) {
       << "                  spaces and run without a shell; also run\n"
       << "                  after writing, to say whether it still\n"
       << "                  builds; without this it cannot run anything\n"
+      << "  --attempts N    how many times to write, build and try\n"
+      << "                  again on what the build said (default 3;\n"
+      << "                  needs --build, and never reverts)\n"
       << "  --rounds N      most times round the tool loop\n"
       << "                  (default 8; nothing calls tools yet)\n"
       << "  --dry-run       decide everything, write nothing\n"
@@ -184,6 +199,11 @@ bool parse_args(int argc, char** argv, options& o, std::string& request,
         else if(a == "--timeout" && has_next) o.timeout = std::atof(argv[++i]);
         else if(a == "--no-stream") o.stream = false;
         else if(a == "--build" && has_next) o.build = argv[++i];
+        else if(a == "--attempts" && has_next) {
+            o.attempts = unsigned(std::atoi(argv[++i]));
+
+            if(!o.attempts) o.attempts = 1;   // zero attempts asks nothing
+        }
         else if(a == "--rounds" && has_next) {
             o.rounds = unsigned(std::atoi(argv[++i]));
 
@@ -419,10 +439,103 @@ int main(int argc, char** argv) {
     // build tool only if one was named.  See jcode::toolbox for what each one
     // may do and what stops it.
 
-    const jcode::conversation talk =
-        jcode::converse(opening, tools, once, o.rounds);
+    // **Everything the loop needs that cannot live in a library.**
+    //
+    // The write is out here rather than being a tool the model calls, which
+    // is #242's constraint and the reason until_built takes it as a functor:
+    // every write is announced and confirmed, and a `write_file` would move
+    // that decision inside the loop where nobody sees it.
+    const jcode::writer put = [&](const jcode::reply& parsed) -> bool {
+        for(const std::string& g : parsed.guesses())
+            std::cerr << "jcode: guessed: " << g << "\n";
 
-    for(const jcode::ran& c : talk.calls)
+        // Decided first, written second: a caller is asked about an edit that
+        // is already known to be applicable, rather than being asked and then
+        // told it was refused.
+        const std::vector<jcode::result> dry =
+            jcode::apply(parsed, o.root, true);
+
+        jcode::reply going;
+
+        for(const jcode::result& r : dry) {
+            if(r.what == jcode::outcome::refused) {
+                std::cerr << "jcode: refused " << r.name << ": " << r.why
+                          << "\n";
+
+                continue;
+            }
+
+            if(r.what == jcode::outcome::unchanged) {
+                std::cerr << "jcode: " << r.name
+                          << " is already what the model sent\n";
+
+                continue;
+            }
+
+            if(o.dry_run) {
+                // "would written" is what spell() gives, and it is not
+                // English.  The outcomes are named for what happened, which
+                // is the right name everywhere except in front of "would".
+                std::cerr << "jcode: would "
+                          << (r.what == jcode::outcome::created ? "create"
+                                                                : "write")
+                          << " " << r.name << "\n";
+
+                continue;
+            }
+
+            if(!o.yes && !confirm(std::string("jcode: ") +
+                                  (r.what == jcode::outcome::created
+                                       ? "create" : "write") +
+                                  " " + r.name + "?"))
+            {
+                std::cerr << "jcode: left " << r.name << " alone\n";
+
+                continue;
+            }
+
+            for(const jcode::edit& e : parsed.edits)
+                if(e.name == r.name) going.edits.push_back(e);
+        }
+
+        if(going.edits.empty()) return false;
+
+        bool wrote = false;
+
+        for(const jcode::result& r : jcode::apply(going, o.root)) {
+            std::cerr << "jcode: " << jcode::spell(r.what) << " " << r.name
+                      << (r.why.empty() ? "" : ": " + r.why) << "\n";
+
+            if(r.what == jcode::outcome::written ||
+               r.what == jcode::outcome::created) wrote = true;
+        }
+
+        return wrote;
+    };
+
+    // **Without a build command there is nothing to iterate against**, so one
+    // attempt is the whole of it: the builder reports success and the loop
+    // stops having written once, which is what jcode did before this existed.
+    const jcode::builder check = [&]() -> jcode::built {
+        jcode::built b;
+
+        if(o.build.empty()) { b.passed = true; return b; }
+
+        for(const jcode::tool& t : tools) {
+            if(t.name != "build") continue;
+
+            b.output = t.run("{}");
+            b.passed = b.output.compare(0, 7, "exit 0\n") == 0;
+        }
+
+        return b;
+    };
+
+    const jcode::attempts done =
+        jcode::until_built(opening, tools, once, put, check, plan.sent,
+                           o.attempts, o.rounds);
+
+    for(const jcode::ran& c : done.calls)
         std::cerr << "jcode: called " << c.name
                   << (c.arguments.empty() ? std::string()
                                           : " with " + c.arguments)
@@ -430,153 +543,35 @@ int main(int argc, char** argv) {
                               : " -- no such tool")
                   << c.failed << "\n";
 
-    if(talk.why != jcode::ending::answered) {
-        std::cerr << "jcode: " << jcode::spell(talk.why)
-                  << (talk.detail.empty() ? std::string() : ": " + talk.detail)
-                  << "\n";
-
-        return 1;
-    }
-
-    text = talk.text;
-
-    // What the guess was worth, said out loud.  The streaming path gets no
-    // usage block -- the protocol does not put one in the chunks -- so this
-    // is only ever available with --no-stream, and saying nothing is better
-    // than implying the estimate was checked.
-    const std::string drift = jcode::estimate_drift(plan.estimate,
-                                                    prompt_tokens);
+    // What the guess was worth, said out loud -- from the first exchange,
+    // which is the one the estimate was made against.
+    const std::string drift =
+        jcode::estimate_drift(plan.estimate, prompt_tokens);
 
     if(!drift.empty()) std::cerr << "jcode: " << drift << "\n";
 
-    const jcode::reply parsed = jcode::parse(text, plan.sent);
+    if(done.why == jcode::settled::built) {
+        if(!o.build.empty())
+            std::cerr << "jcode: and `" << o.build << "` passes\n";
 
-    for(const std::string& g : parsed.guesses())
-        std::cerr << "jcode: guessed: " << g << "\n";
-
-    // **Said rather than swallowed.**  jcode declares no tools, so a model
-    // asking to call one has gone somewhere it was not sent -- but a reply
-    // that is entirely a call would otherwise print "no files in that reply",
-    // which is what a model too weak to follow the format looks like. They
-    // are different problems and silence cannot tell them apart. #316.
-    for(const oa::call& c : parsed.calls)
-        std::cerr << "jcode: the model asked to call " << c.name
-                  << (c.arguments.empty() ? std::string()
-                                          : " with " + c.arguments)
-                  << ", which jcode cannot do yet\n";
-
-    if(parsed.edits.empty() && parsed.refusals.empty()) {
-        std::cerr << "jcode: no files in that reply\n";
-
-        // Not distinguished in the exit status: jcode documents none beyond
-        // 0 and 1, and inventing one here would be a contract nobody could
-        // find. When #310 gives jcode tools it can actually call, that
-        // question has a real case behind it.
         return 0;
     }
 
-    // Decided first, written second: a caller is asked about an edit that is
-    // already known to be applicable, rather than being asked and then told it
-    // was refused.
-    const std::vector<jcode::result> dry = jcode::apply(parsed, o.root, true);
+    std::cerr << "jcode: " << jcode::spell(done.why)
+              << (done.detail.empty() ? std::string() : " -- " + done.detail)
+              << "\n";
 
-    jcode::reply going;
+    // The build's last word, when there was one: it is what a person needs in
+    // order to decide what to do next, and it is why the attempts stopped.
+    if(!done.last.empty() && done.why != jcode::settled::nothing) {
+        std::istringstream lines(done.last);
+        std::string line;
 
-    for(const jcode::result& r : dry) {
-        if(r.what == jcode::outcome::refused) {
-            std::cerr << "jcode: refused " << r.name << ": " << r.why << "\n";
-
-            continue;
-        }
-
-        if(r.what == jcode::outcome::unchanged) {
-            std::cerr << "jcode: " << r.name
-                      << " is already what the model sent\n";
-
-            continue;
-        }
-
-        if(o.dry_run) {
-            // "would written" is what spell() gives, and it is not English.
-            // The outcomes are named for what happened, which is the right
-            // name everywhere except in front of "would".
-            std::cerr << "jcode: would "
-                      << (r.what == jcode::outcome::created ? "create" : "write")
-                      << " " << r.name << "\n";
-
-            continue;
-        }
-
-        if(!o.yes && !confirm(std::string("jcode: ") +
-                              (r.what == jcode::outcome::created ? "create"
-                                                                 : "write") +
-                              " " + r.name + "?"))
-        {
-            std::cerr << "jcode: left " << r.name << " alone\n";
-
-            continue;
-        }
-
-        for(const jcode::edit& e : parsed.edits)
-            if(e.name == r.name) going.edits.push_back(e);
+        for(int i = 0; i < 12 && std::getline(lines, line); i++)
+            std::cerr << "  " << line << "\n";
     }
 
-    if(going.edits.empty()) return 0;
-
-    bool wrote = false;
-
-    for(const jcode::result& r : jcode::apply(going, o.root)) {
-        std::cerr << "jcode: " << jcode::spell(r.what) << " " << r.name
-                  << (r.why.empty() ? "" : ": " + r.why) << "\n";
-
-        if(r.what == jcode::outcome::written ||
-           r.what == jcode::outcome::created) wrote = true;
-    }
-
-    // **"written" is not the same as "and it still works".**
-    //
-    // Measured: a model asked to fix three functions returned a file that
-    // kept all three bugs and called three functions it had not defined, and
-    // jcode said "written util.c" and exited 0. The tree no longer compiled.
-    // Announcing a write and not what the write did is the harness lie this
-    // arc keeps finding in different clothes.
-    //
-    // Only when a build command was named -- the same one the model may call,
-    // and the one #242 requires be named rather than inferred. Nothing is
-    // reverted: undoing a write the user confirmed is a larger decision than
-    // this, and a build that fails is information rather than grounds to
-    // discard their work.
-    if(wrote && !o.build.empty()) {
-        const std::vector<jcode::tool> check = jcode::toolbox(o.root, o.build);
-
-        for(const jcode::tool& t : check) {
-            if(t.name != "build") continue;
-
-            const std::string said = t.run("{}");
-
-            // Named, not paraphrased. `--build 'make check'` runs the
-            // tests as well as the compiler, so "it still builds" would be
-            // a claim about something this did not measure -- a correct fix
-            // that leaves one test failing is not a broken build.
-            if(said.compare(0, 7, "exit 0\n") == 0) {
-                std::cerr << "jcode: and `" << o.build << "` passes\n";
-
-                break;
-            }
-
-            std::cerr << "jcode: but `" << o.build << "` now fails:\n";
-
-            // The first lines only: the point is that it broke and roughly
-            // where, and the whole log is what --build is for.
-            std::istringstream lines(said);
-            std::string line;
-
-            for(int i = 0; i < 12 && std::getline(lines, line); i++)
-                std::cerr << "  " << line << "\n";
-
-            return 1;
-        }
-    }
-
-    return 0;
+    // Nothing written is not a failure: a model saying "this needs no change"
+    // is an answer, and a dry run writes nothing by design.
+    return done.why == jcode::settled::nothing ? 0 : 1;
 }

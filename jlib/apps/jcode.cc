@@ -467,6 +467,114 @@ std::string capped(const std::string& text, std::size_t cap) {
 
 }
 
+const char* spell(settled s) {
+    switch(s) {
+    case settled::built:   return "the build passes";
+    case settled::bounded: return "out of attempts";
+    case settled::stalled: return "the model stopped changing anything";
+    case settled::nothing: return "nothing was written";
+    case settled::failed:  return "the conversation failed";
+    }
+
+    return "?";
+}
+
+attempts until_built(std::vector<ai::message> turns,
+                     const std::vector<tool>& tools,
+                     const exchange& send,
+                     const writer& write,
+                     const builder& build,
+                     const std::vector<std::string>& known,
+                     unsigned int max_attempts,
+                     unsigned int max_rounds)
+{
+    attempts out;
+
+    // What the last attempt put on disk, so an attempt that repeats itself
+    // can be recognised.  Compared by content rather than by name: a model
+    // that sends back the same bytes has nothing more to offer, whatever it
+    // calls them.
+    std::vector<std::pair<std::string, std::string> > before;
+
+    while(out.made < max_attempts) {
+        out.made++;
+
+        const conversation talk =
+            converse(turns, tools, send, max_rounds);
+
+        out.calls.insert(out.calls.end(), talk.calls.begin(), talk.calls.end());
+
+        if(talk.why != ending::answered) {
+            out.why = settled::failed;
+            out.detail = std::string(spell(talk.why)) +
+                         (talk.detail.empty() ? "" : ": " + talk.detail);
+
+            return out;
+        }
+
+        const reply parsed = parse(talk.text, known);
+
+        std::vector<std::pair<std::string, std::string> > now;
+
+        for(std::size_t i = 0; i < parsed.edits.size(); i++)
+            now.push_back(std::make_pair(parsed.edits[i].name,
+                                         parsed.edits[i].content));
+
+        // Sorted, because the same edits in a different order are the same
+        // edits and a model has no reason to keep one.
+        std::sort(now.begin(), now.end());
+
+        if(!parsed.edits.empty() && !before.empty() && now == before) {
+            out.why = settled::stalled;
+            out.detail = "attempt " + std::to_string(out.made) +
+                         " sent the same files as the one before it";
+
+            return out;
+        }
+
+        before = now;
+
+        // **The writer sees every reply, including one with nothing in it.**
+        // Saying what was refused is part of what it does, and a reply that
+        // stopped mid-file is all refusal and no edit -- returning early here
+        // meant the one thing worth telling the user was never printed.
+        if(!write(parsed)) {
+            out.why = settled::nothing;
+            out.detail = parsed.edits.empty()
+                             ? "the model returned no files"
+                             : "nothing was taken from that reply";
+
+            return out;
+        }
+
+        const built check = build();
+
+        out.last = check.output;
+
+        if(check.passed) { out.why = settled::built; return out; }
+
+        // **The compiler's answer, back to the model.**  A user turn rather
+        // than a tool result: the model did not ask for this, and a `tool`
+        // turn with no call before it is the orphan #336 is about.
+        turns = talk.turns;
+
+        ai::message said;
+
+        said.role = "user";
+        said.content = "That did not work. The build says:\n\n" +
+                       check.output +
+                       "\n\nReturn the whole file again with this fixed.";
+
+        turns.push_back(said);
+    }
+
+    out.why = settled::bounded;
+    out.detail = "stopped after " + std::to_string(max_attempts) +
+                 " attempt(s) with the build still failing";
+
+    return out;
+}
+
 std::vector<tool> toolbox(const std::string& root, const std::string& build,
                           std::size_t cap)
 {

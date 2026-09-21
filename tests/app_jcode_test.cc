@@ -466,6 +466,199 @@ static void what_the_tools_look_like_on_the_wire() {
  * something it may not have is told so and gets another turn, rather than
  * having the conversation end underneath it.
  */
+/**
+ * Write, build, and tell the model what the compiler said.
+ *
+ * #341. Every part is scripted -- the model, the write, the build -- so this
+ * needs no compiler, no model and no disk, which is the same reason
+ * `converse` takes its exchange as a functor.
+ */
+static void until_the_build_passes() {
+    std::cout << "\nwriting, building, and trying again:\n";
+
+    const std::vector<std::string> known{ "util.c" };
+
+    // A model that answers with a file each time; the content changes per
+    // attempt so nothing looks stalled.
+    std::size_t said = 0;
+
+    const jcode::exchange answers =
+        [&said](const std::vector<ai::message>&,
+                const std::string&) -> oa::answer {
+            oa::answer a;
+
+            a.content = "util.c\n```\nversion " +
+                        std::to_string(++said) + "\n```\n";
+
+            return a;
+        };
+
+    // A build that fails twice and then passes.
+    std::size_t built = 0;
+
+    const jcode::builder eventually = [&built]() -> jcode::built {
+        jcode::built b;
+
+        b.passed = ++built >= 3;
+        b.output = b.passed ? "exit 0\nall good"
+                            : "exit 1\nutil.c:44: undeclared 'test_copy_into'";
+
+        return b;
+    };
+
+    std::size_t writes = 0;
+
+    const jcode::writer takes = [&writes](const jcode::reply&) {
+        writes++;
+
+        return true;
+    };
+
+    const jcode::attempts got =
+        jcode::until_built({ { "user", "fix it" } }, {}, answers, takes,
+                           eventually, known, 5);
+
+    ok("it stops when the build passes", got.why == jcode::settled::built,
+       jcode::spell(got.why));
+
+    ok("  on the third attempt", got.made == 3, std::to_string(got.made));
+
+    ok("  having written each time", writes == 3, std::to_string(writes));
+
+    // **The assertion that matters.**  "fed the failure back" and "went round
+    // again without it" look identical from outside, so the turn has to be
+    // checked for rather than inferred from the loop having continued.
+    std::string saw;
+
+    const jcode::exchange watching =
+        [&saw](const std::vector<ai::message>& turns,
+               const std::string&) -> oa::answer {
+            for(const ai::message& m : turns)
+                if(m.content.find("undeclared") != std::string::npos)
+                    saw = m.content;
+
+            oa::answer a;
+
+            a.content = "util.c\n```\nsomething " +
+                        std::to_string(turns.size()) + "\n```\n";
+
+            return a;
+        };
+
+    built = 0;
+
+    jcode::until_built({ { "user", "fix it" } }, {}, watching, takes,
+                       eventually, known, 5);
+
+    ok("  and the build output reached the model",
+       saw.find("util.c:44") != std::string::npos, saw);
+
+    ok("  as a user turn, not a tool result without a call",
+       saw.find("That did not work") != std::string::npos, saw);
+}
+
+/** The four ways it stops that are not "the build passed". */
+static void the_attempts_know_why_they_stopped() {
+    std::cout << "\nthe attempts know why they stopped:\n";
+
+    const std::vector<std::string> known{ "util.c" };
+
+    // As the real one does: false when nothing reached the disk.
+    const jcode::writer takes =
+        [](const jcode::reply& r) { return !r.edits.empty(); };
+
+    const jcode::builder never = []() -> jcode::built {
+        jcode::built b;
+
+        b.output = "exit 1\nstill broken";
+
+        return b;
+    };
+
+    // Different content every time, so it is the bound that stops it.
+    std::size_t n = 0;
+
+    const jcode::attempts bounded = jcode::until_built(
+        { { "user", "go" } }, {},
+        [&n](const std::vector<ai::message>&, const std::string&) {
+            oa::answer a;
+
+            a.content = "util.c\n```\nv" + std::to_string(++n) + "\n```\n";
+
+            return a;
+        },
+        takes, never, known, 2);
+
+    ok("a build that never passes runs out of attempts",
+       bounded.why == jcode::settled::bounded, jcode::spell(bounded.why));
+
+    ok("  at the bound it was given", bounded.made == 2,
+       std::to_string(bounded.made));
+
+    // The same file twice: the next attempt would write the same bytes.
+    const jcode::attempts stalled = jcode::until_built(
+        { { "user", "go" } }, {},
+        [](const std::vector<ai::message>&, const std::string&) {
+            oa::answer a;
+
+            a.content = "util.c\n```\nthe same\n```\n";
+
+            return a;
+        },
+        takes, never, known, 5);
+
+    ok("a model that stops changing anything stops the loop",
+       stalled.why == jcode::settled::stalled, jcode::spell(stalled.why));
+
+    ok("  after the repeat, not before it", stalled.made == 2,
+       std::to_string(stalled.made));
+
+    // Nothing to write.
+    const jcode::attempts empty = jcode::until_built(
+        { { "user", "go" } }, {},
+        [](const std::vector<ai::message>&, const std::string&) {
+            oa::answer a;
+
+            a.content = "I do not think anything needs changing.";
+
+            return a;
+        },
+        takes, never, known, 5);
+
+    ok("a reply with no files is not an attempt at anything",
+       empty.why == jcode::settled::nothing, jcode::spell(empty.why));
+
+    // A write the user declined, or one entirely refused.
+    const jcode::attempts declined = jcode::until_built(
+        { { "user", "go" } }, {},
+        [](const std::vector<ai::message>&, const std::string&) {
+            oa::answer a;
+
+            a.content = "util.c\n```\nbody\n```\n";
+
+            return a;
+        },
+        [](const jcode::reply&) { return false; }, never, known, 5);
+
+    ok("  and neither is a write nobody took",
+       declined.why == jcode::settled::nothing, jcode::spell(declined.why));
+
+    // The conversation itself failing is its own ending.
+    const jcode::attempts broke = jcode::until_built(
+        { { "user", "go" } }, {},
+        [](const std::vector<ai::message>&, const std::string&) -> oa::answer {
+            throw std::runtime_error("connection refused");
+        },
+        takes, never, known, 5);
+
+    ok("an exchange that throws ends the attempts too",
+       broke.why == jcode::settled::failed, jcode::spell(broke.why));
+
+    ok("  carrying the reason",
+       broke.detail.find("connection refused") != std::string::npos,
+       broke.detail);
+}
+
 static void the_tools_and_their_root() {
     std::cout << "\nthe tools, and the root they cannot leave:\n";
 
@@ -1035,6 +1228,8 @@ int main() {
     the_format_as_asked_for();
     a_file_given_twice_is_written_once();
     a_tool_call_in_the_reply();
+    until_the_build_passes();
+    the_attempts_know_why_they_stopped();
     the_tools_and_their_root();
     the_agent_loop();
     the_loop_knows_why_it_stopped();
