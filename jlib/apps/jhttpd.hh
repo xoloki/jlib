@@ -775,6 +775,32 @@ inline sorted_error sort_error(const std::exception& e) {
        what.find("octets short of the body it promised") != std::string::npos)
         return { "http", level::info };
 
+    // **The peer hung up while we were answering.**
+    //
+    // Thrown by async_writer as a plain runtime_error, so it used to reach the
+    // fallback below and be logged `core:error` -- the bucket that means "a
+    // server's own failure", and the one thing a level must never hide. Seen
+    // in production as
+    //
+    //     [core:error] [client 47.250.55.210:14176] the peer closed while 160
+    //     octets were still to be written
+    //
+    // which reads as the server breaking while writing. It is a client that
+    // closed a tab, and it belongs with the other went-away cases.
+    if(what.find("octets were still to be written") != std::string::npos)
+        return { "http", level::info };
+
+    // **An empty request head is a knock, not a diagnosis.**
+    //
+    // A peer that sends a bare CRLF and stops has told us nothing an operator
+    // can act on, and the access log already records the 400 with the address
+    // -- which is the whole of what happened. Apache writes nothing here.
+    //
+    // Measured: 21 of 50 error lines in eleven hours were this, all from one
+    // /24 scanning in a two-minute burst. #322 is about exactly that ratio.
+    if(what.find("the request head is empty") != std::string::npos)
+        return { "http", level::info };
+
     // A request we could read enough of to refuse: a bad request line, a
     // header section that made no sense. This *is* evidence -- it is what
     // Apache logs as AH00126 at error -- so it stays at error.
