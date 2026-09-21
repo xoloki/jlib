@@ -1626,6 +1626,71 @@ static void a_level_that_changes_under_a_running_server() {
     log.close();
 }
 
+/**
+ * Settings the blocking server never reads (#270 phase 2).
+ *
+ * `max_connections`, `keepalive_requests`, `keepalive_timeout` and
+ * `client_header_timeout` map to library options only `serve_request_async`
+ * looks at. `sys::server::policy` is explicit about max_connections --
+ * "Ignored by a blocking server" -- and jhttpd's config said nothing about
+ * any of the four, so an operator tuning them without `async;` got no effect
+ * and no hint.
+ *
+ * Found by diffing the two pipelines for #270 phase 2, which is also what the
+ * parity test in net_http_hostile_test does for per-request behaviour. This
+ * half is not per-request: it is a knob that is inert in one mode.
+ */
+static void what_the_blocking_server_ignores() {
+    std::cout << "\nsettings that need async:\n";
+
+    const jhttpd::options fresh;
+
+    // The property, stated once: these four differ from their defaults only
+    // if the config set them, and only the async server reads them.
+    ok("  max_connections has a library default to compare against",
+       fresh.max_connections == 256, std::to_string(fresh.max_connections));
+
+    ok("  and keepalive_requests too",
+       fresh.max_requests == 100, std::to_string(fresh.max_requests));
+
+    {
+        jhttpd::options o;
+
+        const std::string why = refusal(
+            "http {\n"
+            "    listen 8080;\n"
+            "    root /srv;\n"
+            "    max_connections 999;\n"
+            "    keepalive_timeout 45;\n"
+            "}\n", o);
+
+        ok("  a config may set them without async, and is still valid",
+           why.empty(), why);
+
+        ok("  they are parsed rather than ignored",
+           o.max_connections == 999 && o.idle_timeout == 45,
+           std::to_string(o.max_connections));
+
+        ok("  and async is off, which is what makes them inert",
+           !o.async);
+    }
+
+    {
+        jhttpd::options o;
+
+        const std::string why = refusal(
+            "async;\n"
+            "http {\n"
+            "    listen 8080;\n"
+            "    root /srv;\n"
+            "    max_connections 999;\n"
+            "}\n", o);
+
+        ok("  with async they are read by the server that has them",
+           why.empty() && o.async && o.max_connections == 999, why);
+    }
+}
+
 int main() {
     std::cout << "app_jhttpd_test\n";
 
@@ -1649,6 +1714,7 @@ int main() {
         what_a_reload_refuses_to_change();
         reloading_a_credential_file();
         what_test_walks();
+        what_the_blocking_server_ignores();
     }
     catch(std::exception& e) {
         std::cerr << "app_jhttpd_test: " << e.what() << "\n";

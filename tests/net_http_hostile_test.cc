@@ -1022,6 +1022,219 @@ static void a_keepalive_connection_that_finishes(http::server& s) {
     }
 }
 
+/**
+ * The two pipelines answer alike (#270 phase 2).
+ *
+ * `serve()` and `serve_request_async()` are two implementations of one
+ * contract. Everything else in this file runs `everything(s, t)` against each
+ * in turn and reads the two outputs -- which is a comparison a human does,
+ * and did not do: **#330 was async-only for a week.** Every keepalive
+ * connection logged a 408 that never happened, on the server that was
+ * deployed, while the blocking server was correct and the suite was green.
+ *
+ * So this sends the same bytes to both and compares the answers
+ * mechanically -- the status the client is told, and the access record the
+ * operator is shown, which are two different ways for the pipelines to
+ * diverge and only one of them is visible from outside.
+ *
+ * A difference here is not automatically a bug: the async server has a
+ * keepalive loop and the blocking one does not, so some asymmetry is by
+ * construction. What this refuses is an asymmetry **nobody wrote down**.
+ *
+ * ## What this is and is not evidence of
+ *
+ * It is a differential oracle for the decisions the two share -- `path_of`,
+ * `authority_of`, the guards, the caps on head and body. Two implementations
+ * reaching the same answer is evidence both are right, and one of them
+ * changing alone is the signal.
+ *
+ * It is **not** a claim that the two are interchangeable in production. They
+ * are not: the async server is the one with a connection cap, keepalive and
+ * per-phase timeouts, and it is what a deployment runs. The blocking server
+ * is a fixture and a second opinion -- valuable because it is simple enough
+ * to be obviously correct, which is what makes it worth comparing against.
+ *
+ * So a divergence found here means "one of these two is wrong", not
+ * necessarily "the blocking server needs fixing".
+ */
+struct recorded {
+    std::mutex  lock;
+    int         status = 0;
+    std::size_t bytes = 0;
+    std::string reason;
+    std::string host;
+    int         count = 0;
+
+    void clear() {
+        std::lock_guard<std::mutex> hold(lock);
+
+        status = 0;
+        bytes = 0;
+        count = 0;
+
+        reason.clear();
+        host.clear();
+    }
+
+    void take(const http::server::access& a) {
+        std::lock_guard<std::mutex> hold(lock);
+
+        status = a.status;
+        bytes = a.bytes;
+        reason = a.reason;
+        host = a.host;
+        count++;
+    }
+
+    /** Waits for a record rather than sleeping for one. */
+    bool settled() {
+        for(int i = 0; i < 200; i++) {
+            {
+                std::lock_guard<std::mutex> hold(lock);
+
+                if(count > 0) return true;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        return false;
+    }
+};
+
+static void the_two_pipelines_answer_alike(const tree& t) {
+    std::cout << "\nthe two pipelines answer alike:\n";
+
+    http::server blocking(0, "127.0.0.1");
+    http::server asynchronous(http::server::async_t(), 0, "127.0.0.1");
+
+    furnish(blocking, t);
+    furnish(asynchronous, t);
+
+    recorded from_blocking;
+    recorded from_async;
+
+    blocking.on_request([&from_blocking](const http::server::access& a) {
+        from_blocking.take(a);
+    });
+
+    asynchronous.on_request([&from_async](const http::server::access& a) {
+        from_async.take(a);
+    });
+
+    running one(blocking);
+    running two(asynchronous);
+
+    struct probe { const char* why; const char* raw; };
+
+    // Every one carries Connection: close, so raw_exchange's read-to-EOF is
+    // the whole answer and neither server is measured mid-keepalive.
+    const probe probes[] = {
+        { "an ordinary request",
+          "GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" },
+
+        { "a traversal",
+          "GET /static/../../etc/passwd HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" },
+
+        { "an encoded separator in the path",
+          "GET /static%2Fpage.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" },
+
+        { "an encoded separator in the query",
+          "GET /ok?u=https%3A%2F%2Fx.example HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" },
+
+        { "a request with no Host",
+          "GET /ok HTTP/1.1\r\nConnection: close\r\n\r\n" },
+
+        { "a method the route does not have",
+          "POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" },
+
+        { "a path that is not there",
+          "GET /nowhere HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" },
+
+        { "a guarded path without credentials",
+          "GET /static/private/x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" },
+
+        { "a request line that is not one",
+          "GARBAGE\r\nHost: x\r\n\r\n" },
+
+        { "a control character in the target",
+          "GET /ok\x01 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" },
+
+        { "a target in absolute form",
+          "GET http://x/ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" }
+    };
+
+    // The limits, built rather than spelled: a head over max_head and a body
+    // over max_body. Both pipelines read these with different code -- the
+    // blocking one through read_request_head_if_any, the async one through
+    // read_head_if_any and an async read_body -- so a limit enforced in one
+    // and not the other is exactly the shape #330 had.
+    std::string big_head = "GET /ok HTTP/1.1\r\nHost: x\r\n";
+
+    for(int i = 0; i < 400; i++)
+        big_head += "X-Pad-" + std::to_string(i) + ": " +
+                    std::string(200, 'a') + "\r\n";
+
+    big_head += "Connection: close\r\n\r\n";
+
+    std::string big_body = "POST /ok HTTP/1.1\r\nHost: x\r\n"
+                           "Content-Length: 4000000\r\n"
+                           "Connection: close\r\n\r\n";
+
+    big_body += std::string(4000000, 'b');
+
+    const probe limits[] = {
+        { "a head over the cap",  big_head.c_str() },
+        { "a body over the cap",  big_body.c_str() }
+    };
+
+    std::vector<probe> all(probes, probes + sizeof probes / sizeof probes[0]);
+
+    all.push_back(limits[0]);
+    all.push_back(limits[1]);
+
+    for(std::size_t i = 0; i < all.size(); i++) {
+        from_blocking.clear();
+        from_async.clear();
+
+        const std::string a = raw_exchange(blocking.port(), all[i].raw);
+        const std::string b = raw_exchange(asynchronous.port(), all[i].raw);
+
+        const int sa = status_of(a);
+        const int sb = status_of(b);
+
+        ok(std::string("  ") + all[i].why + ": same status",
+           sa == sb, std::to_string(sa) + " vs " + std::to_string(sb));
+
+        // The record an operator is shown, which can differ while the client
+        // sees the same thing -- which is exactly what #330 was.
+        const bool ra = from_blocking.settled();
+        const bool rb = from_async.settled();
+
+        ok(std::string("  ") + all[i].why + ": both write one record",
+           ra == rb && from_blocking.count == from_async.count,
+           std::to_string(from_blocking.count) + " vs "
+               + std::to_string(from_async.count));
+
+        ok(std::string("  ") + all[i].why + ": same recorded status",
+           from_blocking.status == from_async.status,
+           std::to_string(from_blocking.status) + " vs "
+               + std::to_string(from_async.status));
+
+        ok(std::string("  ") + all[i].why + ": same diagnosis, or none",
+           from_blocking.reason.empty() == from_async.reason.empty(),
+           "\"" + from_blocking.reason + "\" vs \"" + from_async.reason + "\"");
+
+        // Combined's %O. Two pipelines that answer the same status with a
+        // different body length are telling an operator two different things
+        // about the same request.
+        ok(std::string("  ") + all[i].why + ": same body octets recorded",
+           from_blocking.bytes == from_async.bytes,
+           std::to_string(from_blocking.bytes) + " vs "
+               + std::to_string(from_async.bytes));
+    }
+}
+
 int main() {
     // Unbuffered, as 62 of the tests here already are.  Piped anywhere -- which
     // is what `make check` does -- this is otherwise block-buffered and the
@@ -1090,6 +1303,11 @@ int main() {
             // streaming handler always has: from a write that fails.
             a_handler_can_ask_if_the_client_left(s, gone_seen);
             a_keepalive_connection_that_finishes(s);
+        }
+
+        // Both at once, so the comparison is made rather than eyeballed.
+        {
+            the_two_pipelines_answer_alike(t);
         }
     }
     catch(std::exception& e) {
