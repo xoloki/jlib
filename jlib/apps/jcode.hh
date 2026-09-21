@@ -364,6 +364,105 @@ std::vector<tool> toolbox(const std::string& root,
                           const std::string& build = std::string(),
                           std::size_t cap = 64 * 1024);
 
+/** One run of the project's build: what it said, and whether it passed. */
+struct built {
+    bool passed = false;
+    std::string output;
+};
+
+/**
+ * Runs the build.  Injected for the same reason `exchange` is: so the loop
+ * below can be tested with no compiler, no model and no disk.
+ */
+typedef std::function<built()> builder;
+
+/**
+ * Puts a reply's edits on disk.
+ *
+ * @return whether anything reached it -- false when every edit was refused,
+ *         left alone by the user, or already what the file held
+ *
+ * Injected because this is where the user is asked, and asking is the half of
+ * "every write announced" that cannot live in a library.
+ */
+typedef std::function<bool(const reply&)> writer;
+
+/** Why the attempts stopped. */
+enum class settled {
+    built,      ///< the build passed
+    bounded,    ///< the attempts ran out with it still failing
+    stalled,    ///< an attempt changed nothing, so the next would not either
+    nothing,    ///< the model offered no edits, or none were taken
+    failed      ///< the conversation itself ended badly; see detail
+};
+
+const char* spell(settled s);
+
+struct attempts {
+    unsigned int made = 0;
+
+    settled why = settled::nothing;
+    std::string detail;
+
+    /** What the build said last, for a caller that wants to show it. */
+    std::string last;
+
+    /**
+     * Every call made, across every attempt.
+     *
+     * Carried because this drives `converse` itself, so a caller has no other
+     * way to see them -- and a harness that ran tools without saying so is
+     * the thing #242 is about.
+     */
+    std::vector<ran> calls;
+};
+
+/**
+ * Write, build, and if it failed tell the model what the compiler said.
+ *
+ * **This is the difference between generating a patch and making the tests
+ * pass.** The model can already run the build as a tool, but only before it
+ * writes, so what it sees is the build of the tree it has not changed yet;
+ * nobody ever tells it what its own edit did. Measured, jcode would write a
+ * file that called three functions it had not defined, report the compiler
+ * error, and exit -- with the answer sitting in the output it had just
+ * printed.
+ *
+ * **The write is not a tool, deliberately.** Putting it inside `converse` as
+ * one would make this a great deal simpler and is the thing #242 forbids:
+ * every write is announced and confirmed, and a `write_file` the model calls
+ * moves that decision inside the loop where nobody sees it. So the write stays
+ * out here and what goes back to the model is its *result*.
+ *
+ * ## What stops it
+ *
+ * `max_attempts`, because a model that rewrites a file forever is the ordinary
+ * failure. Separate from `converse`'s round bound: a model calling read_file
+ * forever and a model rewriting forever are different loops and one number
+ * cannot serve both.
+ *
+ * An attempt that changes nothing stops it early -- a model returning what it
+ * was given has nothing more to offer, and spending the remaining attempts on
+ * it only writes the same bytes again.
+ *
+ * ## What it does not do
+ *
+ * **It does not revert.** After three attempts the tree is left at the third,
+ * which may be worse than the first. Undoing a write the user confirmed is a
+ * larger decision than this, and a caller who wants the original back has the
+ * version control they already had. Keeping the *best* attempt is a different
+ * feature with a harder question in it -- what "best" means when a build fails
+ * differently each time -- and is not smuggled in here.
+ */
+attempts until_built(std::vector<ai::message> turns,
+                     const std::vector<tool>& tools,
+                     const exchange& send,
+                     const writer& write,
+                     const builder& build,
+                     const std::vector<std::string>& known,
+                     unsigned int max_attempts = 3,
+                     unsigned int max_rounds = 8);
+
 /** What became of one edit. */
 enum class outcome {
     written,     ///< the file on disk now holds what the model said
