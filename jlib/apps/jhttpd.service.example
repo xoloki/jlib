@@ -11,12 +11,21 @@
 #     systemctl restart jhttpd    for the parts a reload cannot change
 #     journalctl -u jhttpd        everything it printed
 #
-# **Do not put `daemon;` in the config.** systemd wants the process in the
-# foreground -- Type=simple below -- and a jhttpd that forks would look to it
-# like one that died immediately. Leaving it in the foreground is also what
-# puts the startup lines in the journal, which is where you look when a site
-# is dark and is exactly what was missing the day this bound loopback-only and
-# said so to a stderr nobody was reading.
+# **The config must say `daemon;`.** This unit is Type=forking, so systemd
+# waits for the process it started to exit and then follows PIDFile= to the
+# real one. jhttpd's parent exits only after the ports are bound, the logs and
+# certificate are open and privilege is dropped -- so that exit means "ready",
+# truthfully, which is the whole contract Type=forking rests on.
+#
+# A config without `daemon;` makes systemd wait for a parent that never exits:
+# it hangs until TimeoutStartSec and then kills a server that was serving
+# perfectly well. ExecStartPre passes --forking so that mismatch is refused in
+# a second, by a message that names it, rather than discovered by a timeout.
+#
+# The startup lines still reach the journal through ExecStartPre, and the
+# lifecycle notices reach the error log -- which is where you look when a site
+# is dark, and is exactly what was missing the day this bound loopback-only
+# and said so to a stderr nobody was reading.
 
 [Unit]
 Description=jhttpd
@@ -25,7 +34,22 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# **Type=forking, and the config must say `daemon;`.** (#334)
+#
+# jhttpd implements this contract properly, which is what makes it the right
+# choice rather than a compromise: bg.ready() exists so the parent does not
+# exit until the ports are bound, the certificate and logs are open, and
+# privilege is dropped.  The parent's exit is therefore a truthful readiness
+# signal -- exactly what Type=forking needs, and what most daemons get wrong.
+#
+# Type=notify would be more precise still (bg.ready() is the natural
+# sd_notify(READY=1) site) and is rejected because it means linking libsystemd.
+#
+# The two halves cannot see each other: the config does not know how it will
+# be supervised, and systemd exports Type= nowhere.  So ExecStartPre passes
+# --forking, and `--test --forking` refuses a config with no daemon;.
+Type=forking
+PIDFile=/run/jhttpd.pid
 
 # **The config is checked before the old process is replaced.** A start that
 # would fail on a missing root or an unreadable certificate fails here instead,
@@ -33,7 +57,7 @@ Type=simple
 # /usr/local/bin is where `make install` puts it with autotools' default
 # prefix.  **If you installed the .deb, this is /usr/bin** -- the packaged
 # unit says so and you do not need this file at all.
-ExecStartPre=/usr/local/bin/jhttpd --config /etc/jhttpd.conf --test
+ExecStartPre=/usr/local/bin/jhttpd --config /etc/jhttpd.conf --test --forking
 ExecStart=/usr/local/bin/jhttpd --config /etc/jhttpd.conf
 
 # SIGHUP re-reads the config and reopens the logs. What it cannot change --

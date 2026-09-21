@@ -1061,6 +1061,15 @@ struct options {
     std::string    pidfile;
     bool           allow_root = false;
     bool           daemon = false;
+
+    /**
+     * `--forking`: the unit says it is Type=forking, so `daemon;` is required.
+     *
+     * Set by the flag and never by the config, because it is a fact about how
+     * this process will be supervised rather than about what it should serve.
+     * See the check in --test (#334).
+     */
+    bool           forking = false;
 };
 
 
