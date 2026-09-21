@@ -1691,6 +1691,156 @@ static void what_the_blocking_server_ignores() {
     }
 }
 
+/** Base64, so a credential can be built with bytes a header cannot carry. */
+static std::string base64_of(const std::string& in) {
+    static const char* const T =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    std::string out;
+
+    for(std::size_t i = 0; i < in.size(); i += 3) {
+        unsigned v = static_cast<unsigned char>(in[i]) << 16;
+
+        if(i + 1 < in.size()) v |= static_cast<unsigned char>(in[i + 1]) << 8;
+        if(i + 2 < in.size()) v |= static_cast<unsigned char>(in[i + 2]);
+
+        out += T[(v >> 18) & 63];
+        out += T[(v >> 12) & 63];
+        out += i + 1 < in.size() ? T[(v >> 6) & 63] : '=';
+        out += i + 2 < in.size() ? T[v & 63] : '=';
+    }
+
+    return out;
+}
+
+/** Send bytes, read what comes back, never mind what it means. */
+static std::string raw_to(unsigned short port, const std::string& raw) {
+    try {
+        sys::socketstream c("127.0.0.1", port, 5);
+
+        c.set_timeout(5);
+        c.write(raw.data(), std::streamsize(raw.size()));
+        c.flush();
+
+        std::ostringstream all;
+
+        all << c.rdbuf();
+
+        return all.str();
+    }
+    catch(std::exception&) { return std::string(); }
+}
+
+/**
+ * A client cannot forge a line in the access log (#270 phase 3).
+ *
+ * The Combined format writes the request line, the referer, the user-agent
+ * and the authenticated user -- every one of them the client's. A CR or LF in
+ * any of them ends the line early and starts one the attacker wrote, and a
+ * log an attacker can write is worse than none because it is believed.
+ *
+ * ## Two layers, and the second is the one that matters
+ *
+ * **The grammar refuses raw control characters in a header value**, with a
+ * 400, so the obvious vector does not reach the log at all. Measured, not
+ * assumed -- the first assertion below is that measurement.
+ *
+ * **Basic credentials do not go through the grammar.** `Authorization: Basic
+ * <base64>` is valid to the grammar whatever the base64 decodes to, so a
+ * username containing CRLF arrives intact in `access::user` -- the one field
+ * that passes through a decoder, and the one place a reader might not expect
+ * control characters to survive.
+ *
+ * `escaped()` is what stops it, and this is the test that says so. The record
+ * really does carry the raw bytes; the *line* does not.
+ */
+static void a_client_cannot_forge_a_log_line(bool async) {
+    std::cout << "\na forged log line ("
+              << (async ? "async" : "blocking") << "):\n";
+
+    std::mutex lock;
+    std::vector<http::server::access> seen;
+
+    std::unique_ptr<http::server> s;
+
+    if(async) s.reset(new http::server(http::server::async_t(), 0, "127.0.0.1"));
+    else      s.reset(new http::server(0, "127.0.0.1"));
+
+    s->route("GET", "/ok", [](const http::server::Request&,
+                              http::server::response& r) {
+        r.status(200).type("text/plain").body("ok");
+    });
+
+    // Accepts anyone, so the credential reaches the record rather than being
+    // refused for being wrong. A real verifier would reject this username --
+    // which is why the record, not the check, is what this tests.
+    s->protect("/ok", "Basic realm=\"x\"",
+               [](const http::server::credentials&) { return true; });
+
+    s->on_request([&lock, &seen](const http::server::access& a) {
+        std::lock_guard<std::mutex> hold(lock);
+
+        seen.push_back(a);
+    });
+
+    s->transport().on_error([](const std::exception&, const sys::peer&) {});
+
+    running go(*s);
+
+    // 1. The obvious vector, and the one the grammar takes.
+    const std::string with_cr =
+        "GET /ok HTTP/1.1\r\nHost: x\r\nUser-Agent: a\rb\r\n"
+        "Connection: close\r\n\r\n";
+
+    ok("  a raw CR in a header value is refused by the grammar",
+       raw_to(s->port(), with_cr).find("400") != std::string::npos);
+
+    // 2. The one it cannot: CRLF carried through base64.
+    const std::string smuggled =
+        "GET /ok HTTP/1.1\r\nHost: x\r\nAuthorization: Basic "
+        + base64_of("ev\r\nil:pass") + "\r\nConnection: close\r\n\r\n";
+
+    ok("  and a credential carrying CRLF is served, not refused",
+       raw_to(s->port(), smuggled).find("200") != std::string::npos);
+
+    for(int i = 0; i < 200; i++) {
+        {
+            std::lock_guard<std::mutex> hold(lock);
+
+            if(seen.size() >= 2) break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    std::lock_guard<std::mutex> hold(lock);
+
+    ok("  both are recorded", seen.size() == 2, std::to_string(seen.size()));
+
+    if(seen.size() < 2) return;
+
+    // The record carries the raw bytes. That is not the bug -- the contract
+    // on `access` says every string is the client's -- and asserting it here
+    // is what keeps the next assertion honest: the escaping is doing work,
+    // rather than the bytes having been dropped somewhere upstream.
+    bool carried = false;
+
+    for(std::size_t i = 0; i < seen.size(); i++)
+        if(seen[i].user.find('\n') != std::string::npos) carried = true;
+
+    ok("  the record really does carry the raw CRLF", carried);
+
+    // **The property.** One request, one line, whatever the client sent.
+    for(std::size_t i = 0; i < seen.size(); i++) {
+        const std::string line = jhttpd::combined(seen[i], WHEN);
+
+        ok("  and the line it produces has no CR or LF in it",
+           line.find('\n') == std::string::npos &&
+           line.find('\r') == std::string::npos,
+           line);
+    }
+}
+
 int main() {
     std::cout << "app_jhttpd_test\n";
 
@@ -1715,6 +1865,8 @@ int main() {
         reloading_a_credential_file();
         what_test_walks();
         what_the_blocking_server_ignores();
+        a_client_cannot_forge_a_log_line(false);
+        a_client_cannot_forge_a_log_line(true);
     }
     catch(std::exception& e) {
         std::cerr << "app_jhttpd_test: " << e.what() << "\n";

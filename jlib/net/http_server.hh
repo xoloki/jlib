@@ -1090,6 +1090,27 @@ public:
         void files(const std::string& pattern, const std::string& root,
                    const std::string& cache_control = std::string());
 
+        /**
+         * Guard a pattern **on this site only**.
+         *
+         * A guard carrying a host is skipped for every other host, which is
+         * what scoping means and is the point of it. The trap is that a
+         * *route* carrying no host still matches every host -- so this:
+         *
+         *     s.route("GET", "/secret", serve_it);          // no site
+         *     s.site_of("private.example")
+         *      .protect("/secret", challenge, verify);      // this site
+         *
+         * leaves `/secret` guarded under `private.example` and **open under
+         * any other Host the client cares to send**. Measured: 401 for the
+         * one, 200 for the other.
+         *
+         * Neither half is wrong on its own and the server cannot tell which
+         * you meant, so this is a note rather than a refusal. Scope the route
+         * as well, or guard from the server rather than the site -- which is
+         * what jhttpd does, and why its config has no way to write the shape
+         * above.
+         */
         void protect(const std::string& pattern, const std::string& challenge,
                      verifier v);
 
@@ -1300,7 +1321,25 @@ public:
          */
         unsigned short peer_port = 0;
 
-        /** Who `protect()` let through, or empty.  Combined's third field. */
+        /**
+         * Who `protect()` let through, or empty.  Combined's third field.
+         *
+         * **The one field that did not pass the header grammar.** Every other
+         * string here was read as a header value, and a raw control character
+         * in one of those is refused with a 400 before any of this is
+         * reached. `Authorization: Basic <base64>` is valid to the grammar
+         * whatever the base64 decodes to, so this arrives carrying anything a
+         * client chose -- CR and LF included.
+         *
+         * That is not a defect and it is not filtered here: what a credential
+         * contains is the verifier's business, and a `protect()` callback
+         * that accepts an odd username has said it will. But a consumer that
+         * writes this somewhere line-oriented must escape it, and is the only
+         * one of these fields for which "the grammar already checked" is
+         * false.
+         *
+         * `jhttpd::escaped()` does, and `app_jhttpd_test` has the case.
+         */
         std::string user;
 
         /**

@@ -637,6 +637,20 @@ static void which_site_answers(http::server& s, const tree& t) {
         { "other.example", "OTHER SITE", "a name with a site of its own" },
         { "OTHER.EXAMPLE", "OTHER SITE", "and the same name shouted" },
         { "other.example:8080", "OTHER SITE", "and with a port on it" },
+
+        // **RFC 1034 3.1: the same name.**  Without normalising this, the
+        // request matched no site and fell through to the route carrying no
+        // host -- which on a server with a default root is another site's
+        // content under this site's name. Over TLS, SNI had already chosen
+        // the certificate for the name asked for, so it was a valid
+        // certificate in front of the wrong pages.
+        { "other.example.", "OTHER SITE", "and fully qualified, with the root dot" },
+        { "other.example.:8080", "OTHER SITE", "and with both a dot and a port" },
+
+        // One dot, not a loop: an empty label is not the same name, and
+        // folding it in would put several distinct strings on one site.
+        { "other.example..", "<h1>x</h1>", "but an empty label is a different name" },
+
         { "unclaimed.example", "<h1>x</h1>", "a name nobody claimed gets the default" },
         { "", "<h1>x</h1>", "and so does HTTP/1.0, which has no name to give" }
     };
