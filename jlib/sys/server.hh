@@ -880,6 +880,29 @@ private:
     // cap twice by knocking on two doors.
     bool m_listen_off = false;
 
+    /**
+     * Descriptors were exhausted and a timer will say when to try again.
+     *
+     * A **second reason** to keep the listeners disarmed, independent of the
+     * connection cap. Both are cleared by different events -- a connection
+     * finishing, and a timer firing -- so neither may re-arm on its own, and
+     * `arm_listeners_if_ready()` is the only place that decides.
+     */
+    bool m_out_of_fds = false;
+
+    /** Disarm every listener.  Idempotent; safe to call for either reason. */
+    void pause_listeners();
+
+    /**
+     * Re-arm, but only if **no** reason to stay paused holds.
+     *
+     * Called from `reap()` when a connection finishes and from the descriptor
+     * timer when it fires. The two conditions are checked together here
+     * rather than at either call site, because a caller that knew only its
+     * own reason would re-arm into the other one.
+     */
+    void arm_listeners_if_ready();
+
     std::atomic<bool> m_stop{false};
 
     // Declared last, so it is destroyed first: ~job_queue is stop() then

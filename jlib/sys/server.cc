@@ -572,7 +572,74 @@ bool server::accept_and_start(std::size_t i) {
         if(errno == EMFILE || errno == ENFILE) {
             m_on_error(e, from);
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // **Disarmed and re-armed by a timer, not slept on.**
+            //
+            // Out of descriptors is not a reason to stop serving and it is a
+            // condition that clears, but without a pause this spins at full
+            // tilt: the connection stays queued and the listener stays
+            // readable, so the reactor is handed the same failing accept()
+            // immediately and forever.
+            //
+            // accept_and_post() answers that with a 100ms sleep and says why
+            // it has to: serve_one(timeout) is call-driven, so there is no
+            // reactor to hang a timer on. **That reasoning does not apply
+            // here.** This path is a reactor callback by construction, and
+            // the better answer its own comment names -- modify the token to
+            // NONE and an after() to re-arm -- is available. The sleep was
+            // copied across when the async server was written (#213) and the
+            // justification was not.
+            //
+            // It mattered: 100ms of sleep on this thread is 100ms in which
+            // nothing is read, nothing is written and no timer fires, on
+            // every listener, repeating for as long as descriptors stay out.
+            // **Armed before the flag is set, and that order is the whole
+            // safety argument.**
+            //
+            // `after()` cannot report a failure, but it can throw -- and if it
+            // threw after `m_out_of_fds` were already true, the exception
+            // would leave this function through the reactor callback's
+            // catch(...) with the listeners disarmed and nothing left that
+            // could ever clear the flag. Every later arm_listeners_if_ready()
+            // would return early. That is a permanent outage reached by a path
+            // that leaves no trace, and it is strictly worse than the 100ms
+            // stall this replaced.
+            //
+            // This way a throw leaves the server exactly as it was: still
+            // armed, still spinning on a failing accept, which is the old
+            // behaviour rather than a new and worse one.
+            //
+            // **The timer cannot fire before the two lines below it**, and
+            // the reason is structural rather than about threads.
+            //
+            // Arming first would invert the bug if `after()` could ever run
+            // its handler inline: the handler would clear a flag not yet set,
+            // the next two lines would set it and pause, and nothing would
+            // ever clear it again -- a worse outage than this fixes, reached
+            // by the fix. `reactor::after` inserts into m_timers and m_by_due
+            // and returns the token; **no path in it invokes the handler**.
+            //
+            // "We are already on the reactor thread, so nothing else runs
+            // until this returns" is also true and is the weaker argument: it
+            // stops holding the day this is called from anywhere else, and
+            // the structural one does not.
+            //
+            // Safe against destruction because **run() is joined before the
+            // server goes out of scope** -- join()'s contract, at
+            // server.hh:719, which says it does not wait for run() and the
+            // caller must. That is what makes every reactor callback in this
+            // file safe, and it is not member ordering: member ordering would
+            // still hold for a caller who never joined, and the timer would
+            // fire on a half-destroyed object anyway.
+            m_reactor.after(std::chrono::milliseconds(100),
+                            [this](reactor::timer_token) {
+                                m_out_of_fds = false;
+
+                                arm_listeners_if_ready();
+                            });
+
+            m_out_of_fds = true;
+
+            pause_listeners();
 
             return false;
         }
@@ -606,20 +673,56 @@ bool server::accept_and_start(std::size_t i) {
 
     m_live.back().work.start();
 
-    if(full()) {
-        // Stop asking about the listeners rather than accepting and refusing.
-        //
-        // **Every one of them**, because the cap counts connections and not
-        // connections-per-port: leaving one armed would let a client have the
-        // whole cap again by knocking on a different door, which is the bug a
-        // single-listener re-arm would have shipped silently.
-        for(std::size_t j = 0; j < m_bound.size(); j++)
-            m_reactor.modify(m_bound[j].token, reactor::NONE);
-
-        m_listen_off = true;
-    }
+    if(full()) pause_listeners();
 
     return true;
+}
+
+void server::pause_listeners() {
+    if(m_listen_off) return;
+
+    // **Every one of them**, because the cap counts connections and not
+    // connections-per-port: leaving one armed would let a client have the
+    // whole cap again by knocking on a different door, which is the bug a
+    // single-listener re-arm would have shipped silently.
+    for(std::size_t j = 0; j < m_bound.size(); j++)
+        m_reactor.modify(m_bound[j].token, reactor::NONE);
+
+    m_listen_off = true;
+}
+
+void server::arm_listeners_if_ready() {
+    if(!m_listen_off) return;
+
+    // Both reasons, checked in one place.  `reap()` knows a connection
+    // finished and the timer knows the backoff elapsed; neither knows about
+    // the other, and either re-arming alone would undo the other's pause.
+    //
+    // **Why this cannot stay paused forever**, which is the property that
+    // matters and which is a claim about this code rather than about the
+    // world:
+    //
+    //   - `m_out_of_fds` is set only in the EMFILE branch, which runs only
+    //     from accept(), which runs only while the listeners are armed. So
+    //     the two reasons can never both arrive fresh -- the descriptor
+    //     backoff is reachable only from the armed state.
+    //   - once paused, `full()` can only fall, because nothing new is
+    //     accepted.
+    //   - `reap()` is called from serve_one(), once per reactor pass, so it
+    //     runs on every wake whatever the listeners are doing. A connection
+    //     finishing is a wake; and in the one state where no connection
+    //     exists to provide one -- EMFILE with nothing live -- the pending
+    //     timer is the wake.
+    //
+    // The earlier version of this argument was "the timer always fires and
+    // connections always end", which is two claims about the world and would
+    // survive the bug.
+    if(full() || m_out_of_fds) return;
+
+    for(std::size_t j = 0; j < m_bound.size(); j++)
+        m_reactor.modify(m_bound[j].token, reactor::READ);
+
+    m_listen_off = false;
 }
 
 void server::reap() {
@@ -628,12 +731,7 @@ void server::reap() {
         else ++i;
     }
 
-    if(m_listen_off && !full()) {
-        for(std::size_t j = 0; j < m_bound.size(); j++)
-            m_reactor.modify(m_bound[j].token, reactor::READ);
-
-        m_listen_off = false;
-    }
+    arm_listeners_if_ready();
 }
 
 namespace {

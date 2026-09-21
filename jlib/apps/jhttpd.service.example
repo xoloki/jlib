@@ -133,6 +133,27 @@ RestrictSUIDSGID=true
 # writable by the user jhttpd drops to: the files are opened as root at
 # startup, but SIGHUP reopens them *after* the drop, so a root-only directory
 # means rotation silently stops working.
+# **The file-descriptor bound, stated rather than inherited.**
+#
+# jhttpd holds two descriptors per request in flight: the connection, and the
+# file it is streaming -- `located` keeps the file open across the writes, on
+# both servers. So `max_connections N` needs roughly 2N descriptors, plus the
+# listeners, the two logs, the reactor's own, and the signal pipe.
+#
+# At the default max_connections of 256 that is ~520; at the 512 a busy site
+# wants, ~1032. systemd's own default varies: this unit was measured getting
+# 524288 on Ubuntu 24.04, and older systemd gives services 1024 -- at which
+# point 512 connections exhausts them.
+#
+# Running out is not a graceful degradation. accept() fails with EMFILE and
+# sys::server backs off by sleeping 100ms **on the reactor thread**, which
+# stalls every connection on every listener for that long, repeatedly. See
+# the issue filed from #270 phase 1.
+#
+# 16384 covers max_connections up to about 8000 with room for everything else,
+# and costs nothing to reserve.
+LimitNOFILE=16384
+
 LogsDirectory=jhttpd
 LogsDirectoryMode=0750
 

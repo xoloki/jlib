@@ -29,6 +29,8 @@
 // generated at runtime and the client's trust store points at it, so this runs
 // on a developer's machine and not only in the build container.
 
+#include <sys/resource.h>
+#include <fcntl.h>
 #include "certificate.hh"
 
 #include <jlib/sys/listener.hh>
@@ -550,6 +552,279 @@ static bool settles_to(sys::server& srv, const char* who, std::size_t want) {
     }
 
     return false;
+}
+
+/**
+ * Out of descriptors: the reactor keeps working (#346).
+ *
+ * `accept()` fails with EMFILE when the process has none left. Without a
+ * pause the reactor is handed the same failing accept() forever, because the
+ * connection stays queued and the listener stays readable -- so a pause is
+ * needed. The question is what the reactor does during it.
+ *
+ * The blocking server sleeps 100ms and says why it must: `serve_one(timeout)`
+ * is call-driven, so there is no reactor to hang a timer on. The async server
+ * inherited the sleep without the reasoning (#213), and there it ran **on the
+ * thread carrying every connection**.
+ *
+ * ## What this has to measure, and what an earlier version of it did not
+ *
+ * The first version exhausted descriptors and asserted the server served
+ * again afterwards. It passed against the sleep as well -- because recovery
+ * is not the difference. Worse, it never reached the code at all: with nobody
+ * knocking the listener is not readable, `accept()` is never called, and the
+ * sleep never fires.
+ *
+ * So: hold one connection open, exhaust descriptors *leaving a couple*, use
+ * one to put a connection in the backlog -- which makes the listener readable
+ * and accept() fail, repeatedly -- and then time a round trip on the
+ * connection that already exists. That is the property: other work continues
+ * while descriptors are out.
+ */
+static void out_of_descriptors_does_not_stall_the_reactor() {
+    std::cout << "\nout of descriptors, the reactor keeps working:\n";
+
+    sys::server::policy p;
+
+    p.threads = 2;
+    p.max_connections = 64;
+
+    // Greets, then echoes whatever arrives.  The echo is what gets timed.
+    sys::server srv(
+        0,
+        [](sys::server::connection& c, const sys::peer&) -> sys::task<void> {
+            co_await c.writer().write("hello\r\n");
+
+            // Echoes repeatedly, because one round trip cannot tell these
+            // apart: the knock and the ping are both ready at once and which
+            // the reactor takes first is a race, so a single exchange slips
+            // past the sleep about half the time. Ten cannot.
+            for(int i = 0; i < 12; i++) {
+                if(!co_await c.reader().fill()) break;
+
+                char drain[512];
+
+                while(c.reader().buffered())
+                    c.reader().take(drain, sizeof drain);
+
+                co_await c.writer().write("pong\r\n");
+            }
+        },
+        "127.0.0.1", sys::tls_context(), p);
+
+    std::thread th([&srv] { srv.run(); });
+
+    // The connection whose latency is the measurement.
+    sys::socketstream held("127.0.0.1", srv.port(), 5);
+
+    held.set_timeout(5);
+
+    std::string greeting;
+
+    std::getline(held, greeting);
+
+    ok("  a connection is established first", greeting.find("hello") == 0,
+       greeting);
+
+    // **Lower the ceiling rather than bound the loop.**
+    //
+    // The first version ate descriptors until dup() failed, with a runaway
+    // guard at 200000. On macOS that reached the real limit; in the container
+    // the limit is far higher, so the guard stopped the loop while
+    // descriptors were still free -- the server accepted normally, EMFILE
+    // never happened, and the measurement timed a healthy server. The
+    // precondition assertion below is what caught it.
+    //
+    // A soft RLIMIT_NOFILE of 512 is above what this test has open by a wide
+    // margin and reached in a few hundred dup()s on any machine.
+    struct rlimit was;
+
+    const bool limited = ::getrlimit(RLIMIT_NOFILE, &was) == 0;
+
+    if(limited) {
+        struct rlimit now = was;
+
+        if(now.rlim_cur > 512) now.rlim_cur = 512;
+
+        ::setrlimit(RLIMIT_NOFILE, &now);
+    }
+
+    std::vector<int> eaten;
+
+    const int spare = ::open("/dev/null", O_RDONLY);
+
+    /**
+     * Hands every descriptor back however this scope ends.
+     *
+     * The rest of this binary runs in the same process, so a test that
+     * exhausts descriptors and returns early -- or throws -- leaves every
+     * later test failing for a reason that has nothing to do with it. This
+     * morning eight background processes outlived an interrupted script for
+     * exactly this reason: cleanup on the happy path is cleanup that does not
+     * always run.
+     */
+    struct giving_back {
+        std::vector<int>* fds;
+        const int*        one;
+        const struct rlimit* back;
+        bool              restore;
+
+        ~giving_back() {
+            for(std::size_t i = 0; i < fds->size(); i++) ::close((*fds)[i]);
+
+            fds->clear();
+
+            if(*one >= 0) ::close(*one);
+
+            if(restore) ::setrlimit(RLIMIT_NOFILE, back);
+        }
+    } cleanup{ &eaten, &spare, &was, limited };
+
+    for(;;) {
+        const int d = ::dup(spare);
+
+        if(d < 0) break;
+
+        eaten.push_back(d);
+    }
+
+    ok("  and then the process runs out of descriptors", !eaten.empty(),
+       std::to_string(eaten.size()) + " taken");
+
+    // **Exactly one**, for the knocker's own socket -- and not one more.
+    //
+    // An earlier version handed back two: the knocker took one and the server
+    // accepted with the other, so accept() succeeded, EMFILE never happened,
+    // and the measurement below timed a perfectly healthy server. It passed
+    // against both implementations, which is how it was caught.
+    if(!eaten.empty()) {
+        ::close(eaten.back());
+        eaten.pop_back();
+    }
+
+    // Knock.  This connects (the kernel completes the handshake into the
+    // backlog) and the server cannot accept it -- so the listener stays
+    // readable and accept() is attempted over and over.
+    const int knock = ::socket(AF_INET, SOCK_STREAM, 0);
+
+    int knocked = -1;
+
+    if(knock >= 0) {
+        struct sockaddr_in to;
+
+        std::memset(&to, 0, sizeof to);
+
+        to.sin_family = AF_INET;
+        to.sin_port = htons(srv.port());
+        to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+        knocked = ::connect(knock, (struct sockaddr*)&to, sizeof to);
+    }
+
+    // **Asserted, because the measurement below is meaningless without it.**
+    // A knock that never happened leaves the listener quiet, accept() is
+    // never called, EMFILE never happens, and the timing measures a perfectly
+    // healthy server -- which passes against both implementations. Two
+    // earlier versions of this test did exactly that.
+    ok("  and a connection is waiting that cannot be accepted",
+       knock >= 0 && knocked == 0,
+       "socket=" + std::to_string(knock) + " connect=" + std::to_string(knocked));
+
+    // The server must have tried and failed by now.
+    // The detail prints on success too in this harness, so it states what was
+    // observed rather than what would have been wrong.
+    const int probe = ::dup(spare);
+
+    if(probe >= 0) ::close(probe);
+
+    ok("  which the server has tried and failed to accept",
+       probe < 0, probe < 0 ? "none free, as required"
+                            : "a descriptor was still free");
+
+    // **No pause here, deliberately.**  The exchanges below have to overlap
+    // the server's reaction to the failed accept, not follow it: a 100ms
+    // sleep that has already finished delays nothing, and waiting for it was
+    // why two earlier versions of this test passed against both
+    // implementations.
+
+    // **The measurement.**  Round trip on the connection that already exists,
+    // while the reactor is dealing with an accept it cannot complete.
+    const std::chrono::steady_clock::time_point a =
+        std::chrono::steady_clock::now();
+
+    int pongs = 0;
+
+    for(int i = 0; i < 10; i++) {
+        held << "ping\r\n" << std::flush;
+
+        std::string back;
+
+        if(!std::getline(held, back)) break;
+
+        if(back.find("pong") == 0) pongs++;
+    }
+
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - a).count();
+
+    // Measured, both ways, rather than guessed:
+    //
+    //     sleeping on the reactor    105.5ms
+    //     disarm and re-arm            0.46ms
+    //
+    // One sleep, not ten -- each retry costs its own 100ms, so only one fits
+    // in the window these exchanges occupy. The first threshold here was
+    // 200ms, chosen for ten repeated sleeps that do not happen, and it passed
+    // against both. 50ms sits two orders of magnitude above the real figure
+    // and half an order below the broken one.
+    ok("  ten exchanges on an established connection stay prompt",
+       pongs == 10 && ms < 50,
+       std::to_string(pongs) + " pongs in " + std::to_string(ms) + "ms");
+
+    if(knock >= 0) ::close(knock);
+
+    // **And now the re-arm**, which the measurement above does not reach.
+    //
+    // Disarming is half the fix. The listeners are off; a timer has to turn
+    // them back on, and if it does not the 100ms stall this replaced has
+    // become a permanent outage -- strictly worse. The exchanges above finish
+    // in under a millisecond and `srv.stop()` used to follow immediately, so
+    // the timer had not fired and nothing here tested it.
+    //
+    // Hand the descriptors back first: the timer clears `m_out_of_fds`, but
+    // `arm_listeners_if_ready` also refuses while the connection cap holds,
+    // and an accept that fails again would simply disarm a second time.
+    for(std::size_t i = 0; i < eaten.size(); i++) ::close(eaten[i]);
+
+    eaten.clear();
+
+    // Polled rather than slept: the timer is 100ms and this asserts it
+    // happened at all, not when.
+    bool accepted_again = false;
+
+    for(int i = 0; i < 40 && !accepted_again; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        try {
+            sys::socketstream fresh("127.0.0.1", srv.port(), 1);
+
+            fresh.set_timeout(1);
+
+            std::string hello;
+
+            std::getline(fresh, hello);
+
+            accepted_again = hello.find("hello") == 0;
+        }
+        catch(std::exception&) { /* not yet */ }
+    }
+
+    ok("  and the listeners come back once descriptors do", accepted_again);
+
+    // `cleanup` above hands back the rest, on every path out of here.
+
+    srv.stop();
+    th.join();
 }
 
 static void one_address_may_not_have_every_slot(bool async) {
@@ -1436,6 +1711,8 @@ int main() {
     a_full_server_stops_accepting_everywhere();
     the_cap_holds_at_two();
     counting_connections_per_address();
+    out_of_descriptors_does_not_stall_the_reactor();
+
     one_address_may_not_have_every_slot(false);
     one_address_may_not_have_every_slot(true);
     the_two_paths_became_one();

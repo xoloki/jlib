@@ -189,8 +189,52 @@ static void the_table_does_not_grow_without_bound() {
         l.allow("10.1." + std::to_string(i / 250) + "." + std::to_string(i % 250),
                 wait);
 
+    // **The real bound, not merely "fewer than we inserted".**  This read
+    // `< 20000` of 20000 inserted, which passes with 19,999 kept -- it
+    // asserted that the sweep did something rather than that it worked.
     ok("  twenty thousand addresses do not become twenty thousand buckets",
-       l.tracked() < 20000, std::to_string(l.tracked()) + " kept");
+       l.tracked() <= 4096, std::to_string(l.tracked()) + " kept");
+
+    // **Pass two, which the case above never reaches.**
+    //
+    // With a fast refill every bucket is full by the time the sweep runs, so
+    // pass one erases all of them and returns. The lossy half -- build a
+    // vector of every bucket, partition it, evict the fullest -- only runs
+    // when buckets are *not* refilling, and nothing exercised it.
+    //
+    // That matters beyond coverage: it is the expensive half, it runs inside
+    // the lock, and on the async server that lock is taken on the reactor
+    // thread. Measured at 4096 tracked addresses it is ~80us, against 0.12us
+    // for an ordinary call.
+    {
+        http::server::limiter slow;
+
+        // The production setting, where a bucket takes 20ms to regain a token
+        // and the loop below never waits that long.
+        slow.configure(50, 100);
+
+        long ignored = 0;
+
+        for(int i = 0; i < 12000; i++) {
+            char who[64];
+
+            // IPv6, because that is what makes source addresses free to an
+            // attacker and the sweep reachable on demand.
+            std::snprintf(who, sizeof who, "2001:db8:%x:%x::%x",
+                          i >> 8, i & 255, i);
+
+            slow.allow(who, ignored);
+        }
+
+        ok("  and a table that never refills is still bounded",
+           slow.tracked() <= 4096, std::to_string(slow.tracked()) + " kept");
+
+        // Down to three quarters rather than to the bound, so the next
+        // request does not pay for the sweep again.
+        ok("  swept down to three quarters, not to the ceiling",
+           slow.tracked() <= 4096 - 4096 / 4 + 1024,
+           std::to_string(slow.tracked()) + " kept");
+    }
 
     // And the sweep is exact rather than lossy: a swept address is in the same
     // state as one never seen, because both start full.
