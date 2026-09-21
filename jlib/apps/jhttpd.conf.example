@@ -46,7 +46,27 @@
 # allow_root;          run as root anyway, which you almost never want.
 
 threads     4;
-# async;               the coroutine server rather than thread-per-connection.
+
+# **Turn this on for anything real.**
+#
+# The two servers are not equals dressed differently. The async one carries a
+# connection as a coroutine on a reactor -- a frame rather than a stack -- and
+# it is the one with a connection cap, keepalive, and per-phase timeouts, which
+# is to say the one with defences against a client that opens sockets and says
+# nothing. It is what the six sites this was written for run.
+#
+# The blocking server gives each connection a pool thread for the length of
+# that connection: one request per connection, no keepalive, and nothing
+# bounding a slow client except io_timeout on each individual read. That is
+# fine for a fixture and fine behind something else, and it is deliberately
+# simple to reason about -- which is why the suite runs every property through
+# it as well, and why `net_http_hostile_test` compares the two answer by
+# answer. It is not what you would expose to the internet.
+#
+# Four settings below are read only by the async server and `--test` says so
+# when you set them without this: max_connections, keepalive_requests,
+# keepalive_timeout, client_header_timeout.
+async;
 # The error log, and the level below which nothing is written.
 #
 #   error_log PATH [LEVEL];     "-" is stderr
@@ -143,10 +163,24 @@ http {
     # request_burst    20;     # how many may arrive at once
     # max_per_address   8;
 
+    # **The first four are read only by the async server.**
+    #
+    # max_connections is `sys::server::policy`'s, and that header says so:
+    # "Ignored by a blocking server, which bounds itself with threads and
+    # max_queued". The three keepalive settings are the same by construction
+    # -- sys::server hands a blocking connection to the handler once, so one
+    # connection is one request and there is no idle period to bound.
+    #
+    # Without `async;` they parse, validate, and do nothing. `--test` says so
+    # when they differ from the defaults, because a knob that silently does
+    # nothing is worse than one that is absent: it reads as a bound somebody
+    # is relying on.
     max_connections        256;
     keepalive_requests     100;   # per connection, before it is closed
     keepalive_timeout       60;   # idle, between requests
     client_header_timeout    5;   # to send the first one
+
+    # This one is read by both.
     io_timeout              30;
 
     # --- a guarded path ---

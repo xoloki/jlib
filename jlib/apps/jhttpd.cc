@@ -564,6 +564,46 @@ int main(int argc, char** argv) {
                       << (o.listens[i].redirect ? " (redirect)" : "") << "\n";
         }
 
+        // **Settings the blocking server does not read** (#270 phase 2).
+        //
+        // Four directives map to library options only `serve_request_async`
+        // ever looks at. `sys::server::policy` is honest about one of them --
+        // "Ignored by a blocking server, which bounds itself with threads and
+        // max_queued" -- and jhttpd's own config says nothing about any, so
+        // an operator tuning them without `async;` gets no effect, no error,
+        // and no hint.
+        //
+        // Compared against the defaults rather than tracked as set-ness:
+        // setting one of these *to* its default is the same as not setting
+        // it, so the comparison says exactly what wants saying.
+        //
+        // A note rather than a failure. The config is valid and the server
+        // will serve correctly; it simply will not do one thing the file asks
+        // for. Refusing would break working deployments to report something
+        // that is not wrong, only inert.
+        if(!o.async) {
+            const jhttpd::options fresh;
+
+            const struct { const char* name; bool set; } idle[] = {
+                { "max_connections",
+                  o.max_connections != fresh.max_connections },
+                { "keepalive_requests",
+                  o.max_requests != fresh.max_requests },
+                { "keepalive_timeout",
+                  o.idle_timeout != fresh.idle_timeout },
+                { "client_header_timeout",
+                  o.initial_idle_timeout != fresh.initial_idle_timeout }
+            };
+
+            for(std::size_t i = 0; i < sizeof idle / sizeof idle[0]; i++) {
+                if(!idle[i].set) continue;
+
+                std::cout << "  ..    " << idle[i].name
+                          << " is only read by the async server; add "
+                          << "\"async;\" or it does nothing\n";
+            }
+        }
+
         // **Does this config match the unit that is about to run it?** (#334)
         //
         // `daemon;` and the unit's `Type=` have to agree, and neither can see
