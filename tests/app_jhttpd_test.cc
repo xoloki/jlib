@@ -1480,6 +1480,31 @@ static void the_error_line() {
     }
 
     {
+        // Thrown by async_writer as a plain runtime_error, so before #344 it
+        // reached the `core:error` fallback -- the bucket reserved for the
+        // server's own failures -- and read as the server breaking mid-write.
+        // It is a client that closed a tab.
+        const std::runtime_error gone(
+            "the peer closed while 160 octets were still to be written");
+        const jhttpd::sorted_error s = jhttpd::sort_error(gone);
+
+        ok("  a peer that hung up mid-answer is http, and only info",
+           std::string(s.module) == "http" && s.at == jhttpd::level::info,
+           std::string(s.module) + ":" + jhttpd::level_name(s.at));
+    }
+
+    {
+        // 21 of 50 error lines in eleven hours, from one /24 scanning. The
+        // access log's 400 is the whole of what happened.
+        const jlib::util::http::error bare("the request head is empty");
+        const jhttpd::sorted_error s = jhttpd::sort_error(bare);
+
+        ok("  an empty request head is a knock, and only info",
+           std::string(s.module) == "http" && s.at == jhttpd::level::info,
+           std::string(s.module) + ":" + jhttpd::level_name(s.at));
+    }
+
+    {
         // A server's own failure is the one thing a level must never hide.
         const std::runtime_error ours("cannot read /etc/ssl/private/key.pem");
         const jhttpd::sorted_error s = jhttpd::sort_error(ours);
