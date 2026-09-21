@@ -1,0 +1,31 @@
+# A container that runs systemd, so the *packaged service* can be tested and
+# not merely the package.
+#
+# Everything else in this tree tests the code: the suites run the library, and
+# Dockerfile builds the .deb.  Neither installs the package and starts the
+# service, and that gap is where the jhttpd deploy of 2026-09-20 broke twice --
+# once on a unit naming /usr/local/bin when the package installs /usr/bin, and
+# once on `User=root` silently stripping CAP_SETUID so the server could not
+# drop privilege.  Both passed every check that existed.  Neither was
+# reachable without systemd actually starting the unit.
+#
+# Run with --privileged --cgroupns=host and /sys/fs/cgroup mounted; see
+# tests/service-test.sh, which is the only thing meant to drive this.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive container=docker
+
+RUN apt-get update -qq && \
+    apt-get install -y -qq systemd systemd-sysv logrotate curl ca-certificates \
+        >/dev/null && \
+    rm -rf /var/lib/apt/lists/*
+
+# The units a container has no use for, and which fail noisily without one.
+RUN rm -f /lib/systemd/system/multi-user.target.wants/* \
+          /etc/systemd/system/*.wants/* \
+          /lib/systemd/system/local-fs.target.wants/* \
+          /lib/systemd/system/sockets.target.wants/*initctl*
+
+STOPSIGNAL SIGRTMIN+3
+
+CMD ["/sbin/init"]

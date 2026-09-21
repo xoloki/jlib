@@ -14,6 +14,12 @@
 # user NAME [GROUP];   drop to this identity once the port is bound.
 # user        www-data www-data;
 
+# **Required if you run the packaged systemd unit**, which is Type=forking:
+# systemd waits for the parent to exit and follows the pidfile to the real
+# process.  Without it the start hangs until TimeoutStartSec -- though
+# ExecStartPre refuses it first, in a second, saying so.
+#
+# Leave it out when running in the foreground from a shell.
 # daemon;              or `daemon off;` -- absent means off.
 #
 # SIGHUP re-reads this file and applies what a running server can change:

@@ -132,6 +132,7 @@ void usage(std::ostream& o, const char* argv0) {
       << "  --pidfile FILE    written after binding, before dropping\n"
       << "  --allow-root      run as root anyway, which is refused by default\n"
       << "  --test            check the config and what it names, then exit\n"
+      << "  --forking         with --test: require daemon;, as Type=forking does\n"
       << "  --daemon          fork into the background; the command does not\n"
       << "                    return until the server is bound and serving,\n"
       << "                    and exits non-zero if it never got there\n"
@@ -151,6 +152,7 @@ bool parse(int argc, char** argv, options& o) {
         if(a == "--allow-root") { o.allow_root = true; continue; }
         if(a == "--daemon") { o.daemon = true; continue; }
         if(a == "--test") { o.test = true; continue; }
+        if(a == "--forking") { o.forking = true; continue; }
 
         if(a.size() > 2 && a.compare(0, 2, "--") == 0) {
             if(i + 1 >= argc) {
@@ -562,6 +564,55 @@ int main(int argc, char** argv) {
                       << (o.listens[i].redirect ? " (redirect)" : "") << "\n";
         }
 
+        // **Does this config match the unit that is about to run it?** (#334)
+        //
+        // `daemon;` and the unit's `Type=` have to agree, and neither can see
+        // the other: the config does not say how the process will be
+        // supervised, and systemd exports the unit's Type= nowhere. So the
+        // unit states its expectation, by passing --forking or not, and this
+        // checks the config against it.
+        //
+        // Both mismatches are silent in their own way:
+        //
+        //   Type=forking without daemon;  systemd waits for a parent that
+        //                                 never exits, hangs until
+        //                                 TimeoutStartSec, then kills a
+        //                                 server that was serving fine.
+        //
+        //   Type=simple with daemon;      the parent exits on purpose, systemd
+        //                                 calls that a failed start, and
+        //                                 Restart= loops while the forked
+        //                                 server holds the ports.  A restart
+        //                                 loop in the journal and a working
+        //                                 website, with no obvious link.
+        //
+        // Caught here because this runs as ExecStartPre, so the start fails
+        // with a message naming the problem rather than hanging or looping.
+        if(o.forking && !o.daemon) {
+            std::cerr << "  FAIL  the unit is Type=forking and this config "
+                      << "has no daemon;\n"
+                      << "        systemd would wait for a parent that never "
+                      << "exits.  Add daemon; to\n"
+                      << "        the config, or set Type=simple in the "
+                      << "unit.\n";
+
+            wrong++;
+        }
+
+        // The other way round, and only under systemd: INVOCATION_ID is in
+        // the environment of every process systemd starts and of nothing
+        // else, so a daemonising config run by hand is left alone.
+        if(!o.forking && o.daemon && ::getenv("INVOCATION_ID") != 0) {
+            std::cerr << "  FAIL  this config has daemon; and the unit did "
+                      << "not ask for it\n"
+                      << "        a forking process under Type=simple reads "
+                      << "as a service that died.\n"
+                      << "        Remove daemon;, or set Type=forking and "
+                      << "pass --forking here.\n";
+
+            wrong++;
+        }
+
         std::cout << (wrong ? "jhttpd: " + std::to_string(wrong) + " problem(s)\n"
                             : std::string("jhttpd: config is usable\n"));
 
@@ -842,6 +893,42 @@ int main(int argc, char** argv) {
         }
 
         if(!o.user.empty()) {
+            // **The logs have to belong to the user we are about to become.**
+            //
+            // They were opened as root, because they live where an
+            // unprivileged user cannot create them. The files that opening
+            // *created* are owned by root -- and, under the unit, grouped
+            // www-data by the process's egid, with 0644 from the umask. So
+            // group gets r--, and the moment this process drops privilege it
+            // can read its own logs and not write them.
+            //
+            // Nothing notices until the next reopen, which is a SIGHUP, which
+            // is `systemctl reload` -- or logrotate's postrotate. Then the
+            // reopen fails, **both logs close, and the server goes on serving
+            // with no record at all.** A log that stops has no symptom.
+            //
+            // Rotation hid this: logrotate's `create 0640 www-data www-data`
+            // makes a file the dropped user owns, so the reopen after a
+            // rotation succeeds. A bare reload, before any rotation, does not.
+            //
+            // Done by path rather than by descriptor because logfile owns its
+            // stream on another thread and this is the last moment we are root
+            // -- and chown by path is the same operation logrotate performs
+            // for the files it creates.
+            for(int i = 0; i < 2; i++) {
+                const std::string& path = i == 0 ? o.access_log : o.error_log;
+
+                if(path == "-") continue;
+
+                if(::chown(path.c_str(), who.uid, who.gid) != 0) {
+                    std::cerr << "jhttpd: cannot give \"" << path
+                              << "\" to " << o.user << ": "
+                              << std::strerror(errno) << "\n";
+
+                    return 1;
+                }
+            }
+
             try { sys::become(who); }
             catch(std::exception& e) {
                 std::cerr << "jhttpd: " << e.what() << "\n";
