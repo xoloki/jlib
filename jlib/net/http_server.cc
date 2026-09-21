@@ -1774,6 +1774,27 @@ bool server::authority_of(const util::http::Request& q, std::string& into,
         host.erase(colon);
     }
 
+    // **A trailing dot is the same name**, and must go after the port rather
+    // than before it -- `draconism.org.:443` carries both.
+    //
+    // RFC 1034 3.1 makes "example.com." the fully qualified form of
+    // "example.com": one name, and a resolver treats them as one. A browser
+    // sends whichever the user typed, and a client that qualifies names
+    // itself sends the dot.
+    //
+    // Without this it matched no site, so the request fell through to a route
+    // carrying no host -- which on a server with a default root is **another
+    // site's content under this site's name**. Over TLS that is worse: SNI
+    // picked the certificate for the name asked for, so a valid certificate
+    // for draconism.org sat in front of the default site's pages.
+    //
+    // One dot, not a loop. "example.com.." is not a name with two roots, it
+    // is a name with an empty label and matches nothing -- stripping until it
+    // looked reasonable would fold several distinct strings onto one site,
+    // which is the same class of mistake in the other direction.
+    if(host.size() > 1 && host[host.size() - 1] == '.')
+        host.erase(host.size() - 1);
+
     into = host;
 
     return true;
