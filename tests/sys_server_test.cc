@@ -783,6 +783,44 @@ static void out_of_descriptors_does_not_stall_the_reactor() {
 
     if(knock >= 0) ::close(knock);
 
+    // **And now the re-arm**, which the measurement above does not reach.
+    //
+    // Disarming is half the fix. The listeners are off; a timer has to turn
+    // them back on, and if it does not the 100ms stall this replaced has
+    // become a permanent outage -- strictly worse. The exchanges above finish
+    // in under a millisecond and `srv.stop()` used to follow immediately, so
+    // the timer had not fired and nothing here tested it.
+    //
+    // Hand the descriptors back first: the timer clears `m_out_of_fds`, but
+    // `arm_listeners_if_ready` also refuses while the connection cap holds,
+    // and an accept that fails again would simply disarm a second time.
+    for(std::size_t i = 0; i < eaten.size(); i++) ::close(eaten[i]);
+
+    eaten.clear();
+
+    // Polled rather than slept: the timer is 100ms and this asserts it
+    // happened at all, not when.
+    bool accepted_again = false;
+
+    for(int i = 0; i < 40 && !accepted_again; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        try {
+            sys::socketstream fresh("127.0.0.1", srv.port(), 1);
+
+            fresh.set_timeout(1);
+
+            std::string hello;
+
+            std::getline(fresh, hello);
+
+            accepted_again = hello.find("hello") == 0;
+        }
+        catch(std::exception&) { /* not yet */ }
+    }
+
+    ok("  and the listeners come back once descriptors do", accepted_again);
+
     // `cleanup` above hands back the rest, on every path out of here.
 
     srv.stop();
