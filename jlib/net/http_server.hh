@@ -1174,8 +1174,26 @@ public:
      *
      * Locked, because the two servers reach it from different threads: a
      * blocking server from whichever worker took the connection, an async one
-     * from the reactor thread. One mutex over a small map, held for the
-     * arithmetic and nothing else.
+     * from the reactor thread. One mutex over a small map.
+     *
+     * **The critical section is not always arithmetic**, and this comment
+     * used to say it was. `allow()` calls `sweep()` inside the lock when the
+     * table is over `max_tracked`, which walks every bucket and partitions
+     * them. Measured at 4096 tracked addresses, on an idle machine:
+     *
+     *     median call            0.12us
+     *     p99                    0.25us
+     *     a call that sweeps      ~80us
+     *
+     * Amortised that is nothing -- one sweep per ~1024 new addresses, so
+     * ~0.1us per request -- but on the reactor the tail is what shows, and a
+     * comment claiming "the arithmetic and nothing else" is what stops the
+     * next reader from noticing. #276 assessed this at "tens of nanoseconds"
+     * from the same mistake.
+     *
+     * The trigger is attacker-reachable: a bucket per source address, and an
+     * IPv6 allocation makes source addresses free. `max_tracked` is what
+     * keeps that bounded, and is the reason the cost has a ceiling at all.
      */
     class limiter {
     public:

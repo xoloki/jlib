@@ -572,7 +572,36 @@ bool server::accept_and_start(std::size_t i) {
         if(errno == EMFILE || errno == ENFILE) {
             m_on_error(e, from);
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // **Disarmed and re-armed by a timer, not slept on.**
+            //
+            // Out of descriptors is not a reason to stop serving and it is a
+            // condition that clears, but without a pause this spins at full
+            // tilt: the connection stays queued and the listener stays
+            // readable, so the reactor is handed the same failing accept()
+            // immediately and forever.
+            //
+            // accept_and_post() answers that with a 100ms sleep and says why
+            // it has to: serve_one(timeout) is call-driven, so there is no
+            // reactor to hang a timer on. **That reasoning does not apply
+            // here.** This path is a reactor callback by construction, and
+            // the better answer its own comment names -- modify the token to
+            // NONE and an after() to re-arm -- is available. The sleep was
+            // copied across when the async server was written (#213) and the
+            // justification was not.
+            //
+            // It mattered: 100ms of sleep on this thread is 100ms in which
+            // nothing is read, nothing is written and no timer fires, on
+            // every listener, repeating for as long as descriptors stay out.
+            m_out_of_fds = true;
+
+            pause_listeners();
+
+            m_reactor.after(std::chrono::milliseconds(100),
+                            [this](reactor::timer_token) {
+                                m_out_of_fds = false;
+
+                                arm_listeners_if_ready();
+                            });
 
             return false;
         }
@@ -606,20 +635,36 @@ bool server::accept_and_start(std::size_t i) {
 
     m_live.back().work.start();
 
-    if(full()) {
-        // Stop asking about the listeners rather than accepting and refusing.
-        //
-        // **Every one of them**, because the cap counts connections and not
-        // connections-per-port: leaving one armed would let a client have the
-        // whole cap again by knocking on a different door, which is the bug a
-        // single-listener re-arm would have shipped silently.
-        for(std::size_t j = 0; j < m_bound.size(); j++)
-            m_reactor.modify(m_bound[j].token, reactor::NONE);
-
-        m_listen_off = true;
-    }
+    if(full()) pause_listeners();
 
     return true;
+}
+
+void server::pause_listeners() {
+    if(m_listen_off) return;
+
+    // **Every one of them**, because the cap counts connections and not
+    // connections-per-port: leaving one armed would let a client have the
+    // whole cap again by knocking on a different door, which is the bug a
+    // single-listener re-arm would have shipped silently.
+    for(std::size_t j = 0; j < m_bound.size(); j++)
+        m_reactor.modify(m_bound[j].token, reactor::NONE);
+
+    m_listen_off = true;
+}
+
+void server::arm_listeners_if_ready() {
+    if(!m_listen_off) return;
+
+    // Both reasons, checked in one place.  `reap()` knows a connection
+    // finished and the timer knows the backoff elapsed; neither knows about
+    // the other, and either re-arming alone would undo the other's pause.
+    if(full() || m_out_of_fds) return;
+
+    for(std::size_t j = 0; j < m_bound.size(); j++)
+        m_reactor.modify(m_bound[j].token, reactor::READ);
+
+    m_listen_off = false;
 }
 
 void server::reap() {
@@ -628,12 +673,7 @@ void server::reap() {
         else ++i;
     }
 
-    if(m_listen_off && !full()) {
-        for(std::size_t j = 0; j < m_bound.size(); j++)
-            m_reactor.modify(m_bound[j].token, reactor::READ);
-
-        m_listen_off = false;
-    }
+    arm_listeners_if_ready();
 }
 
 namespace {
