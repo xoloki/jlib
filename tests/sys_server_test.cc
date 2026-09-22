@@ -581,6 +581,54 @@ static bool settles_to(sys::server& srv, const char* who, std::size_t want) {
  * connection that already exists. That is the property: other work continues
  * while descriptors are out.
  */
+/**
+ * A context can say when its certificate stops working (#270 phase 5).
+ *
+ * **A server does not notice its own certificate expiring.** OpenSSL serves
+ * an expired one without complaint; the client is what refuses. So the
+ * failure presents as a healthy server and a world full of broken browsers,
+ * and for a deployment where something renews unattended, a renewal that
+ * quietly stopped working is invisible until the morning it matters.
+ *
+ * jhttpd uses this in two places: `--test` reports the days remaining, and
+ * each reload records them -- which, since logrotate reloads daily, turns an
+ * invisible countdown into a line a day in the error log.
+ */
+static void a_context_knows_when_its_certificate_ends() {
+    std::cout << "\nwhen the certificate stops working:\n";
+
+    const std::string cert = "expiry_cert.pem";
+    const std::string key = "expiry_key.pem";
+
+    // make_cert writes an hour of validity, which is what makes this exact
+    // rather than approximate.
+    if(!make_cert(cert, key, "expiry.example", "DNS:expiry.example")) {
+        std::cout << "  skip  could not generate a test certificate\n";
+
+        return;
+    }
+
+    const sys::tls_context ctx = sys::tls_context::server(cert, key);
+
+    const std::time_t ends = ctx.expires();
+
+    ok("  it has a readable expiry", ends != 0, std::to_string(ends));
+
+    const double left = std::difftime(ends, std::time(0));
+
+    // An hour, give or take the time this test took to get here.
+    ok("  which is the hour make_cert asked for",
+       left > 3000 && left < 3700, std::to_string(int(left)) + "s");
+
+    // An empty context has no certificate to ask about, and saying so is not
+    // the same as saying "expired" -- a caller that treated 0 as a date would
+    // report every plaintext server as forty years out of date.
+    const sys::tls_context none;
+
+    ok("  and an empty context says it has none, rather than a date",
+       none.expires() == 0);
+}
+
 static void out_of_descriptors_does_not_stall_the_reactor() {
     std::cout << "\nout of descriptors, the reactor keeps working:\n";
 
@@ -1723,6 +1771,7 @@ int main() {
     a_full_server_stops_accepting_everywhere();
     the_cap_holds_at_two();
     counting_connections_per_address();
+    a_context_knows_when_its_certificate_ends();
     out_of_descriptors_does_not_stall_the_reactor();
 
     one_address_may_not_have_every_slot(false);

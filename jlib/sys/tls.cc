@@ -269,6 +269,30 @@ namespace {
 
 }
 
+std::time_t tls_context::expires() const {
+    if(!m_ctx) return 0;
+
+    // get0: borrowed, not ours to free.
+    X509* cert = SSL_CTX_get0_certificate(m_ctx.get());
+
+    if(cert == 0) return 0;
+
+    const ASN1_TIME* when = X509_get0_notAfter(cert);
+
+    if(when == 0) return 0;
+
+    // Against the epoch rather than against now, so a caller decides what
+    // "soon" means. ASN1_TIME_diff gives the difference from a reference,
+    // and the reference this wants is 1970 -- which it will not take
+    // directly, so the difference is taken from now and added back.
+    int days = 0;
+    int secs = 0;
+
+    if(!ASN1_TIME_diff(&days, &secs, 0, when)) return 0;
+
+    return std::time(0) + std::time_t(days) * 86400 + secs;
+}
+
 void tls_context::add_site(const std::string& name,
                            const std::string& cert_file,
                            const std::string& key_file)

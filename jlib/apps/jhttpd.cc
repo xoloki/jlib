@@ -526,9 +526,57 @@ int main(int argc, char** argv) {
 
         if(!o.cert.empty()) {
             try {
-                sys::tls_context::server(o.cert, o.key);
+                const sys::tls_context loaded =
+                    sys::tls_context::server(o.cert, o.key);
 
-                std::cout << "  ok    certificate " << o.cert << "\n";
+                // **A server does not notice its own certificate expiring.**
+                // OpenSSL serves an expired one without complaint; it is the
+                // client that refuses, so the failure looks like a healthy
+                // server and a world full of broken browsers. Something
+                // renews these unattended, and a renewal that quietly stopped
+                // working is invisible until the morning it matters.
+                const std::time_t ends = loaded.expires();
+
+                if(ends == 0) {
+                    std::cout << "  ok    certificate " << o.cert
+                              << " (no readable expiry)\n";
+                }
+                else {
+                    const double days =
+                        std::difftime(ends, std::time(0)) / 86400.0;
+
+                    // **Loud, and not a failure -- including when it has
+                    // already expired.**
+                    //
+                    // This runs as ExecStartPre, so a failure here is a
+                    // service that does not start. An expired certificate
+                    // means https shows a warning; refusing to start means
+                    // port 80, the redirect and every site go dark as well.
+                    // The condition is already visible to every visitor, and
+                    // converting it into a total outage tells nobody anything
+                    // new -- while blocking the operator who is restarting in
+                    // order to fix it.
+                    //
+                    // An earlier version of this counted expiry as a problem
+                    // and refused. That was the wrong way round: --test
+                    // exists to catch what an operator cannot see, and this
+                    // is the one condition the whole internet can see already.
+                    if(days < 0) {
+                        std::cout << "  ..    certificate " << o.cert
+                                  << " EXPIRED " << int(-days)
+                                  << " day(s) ago -- clients are refusing "
+                                  << "this connection\n";
+                    }
+                    else if(days < 14) {
+                        std::cout << "  ..    certificate " << o.cert
+                                  << " expires in " << int(days)
+                                  << " day(s)\n";
+                    }
+                    else {
+                        std::cout << "  ok    certificate " << o.cert
+                                  << " (" << int(days) << " days left)\n";
+                    }
+                }
             }
             catch(std::exception& e) {
                 std::cerr << "  FAIL  certificate " << o.cert << ": "
@@ -1214,6 +1262,33 @@ int main(int argc, char** argv) {
 
                         std::cerr << "jhttpd: certificate reloaded from "
                                   << fresh.cert << "\n";
+
+                        // **The countdown, written down.**
+                        //
+                        // A server does not notice its own certificate
+                        // expiring -- OpenSSL serves an expired one and the
+                        // client is what refuses, so the failure looks like a
+                        // healthy server. The reload is the one moment the
+                        // certificate is read again, and logrotate reloads
+                        // daily, so this turns an invisible countdown into a
+                        // line a day in the error log.
+                        const std::time_t ends = next.expires();
+
+                        if(ends != 0) {
+                            const double days =
+                                std::difftime(ends, std::time(0)) / 86400.0;
+
+                            errors.write(days < 14 ? jhttpd::level::warn
+                                                   : jhttpd::level::notice,
+                                         "core", "",
+                                         days < 0
+                                             ? "certificate EXPIRED " +
+                                                   std::to_string(int(-days)) +
+                                                   " day(s) ago"
+                                             : "certificate expires in " +
+                                                   std::to_string(int(days)) +
+                                                   " day(s)");
+                        }
                     }
                     catch(std::exception& e) {
                         std::cerr << "jhttpd: certificate not reloaded, keeping "

@@ -28,6 +28,8 @@
  * cannot check.
  */
 
+#include <sys/resource.h>
+#include <csignal>
 #include "../jlib/apps/jhttpd.hh"
 
 #include <jlib/net/http.hh>
@@ -531,6 +533,98 @@ static double timed_check(const jhttpd::credentials& c, const std::string& user,
  * The credential file, and the two things about it that are security
  * properties rather than conveniences.
  */
+/**
+ * A log that cannot be written comes back when it can (#270 phase 5).
+ *
+ * `badbit` is sticky. One write that cannot complete -- a full disk, a quota,
+ * an I/O error -- leaves the stream in a failed state where every later write
+ * is silently discarded, **including after the disk is freed**. Measured
+ * before the fix: five lines into a full disk and five more after it emptied
+ * produced nothing at all.
+ *
+ * Only a SIGHUP brought it back, because `reopen_if_asked()` happens to close
+ * and reopen. So logging recovered on the next *rotation* rather than the
+ * next line -- the same accidental-recovery shape as a reload restoring a
+ * reopen, and the same reason it is worth fixing: a property that holds
+ * because something unrelated runs on a timer is not a property.
+ *
+ * RLIMIT_FSIZE stands in for a full disk: a write past the cap fails the same
+ * way, and it can be taken back.
+ */
+static void a_log_that_could_not_be_written(void) {
+    std::cout << "\na log that runs out of room:\n";
+
+    struct rlimit was;
+
+    if(::getrlimit(RLIMIT_FSIZE, &was) != 0) {
+        ok("  (skipped: cannot read RLIMIT_FSIZE)", true);
+
+        return;
+    }
+
+    // SIGXFSZ kills the process by default, and the point here is that the
+    // *write* fails.
+    void (*old_xfsz)(int) = std::signal(SIGXFSZ, SIG_IGN);
+
+    /** Puts both back however this scope ends. */
+    struct restoring {
+        const struct rlimit* limit;
+        void (*handler)(int);
+
+        ~restoring() {
+            ::setrlimit(RLIMIT_FSIZE, limit);
+            std::signal(SIGXFSZ, handler);
+        }
+    } give_back{ &was, old_xfsz };
+
+    char pattern[] = "/tmp/jlib_full_XXXXXX";
+    const std::string dir = ::mkdtemp(pattern);
+    const std::string path = dir + "/access.log";
+
+    jhttpd::logfile log;
+
+    ok("  it opens", log.open(path));
+
+    log.write("one ordinary line");
+    log.drain();
+
+    ok("  and writes", lines_of(path).size() == 1,
+       std::to_string(lines_of(path).size()));
+
+    // The disk fills.
+    struct rlimit tight = was;
+
+    tight.rlim_cur = 20;
+
+    ::setrlimit(RLIMIT_FSIZE, &tight);
+
+    for(int i = 0; i < 5; i++)
+        log.write("this one cannot fit, there is no room");
+
+    log.drain();
+
+    const std::size_t during = lines_of(path).size();
+
+    ok("  a line that cannot fit is lost, which is all that can happen",
+       during <= 2, std::to_string(during));
+
+    // And comes back.
+    ::setrlimit(RLIMIT_FSIZE, &was);
+
+    for(int i = 0; i < 5; i++) log.write("there is room again");
+
+    log.drain();
+
+    // **The assertion.**  Before the fix this stayed at `during` forever: the
+    // stream was bad, nothing cleared it, and every line after was dropped.
+    ok("  and when there is room again the log resumes, without a rotation",
+       lines_of(path).size() >= during + 5,
+       std::to_string(lines_of(path).size()) + " after " +
+           std::to_string(during));
+
+    log.close();
+}
+
 static void credentials_file() {
     std::cout << "\ncredentials:\n";
 
@@ -1850,6 +1944,7 @@ int main() {
         a_level_that_changes_under_a_running_server();
         credentials_file();
         rotation();
+        a_log_that_could_not_be_written();
         what_a_client_can_put_in_a_field();
 
         what_the_hook_reports(false);
