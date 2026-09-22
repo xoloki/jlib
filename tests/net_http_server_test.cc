@@ -298,6 +298,49 @@ static void what_it_refuses() {
            reply.find("400") != std::string::npos, reply);
     }
 
+    // **What the coverage-guided fuzzer found, as a function call** (#268).
+    //
+    // `sud:7` is five bytes and a valid absolute-URI: RFC 3986 allows
+    // `scheme ":" path-rootless`, so it parses and its path is `7` -- no
+    // leading slash. split_path() drops empty segments, so it used to be
+    // routed exactly as `/7` and answered rather than refused.
+    //
+    // Tested here rather than through a socket because that is the point of
+    // the fuzzer finding it: the decision is a pure function of a string, and
+    // a test that spends a connection to ask one question about a string can
+    // only ask a handful.
+    {
+        std::string path;
+        std::string why;
+
+        ok("a rootless absolute-URI target is refused",
+           !jlib::net::http::server::path_of("sud:7", path, why), path);
+        ok("and it says why", !why.empty(), why);
+
+        path.clear();
+        why.clear();
+
+        // Absolute-form with no path at all is not malformed -- it means the
+        // root, and every other server reads it that way.
+        ok("absolute-form with an empty path becomes the root",
+           jlib::net::http::server::path_of("http://example.com", path, why) &&
+               path == "/", path);
+
+        path.clear();
+        why.clear();
+
+        ok("absolute-form keeps its path",
+           jlib::net::http::server::path_of("http://example.com/a/b", path,
+                                            why) && path == "/a/b", path);
+
+        path.clear();
+        why.clear();
+
+        ok("origin-form is unaffected",
+           jlib::net::http::server::path_of("/a/b", path, why) &&
+               path == "/a/b", path);
+    }
+
     // A handler that throws is answered with a 500, because nothing has reached
     // the socket until it returns -- which is why a response is accumulated.
     int reported = 0;

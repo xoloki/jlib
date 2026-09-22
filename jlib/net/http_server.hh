@@ -1127,6 +1127,33 @@ public:
      * @throws error if `name` is empty -- which would mean "any site", and
      *         the server's own methods already say that more plainly
      */
+    /**
+     * The two decisions a request's names are subjected to, exposed.
+     *
+     * **Pure, static, and about HTTP rather than about a server.** They take
+     * strings and return strings; no instance is needed and none is touched.
+     * They were private because nothing outside needed them.
+     *
+     * Something does now. #268 is about a fuzzer with no coverage feedback
+     * that cannot tell a mutant which reached a new branch from one rejected
+     * in the first ten octets -- and its answer is to fuzz these directly,
+     * in process, with no socket. `path_of` is where `%2F`, `%5C` and control
+     * characters are refused, and where the first round found a NUL
+     * truncation (#262); `authority_of` is where a client-supplied name
+     * becomes the choice of root, certificate and guards.
+     *
+     * Reaching them through a socket costs an accept, a handshake and a close
+     * per input -- hundreds of microseconds of transport against microseconds
+     * of parser -- which is most of why 80,000 mutants proved less than it
+     * sounded.
+     */
+    static bool authority_of(const util::http::Request& q, std::string& into,
+                             std::string& why);
+
+    /** The target as a path, or why it is not one.  See authority_of(). */
+    static bool path_of(const std::string& target, std::string& path,
+                        std::string& why);
+
     site site_of(const std::string& name);
 
     /**
@@ -1586,12 +1613,6 @@ private:
      * on HTTP/1.1, and 3.2.2 makes an absolute-form target's authority win
      * over the field.
      */
-    static bool authority_of(const util::http::Request& q, std::string& into,
-                             std::string& why);
-
-    /** Shared by both serves: the target as a path, or why it is not one. */
-    static bool path_of(const std::string& target, std::string& path,
-                        std::string& why);
 
     /** Shared by both serves: the route table lookup. */
     /**

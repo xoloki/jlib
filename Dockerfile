@@ -84,4 +84,29 @@ RUN mkdir -p build && cd build && ../configure
 
 RUN cd build && make -j"$(nproc)"
 
+# clang, for the coverage-guided fuzzers in tests/fuzz (#268). Apple's clang
+# does not ship libFuzzer -- there is no libclang_rt.fuzzer_osx.a in the Xcode
+# toolchain -- and Ubuntu's does, which is why the fuzzers run here.
+#
+# **A late layer, deliberately.** Adding clang to the dependency layer above
+# would invalidate the cached build of the entire tree for everyone who only
+# ever runs the suite, to install a compiler they never invoke.
+# **Without --no-install-recommends, unlike every other apt line here.** The
+# sanitizer runtimes -- libclang_rt.fuzzer, libclang_rt.asan -- are recommended
+# by clang rather than depended on, so the lean install yields a compiler that
+# accepts -fsanitize=fuzzer,address and then fails at link with four missing
+# archives. libclang-rt-18-dev is the package, named for a version that will
+# move; letting apt follow the recommendation survives the next toolchain.
+RUN apt-get update && apt-get install -y clang \
+    && rm -rf /var/lib/apt/lists/*
+
+# Where the fuzz corpus and any crashing inputs live inside the container.
+# They are copied in and out with `docker cp` rather than bind-mounted: a
+# corpus is thousands of small files that libFuzzer opens one at a time at
+# startup and appends to throughout a run, which is precisely the access
+# pattern a macOS bind mount punishes hardest. Two bulk transfers at the
+# boundary cost nothing; tens of thousands of small ones over FUSE would
+# dominate a run whose entire purpose is executions per second.
+RUN mkdir -p /corpus /artifacts
+
 CMD ["/bin/bash"]
