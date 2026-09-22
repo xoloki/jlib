@@ -285,6 +285,22 @@ static void what_rfc_9112_section_6_refuses() {
 
     ok("and a status code that is not three digits",
        refused("HTTP/1.1 20 OK\r\n\r\n"));
+
+    // **Three digits is not the same as a status code** (#268), found by the
+    // coverage-guided fuzzer from `HTTP/1.1 600 OK`. RFC 9112 4 writes
+    // status-code = 3DIGIT, so 600 parses; RFC 9110 15 defines the classes
+    // 1xx to 5xx and tells a client to read an unrecognised code as the x00
+    // of its class, which leaves a 6xx with no class and no fallback.
+    ok("a status code above the last class", refused("HTTP/1.1 600 OK\r\n\r\n"));
+
+    ok("and one below the first", refused("HTTP/1.1 099 OK\r\n\r\n"));
+
+    // The edges themselves stay good: refusing 600 must not cost 599.
+    ok("the last valid code is still read",
+       http::parse_head("HTTP/1.1 599 Whatever\r\n\r\n").status() == 599);
+
+    ok("and the first",
+       http::parse_head("HTTP/1.1 100 Continue\r\n\r\n").status() == 100);
 }
 
 static void reading_a_head_off_a_stream() {

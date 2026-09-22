@@ -575,6 +575,22 @@ Response parse_head(std::string_view head, bool head_request) {
         r.m_version = m["HTTP-version"].str();
         r.m_status = std::stoi(m["status-code"].str());
 
+        // **A three-digit code is not the same as a status code** (#268).
+        //
+        // RFC 9112 4 writes status-code = 3DIGIT, so "600" and "999" parse.
+        // RFC 9110 15 defines the classes 1xx through 5xx and requires a
+        // client to understand a response by the class its first digit names,
+        // treating an unrecognised code as the x00 of that class. A 6xx has
+        // no class, so there is no such fallback and nothing a caller may do
+        // with it -- and everything downstream here switches on status or on
+        // status / 100.
+        //
+        // Found by the coverage-guided fuzzer, from `HTTP/1.1 600 OK`.
+        if(r.m_status < 100 || r.m_status > 599) {
+            throw error("a status code outside 100..599: \"" +
+                        std::string(m["status-code"].str()) + "\"");
+        }
+
         const abnf::match reason = m["reason-phrase"];
 
         if(reason) r.m_reason = reason.str();

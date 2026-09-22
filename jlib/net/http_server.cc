@@ -1860,6 +1860,35 @@ bool server::path_of(const std::string& target, std::string& path,
     //
     // The defence is unchanged: the path is still checked, still before it is
     // decoded, and a traversal still cannot get through.
+    // **A request target names an absolute path, or it is not one** (#268).
+    //
+    // Found by the coverage-guided fuzzer in under two minutes, from the
+    // five bytes `sud:7`. RFC 3986 lets an absolute-URI carry a rootless
+    // path -- `scheme ":" path-rootless` -- so `sud:7` parses cleanly and
+    // get_path() hands back `7`, with no leading slash. Nothing here used to
+    // object, and split_path() drops empty segments, so `sud:7` was routed
+    // exactly as `/7` and answered 200.
+    //
+    // Nothing downstream was unsafe: locate() joins with its own separator,
+    // and the realpath and dev/ino containment checks decide what may be
+    // served regardless of what this returns. guard_for() splits the same way
+    // route_for() does, so a protected prefix stayed protected. What was
+    // wrong is narrower and still worth fixing -- a malformed target was
+    // answered rather than refused, and this function's whole contract is
+    // that what it returns is a path.
+    //
+    // The empty path is the one case that is not malformed: absolute-form
+    // `http://example.com` has no path component and means the root, which is
+    // what every other server makes of it.
+    if(encoded.empty()) {
+        encoded = "/";
+    }
+    else if(encoded[0] != '/') {
+        why = "a request target that is not an absolute path\n";
+
+        return false;
+    }
+
     const std::string lowered = util::http::fold(encoded);
 
     if(lowered.find("%2f") != std::string::npos ||
