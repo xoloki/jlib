@@ -34,9 +34,12 @@
 
 #include <iostream>
 #include <sstream>
+#include <set>
+#include <algorithm>
 #include <string>
 
 namespace http = jlib::util::http;
+namespace abnf = jlib::util::abnf;
 
 using jlib::util::URL;
 
@@ -301,6 +304,111 @@ static void what_rfc_9112_section_6_refuses() {
 
     ok("and the first",
        http::parse_head("HTTP/1.1 100 Continue\r\n\r\n").status() == 100);
+}
+
+/**
+ * Every rule in the HTTP grammar, drawn from and then read back.
+ *
+ * The property is one sentence -- **anything `generate()` produces,
+ * `try_parse()` on the same rule must accept in full** -- and it covers the
+ * grammar in a way no list of examples does: 191 productions, most of which
+ * no test had ever exercised because nothing in the library parses with them.
+ *
+ * Where it does not hold, the cause is the engine rather than either half of
+ * the round trip. This is a PEG: `alternation` takes the first branch that
+ * matches and `concat` never comes back to try another, and repetition is
+ * possessive. So a grammar whose earlier branch shadows a later one sharing a
+ * prefix has strings in its language it cannot read -- exactly what
+ * util_abnf_test's ordered_choice_is_not_unordered_alternation() asserts,
+ * there on RFC 5234's own `repeat` rule.
+ *
+ * The eight below are those cases in RFC 9110 and 9112. **None of them is
+ * parsed with at runtime**: jlib reads `chunk-size`, `credentials`,
+ * `field-line`, `field-value`, `method`, `request-line`, `status-line` and
+ * `WWW-Authenticate`, and nothing else. They are compiled because they came
+ * in the RFC text, and they are listed here so that a *new* divergence fails
+ * this test loudly instead of joining them unnoticed.
+ */
+static void every_rule_draws_something_it_can_read_back() {
+    std::cout << "\nthe grammar draws strings it can read back:\n";
+
+    // Ordered choice or possessive repetition makes these unreadable for some
+    // draws. `chunk` is the clearest and is unreadable for *every* draw:
+    // chunk-data is 1*OCTET, which swallows the CRLF that has to follow it.
+    const std::set<std::string> known = {
+        "Accept", "Range", "Vary", "chunk", "chunked-body",
+        "media-range", "range-set", "ranges-specifier",
+    };
+
+    const abnf::grammar& g = http::grammar();
+
+    std::size_t drawn = 0;
+    std::size_t rules = 0;
+    std::size_t skipped = 0;
+
+    std::vector<std::string> broke;
+    std::size_t chunk_failed = 0;
+
+    for(const std::string& name : g.rules()) {
+        const abnf::rule r = g.at(name);
+
+        bool first = true;
+        bool usable = true;
+
+        for(unsigned seed = 1; seed <= 300 && usable; seed++) {
+            abnf::generate_options o;
+            o.seed = seed;
+
+            std::string s;
+
+            try {
+                s = r.generate(o);
+            }
+            catch(const abnf::generate_error&) {
+                // Prose: an RFC production written in words has nothing to
+                // draw from. Asked rather than listed -- prose_rules() names
+                // the three productions themselves and not the rules that
+                // reach them, which is a distinction that has now cost two
+                // false findings elsewhere.
+                usable = false;
+                break;
+            }
+
+            if(first) { rules++; first = false; }
+
+            bool read_back = false;
+
+            try { read_back = static_cast<bool>(r.try_parse(s)); }
+            catch(const abnf::grammar_error&) { usable = false; break; }
+
+            drawn++;
+
+            if(read_back) continue;
+
+            if(name == "chunk") chunk_failed++;
+
+            if(known.count(name) == 0 &&
+               std::find(broke.begin(), broke.end(), name) == broke.end()) {
+                broke.push_back(name + " [" + s.substr(0, 40) + "]");
+            }
+        }
+
+        if(!usable && first) skipped++;
+    }
+
+    ok("every rule outside the eight known to the engine reads its own draw",
+       broke.empty(),
+       broke.empty() ? std::to_string(drawn) + " draws over " +
+                           std::to_string(rules) + " rules, " +
+                           std::to_string(skipped) + " prose-dependent"
+                     : broke[0]);
+
+    // Pinned because it is structural rather than a matter of which draw came
+    // up: possessive 1*OCTET can never leave the trailing CRLF unread. If
+    // this ever passes, the engine gained backtracking and the list above is
+    // out of date.
+    ok("chunk cannot read any draw of itself, on every seed",
+       chunk_failed == 300, std::to_string(chunk_failed) + "/300");
 }
 
 static void reading_a_head_off_a_stream() {
@@ -735,6 +843,7 @@ int main() {
     the_authentication_rules();
     a_status_line_and_a_field_section();
     what_rfc_9112_section_6_refuses();
+    every_rule_draws_something_it_can_read_back();
     reading_a_head_off_a_stream();
     reading_a_body();
     a_request_head_reads_the_same_way();

@@ -21,6 +21,8 @@
 #include <jlib/util/abnf.hh>
 
 #include <algorithm>
+#include <map>
+#include <random>
 #include <cctype>
 #include <ostream>
 #include <sstream>
@@ -151,6 +153,69 @@ public:
     }
 };
 
+// ------------------------------------------------------------- generation
+
+/** "cannot be reached at all", for the shortest-string fixpoint below. */
+static const std::size_t GEN_INF = static_cast<std::size_t>(-1) / 4;
+
+static std::size_t add_capped(std::size_t a, std::size_t b)
+{
+    if(a >= GEN_INF || b >= GEN_INF) return GEN_INF;
+
+    const std::size_t s = a + b;
+
+    return s >= GEN_INF ? GEN_INF : s;
+}
+
+/**
+ * Everything one draw needs.
+ *
+ * `shortest` is the length of the briefest string each named rule can
+ * produce, solved to a fixed point before any drawing starts. It is what
+ * makes termination a decision rather than a hope: at an alternation that has
+ * gone deep enough, the branch with the smallest value is the way out, and a
+ * rule whose value stayed GEN_INF cannot be drawn from at all.
+ *
+ * Held here and not on the grammar, for the reason context is: a frozen
+ * grammar is read-only so several threads can parse against it at once, and
+ * anything cached on it would end that.
+ */
+struct gen_context {
+    std::mt19937_64 rng;
+    const generate_options* opt = 0;
+    std::size_t depth = 0;
+
+    std::map<const slot*, std::size_t> shortest;
+
+    /**
+     * A number below n.
+     *
+     * **Modulo off the engine rather than std::uniform_int_distribution**,
+     * which looks like the careless choice and is the deliberate one. The
+     * standard specifies mt19937_64's output sequence exactly; it does not
+     * specify how a distribution maps that sequence onto a range, and libc++
+     * and libstdc++ do it differently. Measured: the same seed drew "cFM-98"
+     * on macOS and "Ro-0" in the container.
+     *
+     * A draw that is not the same string everywhere makes the seed useless
+     * for reproducing a reported failure, and makes any test that pins which
+     * rules round-trip a platform-dependent one. The modulo bias over a
+     * handful of branches is nothing beside that.
+     */
+    std::size_t pick(std::size_t n)
+    {
+        if(n <= 1) return 0;
+
+        return static_cast<std::size_t>(rng() % n);
+    }
+
+    /** Take the shortest way out: too deep, or already long enough. */
+    bool tight(std::size_t produced) const
+    {
+        return depth >= opt->max_depth || produced >= opt->max_size;
+    }
+};
+
 // ------------------------------------------------------------------ the node
 
 class expr {
@@ -189,6 +254,44 @@ public:
      */
     virtual bool pure() const { return true; }
 
+    /**
+     * The length of the shortest string this can match, GEN_INF for one that
+     * cannot be drawn from. Named rules are read from the solved table rather
+     * than recursed into, so this terminates on a recursive grammar.
+     */
+    virtual std::size_t shortest(const std::map<const slot*,
+                                                std::size_t>& sm) const
+    {
+        (void) sm;
+
+        return GEN_INF;
+    }
+
+    /** Append one string this can match. */
+    virtual void gen(gen_context& g, std::string& out) const
+    {
+        (void) g;
+        (void) out;
+
+        std::ostringstream os;
+
+        write(os, 0);
+
+        throw generate_error("cannot generate from \"" + os.str() +
+                             "\": it can only be run forwards");
+    }
+
+    /** Every named rule reachable from here, for the fixpoint. */
+    virtual void slots(std::set<const slot*>& out,
+                       std::vector<const slot*>& fresh) const
+    {
+        std::vector<const expr*> ks;
+
+        kids(ks);
+
+        for(const expr* k : ks) k->slots(out, fresh);
+    }
+
     /** Some counted() or backref() names this node as its source. */
     mutable bool m_tracked = false;
 };
@@ -224,6 +327,38 @@ public:
 
     virtual bool nullable(std::set<const slot*>&) const { return false; }
     virtual void leftmost(std::set<const slot*>&, std::set<const slot*>&) const {}
+
+
+    virtual std::size_t shortest(const std::map<const slot*,
+                                                std::size_t>&) const
+    {
+        return m_set.any() ? 1 : GEN_INF;
+    }
+
+    virtual void gen(gen_context& g, std::string& out) const
+    {
+        const std::size_t n = m_set.count();
+
+        if(n == 0)
+            throw generate_error("a character class matching nothing: " +
+                                 m_label);
+
+        // Uniform over the set, so a draw explores the whole class rather
+        // than settling on its first member.
+        std::size_t k = g.pick(n);
+
+        for(std::size_t c = 0; c < 256; c++) {
+            if(!m_set.test(c)) continue;
+
+            if(k == 0) {
+                out += static_cast<char>(static_cast<unsigned char>(c));
+
+                return;
+            }
+
+            k--;
+        }
+    }
 
 protected:
     std::bitset<256> m_set;
@@ -266,6 +401,37 @@ public:
     virtual bool nullable(std::set<const slot*>&) const { return m_text.empty(); }
     virtual void leftmost(std::set<const slot*>&, std::set<const slot*>&) const {}
 
+
+    virtual std::size_t shortest(const std::map<const slot*,
+                                                std::size_t>&) const
+    {
+        return m_text.size();
+    }
+
+    virtual void gen(gen_context& g, std::string& out) const
+    {
+        if(!m_fold) {
+            out += m_text;
+
+            return;
+        }
+
+        // **A folded literal is drawn in a random case**, because that is
+        // exactly the property: RFC 5234 2.3 makes a quoted string
+        // case-insensitive, so every casing of it is a string the rule
+        // matches. Emitting only the spelling in the grammar would never put
+        // that claim to the test.
+        for(const char c : m_text) {
+            const unsigned char u = static_cast<unsigned char>(c);
+
+            if(std::isalpha(u) && g.pick(2))
+                out += static_cast<char>(std::isupper(u) ? std::tolower(u)
+                                                         : std::toupper(u));
+            else
+                out += c;
+        }
+    }
+
 protected:
     std::string label() const
     {
@@ -296,6 +462,18 @@ public:
 
     virtual bool nullable(std::set<const slot*>&) const { return m_succeed; }
     virtual void leftmost(std::set<const slot*>&, std::set<const slot*>&) const {}
+
+
+    virtual std::size_t shortest(const std::map<const slot*,
+                                                std::size_t>&) const
+    {
+        return m_succeed ? 0 : GEN_INF;
+    }
+
+    virtual void gen(gen_context&, std::string&) const
+    {
+        if(!m_succeed) throw generate_error("a node that matches nothing");
+    }
 
 protected:
     bool m_succeed;
@@ -374,6 +552,22 @@ public:
 
     const std::vector<ptr>& parts() const { return m_parts; }
 
+
+    virtual std::size_t shortest(const std::map<const slot*,
+                                                std::size_t>& sm) const
+    {
+        std::size_t n = 0;
+
+        for(const ptr& p : m_parts) n = add_capped(n, p->shortest(sm));
+
+        return n;
+    }
+
+    virtual void gen(gen_context& g, std::string& out) const
+    {
+        for(const ptr& p : m_parts) p->gen(g, out);
+    }
+
 protected:
     std::vector<ptr> m_parts;
 };
@@ -445,6 +639,56 @@ public:
     }
 
     const std::vector<ptr>& branches() const { return m_branches; }
+
+
+    virtual std::size_t shortest(const std::map<const slot*,
+                                                std::size_t>& sm) const
+    {
+        std::size_t best = GEN_INF;
+
+        for(const ptr& b : m_branches) best = std::min(best, b->shortest(sm));
+
+        return best;
+    }
+
+    virtual void gen(gen_context& g, std::string& out) const
+    {
+        // Deep enough, or long enough: take whichever branch reaches a
+        // terminal soonest. This is what stops a recursive rule running away,
+        // and it is a decision rather than a guess because `shortest` was
+        // solved to a fixed point before any drawing began.
+        if(g.tight(out.size())) {
+            const expr* best = 0;
+            std::size_t least = GEN_INF;
+
+            for(const ptr& b : m_branches) {
+                const std::size_t n = b->shortest(g.shortest);
+
+                if(n < least) { least = n; best = b.get(); }
+            }
+
+            if(best == 0)
+                throw generate_error("no branch of an alternation can be "
+                                     "generated");
+
+            best->gen(g, out);
+
+            return;
+        }
+
+        // Otherwise uniformly among the branches that can be drawn at all --
+        // one that cannot would abort a draw the grammar permits.
+        std::vector<const expr*> open;
+
+        for(const ptr& b : m_branches)
+            if(b->shortest(g.shortest) < GEN_INF) open.push_back(b.get());
+
+        if(open.empty())
+            throw generate_error("no branch of an alternation can be "
+                                 "generated");
+
+        open[g.pick(open.size())]->gen(g, out);
+    }
 
 protected:
     std::vector<ptr> m_branches;
@@ -535,6 +779,50 @@ public:
     std::size_t min() const { return m_min; }
     std::size_t max() const { return m_max; }
 
+
+    virtual std::size_t shortest(const std::map<const slot*,
+                                                std::size_t>& sm) const
+    {
+        if(m_min == 0) return 0;
+
+        const std::size_t one = m_body->shortest(sm);
+
+        if(one >= GEN_INF) return GEN_INF;
+
+        std::size_t n = 0;
+
+        for(std::size_t i = 0; i < m_min; i++) n = add_capped(n, one);
+
+        return n;
+    }
+
+    virtual void gen(gen_context& g, std::string& out) const
+    {
+        if(m_body->shortest(g.shortest) >= GEN_INF) {
+            // *rule over something undrawable is still drawable: as none.
+            if(m_min == 0) return;
+
+            throw generate_error("a required repetition cannot be generated");
+        }
+
+        std::size_t n = m_min;
+
+        if(!g.tight(out.size())) {
+            // A few, not many: a *rule nested inside another multiplies
+            // rather than adds, so a generous count here is a long string
+            // two levels up.
+            const std::size_t room = m_max > m_min ? m_max - m_min : 0;
+
+            n += g.pick(std::min(room, g.opt->max_repeat) + 1);
+        }
+
+        for(std::size_t i = 0; i < n; i++) {
+            if(i >= m_min && out.size() >= g.opt->max_size) break;
+
+            m_body->gen(g, out);
+        }
+    }
+
 protected:
     ptr m_body;
     std::size_t m_min;
@@ -617,6 +905,40 @@ public:
 
     const std::shared_ptr<slot>& cell() const { return m_slot; }
 
+
+    virtual std::size_t shortest(const std::map<const slot*,
+                                                std::size_t>& sm) const
+    {
+        // Read from the table rather than recursed into: that is what makes
+        // this terminate on a grammar that refers to itself.
+        const std::map<const slot*, std::size_t>::const_iterator i =
+            sm.find(m_slot.get());
+
+        return i == sm.end() ? GEN_INF : i->second;
+    }
+
+    virtual void gen(gen_context& g, std::string& out) const
+    {
+        if(!m_slot->body)
+            throw generate_error("rule \"" + m_slot->name +
+                                 "\" is referenced but never defined");
+
+        g.depth++;
+
+        m_slot->body->gen(g, out);
+
+        g.depth--;
+    }
+
+    virtual void slots(std::set<const slot*>& out,
+                       std::vector<const slot*>& fresh) const
+    {
+        if(out.count(m_slot.get())) return;
+
+        out.insert(m_slot.get());
+        fresh.push_back(m_slot.get());
+    }
+
 protected:
     std::shared_ptr<slot> m_slot;
 };
@@ -682,6 +1004,18 @@ public:
     virtual bool pure() const { return m_body->pure(); }
 
     const std::string& name() const { return m_name; }
+
+
+    virtual std::size_t shortest(const std::map<const slot*,
+                                                std::size_t>& sm) const
+    {
+        return m_body->shortest(sm);
+    }
+
+    virtual void gen(gen_context& g, std::string& out) const
+    {
+        m_body->gen(g, out);
+    }
 
 protected:
     std::string m_name;
@@ -1258,6 +1592,72 @@ void rule::define_alternative(const rule& more)
     branches.push_back(more.node());
 
     r->cell()->body = std::make_shared<detail::alternation>(std::move(branches));
+}
+
+std::string rule::generate() const
+{
+    return generate(generate_options());
+}
+
+std::string rule::generate(const generate_options& o) const
+{
+    if(!m_expr) throw generate_error("an empty rule cannot be generated");
+
+    detail::gen_context g;
+
+    g.opt = &o;
+    g.rng.seed(o.seed);
+
+    // **Every named rule reachable from here**, breadth-first. reference::slots
+    // deliberately does not recurse into the body it names -- that is what the
+    // queue below is for, and it is why a grammar that refers to itself does
+    // not run away here.
+    std::set<const detail::slot*> seen;
+    std::vector<const detail::slot*> queue;
+
+    m_expr->slots(seen, queue);
+
+    for(std::size_t i = 0; i < queue.size(); i++) {
+        if(queue[i]->body) queue[i]->body->slots(seen, queue);
+    }
+
+    // **The shortest string each rule can produce, to a fixed point.**
+    //
+    // Everything starts unreachable and is relaxed until nothing improves,
+    // which is the standard shortest-path shape and terminates for the same
+    // reason: each pass either lowers a value or ends the loop. What it buys
+    // is a generator that can always find its way out of a recursive rule --
+    // at an alternation that has gone deep enough, the branch with the
+    // smallest value is by construction the one that terminates soonest.
+    for(const detail::slot* s : seen) g.shortest[s] = detail::GEN_INF;
+
+    bool changed = true;
+
+    while(changed) {
+        changed = false;
+
+        for(const detail::slot* s : seen) {
+            if(!s->body) continue;
+
+            const std::size_t v = s->body->shortest(g.shortest);
+
+            if(v < g.shortest[s]) {
+                g.shortest[s] = v;
+                changed = true;
+            }
+        }
+    }
+
+    if(m_expr->shortest(g.shortest) >= detail::GEN_INF) {
+        throw generate_error("nothing can be drawn from \"" +
+                             (name().empty() ? to_abnf() : name()) + "\"");
+    }
+
+    std::string out;
+
+    m_expr->gen(g, out);
+
+    return out;
 }
 
 std::string rule::to_abnf() const
