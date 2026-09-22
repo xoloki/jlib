@@ -1311,6 +1311,18 @@ static void a_certificate_per_name() {
         { "a.example", "a.example", "a name with a certificate of its own" },
         { "A.EXAMPLE", "a.example", "and the same name shouted, since DNS is "
                                     "not case-sensitive" },
+        // **RFC 1034 3.1: the same name.**  RFC 6066 3 says an SNI HostName
+        // "MUST NOT" carry the trailing dot, so a conforming client strips
+        // it -- but a server that only works for conforming clients is a
+        // server that fails for the others, and `Host` accepts the dot as of
+        // the previous branch. Refusing here while accepting there means the
+        // same URL works over http and fails over https.
+        { "a.example.", "a.example", "and fully qualified, with the root dot" },
+
+        // One dot, not a loop, matching what authority_of does with Host.
+        { "a.example..", "default.example",
+          "but an empty label is a different name" },
+
         { "other.example", "default.example",
           "a name nothing claimed keeps the default, rather than failing" },
         { 0, "default.example", "and so does a client that sends no SNI" }

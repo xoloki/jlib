@@ -1025,6 +1025,27 @@ namespace {
          .field("Content-Length", len.str())
          .field("Last-Modified", http_date(f.st.st_mtime))
          .field("ETag", etag_for(f.st))
+
+         // **The header that makes the line above mean something.**
+         //
+         // `type_by_extension` decides from three characters at the end of a
+         // name, and its own comment leans on the consequence: unknown means
+         // application/octet-stream, "the one answer that cannot be wrong in
+         // a dangerous direction: a browser will not execute it."
+         //
+         // That is true only with this. Without it a browser may sniff past
+         // the declared type and decide for itself -- which is exactly the
+         // decision the fallback exists to take away from it. A .txt holding
+         // markup, an upload with a harmless extension, a file whose name
+         // says one thing and whose first bytes say another: sniffing turns
+         // any of those into script in the origin's own context.
+         //
+         // Sent only where a type was guessed, which is here. A handler that
+         // sets its own Content-Type knows what it is serving and can say so
+         // itself; imposing a policy header on every response a route builds
+         // would be the library deciding something that belongs to whoever
+         // wrote the route.
+         .field("X-Content-Type-Options", "nosniff")
          // RFC 9110 14.3: advertised where a client looks before deciding
          // whether seeking is possible at all.
          .field("Accept-Ranges", "bytes");
