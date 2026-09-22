@@ -534,6 +534,137 @@ static void the_core_rules_are_the_ones_in_appendix_b() {
     ok("CTL includes DEL",    matches(core::CTL(), std::string(1, '\x7f')));
 }
 
+static void a_rule_draws_strings_it_can_match() {
+    std::cout << "\ngeneration, and the round trip:\n";
+
+    // **The property**: anything generate() returns, try_parse() accepts in
+    // full. It is the one claim worth making about a generator, and it is the
+    // reason this exists -- a generator nobody checks is a generator that
+    // drifts away from the grammar it is supposed to speak.
+    {
+        const rule r = (lit("GET") | lit("POST")) >> lit(" ") >> +core::DIGIT();
+
+        bool all = true;
+        bool saw_get = false;
+        bool saw_post = false;
+
+        for(unsigned seed = 1; seed <= 200; seed++) {
+            generate_options o;
+            o.seed = seed;
+
+            const std::string s = r.generate(o);
+
+            if(!matches(r, s)) { all = false; break; }
+
+            if(s.compare(0, 3, "GET") == 0)  saw_get = true;
+            if(s.compare(0, 4, "POST") == 0) saw_post = true;
+        }
+
+        ok("200 draws all parse again", all);
+
+        // A generator that always took the first branch would satisfy the
+        // round trip and test nothing, so the draw has to be seen varying.
+        ok("and both branches are drawn", saw_get && saw_post);
+    }
+
+    // Same seed, same string. A failure that cannot be reproduced cannot be
+    // fixed, and the seed is the whole of the reproduction.
+    {
+        const rule r = +core::ALPHA() >> lit("-") >> +core::DIGIT();
+
+        generate_options o;
+        o.seed = 12345;
+
+        ok("the same seed draws the same string",
+           r.generate(o) == r.generate(o), r.generate(o));
+
+        generate_options other;
+        other.seed = 999;
+
+        ok("and a different seed does not",  r.generate(o) != r.generate(other));
+    }
+
+    // **Recursion terminates because the shortest way out is known**, not
+    // because the draw got lucky. This rule can nest forever; the fixed-point
+    // table is what makes the generator take the exit once it is deep enough.
+    {
+        grammar g = compile("nest = %x28 nest %x29 / %x78\r\n");
+        g.check();
+
+        bool all = true;
+        std::size_t longest = 0;
+
+        for(unsigned seed = 1; seed <= 100; seed++) {
+            generate_options o;
+            o.seed = seed;
+            o.max_depth = 8;
+
+            const std::string s = g.at("nest").generate(o);
+
+            longest = std::max(longest, s.size());
+
+            if(!matches(g.at("nest"), s)) { all = false; break; }
+        }
+
+        ok("a self-referential rule terminates and round-trips", all,
+           "longest draw " + std::to_string(longest) + " bytes");
+    }
+
+    // A case-insensitive literal matches every casing, so the draw varies the
+    // case -- and the round trip is what says ilit() agrees.
+    {
+        const rule r = ilit("chunked");
+
+        bool all = true;
+        bool varied = false;
+
+        for(unsigned seed = 1; seed <= 100; seed++) {
+            generate_options o;
+            o.seed = seed;
+
+            const std::string s = r.generate(o);
+
+            if(!matches(r, s)) { all = false; break; }
+            if(s != "chunked") varied = true;
+        }
+
+        ok("a folded literal is drawn in mixed case, and still parses",
+           all && varied);
+    }
+
+    // What cannot be run backwards says so rather than guessing. A predicate
+    // is an arbitrary function; there is nothing to invert.
+    {
+        bool threw = false;
+
+        try {
+            (void) where("anything",
+                         [](std::string_view, std::size_t&) { return true; })
+                .generate();
+        }
+        catch(const generate_error&) { threw = true; }
+
+        ok("a predicate cannot be generated, and says so", threw);
+    }
+
+    // A rule that refers only to itself has no shortest string, so the
+    // fixed point leaves it unreachable and generate() refuses rather than
+    // recursing until the stack runs out.
+    {
+        grammar g;
+
+        g.define("loop", g["loop"]);
+
+        bool threw = false;
+
+        try { (void) g.at("loop").generate(); }
+        catch(const generate_error&) { threw = true; }
+        catch(const grammar_error&)  { threw = true; }
+
+        ok("a rule with no way out is refused, not chased", threw);
+    }
+}
+
 static void what_a_parse_costs() {
     std::cout << "\nwhat it costs:\n";
 
@@ -606,6 +737,7 @@ int main() {
     the_depth_guard_fires_instead_of_the_stack();
     a_grammar_serializes_to_abnf();
     the_core_rules_are_the_ones_in_appendix_b();
+    a_rule_draws_strings_it_can_match();
     what_a_parse_costs();
 
     // What a green run here does NOT establish.

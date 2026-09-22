@@ -28,6 +28,7 @@
 #include <memory>
 #include <set>
 #include <stdexcept>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -209,6 +210,40 @@ struct options {
     std::size_t max_depth = 1000;
 };
 
+// ------------------------------------------------------------ generation
+
+/**
+ * How to draw a string from a rule.
+ *
+ * Generation is parsing run backwards: at an alternation pick a branch, at a
+ * repetition pick a count, at a terminal emit bytes. The bounds below are
+ * what keep that terminating -- `URI-reference` nests happily, and a draw
+ * that always took the interesting branch would not come back.
+ */
+struct generate_options {
+    /** Same seed, same string.  A failure has to be reproducible. */
+    std::uint64_t seed = 1;
+
+    /**
+     * Nested rule references before generation starts preferring whichever
+     * branch reaches a terminal soonest.  Not an error: the draw gets
+     * shorter, it does not fail.
+     */
+    std::size_t max_depth = 24;
+
+    /** Repetitions drawn for an unbounded `*rule`. */
+    std::size_t max_repeat = 3;
+
+    /** Past this many bytes, generation takes the shortest way out. */
+    std::size_t max_size = 4096;
+};
+
+/** A rule that cannot be drawn from: prose, a predicate, a back-reference. */
+class generate_error : public exception {
+public:
+    explicit generate_error(const std::string& what) : exception(what) {}
+};
+
 // --------------------------------------------------------------------- match
 
 /**
@@ -352,6 +387,25 @@ public:
     /** As parse(), but a mismatch is a return value rather than a throw. */
     parse_result try_parse(std::string_view in) const;
     parse_result try_parse(std::string_view in, const options& o) const;
+
+    /**
+     * Draw a string this rule can match.
+     *
+     * **The round-trip property is the point**: anything this returns,
+     * try_parse() on the same rule must accept in full. Where that fails it
+     * is worth looking at rather than papering over -- this engine takes the
+     * first alternative that matches and does not come back to try another
+     * (see `alternation::parse`), so a grammar whose earlier branch shadows a
+     * later one sharing a prefix has strings in its language that it cannot
+     * read. That is a property of the grammar as written, and for a grammar
+     * pasted from an RFC it means refusing input the RFC allows.
+     *
+     * Throws generate_error for a rule that cannot be drawn from: one that
+     * reaches an unimplemented prose-val, a predicate, a counted length or a
+     * back-reference, none of which can be run backwards.
+     */
+    std::string generate() const;
+    std::string generate(const generate_options& o) const;
 
     /** Canonical ABNF for this rule.  A serialization, not the source text. */
     std::string to_abnf() const;
