@@ -338,6 +338,16 @@ private:
     std::string   m_path;
     std::sig_atomic_t m_acted_on = 0;
 
+    /**
+     * Whether the last write failed and has been reported.
+     *
+     * Writer thread only, like everything else below. One message per outage
+     * rather than per line: the failure mode this exists for is a full disk,
+     * and a server that answered it by writing the same sentence to the
+     * journal a thousand times a second would have made the problem worse.
+     */
+    bool m_complained = false;
+
     // One worker, so the stream has exactly one owner.  A pointer because a
     // job_queue is not movable and this is created only when a path is given.
     std::unique_ptr<jlib::sys::job_queue> m_writer;
@@ -1685,10 +1695,64 @@ inline void logfile::write(const std::string& line) {
     m_writer->post([this, line] {
         reopen_if_asked();
 
-        if(!m_out.is_open()) return;
+        // **A failed stream stays failed.**  `badbit` is sticky: one write
+        // that cannot complete -- a full disk, a quota, an I/O error -- puts
+        // the stream in a state where every later write is silently
+        // discarded, including after the disk is freed. Measured: five lines
+        // written into a full disk and five more after it emptied produced
+        // nothing at all, and only a SIGHUP brought it back, because
+        // reopen_if_asked() happens to clear and reopen.
+        //
+        // That made logging depend on log *rotation* to recover, which is the
+        // same accidental-recovery shape as a reload restoring a reopen. So:
+        // try to come back on the next line rather than on the next rotation.
+        if(m_out.is_open() && !m_out.good()) {
+            m_out.close();
+            m_out.clear();
+            m_out.open(m_path.c_str(), std::ios::out | std::ios::app);
+        }
+
+        // **A log that cannot be opened is as silent as one that cannot be
+        // written**, and reaches here by a different door: the directory
+        // removed, or a rotation into a path that is no longer writable.
+        // Without this the return below is the end of it -- no line, no
+        // complaint, and nothing to distinguish a dead log from a quiet one.
+        if(!m_out.is_open()) {
+            if(!m_complained) {
+                m_complained = true;
+
+                std::cerr << "jhttpd: cannot open \"" << m_path
+                          << "\": " << std::strerror(errno)
+                          << " -- log lines are being lost\n";
+            }
+
+            return;
+        }
 
         m_out << line << "\n";
         m_out.flush();
+
+        // **Reported where it can be**, which is not this file.
+        //
+        // Under the unit stderr is the journal, so a log that cannot be
+        // written says so somewhere an operator will find -- and says it
+        // once, because a full disk would otherwise fill the journal with the
+        // news that it cannot fill the log.
+        if(!m_out.good()) {
+            if(!m_complained) {
+                m_complained = true;
+
+                std::cerr << "jhttpd: cannot write \"" << m_path
+                          << "\": " << std::strerror(errno)
+                          << " -- log lines are being lost\n";
+            }
+        }
+        else if(m_complained) {
+            m_complained = false;
+
+            std::cerr << "jhttpd: writing \"" << m_path
+                      << "\" again\n";
+        }
     });
 }
 

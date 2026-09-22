@@ -21,6 +21,7 @@
 #ifndef JLIB_SYS_TLS_HH
 #define JLIB_SYS_TLS_HH
 
+#include <ctime>
 #include <exception>
 #include <memory>
 #include <string>
@@ -160,6 +161,25 @@ public:
                   const std::string& key_file);
 
     bool empty() const { return !m_ctx; }
+
+    /**
+     * When this context's certificate stops being valid, or 0 if there is
+     * none to ask about.
+     *
+     * **A server does not notice its own certificate expiring.** OpenSSL will
+     * serve one happily; it is the client that refuses, so the failure looks
+     * like a healthy server and a world full of broken browsers. For a
+     * deployment where something renews unattended, a renewal that quietly
+     * stopped working is invisible until the day it matters.
+     *
+     * The default certificate only -- a context with named sites has one per
+     * site, and each was loaded through `server()` so each could be asked in
+     * turn if a caller wanted to.
+     *
+     * @return seconds since the epoch, or 0 if the certificate has no
+     *         readable expiry
+     */
+    std::time_t expires() const;
     explicit operator bool() const { return static_cast<bool>(m_ctx); }
 
     /** Borrowed; null when empty(). */
