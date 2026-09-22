@@ -331,6 +331,39 @@ static void the_name_asked_for_is_the_name_on_disk(http::server& s) {
  * raw request would refuse `/static/./page.html` -- which is a correct request
  * and worked before the audit.
  */
+/**
+ * A guessed type is declared as final (#270 phase 3).
+ *
+ * `type_by_extension` decides from three characters at the end of a name, and
+ * its own comment rests on the consequence: unknown means
+ * application/octet-stream, "the one answer that cannot be wrong in a
+ * dangerous direction: a browser will not execute it."
+ *
+ * That holds only if the browser is told not to sniff. Without
+ * `X-Content-Type-Options: nosniff` it may decide for itself, which is the
+ * decision the fallback exists to take away -- so the header is what makes
+ * the claim in that comment true, and it had never been sent.
+ */
+static void a_guessed_type_is_not_a_suggestion(http::server& s) {
+    std::cout << "\ntypes a browser may not second-guess:\n";
+
+    const std::string served = get(s.port(), "/static/page.html");
+
+    ok("  a served file says its type is not to be sniffed",
+       util::http::fold(served).find("x-content-type-options: nosniff")
+           != std::string::npos,
+       served.substr(0, served.find("\r\n\r\n")));
+
+    // A route that sets its own type has said what it is serving, and the
+    // library imposing a policy header there would be deciding something
+    // belonging to whoever wrote the route.
+    const std::string routed = get(s.port(), "/ok");
+
+    ok("  and a route that names its own type is left alone",
+       util::http::fold(routed).find("x-content-type-options")
+           == std::string::npos);
+}
+
 static void ordinary_paths_still_work(http::server& s) {
     std::cout << "\nand what should still work, does:\n";
 
@@ -953,6 +986,7 @@ static void everything(http::server& s, const tree& t) {
     a_control_character_in_the_target(s);
     the_name_asked_for_is_the_name_on_disk(s);
     ordinary_paths_still_work(s);
+    a_guessed_type_is_not_a_suggestion(s);
     heard_by_the_operator(s);
     too_many_header_fields(s);
     what_site_a_request_names(s);

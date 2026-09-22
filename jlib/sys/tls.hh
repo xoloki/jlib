@@ -131,6 +131,29 @@ public:
      * A client that sends no SNI at all also gets the default, which is what
      * every client did before the extension existed.
      *
+     * The name is matched case-insensitively and without a trailing root dot,
+     * at both ends -- the name registered here and the name a client asks
+     * for. RFC 6066 3 says a client MUST NOT send the dot, but `Host` accepts
+     * it at the HTTP layer and a server that disagreed with itself would make
+     * one URL work over http and fail over https.
+     *
+     * ## **SNI chooses the certificate. It does not choose the content.**
+     *
+     * The name a client puts in SNI reaches this callback and goes no
+     * further: nothing carries it up to whatever is reading the request, so
+     * nothing can compare it with `Host`. A client may take one site's
+     * certificate and then ask for another site's pages, and will get them.
+     *
+     * That is deliberate and it is what nginx does; Apache calls the
+     * alternative `SSLStrictSNIVHostCheck` and leaves it off. It is safe
+     * because authorisation does not rest on the certificate: a guard is
+     * keyed on the name in the request, so a guarded site stays guarded
+     * whichever certificate the connection was established with.
+     *
+     * What it does mean is that **"reachable only over its own certificate"
+     * is not a property this offers.** Requiring the two to agree would need
+     * the SNI name plumbed up to the request layer, which nothing does today.
+     *
      * @throws exception if the pair cannot be read or does not match
      */
     void add_site(const std::string& name, const std::string& cert_file,

@@ -135,6 +135,38 @@ tls_context tls_context::server(const std::string& cert_file,
     // to start.
     SSL_CTX_set_options(ctx, SSL_OP_NO_RENEGOTIATION);
 
+    // **Session tickets: OpenSSL's defaults, deliberately, and what that
+    // means for forward secrecy.**  Measured rather than assumed:
+    //
+    //     SSL_OP_NO_TICKET   not set   -- tickets are issued
+    //     max_early_data     0         -- 0-RTT off, so no replay question
+    //     num_tickets        2         -- TLS 1.3 issues two per handshake
+    //
+    // The ticket key belongs to this SSL_CTX and is generated here. It is
+    // never rotated while the context lives, which is the forward-secrecy
+    // question #240 deferred to #270: somebody who later obtains that key can
+    // decrypt any session resumed with a ticket it issued.
+    //
+    // **The key's lifetime is the context's**, so it rotates whenever a
+    // caller builds a new one. jhttpd rebuilds on every SIGHUP, and its
+    // logrotate snippet reloads daily -- so in that deployment the window is
+    // about a day, which is better than nginx's default of rotating only on
+    // reload. That is worth knowing *and* worth distrusting: it is a property
+    // of how often something unrelated happens to restart the context, not a
+    // guarantee this code makes. A server nobody reloads keeps one key for
+    // months.
+    //
+    // Left on rather than disabled. SSL_OP_NO_TICKET would make resumption
+    // impossible and forward secrecy exact, which is the stricter choice --
+    // but it is not what Apache or nginx do, 0-RTT is already off so the
+    // replay hazard is absent, and a full handshake per connection is a cost
+    // paid by every honest client to narrow a window that requires the
+    // server's memory to have been read in the first place.
+    //
+    // If that trade is ever revisited, the middle option is a rotating key
+    // via SSL_CTX_set_tlsext_ticket_key_evp_cb, which keeps resumption and
+    // bounds the window explicitly instead of incidentally.
+
     return held;
 }
 
@@ -163,12 +195,37 @@ namespace {
         return i;
     }
 
+    /**
+     * A DNS name as a map key: lowercased, and without the root dot.
+     *
+     * **Both ends go through this** -- the name a config registered and the
+     * name a client asked for -- because a key and a query normalised
+     * differently is a site nothing can reach.
+     *
+     * The dot: RFC 1034 3.1 makes "a.example." the fully qualified form of
+     * "a.example", one name. RFC 6066 3 says an SNI HostName MUST NOT carry
+     * it, so a conforming client strips it -- but a server that works only
+     * for conforming clients fails for the rest, and `Host` accepts the dot
+     * at the HTTP layer. Refusing it here while accepting it there makes one
+     * URL work over http and fail over https, which is a difference nobody
+     * debugs quickly.
+     *
+     * It also fixes the direction likelier to bite: a config writing
+     * `server_name a.example.;` would otherwise key this map with a dot no
+     * client sends, and the site would be unreachable with no error anywhere.
+     *
+     * One dot, not a loop. "a.example.." has an empty label and stays a
+     * different name, which is what authority_of does with Host.
+     */
     std::string folded(const char* s) {
         std::string out;
 
         for(const char* p = s; p && *p; p++) {
             out += char(*p >= 'A' && *p <= 'Z' ? *p + ('a' - 'A') : *p);
         }
+
+        if(out.size() > 1 && out[out.size() - 1] == '.')
+            out.erase(out.size() - 1);
 
         return out;
     }
