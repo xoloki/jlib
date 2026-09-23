@@ -68,11 +68,15 @@ docker build -q $platform -t "$tag" "$here" >/dev/null
 # cross build died in lto_main() with the internal compiler error this flag
 # exists to avoid -- twenty minutes in, with the flag visibly present in the
 # script and visibly absent from the compile line.
+# **The build's output is not filtered.** An earlier version piped
+# dpkg-buildpackage through `tail -40`, which prints nothing until the command
+# ends -- so a build twenty minutes in and a build that died twenty minutes ago
+# produced the same empty log, and the second was reported as the first.
 # shellcheck disable=SC2086
 cid=$(docker create $platform -e DEB_BUILD_MAINT_OPTIONS="$maint" "$tag" sh -c "
     cd /src/jlib &&
     echo \"DEB_BUILD_MAINT_OPTIONS=\$DEB_BUILD_MAINT_OPTIONS\" &&
-    dpkg-buildpackage -b -us -uc 2>&1 | tail -40 &&
+    dpkg-buildpackage -b -us -uc 2>&1 &&
     mkdir -p /debs && cp /src/*.deb /debs/
 ")
 
