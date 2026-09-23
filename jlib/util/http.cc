@@ -642,7 +642,24 @@ namespace {
         if(!grammar().at("chunk-size").try_parse(size_text))
             throw error("not a chunk size: \"" + size_text + "\"");
 
-        return std::stoull(size_text, 0, 16);
+        // **`chunk-size = 1*HEXDIG` says any number of digits** (#354), so
+        // the grammar check above passes for a line of twenty f's and stoull
+        // then throws std::out_of_range. Content-Length has carried this
+        // guard since it was written -- the same hazard in the other framing
+        // went without one.
+        //
+        // What escaped was an exception no caller is told about: read_body
+        // documents http::error and nothing else, the server's framing catch
+        // names that type, and the connection was dropped by the outermost
+        // handler where a 400 was intended. Found by the body-reader fuzz
+        // target in under thirty seconds, from `fffff...\r\nx\r\n0`.
+        try {
+            return std::stoull(size_text, 0, 16);
+        }
+        catch(const std::exception&) {
+            throw error("a chunk size that does not fit: \"" + size_text +
+                        "\"");
+        }
     }
 
     void refuse_oversized_chunk(std::size_t so_far, std::size_t n,

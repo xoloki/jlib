@@ -16,7 +16,7 @@ cd /src/jlib
 
 status=0
 
-for target in head_request response_head target_path abnf_rules; do
+for target in head_request grammar_head response_head target_path abnf_rules body_reader; do
     [ -n "$only" ] && [ "$only" != "$target" ] && continue
 
     echo "=== $target ==="
