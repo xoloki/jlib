@@ -21,8 +21,15 @@
 #include <jlib/sys/tls.hh>
 
 #include <openssl/err.h>
+#include <chrono>
+#include <cstring>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <openssl/core_names.h>
+#include <openssl/evp.h>
+#include <openssl/params.h>
+#include <openssl/rand.h>
 #include <openssl/ssl.h>
 
 namespace jlib {
@@ -80,6 +87,173 @@ tls_context tls_context::client() {
     return held;
 }
 
+namespace {
+
+    /**
+     * The key a session ticket is encrypted with, and the one before it.
+     *
+     * **Rotation, so the forward-secrecy window is stated rather than
+     * inherited.** OpenSSL generates one ticket key when an SSL_CTX is built
+     * and never changes it, so the window is however long the context lives.
+     * For jhttpd that came to "until somebody reloads it" -- daily where
+     * logrotate reloads, months otherwise -- and neither was a promise this
+     * code made. Somebody who later reads that key out of the process can
+     * decrypt every session resumed with a ticket it issued.
+     *
+     * Two keys, because one would break resumption at every rotation: the
+     * current key encrypts, either key decrypts. A ticket arriving under the
+     * previous key is accepted *and renewed* -- the 2 returned below -- so a
+     * client moves onto the current key without paying for a full handshake.
+     *
+     * **The interval is the session timeout, measured rather than chosen.**
+     * OpenSSL 3.0.13 and 3.6.4 both report 7200 seconds, and a ticket is
+     * useless past it, so keeping the previous key for exactly one interval
+     * covers every ticket that key issued for the whole of its life.
+     * Rotating faster would discard resumptions still inside their timeout;
+     * slower widens the window for nothing.
+     *
+     * Rotation happens on use, not on a timer: a server issuing no tickets
+     * has nothing to rotate away from, and a timer would want a reactor this
+     * layer does not have.
+     */
+    struct ticket_keys {
+        struct key {
+            unsigned char name[16];
+            unsigned char aes[32];
+            unsigned char hmac[32];
+        };
+
+        std::mutex mutex;
+        key current;
+        key previous;
+        bool have_previous = false;
+        std::chrono::steady_clock::time_point rotated;
+        std::chrono::seconds every;
+
+        explicit ticket_keys(std::chrono::seconds interval) : every(interval)
+        {
+            fresh(current);
+
+            rotated = std::chrono::steady_clock::now();
+        }
+
+        /** New random material.  Throws rather than issue a guessable key. */
+        static void fresh(key& k)
+        {
+            if(RAND_bytes(k.name, sizeof k.name) != 1 ||
+               RAND_bytes(k.aes, sizeof k.aes) != 1 ||
+               RAND_bytes(k.hmac, sizeof k.hmac) != 1) {
+                throw tls_context::exception("RAND_bytes for a session ticket key: " +
+                                why());
+            }
+        }
+
+        /** Called with the mutex held. */
+        void rotate_if_due()
+        {
+            const std::chrono::steady_clock::time_point now =
+                std::chrono::steady_clock::now();
+
+            if(now - rotated < every) return;
+
+            previous = current;
+            have_previous = true;
+
+            fresh(current);
+
+            rotated = now;
+        }
+    };
+
+    void forget_ticket_keys(void*, void* ptr, CRYPTO_EX_DATA*, int, long,
+                            void*) {
+        delete static_cast<ticket_keys*>(ptr);
+    }
+
+    /** Where the keys live: in the context, for the reason sites_index says. */
+    int ticket_keys_index() {
+        static const int i =
+            SSL_CTX_get_ex_new_index(0, 0, 0, 0, forget_ticket_keys);
+
+        return i;
+    }
+
+    /** The HMAC half, which in OpenSSL 3 is an EVP_MAC rather than a key. */
+    bool mac_init(EVP_MAC_CTX* hctx, const unsigned char* key, std::size_t n)
+    {
+        char digest[] = "SHA256";
+
+        OSSL_PARAM params[2];
+
+        params[0] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST,
+                                                     digest, 0);
+        params[1] = OSSL_PARAM_construct_end();
+
+        return EVP_MAC_init(hctx, key, n, params) == 1;
+    }
+
+    /**
+     * Issue or accept a session ticket.
+     *
+     * The OpenSSL contract, which is unusual enough to write down: 1 means
+     * use the ticket as it stands, 2 means accept it and issue a replacement,
+     * **0 is not an error** -- it is a ticket this server cannot read, and the
+     * handshake continues in full -- and negative is a failure.
+     */
+    int ticket_key_cb(SSL* ssl, unsigned char name[16], unsigned char* iv,
+                      EVP_CIPHER_CTX* ctx, EVP_MAC_CTX* hctx, int enc)
+    {
+        SSL_CTX* c = SSL_get_SSL_CTX(ssl);
+
+        ticket_keys* keys = static_cast<ticket_keys*>(
+            SSL_CTX_get_ex_data(c, ticket_keys_index()));
+
+        if(keys == 0) return -1;
+
+        std::lock_guard<std::mutex> hold(keys->mutex);
+
+        if(enc) {
+            keys->rotate_if_due();
+
+            if(RAND_bytes(iv, EVP_MAX_IV_LENGTH) != 1) return -1;
+
+            std::memcpy(name, keys->current.name, sizeof keys->current.name);
+
+            if(EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), 0,
+                                  keys->current.aes, iv) != 1) {
+                return -1;
+            }
+
+            return mac_init(hctx, keys->current.hmac,
+                            sizeof keys->current.hmac) ? 1 : -1;
+        }
+
+        // Which key issued this one?
+        const ticket_keys::key* k = 0;
+        int answer = 0;
+
+        if(std::memcmp(name, keys->current.name, 16) == 0) {
+            k = &keys->current;
+            answer = 1;
+        }
+        else if(keys->have_previous &&
+                std::memcmp(name, keys->previous.name, 16) == 0) {
+            k = &keys->previous;
+            answer = 2;
+        }
+
+        if(k == 0) return 0;
+
+        if(!mac_init(hctx, k->hmac, sizeof k->hmac)) return -1;
+
+        if(EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), 0, k->aes, iv) != 1)
+            return -1;
+
+        return answer;
+    }
+
+} // namespace
+
 tls_context tls_context::server(const std::string& cert_file,
                                 const std::string& key_file)
 {
@@ -135,37 +309,57 @@ tls_context tls_context::server(const std::string& cert_file,
     // to start.
     SSL_CTX_set_options(ctx, SSL_OP_NO_RENEGOTIATION);
 
-    // **Session tickets: OpenSSL's defaults, deliberately, and what that
-    // means for forward secrecy.**  Measured rather than assumed:
+    // **Session tickets, with a rotating key** (#270, deferred here by #240).
+    //
+    // Measured rather than assumed, on both toolchains this builds against:
     //
     //     SSL_OP_NO_TICKET   not set   -- tickets are issued
     //     max_early_data     0         -- 0-RTT off, so no replay question
     //     num_tickets        2         -- TLS 1.3 issues two per handshake
+    //     session timeout    7200 s    -- and so a ticket's useful life
     //
-    // The ticket key belongs to this SSL_CTX and is generated here. It is
-    // never rotated while the context lives, which is the forward-secrecy
-    // question #240 deferred to #270: somebody who later obtains that key can
-    // decrypt any session resumed with a ticket it issued.
+    // What OpenSSL does on its own is generate one ticket key here and keep
+    // it for as long as the context lives. That made the forward-secrecy
+    // window a property of something unrelated -- how often anything happens
+    // to rebuild the context. jhttpd rebuilds on SIGHUP and its logrotate
+    // snippet reloads daily, so *that* deployment had a window of about a
+    // day; a server nobody reloads kept one key for months. Either way the
+    // window was inherited rather than stated, and the one running six sites
+    // had been up continuously since it was installed.
     //
-    // **The key's lifetime is the context's**, so it rotates whenever a
-    // caller builds a new one. jhttpd rebuilds on every SIGHUP, and its
-    // logrotate snippet reloads daily -- so in that deployment the window is
-    // about a day, which is better than nginx's default of rotating only on
-    // reload. That is worth knowing *and* worth distrusting: it is a property
-    // of how often something unrelated happens to restart the context, not a
-    // guarantee this code makes. A server nobody reloads keeps one key for
-    // months.
+    // Now it is stated: the key rotates every 7200 seconds, the previous key
+    // is kept so resumption survives the rotation, and a ticket presented
+    // under the previous key is renewed onto the current one. Somebody who
+    // reads a key out of this process can decrypt sessions resumed within
+    // one interval of it rather than every session since the last restart.
     //
-    // Left on rather than disabled. SSL_OP_NO_TICKET would make resumption
-    // impossible and forward secrecy exact, which is the stricter choice --
-    // but it is not what Apache or nginx do, 0-RTT is already off so the
-    // replay hazard is absent, and a full handshake per connection is a cost
-    // paid by every honest client to narrow a window that requires the
-    // server's memory to have been read in the first place.
+    // **A reload is a harder boundary than a rotation**, and it is worth
+    // knowing which one is doing the work. jhttpd's SIGHUP path builds a
+    // fresh context to pick up a renewed certificate, so it discards these
+    // keys entirely rather than retaining one -- every outstanding ticket
+    // stops resuming at a reload, which costs a full handshake per returning
+    // client and gives forward secrecy for nothing. Nothing here has to call
+    // rotate_ticket_key() for that; the rebuild is what does it. The timer
+    // below is what covers the days between reloads, which is where the
+    // window used to be unbounded.
     //
-    // If that trade is ever revisited, the middle option is a rotating key
-    // via SSL_CTX_set_tlsext_ticket_key_evp_cb, which keeps resumption and
-    // bounds the window explicitly instead of incidentally.
+    // Tickets stay enabled. SSL_OP_NO_TICKET would make the window exact and
+    // resumption impossible, which is a full handshake charged to every
+    // honest client to close a gap that already requires reading the
+    // server's memory -- and 0-RTT being off means the replay hazard that
+    // usually argues against tickets is absent here.
+    {
+        std::unique_ptr<ticket_keys> keys(
+            new ticket_keys(std::chrono::seconds(SSL_CTX_get_timeout(ctx))));
+
+        if(SSL_CTX_set_ex_data(ctx, ticket_keys_index(), keys.get()) != 1)
+            throw exception("SSL_CTX_set_ex_data for ticket keys: " + why());
+
+        keys.release();   // owned by the context now, freed by forget_ticket_keys
+
+        if(SSL_CTX_set_tlsext_ticket_key_evp_cb(ctx, ticket_key_cb) != 1)
+            throw exception("SSL_CTX_set_tlsext_ticket_key_evp_cb: " + why());
+    }
 
     return held;
 }
@@ -267,6 +461,27 @@ namespace {
         return SSL_TLSEXT_ERR_OK;
     }
 
+}
+
+bool tls_context::rotate_ticket_key()
+{
+    if(!m_ctx) return false;
+
+    ticket_keys* keys = static_cast<ticket_keys*>(
+        SSL_CTX_get_ex_data(m_ctx.get(), ticket_keys_index()));
+
+    if(keys == 0) return false;
+
+    std::lock_guard<std::mutex> hold(keys->mutex);
+
+    keys->previous = keys->current;
+    keys->have_previous = true;
+
+    ticket_keys::fresh(keys->current);
+
+    keys->rotated = std::chrono::steady_clock::now();
+
+    return true;
 }
 
 std::time_t tls_context::expires() const {

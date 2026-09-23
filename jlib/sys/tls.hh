@@ -180,6 +180,24 @@ public:
      *         readable expiry
      */
     std::time_t expires() const;
+
+    /**
+     * Rotate the session-ticket key now, keeping the previous one.
+     *
+     * Rotation is otherwise automatic and on a timer derived from the session
+     * timeout -- see the note in tls.cc. This is for the two callers that
+     * want to decide: a test, which cannot wait two hours to prove the window
+     * is bounded, and an operator reloading a server who would rather the
+     * window started again from now.
+     *
+     * A ticket issued under the key this displaces is still accepted, and is
+     * renewed onto the new one. Call it twice and those tickets stop working,
+     * which is the point of a bounded window and is what the test asserts.
+     *
+     * @return false for a context with no ticket keys -- a client context,
+     *         or one built before this existed.
+     */
+    bool rotate_ticket_key();
     explicit operator bool() const { return static_cast<bool>(m_ctx); }
 
     /** Borrowed; null when empty(). */
