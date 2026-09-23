@@ -4,6 +4,7 @@
 #
 #     tools/package-debs.sh            native (arm64 on this Mac)
 #     tools/package-debs.sh amd64      cross, for dancingdragon
+#     NOCHECK=1 tools/package-debs.sh amd64    without the test suite
 #
 # Named "package-" rather than "build-" because .gitignore line 13 is
 # `build-*`, which is meant for build directories and silently swallowed the
@@ -22,9 +23,22 @@
 # rather than anything about binfmt:
 #
 #     docker run --privileged --rm tonistiigi/binfmt --install amd64
+#
+# **The suite runs as part of the build by default**, because debian/rules
+# says a package whose tests fail should not exist. NOCHECK=1 turns that off,
+# and it is for one situation: the cross build re-running a suite that has
+# already passed natively, where a failure is more likely to be about the
+# emulation than about the code. sys_proxy_live_test fails under Rosetta while
+# passing on arm64 and on macOS from the same commit -- tinyproxy answers and
+# refuses correctly, but an allowed CONNECT does not tunnel.
+#
+# Use it knowing what it costs: the packages are then built from code these
+# tests did not check *here*, and the check they passed was on another
+# architecture.
 set -eu
 
 arch=${1:-}
+nocheck=${NOCHECK:-}
 here=$(cd "$(dirname "$0")/.." && pwd)
 
 if [ -n "$arch" ]; then
@@ -72,10 +86,15 @@ docker build -q $platform -t "$tag" "$here" >/dev/null
 # dpkg-buildpackage through `tail -40`, which prints nothing until the command
 # ends -- so a build twenty minutes in and a build that died twenty minutes ago
 # produced the same empty log, and the second was reported as the first.
+opts=""
+[ -n "$nocheck" ] && opts="nocheck"
+
 # shellcheck disable=SC2086
-cid=$(docker create $platform -e DEB_BUILD_MAINT_OPTIONS="$maint" "$tag" sh -c "
+cid=$(docker create $platform -e DEB_BUILD_MAINT_OPTIONS="$maint" \
+                              -e DEB_BUILD_OPTIONS="$opts" "$tag" sh -c "
     cd /src/jlib &&
     echo \"DEB_BUILD_MAINT_OPTIONS=\$DEB_BUILD_MAINT_OPTIONS\" &&
+    echo \"DEB_BUILD_OPTIONS=\$DEB_BUILD_OPTIONS\" &&
     dpkg-buildpackage -b -us -uc 2>&1 &&
     mkdir -p /debs && cp /src/*.deb /debs/
 ")
