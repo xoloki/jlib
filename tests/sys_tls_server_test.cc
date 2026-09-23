@@ -44,6 +44,9 @@
 
 #include <openssl/ssl.h>
 
+#include <arpa/inet.h>
+#include <cstring>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -89,6 +92,162 @@ static void echo_once(sys::listener& l, const sys::tls_context& ctx,
     catch(std::exception& e) {
         if(saw) *saw = std::string("server threw: ") + e.what();
     }
+}
+
+/**
+ * A session ticket outlives one key rotation and not two.
+ *
+ * **What the window is, rather than what it happens to be.** OpenSSL issues
+ * tickets under a key it generates when the context is built and never
+ * changes, so before this the forward-secrecy window was however long the
+ * process kept that context -- for the deployed jhttpd, months. The key now
+ * rotates on a timer derived from the session timeout, and the previous key
+ * is kept so that rotating does not throw away resumptions still inside it.
+ *
+ * Three states, and the third is the one worth having:
+ *
+ *   - a ticket resumes at all, which is the baseline everything else needs
+ *   - after one rotation it still resumes, from the retained key, so clients
+ *     do not pay a full handshake every time the key turns over
+ *   - after two it does not, because the key that issued it is gone -- which
+ *     is the bound, and the only assertion here that would notice if the
+ *     rotation quietly stopped happening
+ *
+ * The client is raw OpenSSL because resumption needs an SSL_SESSION and
+ * jlib's streams do not expose one. What is under test is the server's
+ * ticket callback, and the server here is jlib's.
+ */
+static SSL_SESSION* g_ticket = 0;
+
+static int keep_the_ticket(SSL*, SSL_SESSION* s)
+{
+    // TLS 1.3 sends NewSessionTicket *after* the handshake, so the session
+    // worth resuming is the one that arrives here rather than whatever
+    // SSL_get1_session would hand back when SSL_connect returns.
+    if(g_ticket) SSL_SESSION_free(g_ticket);
+
+    g_ticket = s;
+
+    return 1;   // we hold the reference now
+}
+
+/** A plain connected descriptor, which socketstream deliberately does not lend out. */
+static int dial(unsigned short port)
+{
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+
+    if(fd < 0) return -1;
+
+    sockaddr_in at;
+
+    std::memset(&at, 0, sizeof at);
+
+    at.sin_family = AF_INET;
+    at.sin_port = htons(port);
+    at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    if(::connect(fd, reinterpret_cast<sockaddr*>(&at), sizeof at) != 0) {
+        ::close(fd);
+
+        return -1;
+    }
+
+    return fd;
+}
+
+/** One connection; true if the server resumed rather than handshook afresh. */
+static bool talk(SSL_CTX* cc, unsigned short port, bool offer_ticket)
+{
+    const int fd = dial(port);
+
+    if(fd < 0) return false;
+
+    SSL* ssl = SSL_new(cc);
+
+    SSL_set_fd(ssl, fd);
+
+    if(offer_ticket && g_ticket) SSL_set_session(ssl, g_ticket);
+
+    bool reused = false;
+
+    if(SSL_connect(ssl) == 1) {
+        reused = SSL_session_reused(ssl) == 1;
+
+        // Say something and read the answer: on TLS 1.3 the ticket rides in
+        // after the handshake, and a client that hangs up immediately never
+        // sees it.
+        SSL_write(ssl, "hello\r\n", 7);
+
+        char buf[128];
+
+        SSL_read(ssl, buf, sizeof buf);
+
+        SSL_shutdown(ssl);
+    }
+
+    SSL_free(ssl);
+    ::close(fd);
+
+    return reused;
+}
+
+static void a_ticket_outlives_one_rotation_and_not_two(const std::string& cert,
+                                                       const std::string& key)
+{
+    std::cout << "\nsession tickets, and the window they leave open:\n";
+
+    sys::tls_context ctx = sys::tls_context::server(cert, key);
+    sys::listener l(0, "127.0.0.1");
+
+    const unsigned short port = l.port();
+
+    // Six exchanges: three pairs of "get a ticket, then try to use it".
+    std::thread server([&l, &ctx] {
+        for(int i = 0; i < 6; i++) echo_once(l, ctx);
+    });
+
+    SSL_CTX* cc = SSL_CTX_new(TLS_client_method());
+
+    SSL_CTX_set_session_cache_mode(cc, SSL_SESS_CACHE_CLIENT |
+                                       SSL_SESS_CACHE_NO_INTERNAL_STORE);
+    SSL_CTX_sess_set_new_cb(cc, keep_the_ticket);
+    SSL_CTX_set_verify(cc, SSL_VERIFY_NONE, 0);
+
+    // **A ticket is spent by the connection that uses it.** TLS 1.3 tickets
+    // are single-use on OpenSSL's client, so every state below gets its own
+    // full handshake to draw a fresh one from. The first version of this test
+    // offered the same session three times and read the client's refusal to
+    // reuse it as the server refusing to resume -- which reported the bug
+    // that this test exists to detect, from a server that did not have it.
+    const bool first = talk(cc, port, false);
+
+    ok("a first connection is not a resumption", !first);
+    ok("and it leaves a ticket behind", g_ticket != 0);
+
+    ok("the ticket resumes the session", talk(cc, port, true));
+
+    // One rotation: the key that issued this ticket becomes the previous
+    // key, which is kept exactly so that this still works.
+    talk(cc, port, false);
+
+    ok("rotation is available on a server context", ctx.rotate_ticket_key());
+
+    ok("a ticket from before one rotation still resumes",
+       talk(cc, port, true));
+
+    // Two rotations: the issuing key is gone and a full handshake is right.
+    talk(cc, port, false);
+
+    ctx.rotate_ticket_key();
+    ctx.rotate_ticket_key();
+
+    ok("and one from before two rotations does not", !talk(cc, port, true));
+
+    server.join();
+
+    if(g_ticket) { SSL_SESSION_free(g_ticket); g_ticket = 0; }
+
+    SSL_CTX_free(cc);
 }
 
 /**
@@ -671,6 +830,7 @@ int main() {
     starttls_refuses_a_stream_with_bytes_in_it();
     starttls_refuses_a_stream_with_bytes_pending();
     a_legitimate_starttls_still_works(cert, key);
+    a_ticket_outlives_one_rotation_and_not_two(cert, key);
 
     std::remove(cert.c_str());
     std::remove(key.c_str());
