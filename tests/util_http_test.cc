@@ -511,6 +511,57 @@ static void reading_a_body() {
     }
 
     {
+        // **A chunk size that is well-formed and does not fit** (#354), found
+        // by the body-reader fuzz target in under thirty seconds.
+        //
+        // RFC 9112 7.1 writes chunk-size = 1*HEXDIG and sets no limit on how
+        // many, so twenty f's is a *valid* chunk-size that overflows a 64-bit
+        // conversion. What came out was std::out_of_range from stoull -- not
+        // http::error, which is the only type read_body documents and the
+        // only one the server's framing catch names, so a request like this
+        // was answered with a dropped connection instead of the 400 the code
+        // one frame up intends.
+        //
+        // The same hazard on Content-Length has been guarded since it was
+        // written. This is the other framing, and it had no guard.
+        std::istringstream is(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+            "ffffffffffffffffffff\r\nx\r\n0\r\n\r\n");
+
+        const http::Response head = http::read_response_head(is);
+
+        bool refused_as_http_error = false;
+        bool something_else = false;
+
+        try {
+            (void) http::read_body(is, head);
+        }
+        catch(const http::error&)      { refused_as_http_error = true; }
+        catch(const std::exception&)   { something_else = true; }
+
+        ok("an overlong chunk size is refused as an http error",
+           refused_as_http_error && !something_else);
+
+        // The boundary: the largest chunk size that does fit is still read as
+        // a size rather than refused for being long. It asks for more octets
+        // than the stream holds, so the body is short -- an http error too,
+        // and a different one.
+        std::istringstream big(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+            "ffffffffffffffff\r\nx\r\n0\r\n\r\n");
+
+        const http::Response big_head = http::read_response_head(big);
+
+        bool big_refused = false;
+
+        try { (void) http::read_body(big, big_head, 64); }
+        catch(const http::error&) { big_refused = true; }
+
+        ok("and the largest one that fits is refused for its size, not its "
+           "length", big_refused);
+    }
+
+    {
         std::istringstream is("HTTP/1.1 200 OK\r\nX: 1\r\n\r\nall of this");
 
         const http::Response head = http::read_response_head(is);
