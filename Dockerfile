@@ -72,6 +72,12 @@ COPY jlib/ ./jlib/
 COPY tests/ ./tests/
 COPY tools/ ./tools/
 
+# The architecture documents. Not optional: Makefile.am installs them as
+# doc_DATA, and automake makes $(DATA) a dependency of all-am -- so a tree
+# without docs/ does not fail at install time with something about
+# documentation, it fails at `make` with a missing target.
+COPY docs/ ./docs/
+
 # The packaging, so the image can build a .deb as well as run the suite. Small,
 # and it means `debian/` is tested by the same container that tests the code --
 # a rules file that only works on the maintainer's machine is the sort of thing

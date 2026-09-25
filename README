@@ -74,6 +74,22 @@ Some programs it builds:
     jcrypt      a GPGME encrypt/decrypt filter
 
 
+DOCUMENTATION
+-------------
+Per-symbol documentation is in the headers, next to what it describes, which
+is where it stays correct.
+
+What a header cannot hold is the shape that spans several of them, and that is
+in docs/:
+
+    docs/async.md    the reactor, the coroutine layer, and the two ways
+                     sys::server serves a connection
+
+Each is a map rather than a reference: it says how the pieces fit and why they
+are shaped that way, and points at the header for the detail.  Where a
+document and a header disagree, the header is right and the document is a bug.
+
+
 REQUIREMENTS
 ------------
 A C++20 compiler.  Apple clang 15+ and gcc 11+ are what it is built with;

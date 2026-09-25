@@ -4,6 +4,11 @@ SUBDIRS = jlib tests tools/perf
 
 EXTRA_DIST = autogen.sh DOCKER TODO.md LICENSE NOTICE
 
+# The architecture documents, which are the map the headers cannot be: each
+# one spans files, and none of it belongs at any single declaration.
+doc_DATA = docs/async.md
+EXTRA_DIST += $(doc_DATA)
+
 # The coverage-guided fuzzers (#268).
 #
 # **Deliberately not in TESTS, and so not in `make check`.** A fuzzer given a
