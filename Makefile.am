@@ -6,7 +6,8 @@ EXTRA_DIST = autogen.sh DOCKER TODO.md LICENSE NOTICE
 
 # The architecture documents, which are the map the headers cannot be: each
 # one spans files, and none of it belongs at any single declaration.
-doc_DATA = docs/async.md
+doc_DATA = docs/async.md docs/jhttpd.md docs/ai.md \
+           docs/jserve.md docs/jchat.md docs/jalpaca.md docs/jcode.md
 EXTRA_DIST += $(doc_DATA)
 
 # The coverage-guided fuzzers (#268).
@@ -43,4 +44,11 @@ EXTRA_DIST += tests/fuzz
 outline:
 	@cd "$(top_srcdir)" && ./tools/outline.sh "$(FILE)"
 
-EXTRA_DIST += tools/outline.sh
+EXTRA_DIST += tools/outline.sh tools/check-mermaid.sh
+
+# The diagrams in docs/ are rendered by GitHub and by nothing here, so a
+# syntax error in one is found by a human opening the page.  This catches the
+# forms that have actually broken: see tools/check-mermaid.sh.
+.PHONY: check-docs
+check-docs:
+	@$(top_srcdir)/tools/check-mermaid.sh $(top_srcdir)/docs/*.md

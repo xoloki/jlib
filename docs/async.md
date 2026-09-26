@@ -173,7 +173,7 @@ sequenceDiagram
 
     C->>R: connect
     R->>S: listener readable
-    S->>S: accept; caps and per-address checks
+    S->>S: accept, then caps and per-address checks
     Note over S: full? disarm listeners until a slot frees
     S->>H: a coroutine per connection
     H->>R: await the head
