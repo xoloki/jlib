@@ -49,38 +49,21 @@ class reactor_backend;
 /**
  * One thread, many descriptors: wait for readiness and call something.
  *
- * jlib has had four ways to wait and no way to wait on two things at once.
- * Servent blocks on its command pipe, ASServent on a condition variable,
- * job_queue on a queue depth, server on poll(2) over a listener and a wake
- * pipe -- and nothing in the library can wait for a request *and* a socket.
- * ASServent says so in as many words: its responses travel down a pipe rather
- * than a queue purely so that somebody else's event loop can select on the
- * read end.  This is that loop, written down.
+ * Why this exists and how it sits under the coroutine layer and sys::server:
+ * docs/async.md.
  *
- * ## What it is not
+ * ## Readiness only, which is a boundary and not an omission
  *
- * It is not asio.  There is no async_read, no completion handler, no buffer,
- * no error_code, no executor, no cancellation.  It reports that a descriptor
- * is ready and calls a function; what that function does with the descriptor
- * is the caller's business, and is always an ordinary blocking-style call on a
- * descriptor already known to be ready.
+ * There is no async_read, no completion handler, no buffer, no error_code, no
+ * executor.  It reports that a descriptor is ready and calls a function; what
+ * that function does with it is the caller's business, and is always an
+ * ordinary blocking-style call on a descriptor already known to be ready.
  *
- * That restraint is the design.  The library has not chosen between stackful
- * coroutines and C++20's stackless ones, and this must not choose for it.
- * Both resume the same way -- a fiber's callback switches to its context, a
- * coroutine's resumes its handle -- so a reactor that only ever says "ready,
- * here is your function" serves either:
- *
- *     void await_suspend(std::coroutine_handle<> h) {
- *         m_r.once(m_fd, reactor::READ,
- *                  [h](reactor::token, int, reactor::event_type) {
- *                      h.resume();
- *                  });
- *     }
- *
- * The fork is not about readiness.  It is about *operations and completions* --
- * who owns the buffer, how an error arrives -- and that layer is deliberately
- * absent.  See once(), which is the resumption primitive.
+ * **Do not add an operation layer here.**  Readiness serves a stackful fiber
+ * and a stackless coroutine identically, so this does not choose between them
+ * on the library's behalf; operations and completions -- who owns the buffer,
+ * how an error arrives -- are what would.  See once(), the resumption
+ * primitive, and docs/async.md for the argument in full.
  *
  * ## Level-triggered, and that is a contract
  *

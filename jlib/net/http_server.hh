@@ -155,55 +155,38 @@ struct server_options {
  * that claim, and every existing client caller would start including
  * <jlib/sys/server.hh>, <thread> and OpenSSL to get it.
  *
- * ## It was a harness; it is a small server now
+ * What it does, what it deliberately does not, and how a request travels
+ * through it: docs/jhttpd.md.  The invariants stay here, at what they guard.
  *
- * This header said "as narrow as the client" for most of its life, and that
- * stopped being true one branch at a time.  What it does now:
+ * ## A buffered response is accumulated whole
  *
- *   - **keep-alive** on the asynchronous server, with three separate bounds --
- *     see server_options.  The blocking one still answers once and closes, and
- *     should: an idle persistent connection is a suspended coroutine here and
- *     would be a held thread there.
- *   - **chunked output**, so a streamed body has an end a client can find.
- *     It used to be delimited by the close, which meant a handler that died
- *     halfway produced the same octets as one that finished.
- *   - **route patterns** -- `/users/{id}`, `/static/*` -- with the most
- *     specific match winning, and 405 with `Allow` where a path exists for
- *     another method.
- *   - **HEAD**, answered by the GET route with the body suppressed and the
- *     Content-Length a GET would have sent.
- *   - **conditional requests**: `If-None-Match` and `If-Modified-Since` become
- *     304, with the HTTP-date read against RFC 9110's own grammar.
- *   - **byte ranges** for any body, and `files()` for serving a directory --
- *     which seeks rather than reading, so a range costs the range.
+ * Which is what lets a handler that throws be answered with a 500 anyway.  A
+ * streaming one gives that up knowingly; `files()` keeps it regardless by
+ * deciding everything -- 404, 304, 416 -- before a byte goes out.
  *
- * A buffered response is still accumulated whole, which is what lets a handler
- * that throws be answered with a 500 anyway.  A streaming one gives that up
- * knowingly; `files()` keeps it regardless by deciding everything -- 404, 304,
- * 416 -- before a byte goes out.
+ * ## No authorisation, which is not an omission to fill in casually
  *
- * ## What it is still not
+ * `protect()` is authentication: Basic and Bearer, per prefix.  A verifier
+ * says whether credentials are good, **never what they may do**.  Anything
+ * wanting the second question answered has to ask it in the handler, where
+ * the resource is known.
  *
- * No HTTP/2 or /3.  No compression (#233).  No `multipart/byteranges`, so a
- * multi-range request gets the whole body (#232).  No `If-Match` or
- * `If-Unmodified-Since`, so a precondition can only succeed -- 412 is
- * unreachable (#231).  No `Vary`, which stays empty until something is
- * negotiated (#233); `Cache-Control` is per `files()` route.
+ * Requests are rate-limited per address by `rate_limit()`, off by default,
+ * and `sys::server_policy::max_per_address` caps concurrent connections from
+ * one address.  The two bound different things: how fast a client may ask,
+ * and how many sockets it may hold.
  *
- * Authentication is `protect()` -- Basic and Bearer, per prefix.  No Digest,
- * no sessions, no login form, and **no authorisation**: a verifier says
- * whether credentials are good, never what they may do.
+ * **Its defaults are not a public-port configuration** -- see the note on
+ * sys::server, which lists what is and is not armed for you.  That sentence
+ * has more to protect now than when it was written: this began as a thing to
+ * receive an OAuth2 redirect on loopback, and a server that routes, caches
+ * and serves a directory is a much easier thing to point at the internet by
+ * mistake.
  *
- * Requests are rate-limited per address by `rate_limit()`, off by default.
- * There is still **no per-address connection cap** (#238), so one client can
- * hold every slot `sys::server_policy::max_connections` allows -- the limit
- * above bounds how fast a connection may ask, not how many a client may open.
- *
- * **It is not hardened for a public port** -- see the note on sys::server --
- * and that sentence has more to protect now than when it was written.  It
- * began as a thing to receive an OAuth2 redirect on loopback and to be a test
- * harness; a server that routes, caches and serves a directory is a much
- * easier thing to point at the internet by mistake.
+ * A *configured* one can be public, and jhttpd is the worked example: #270
+ * audited that combination -- log injection, routing on Host, SNI, privilege
+ * dropping, session-ticket rotation -- and it serves six sites.  What none of
+ * that changes is the default, which is still a harness.
  */
 class server {
 public:
@@ -1040,11 +1023,8 @@ public:
      * possible answers is not routing. Compared **exactly**, after that
      * normalisation: lowercased, port removed.
      *
-     * No wildcards. `*.example.com` is a thing people want and a second way to
-     * pick the wrong site, and the safe version of it needs rules about how
-     * many labels match and which of two patterns wins. Exact names first;
-     * whoever needs patterns can have them with a test that says what they
-     * mean.
+     * No wildcards; docs/jhttpd.md says why, and what the safe version would
+     * have to decide first.
      *
      * ## And what happens to a name nothing claims
      *
@@ -1058,10 +1038,8 @@ public:
      * registered for it -- the worst it can do is fail to name one and get the
      * default, which is what a server with one site has always done.
      *
-     * Per request rather than per container, unlike nginx: a path with no
-     * site-qualified route still reaches an unqualified one. One `site()` call
-     * therefore does not hide the rest of the table from that name, which is a
-     * cliff worth not having.
+     * Per request rather than per container, unlike nginx: one `site()` call
+     * does not hide the rest of the table from that name.
      *
      * ## Guards too
      *

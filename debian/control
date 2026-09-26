@@ -53,5 +53,10 @@ Description: the graphical and audio half of jlib
 Package: jlib-doc
 Architecture: all
 Depends: ${misc:Depends}
-Description: documentation for jlib
- C++ libraries for crypto, net, media, gl, sys
+Description: architecture documentation for jlib
+ The maps that the headers cannot be: how the reactor, the coroutine layer and
+ the two server modes fit together, and what a request traverses end to end.
+ Each document spans several files, which is why none of it lives at any one
+ declaration.
+ .
+ Per-symbol documentation is in the headers, where it stays correct.
