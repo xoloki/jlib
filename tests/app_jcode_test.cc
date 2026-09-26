@@ -150,6 +150,90 @@ static void the_format_as_asked_for() {
  * the other six were announcements of a write that did not survive.
  */
 /** A search/replace block, and the four ways it is refused. */
+/**
+ * An illustration is not an edit, when the model's own fence says so.
+ *
+ * #364, from a live run: asked to fix `util.c`, the model ended its reply with
+ *
+ *     Now, run the build again:
+ *
+ *     ```sh
+ *     make
+ *     ```
+ *
+ * jcode gave that block the only filename it had been sent, logged the guess,
+ * and wrote it. Forty-one lines of C became one line of shell.
+ *
+ * **Both halves of the condition are tested**, because either alone is wrong:
+ * a stated filename must still be believed, and an unrecognised or absent
+ * language must still be lenient -- models fence source with no info string
+ * constantly.
+ */
+static void an_illustration_is_not_an_edit() {
+    std::cout << "\na fenced block whose language contradicts the file:\n";
+
+    const std::vector<std::string> one{ "util.c" };
+
+    // The reply that caused it, in miniature.
+    const jcode::reply r = jcode::parse(
+        "I fixed it. Now, run the build again:\n\n```sh\nmake\n```\n", one);
+
+    ok("it is not taken as an edit", r.edits.empty(),
+       std::to_string(r.edits.size()) + " edits");
+
+    ok("  and the refusal says why",
+       r.refusals.size() == 1 &&
+       r.refusals[0].why.find("illustration") != std::string::npos,
+       r.refusals.empty() ? "none" : r.refusals[0].why);
+
+    // The same block with the filename **stated**: the model said so, and a
+    // stated name is not a guess to second-guess.
+    const jcode::reply said = jcode::parse(
+        "util.c\n```sh\nmake\n```\n", one);
+
+    ok("a stated filename is believed, whatever the fence says",
+       said.edits.size() == 1 && said.edits[0].content == "make\n",
+       std::to_string(said.edits.size()) + " edits");
+
+    // No info string at all is the common case and must stay lenient.
+    const jcode::reply bare = jcode::parse("```\nint main(){}\n```\n", one);
+
+    ok("a fence with no language is still taken", bare.edits.size() == 1,
+       std::to_string(bare.edits.size()));
+
+    // The right language for the file, guessed name: taken.
+    const jcode::reply right = jcode::parse("```c\nint main(){}\n```\n", one);
+
+    ok("and so is one whose language fits the file", right.edits.size() == 1,
+       std::to_string(right.edits.size()));
+
+    // A language nobody here knows says nothing either way.
+    const jcode::reply odd =
+        jcode::parse("```brainfuck\n+++\n```\n", one);
+
+    ok("a language this does not know is not a contradiction",
+       odd.edits.size() == 1, std::to_string(odd.edits.size()));
+
+    // A header is C too -- the sets are families, not exact matches.
+    const std::vector<std::string> hdr{ "util.h" };
+
+    ok("a ```c block is fine for a header",
+       jcode::parse("```c\nint f(void);\n```\n", hdr).edits.size() == 1);
+
+    ok("  and a ```cpp block for a .hh",
+       jcode::parse("```cpp\nclass X {};\n```\n",
+                    std::vector<std::string>{ "x.hh" }).edits.size() == 1);
+
+    // A file with no extension has nothing to disagree with.
+    ok("a file with no extension is not second-guessed",
+       jcode::parse("```sh\nmake\n```\n",
+                    std::vector<std::string>{ "Makefile" }).edits.size() == 1);
+
+    // And the fence may carry more than a language.
+    ok("a language followed by other words is still read",
+       jcode::parse("```sh title=build\nmake\n```\n", one).edits.empty());
+}
+
 static void search_and_replace_blocks() {
     std::cout << "\nsearch and replace:\n";
 
@@ -1407,6 +1491,7 @@ int main() {
     std::cout << std::unitbuf;
 
     the_format_as_asked_for();
+    an_illustration_is_not_an_edit();
     search_and_replace_blocks();
     applying_a_search_block();
     a_file_given_twice_is_written_once();

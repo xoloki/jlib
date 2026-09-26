@@ -282,6 +282,31 @@ int main() {
     }
 
     {
+        std::cout << "\nan illustration at the end of a reply:\n";
+
+        tree t;
+
+        t.put("hello.cc", "int main() { return 1; }\n");
+
+        // **The reply that destroyed a file** (#364), in miniature: a model
+        // finishing with the command it wants run. Nothing names the file, so
+        // jcode's leniency gave the block the only filename it had.
+        sc.content = "I fixed it.\n\nNow run the build:\n\n```sh\nmake\n```\n";
+
+        const run_result r =
+            run_jcode(jcode, url, t, { "fix it", "hello.cc" });
+
+        // The assertion that matters: not that it refused, but that the file
+        // is still there. A refusal and a write look identical from outside.
+        ok("the file is untouched",
+           t.get("hello.cc") == "int main() { return 1; }\n",
+           t.get("hello.cc"));
+
+        ok("  and it says the block was an illustration",
+           r.err.find("illustration") != std::string::npos, r.err);
+    }
+
+    {
         std::cout << "\nan edit to somewhere else entirely:\n";
 
         tree t;

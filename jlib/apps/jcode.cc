@@ -27,6 +27,7 @@
 #include <jlib/util/util.hh>
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 
@@ -63,6 +64,84 @@ bool fenced(const std::string& line, std::string& info) {
     info = util::trim(s.substr(n));
 
     return true;
+}
+
+/**
+ * Whether a fence's own language contradicts the file it would be written to.
+ *
+ * **The model said both things**: ```sh on the fence and, by omission, a `.c`
+ * file. One of them is wrong and it is not jcode's job to decide which -- but
+ * it is jcode's job not to write a shell snippet over a source file, which is
+ * what happened (#364): forty-one lines of C became one line of `make`,
+ * because an illustration was the last fenced block in the reply.
+ *
+ * **Narrow on purpose.** Only a *recognised* language against a *recognised*
+ * extension can disagree. An info string nobody here knows, or none at all,
+ * says nothing and stays lenient -- models fence source with no info string
+ * constantly and that has to keep working.
+ *
+ * The table is what has actually been seen rather than a survey of Markdown:
+ * shells and build output because that is what a model illustrates a command
+ * with, and the source languages because those are what it would overwrite.
+ */
+bool fence_contradicts(const std::string& info, const std::string& name) {
+    if(info.empty()) return false;
+
+    // A fence may carry more than a language -- ```c title=x -- and the
+    // language is the first word.
+    std::string lang = util::trim(info);
+
+    const std::string::size_type sp = lang.find_first_of(" \t");
+
+    if(sp != std::string::npos) lang = lang.substr(0, sp);
+
+    for(std::size_t i = 0; i < lang.size(); i++)
+        lang[i] = char(std::tolower((unsigned char)lang[i]));
+
+    const std::string::size_type dot = name.find_last_of('.');
+
+    if(dot == std::string::npos) return false;     // no extension to disagree
+
+    std::string ext = name.substr(dot + 1);
+
+    for(std::size_t i = 0; i < ext.size(); i++)
+        ext[i] = char(std::tolower((unsigned char)ext[i]));
+
+    struct { const char* lang; const char* exts; } known_langs[] = {
+        { "sh",         "sh bash zsh" },
+        { "bash",       "sh bash" },
+        { "zsh",        "sh zsh" },
+        { "shell",      "sh bash zsh" },
+        { "console",    "sh bash zsh" },
+        { "session",    "sh bash zsh" },
+        { "make",       "mk" },
+        { "makefile",   "mk" },
+        { "diff",       "diff patch" },
+        { "patch",      "diff patch" },
+        { "json",       "json" },
+        { "yaml",       "yaml yml" },
+        { "yml",        "yaml yml" },
+        { "xml",        "xml" },
+        { "python",     "py" },
+        { "py",         "py" },
+        { "c",          "c h" },
+        { "cpp",        "cc cpp cxx hh hpp h" },
+        { "c++",        "cc cpp cxx hh hpp h" },
+        { "cc",         "cc cpp cxx hh hpp h" },
+        { "objc",       "m h" },
+        { "objcpp",     "mm hh h" },
+    };
+
+    for(const auto& k : known_langs) {
+        if(lang != k.lang) continue;
+
+        // Recognised language: does the extension appear in its set?
+        const std::string set = std::string(" ") + k.exts + " ";
+
+        return set.find(" " + ext + " ") == std::string::npos;
+    }
+
+    return false;     // a language nobody here knows says nothing
 }
 
 std::string basename_of(const std::string& path) {
@@ -1033,6 +1112,13 @@ reply parse(const std::string& text, const std::vector<std::string>& known) {
 
     bool inside = false;
 
+    // Whether this block's filename was inferred, and what language its
+    // opening fence declared.  Together they are how an illustration is told
+    // from an edit; see fence_contradicts.
+    bool guessed = false;
+
+    std::string opened_with;
+
     std::string name;
     std::string content;
     std::vector<std::string> why;
@@ -1047,6 +1133,10 @@ reply parse(const std::string& text, const std::vector<std::string>& known) {
                 why.clear();
 
                 name = clean(candidate, known, why);
+
+                // Stated or inferred, which decides how much this trusts the
+                // block below -- see fence_contradicts.
+                guessed = name.empty();
 
                 if(name.empty()) {
                     if(!previous.empty()) {
@@ -1063,6 +1153,11 @@ reply parse(const std::string& text, const std::vector<std::string>& known) {
                     }
                 }
 
+                // The **opening** fence's language.  fenced() fills `info` on
+                // the closing line too, where it is almost always empty, so
+                // the one that matters has to be kept.
+                opened_with = info;
+
                 inside = true;
                 content.clear();
 
@@ -1075,6 +1170,18 @@ reply parse(const std::string& text, const std::vector<std::string>& known) {
                                          "a fenced block with no filename "
                                          "before it, and nothing to infer one "
                                          "from" });
+            }
+            // **A guessed filename and a contradicting language is not an
+            // edit.**  The model illustrated something -- a command, a patch,
+            // a config -- and jcode was about to write it over a source file
+            // because that file was the only one sent. #364.
+            else if(guessed && fence_contradicts(opened_with, name)) {
+                out.refusals.push_back({ name,
+                                         "a ```" + opened_with + " block with "
+                                         "no filename before it, which cannot "
+                                         "be the contents of \"" + name +
+                                         "\" -- read as an illustration "
+                                         "rather than an edit" });
             }
             else {
                 edit e;
