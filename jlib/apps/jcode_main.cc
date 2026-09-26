@@ -140,6 +140,16 @@ struct options {
      */
     std::string build;
 
+    /**
+     * Which shape to ask the model to answer in.
+     *
+     * `whole` is the default because it is what jserve was verified against
+     * end to end and what #242 built on; `hunks` is #348, which exists
+     * because the two fail differently and the choice should be measured
+     * rather than assumed.
+     */
+    jcode::format shape = jcode::format::whole;
+
     bool dry_run = false;
     bool yes = false;
 };
@@ -162,6 +172,9 @@ void usage(std::ostream& o, const char* me) {
       << "  --timeout S     seconds to wait for a reply (default 600; a\n"
       << "                  cold model can take a minute to say anything)\n"
       << "  --no-stream     wait for the whole reply rather than watching it\n"
+      << "  --format F      whole (default) or diff: whether the model\n"
+      << "                  returns entire files or search/replace\n"
+      << "                  blocks\n"
       << "  --build CMD     a command the model may run, split on\n"
       << "                  spaces and run without a shell; also run\n"
       << "                  after writing, to say whether it still\n"
@@ -198,6 +211,19 @@ bool parse_args(int argc, char** argv, options& o, std::string& request,
         }
         else if(a == "--timeout" && has_next) o.timeout = std::atof(argv[++i]);
         else if(a == "--no-stream") o.stream = false;
+        else if(a == "--format" && has_next) {
+            const std::string f = argv[++i];
+
+            if(f == "diff" || f == "hunks")
+                o.shape = jcode::format::hunks;
+            else if(f == "whole") o.shape = jcode::format::whole;
+            else {
+                std::cerr << "jcode: unknown --format \"" << f
+                          << "\"; whole or diff\n";
+
+                return false;
+            }
+        }
         else if(a == "--build" && has_next) o.build = argv[++i];
         else if(a == "--attempts" && has_next) {
             o.attempts = unsigned(std::atoi(argv[++i]));
@@ -296,7 +322,7 @@ int main(int argc, char** argv) {
 
     std::cerr << "\n";
 
-    const jcode::plan plan = jcode::lay_out(request, files, o.context, tools);
+    const jcode::plan plan = jcode::lay_out(request, files, o.context, tools, o.shape);
 
     for(const std::string& d : plan.dropped)
         std::cerr << "jcode: left out " << d << "\n";
