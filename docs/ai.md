@@ -24,7 +24,7 @@ flowchart TB
         tr["transformer: a language model"]
         nn["neural: a trained network"]
     end
-    subgraph be["backend&lt;T&gt;"]
+    subgraph be["backend, generic over T"]
         host["host_backend — immediate"]
         metal["Metal — deferred, batched"]
         cuda["CUDA — cuBLAS"]
@@ -58,7 +58,7 @@ to wait works on the CPU and fails on a GPU**. Write the wait.
 flowchart LR
     f["a .gguf file"] --> g["gguf: metadata + tensors"]
     g --> q["quant: q8_0, q4_K, q6_K"]
-    q --> m["model&lt;T&gt;: weights + KV cache"]
+    q --> m["model: weights and the KV cache"]
     m --> t["transformer / attention"]
     txt["text"] --> u["unicode"] --> pt["pretokenizer"] --> tok["tokenizer: ids"]
     tok --> m

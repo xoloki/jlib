@@ -43,4 +43,11 @@ EXTRA_DIST += tests/fuzz
 outline:
 	@cd "$(top_srcdir)" && ./tools/outline.sh "$(FILE)"
 
-EXTRA_DIST += tools/outline.sh
+EXTRA_DIST += tools/outline.sh tools/check-mermaid.sh
+
+# The diagrams in docs/ are rendered by GitHub and by nothing here, so a
+# syntax error in one is found by a human opening the page.  This catches the
+# forms that have actually broken: see tools/check-mermaid.sh.
+.PHONY: check-docs
+check-docs:
+	@$(top_srcdir)/tools/check-mermaid.sh $(top_srcdir)/docs/*.md
