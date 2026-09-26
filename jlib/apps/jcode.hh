@@ -62,12 +62,39 @@ namespace apps {
 namespace jcode {
 
 /** One file the model asked for, and what was assumed to get it. */
+/**
+ * One search-and-replace, as a model wrote it.
+ *
+ * `search` is the text as it is now, exactly -- not a pattern and not a
+ * paraphrase. See apply(), which refuses a hunk it cannot find and one it
+ * finds twice, rather than guessing which was meant.
+ */
+struct hunk {
+    std::string search;
+    std::string replace;
+};
+
 struct edit {
     /** The name after cleaning.  Relative; see contain(). */
     std::string name;
 
-    /** The whole file, as the model gave it. */
+    /**
+     * The whole file, as the model gave it -- empty when `hunks` is not.
+     *
+     * The two formats are alternatives, not layers: a reply is in one or the
+     * other and an edit carries whichever arrived. #348 has why both exist,
+     * which is that they fail differently -- whole-file by omission, into the
+     * file, and hunks by not matching, into a refusal.
+     */
     std::string content;
+
+    /**
+     * The changes to make, when the reply came in search/replace form.
+     *
+     * Resolved by apply() rather than by parse(), because resolving needs the
+     * file and parse() promises not to touch one.
+     */
+    std::vector<hunk> hunks;
 
     /**
      * What was absorbed to arrive at that name, in the order it happened.
@@ -161,8 +188,15 @@ struct tool {
  * different files and they drift, and the drift shows up as a harness that
  * quietly stops applying edits.
  */
+/** Which shape a reply should come back in. */
+enum class format {
+    whole,   ///< filename, fence, the entire file, fence
+    hunks    ///< filename, then search/replace blocks
+};
+
 std::string system_prompt(const std::vector<tool>& tools =
-                              std::vector<tool>());
+                              std::vector<tool>(),
+                          format want = format::whole);
 
 /**
  * How many tokens a string is likely to be, erring high.
@@ -227,7 +261,8 @@ struct plan {
  */
 plan lay_out(const std::string& request, const std::vector<source>& files,
              std::size_t budget,
-             const std::vector<tool>& tools = std::vector<tool>());
+             const std::vector<tool>& tools = std::vector<tool>(),
+             format want = format::whole);
 
 /**
  * How far the estimate was out, once a reply says what it really cost.

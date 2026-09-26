@@ -206,7 +206,7 @@ std::size_t estimate_tokens(const std::string& text) {
     return std::size_t(double(text.size()) / BYTES_PER_TOKEN) + 1;
 }
 
-std::string system_prompt(const std::vector<tool>& tools) {
+std::string system_prompt(const std::vector<tool>& tools, format want) {
     // **Registering a tool is not the same as telling the model it has one.**
     //
     // Measured: with read_file and search registered but unmentioned here, a
@@ -248,6 +248,33 @@ std::string system_prompt(const std::vector<tool>& tools) {
     // trained on the shape of.  What differs is that this says what happens
     // when the rules are broken, since parse() is the other half of it and a
     // model told the consequence has a chance of avoiding it.
+    if(want == format::hunks)
+        return
+            "You are a careful programmer working on an existing codebase.\n"
+            "\n"
+            "When you change a file you MUST answer with search and replace "
+            "blocks, in this format and no other:\n"
+            "\n"
+            "path/to/filename.cc\n"
+            "<<<<<<< SEARCH\n"
+            "the lines exactly as they are now\n"
+            "=======\n"
+            "what they should be instead\n"
+            ">>>>>>> REPLACE\n"
+            "\n"
+            "- the filename goes on a line of its own, exactly as it was "
+            "given to you\n"
+            "- **the SEARCH text must be character for character what is in "
+            "the file now**, including indentation: it is looked for, not "
+            "interpreted, and a block that does not match is not applied\n"
+            "- give enough lines for the SEARCH text to appear exactly once "
+            "in the file; a block that matches twice is not applied either\n"
+            "- use one block per change, and as many blocks as you need\n"
+            "- do not return the whole file, and do not abbreviate with "
+            "\"...\": only the lines you are changing\n"
+            "- if a change is not needed, or the request is unclear, say so "
+            "in prose and return no blocks at all\n" + asking;
+
     return
         "You are a careful programmer working on an existing codebase.\n"
         "\n"
@@ -271,11 +298,11 @@ std::string system_prompt(const std::vector<tool>& tools) {
 }
 
 plan lay_out(const std::string& request, const std::vector<source>& files,
-             std::size_t budget, const std::vector<tool>& tools)
+             std::size_t budget, const std::vector<tool>& tools, format want)
 {
     plan out;
 
-    const std::string system = system_prompt(tools);
+    const std::string system = system_prompt(tools, want);
 
     // The two that are never dropped, costed first: without the system turn
     // the reply is in no format at all, and without the request there is
@@ -832,6 +859,135 @@ conversation converse(std::vector<ai::message> turns,
     }
 }
 
+namespace {
+
+/** The first line of a hunk's search text, for a refusal worth reading. */
+std::string first_line_of(const std::string& s) {
+    const std::string::size_type at = s.find('\n');
+
+    const std::string one = at == std::string::npos ? s : s.substr(0, at);
+
+    return one.size() > 60 ? one.substr(0, 60) + "..." : one;
+}
+
+}
+
+namespace {
+
+/**
+ * Search/replace blocks, lifted out before the whole-file parser runs.
+ *
+ * The same arrangement tool calls get, and for the same reason: to the
+ * whole-file parser these markers are prose, so it would skip them in silence
+ * and report a reply with nothing in it. Lifting them first lets both formats
+ * stay lenient without either having to know about the other.
+ *
+ * Recognised leniently -- a line beginning `<<<<<<<`, one that trims to
+ * `=======`, one beginning `>>>>>>>`. Models put varying words after the
+ * angle brackets and aider's own prompt shows two spellings.
+ *
+ * @param[out] left the text with the blocks removed
+ */
+std::vector<edit> hunks_in(const std::string& text, std::string& left,
+                           const std::vector<std::string>& known,
+                           std::vector<std::string>& why)
+{
+    std::vector<edit> out;
+
+    left.clear();
+
+    std::istringstream in(text);
+
+    std::string line, previous, name;
+
+    // Lines held back because they might turn out to be a filename: the one
+    // before an opening marker belongs to the block, not to the prose.
+    std::string pending;
+
+    while(std::getline(in, line)) {
+        const std::string trimmed = util::trim(line);
+
+        if(trimmed.compare(0, 7, "<<<<<<<") != 0) {
+            if(!pending.empty()) left += pending + "\n";
+
+            pending = line;
+
+            if(!trimmed.empty()) previous = trimmed;
+
+            continue;
+        }
+
+        // The line before the marker is the filename, when there was one.
+        std::string who = util::trim(pending);
+
+        pending.clear();
+
+        if(who.empty() || who.find(' ') != std::string::npos) {
+            if(!name.empty())
+                why.push_back("no filename before the search block; used the "
+                              "one before it: " + name);
+            else if(known.size() == 1) {
+                name = known[0];
+
+                why.push_back("no filename before the search block; only one "
+                              "file was sent: " + name);
+            }
+
+            who = name;
+        }
+
+        if(who.empty()) {
+            // Nothing to attach it to. The text is kept rather than dropped.
+            left += line + "\n";
+
+            continue;
+        }
+
+        name = who;
+
+        hunk h;
+
+        bool in_replace = false, closed = false;
+
+        while(std::getline(in, line)) {
+            const std::string t = util::trim(line);
+
+            if(!in_replace && t == "=======") { in_replace = true; continue; }
+
+            if(t.compare(0, 7, ">>>>>>>") == 0) { closed = true; break; }
+
+            (in_replace ? h.replace : h.search) += line + "\n";
+        }
+
+        // **An unterminated block is not an edit.** The same hazard the
+        // whole-file parser refuses a half-file for: what is in hand is the
+        // beginning of a change, and applying it would be applying half.
+        if(!closed) {
+            why.push_back(name + ": a search block that never closed was "
+                                 "dropped");
+
+            continue;
+        }
+
+        // Attach to the edit for this file, so several hunks on one file are
+        // one edit applied in order.
+        edit* at = 0;
+
+        for(std::size_t i = 0; i < out.size(); i++)
+            if(out[i].name == name) { at = &out[i]; break; }
+
+        if(!at) { out.push_back(edit()); at = &out.back(); at->name = name; }
+
+        at->hunks.push_back(h);
+    }
+
+    if(!pending.empty()) left += pending + "\n";
+
+    return out;
+}
+
+}
+
 reply parse(const std::string& text, const std::vector<std::string>& known) {
     reply out;
 
@@ -845,7 +1001,25 @@ reply parse(const std::string& text, const std::vector<std::string>& known) {
 
     out.calls = ai::openai::calls_in(text, rest);
 
-    std::istringstream in(rest);
+    // Then the search/replace blocks, for the same reason and in the same
+    // way: what the whole-file parser cannot read it would skip in silence.
+    std::vector<std::string> hunk_guesses;
+
+    std::string after_hunks;
+
+    out.edits = hunks_in(rest, after_hunks, known, hunk_guesses);
+
+    if(!out.edits.empty()) {
+        // A reply is in one format or the other. Having found hunks, the rest
+        // is prose -- and running the whole-file parser over it would read a
+        // fenced example as a file to write.
+        for(std::size_t i = 0; i < hunk_guesses.size(); i++)
+            out.edits[0].guesses.push_back(hunk_guesses[i]);
+
+        return out;
+    }
+
+    std::istringstream in(after_hunks);
 
     std::string line;
 
@@ -1083,7 +1257,68 @@ std::vector<result> apply(const reply& r, const std::string& root, bool dry_run)
 
         const std::string had = slurp(full, found);
 
-        if(found && had == e.content) {
+        // **Hunks are resolved here, against the file, not at parse time.**
+        // parse() promises a reply is data and touching disk is this
+        // function's job -- so a search/replace edit arrives as the changes
+        // to make and becomes content exactly here.
+        std::string want = e.content;
+
+        if(!e.hunks.empty()) {
+            if(!found) {
+                one.why = "\"" + e.name + "\" does not exist, so there is "
+                          "nothing for a search block to match";
+
+                out.push_back(one);
+
+                continue;
+            }
+
+            want = had;
+
+            bool bad = false;
+
+            for(std::size_t h = 0; h < e.hunks.size() && !bad; h++) {
+                const std::string& look = e.hunks[h].search;
+
+                // An empty search would match at every position; a model that
+                // wrote one meant something it did not say.
+                if(look.empty()) {
+                    one.why = "a search block with nothing to look for";
+                    bad = true;
+
+                    break;
+                }
+
+                const std::string::size_type at = want.find(look);
+
+                if(at == std::string::npos) {
+                    one.why = "a search block does not match anything in \"" +
+                              e.name + "\": " + first_line_of(look);
+                    bad = true;
+
+                    break;
+                }
+
+                // **Twice is a refusal, not a coin toss.** Replacing the
+                // first of two identical blocks is a choice the model did not
+                // know it was making, and getting it wrong edits the wrong
+                // part of the file.
+                if(want.find(look, at + 1) != std::string::npos) {
+                    one.why = "a search block matches more than once in \"" +
+                              e.name + "\": " + first_line_of(look);
+                    bad = true;
+
+                    break;
+                }
+
+                want = want.substr(0, at) + e.hunks[h].replace +
+                       want.substr(at + look.size());
+            }
+
+            if(bad) { out.push_back(one); continue; }
+        }
+
+        if(found && had == want) {
             // Not "written".  The model returned what it was given, and
             // saying it applied an edit would be the harness lie.
             one.what = outcome::unchanged;
@@ -1107,7 +1342,7 @@ std::vector<result> apply(const reply& r, const std::string& root, bool dry_run)
                 continue;
             }
 
-            to << e.content;
+            to << want;
 
             to.flush();
 

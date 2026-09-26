@@ -92,6 +92,13 @@ struct tree {
     }
 };
 
+/** The tree's get(), for a caller that already knows the file is there. */
+static std::string read(const tree& t, const std::string& name) {
+    bool found = false;
+
+    return t.get(name, found);
+}
+
 static const std::vector<std::string> KNOWN{ "main.cc", "src/util.cc" };
 
 static std::string fence(const std::string& name, const std::string& body) {
@@ -142,6 +149,180 @@ static void the_format_as_asked_for() {
  * util.c. apply() wrote them in order so the result was the last one anyway --
  * the other six were announcements of a write that did not survive.
  */
+/** A search/replace block, and the four ways it is refused. */
+static void search_and_replace_blocks() {
+    std::cout << "\nsearch and replace:\n";
+
+    const std::string body =
+        "hello.cc\n"
+        "<<<<<<< SEARCH\n"
+        "int main() { return 1; }\n"
+        "=======\n"
+        "int main() { return 0; }\n"
+        ">>>>>>> REPLACE\n";
+
+    const jcode::reply r = jcode::parse(body, KNOWN);
+
+    ok("one edit carrying one hunk",
+       r.edits.size() == 1 && r.edits[0].hunks.size() == 1,
+       std::to_string(r.edits.size()) + " edits");
+
+    ok("  naming the file", !r.edits.empty() && r.edits[0].name == "hello.cc");
+
+    ok("  with the text to look for",
+       !r.edits.empty() && r.edits[0].hunks.size() == 1 &&
+       r.edits[0].hunks[0].search == "int main() { return 1; }\n",
+       r.edits.empty() || r.edits[0].hunks.empty()
+           ? "" : r.edits[0].hunks[0].search);
+
+    ok("  and what to put there",
+       !r.edits.empty() && r.edits[0].hunks.size() == 1 &&
+       r.edits[0].hunks[0].replace == "int main() { return 0; }\n");
+
+    // No whole-file content: the two formats are alternatives.
+    ok("  and no whole-file content",
+       !r.edits.empty() && r.edits[0].content.empty());
+
+    // Several changes to one file are one edit, applied in order.
+    const jcode::reply two = jcode::parse(
+        "hello.cc\n<<<<<<< SEARCH\nfirst\n=======\nFIRST\n>>>>>>> REPLACE\n"
+        "hello.cc\n<<<<<<< SEARCH\nsecond\n=======\nSECOND\n>>>>>>> REPLACE\n",
+        KNOWN);
+
+    ok("two blocks on one file are one edit with two hunks",
+       two.edits.size() == 1 && two.edits[0].hunks.size() == 2,
+       std::to_string(two.edits.size()) + "/" +
+       (two.edits.empty() ? "0" : std::to_string(two.edits[0].hunks.size())));
+
+    // An unterminated block is the same hazard as a half-file: what is in
+    // hand is the beginning of a change.
+    const jcode::reply cut = jcode::parse(
+        "hello.cc\n<<<<<<< SEARCH\nsomething\n=======\nhalf a repl", KNOWN);
+
+    ok("a block that never closed is not an edit", cut.edits.empty(),
+       std::to_string(cut.edits.size()));
+
+    // A reply in the other format is untouched by any of this.
+    const jcode::reply whole = jcode::parse(
+        "hello.cc\n```\nwhole file\n```\n", KNOWN);
+
+    ok("a whole-file reply still parses as one",
+       whole.edits.size() == 1 && whole.edits[0].hunks.empty() &&
+       whole.edits[0].content == "whole file\n");
+}
+
+/** Resolving hunks against a real file, which is apply()'s job. */
+static void applying_a_search_block() {
+    std::cout << "\napplying a search block:\n";
+
+    tree t;
+
+    t.put("hello.cc", "one\ntwo\nthree\n");
+
+    jcode::reply r;
+
+    {
+        jcode::edit e;
+
+        e.name = "hello.cc";
+        e.hunks.push_back({ "two\n", "TWO\n" });
+
+        r.edits.push_back(e);
+    }
+
+    const std::vector<jcode::result> did = jcode::apply(r, t.path);
+
+    ok("it is written", did.size() == 1 &&
+       did[0].what == jcode::outcome::written,
+       did.empty() ? "none" : jcode::spell(did[0].what));
+
+    // **The rest of the file is untouched, byte for byte.** That is the whole
+    // reason to prefer this format, so it is the assertion that matters.
+    ok("  with only those bytes changed",
+       read(t, "hello.cc") == "one\nTWO\nthree\n", read(t, "hello.cc"));
+
+    // A hunk that does not match refuses -- into the refusal, not the file.
+    {
+        jcode::reply miss;
+        jcode::edit e;
+
+        e.name = "hello.cc";
+        e.hunks.push_back({ "nowhere\n", "x\n" });
+
+        miss.edits.push_back(e);
+
+        const std::vector<jcode::result> no = jcode::apply(miss, t.path);
+
+        ok("a block that matches nothing is refused",
+           no.size() == 1 && no[0].what == jcode::outcome::refused &&
+           no[0].why.find("does not match") != std::string::npos,
+           no.empty() ? "" : no[0].why);
+
+        ok("  and the file is untouched",
+           read(t, "hello.cc") == "one\nTWO\nthree\n");
+    }
+
+    // Twice is a refusal rather than a coin toss.
+    t.put("twice.cc", "same\nother\nsame\n");
+
+    {
+        jcode::reply amb;
+        jcode::edit e;
+
+        e.name = "twice.cc";
+        e.hunks.push_back({ "same\n", "changed\n" });
+
+        amb.edits.push_back(e);
+
+        const std::vector<jcode::result> no = jcode::apply(amb, t.path);
+
+        ok("a block that matches twice is refused",
+           no.size() == 1 && no[0].what == jcode::outcome::refused &&
+           no[0].why.find("more than once") != std::string::npos,
+           no.empty() ? "" : no[0].why);
+
+        ok("  and that file is untouched too",
+           read(t, "twice.cc") == "same\nother\nsame\n");
+    }
+
+    // A hunk against a file that is not there has nothing to match.
+    {
+        jcode::reply gone;
+        jcode::edit e;
+
+        e.name = "absent.cc";
+        e.hunks.push_back({ "x\n", "y\n" });
+
+        gone.edits.push_back(e);
+
+        const std::vector<jcode::result> no = jcode::apply(gone, t.path);
+
+        ok("a block against a file that does not exist is refused",
+           no.size() == 1 && no[0].what == jcode::outcome::refused &&
+           no[0].why.find("does not exist") != std::string::npos,
+           no.empty() ? "" : no[0].why);
+    }
+
+    // Two hunks, applied in order, both landing.
+    {
+        t.put("both.cc", "alpha\nbeta\n");
+
+        jcode::reply many;
+        jcode::edit e;
+
+        e.name = "both.cc";
+        e.hunks.push_back({ "alpha\n", "ALPHA\n" });
+        e.hunks.push_back({ "beta\n", "BETA\n" });
+
+        many.edits.push_back(e);
+
+        jcode::apply(many, t.path);
+
+        ok("several blocks all land", read(t, "both.cc") == "ALPHA\nBETA\n",
+           read(t, "both.cc"));
+    }
+}
+
 static void a_file_given_twice_is_written_once() {
     std::cout << "\na file given more than once:\n";
 
@@ -1226,6 +1407,8 @@ int main() {
     std::cout << std::unitbuf;
 
     the_format_as_asked_for();
+    search_and_replace_blocks();
+    applying_a_search_block();
     a_file_given_twice_is_written_once();
     a_tool_call_in_the_reply();
     until_the_build_passes();
