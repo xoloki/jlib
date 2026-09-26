@@ -84,6 +84,9 @@ in docs/:
 
     docs/async.md    the reactor, the coroutine layer, and the two ways
                      sys::server serves a connection
+    docs/jhttpd.md   the HTTP server, and the daemon built on it
+    docs/ai.md       the transformer, the backend, and the network that
+                     trains from scratch
 
 Each is a map rather than a reference: it says how the pieces fit and why they
 are shaped that way, and points at the header for the detail.  Where a
