@@ -31,3 +31,16 @@ fuzz:
 	$(top_srcdir)/tests/fuzz/run.sh $(FUZZ_SECONDS) $(FUZZ_TARGET)
 
 EXTRA_DIST += tests/fuzz
+
+# A header without its prose, for when the question is "what is the interface"
+# rather than "why is it like that".  See tools/outline.sh for why this is a
+# filter and not a shorter header.
+#
+#     make outline FILE=jlib/net/http_server.hh
+.PHONY: outline
+# FILE is relative to the source root, not to the build directory, because
+# that is what a reader has in hand when they want to look at a header.
+outline:
+	@cd "$(top_srcdir)" && ./tools/outline.sh "$(FILE)"
+
+EXTRA_DIST += tools/outline.sh
