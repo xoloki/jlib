@@ -153,4 +153,4 @@ ones).
 No model eviction: `engine` loads on first use and never unloads, so a server
 advertises more than it can hold (#278).
 
-No batching across conversations, per the serialisation point above (#199).
+No batching across conversations, per the serialisation point above (#368).
