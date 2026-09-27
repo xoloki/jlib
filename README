@@ -95,6 +95,8 @@ in docs/:
                      program
     docs/jcode.md    the coding harness, its two edit formats, and the
                      write that is deliberately not a tool
+    docs/audio.md    synthesis, sampling and mixing, and the streambuf you
+                     write notes into
 
 Each is a map rather than a reference: it says how the pieces fit and why they
 are shaped that way, and points at the header for the detail.  Where a
