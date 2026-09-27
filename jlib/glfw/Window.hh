@@ -100,7 +100,12 @@ public:
     void set_should_close(bool close = true);
 
     /**
-     * Drain pending events, then fire timeout.
+     * Drain pending events, fire timeout, then wait out what is left of the
+     * tick.
+     *
+     * The wait is the **remainder**, not the interval: a frame costs the
+     * greater of `get_timeout()` and the work, rather than the sum.  It also
+     * ends early if an event arrives, so input is not delayed by a tick.
      */
     virtual void iterate();
 
@@ -110,7 +115,14 @@ public:
     void run();
 
     /**
-     * Microseconds to wait in iterate() before firing timeout.
+     * The shortest a tick may be, in microseconds.  Zero for no floor.
+     *
+     * A ceiling on the rate rather than a delay: iterate() waits only for
+     * whatever is left after the work, so setting this below the display's
+     * refresh does nothing once glfwSwapInterval(1) is pacing the loop --
+     * the swap is already the slower constraint.  What it is for is a tick
+     * *slower* than the display, the way jhypermusic asks for sixty a second
+     * on a screen that could do more.
      */
     void set_timeout(long micro);
     long get_timeout() const;
