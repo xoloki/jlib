@@ -46,10 +46,30 @@
  *     this as a debugger to find out when/where it broke
  *
  * Read it as a hypothesis with a method attached: *if* this renderer and
- * jhyper disagree, dumping both modelview matrices in a comparable form and
+ * jhyper disagree, dumping both pipelines' vertices in a comparable form and
  * rotating in every plane from the start is how to find the frame where they
  * part.  There is no recorded symptom -- no wrong picture anybody wrote
  * down -- which is why this is a comment and not an issue.
+ *
+ * **The machine-readable dump the note asks for exists**: see math/dump.hh.
+ * `JLIB_PLOT_DUMP=<path>` writes a frame's vertices, source and transformed,
+ * with `JLIB_PLOT_DUMP_SKIP` and `JLIB_PLOT_DUMP_FRAMES` to choose which
+ * frames.  Both `math::Plot` and this file already call it:
+ *
+ *     JLIB_PLOT_DUMP=/tmp/hard.txt jhardhyper
+ *     JLIB_PLOT_DUMP=/tmp/base.txt jhyper
+ *
+ * So the half of the plan that was tooling is built and what is left is the
+ * reading.  Two things stop the files being diffable as they stand, and they
+ * are the "correct for the different column layout" the note asked for:
+ *
+ *   - the first column is a tag, `hard` here and `base` from math::Plot
+ *   - `dst` has a different width, because this renderer stops the reduction
+ *     at three dimensions and jhyper carries it to two
+ *
+ * The `src` columns and the leading `dst` ones are what compare directly.
+ * And dump.hh's own caveat applies: two runs are only comparable at the same
+ * rotation, which is why it captures frame zero unless told otherwise.
  */
 
 #include <algorithm>
