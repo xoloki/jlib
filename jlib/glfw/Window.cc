@@ -26,7 +26,6 @@
 #include <cctype>
 #include <iostream>
 #include <sstream>
-#include <thread>
 
 namespace jlib {
 namespace glfw {
@@ -167,6 +166,9 @@ long Window::get_timeout() const {
 }
 
 void Window::iterate() {
+    const std::chrono::steady_clock::time_point began =
+        std::chrono::steady_clock::now();
+
     glfwPollEvents();
 
     // GLFW delivers no resize event for the initial size, so synthesize one
@@ -183,10 +185,39 @@ void Window::iterate() {
         configure_notify.emit(get_width(), get_height());
     }
 
-    if(m_timeout > 0)
-        std::this_thread::sleep_for(std::chrono::microseconds(m_timeout));
-
     timeout.emit();
+
+    // **What is left of the tick, not the whole of it.**
+    //
+    // This used to sleep m_timeout *before* emitting, so a frame cost the
+    // interval plus the work rather than the greater of the two.  With
+    // glfwSwapInterval(1) set in the constructor the budget is one refresh --
+    // 16.7 ms at 60 Hz -- and a fixed 10 ms wait spent 60% of it before any
+    // work began, leaving 6.7 ms for everything the app does.
+    //
+    // Cross that and a vblank is missed, which does not shave the frame rate,
+    // it halves it.  Since a hypercube has 2^D vertices the work doubles with
+    // each dimension, so one step of D took jhardhyper from comfortable to
+    // 30 fps -- a cliff rather than a slope, and the reason one was observed
+    // around D=14 for years without a cause (#376).
+    //
+    // **glfwWaitEventsTimeout rather than sleep_for**, so the wait ends early
+    // when something arrives.  A sleep on this thread is a sleep on the only
+    // thread: events queue behind it and a keystroke waits out the interval,
+    // which is the same mistake as #346 in a different loop.
+    if(m_timeout > 0) {
+        const std::chrono::microseconds spent =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - began);
+
+        const std::chrono::microseconds left =
+            std::chrono::microseconds(m_timeout) - spent;
+
+        if(left > std::chrono::microseconds::zero()) {
+            glfwWaitEventsTimeout(
+                std::chrono::duration<double>(left).count());
+        }
+    }
 }
 
 void Window::run() {

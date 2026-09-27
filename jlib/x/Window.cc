@@ -442,6 +442,9 @@ void Window::run() {
 }
 	
 void Window::iterate() {
+    const std::chrono::steady_clock::time_point began =
+        std::chrono::steady_clock::now();
+
     const int sz = 64;
     int n;
     char buffer[sz];
@@ -473,8 +476,29 @@ void Window::iterate() {
 		}
     }
 
-    std::this_thread::sleep_for(std::chrono::microseconds(m_timeout));
     timeout.emit();
+
+    // **What is left of the tick, not the whole of it**, the same correction
+    // glfw::Window needed: this slept the interval *before* emitting, so a
+    // frame cost the interval plus the work rather than the greater of the
+    // two.  At 1000 us the distortion is small next to the 10 ms glfw was
+    // spending, but it is the same arithmetic and it is wrong the same way.
+    //
+    // Still a sleep rather than an event wait, unlike glfw.  Waking early on
+    // input here means select() on ConnectionNumber(m_dpy), which is a real
+    // change to this loop; at a 1 ms floor the latency it would save is not
+    // worth that, and if this ever paces at 10 ms it becomes worth it.
+    if(m_timeout > 0) {
+        const std::chrono::microseconds spent =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - began);
+
+        const std::chrono::microseconds left =
+            std::chrono::microseconds(m_timeout) - spent;
+
+        if(left > std::chrono::microseconds::zero())
+            std::this_thread::sleep_for(left);
+    }
 }
 
 void Window::set_timeout(long micro) {

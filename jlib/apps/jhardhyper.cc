@@ -76,7 +76,6 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
-#include <thread>
 
 #include <cstdlib>
 
@@ -1419,9 +1418,16 @@ public:
     void on_timeout() {
         HyperPlot<T, PlotType>::on_timeout();
 
-        if(waiting)
-            std::this_thread::sleep_for(std::chrono::microseconds(100000));
-        else
+        // Paused draws nothing, and waits for nothing either.  This used to
+        // sleep 100 ms here so a paused window would not spin -- on the one
+        // thread that also reads input, so unpausing, resizing and closing
+        // all queued behind it and the spacebar could take a tenth of a
+        // second to register.
+        //
+        // Window::iterate() now waits out the rest of the tick with
+        // glfwWaitEventsTimeout, so an idle loop already costs nothing and
+        // already wakes on input.  There is nothing left for a sleep to do.
+        if(!waiting)
             this->draw();
     }
 
