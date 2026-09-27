@@ -18,6 +18,15 @@
  *
  */
 
+/**
+ * The same rotating hypercube as jhyper, drawn with OpenGL over GLX.
+ *
+ * Identical geometry and colouring -- both derive from the shared
+ * `HyperPlot` -- and the only difference is the backend passed as its
+ * template argument.  That the two files are this small is the point of the
+ * arrangement; see apps/Hyper.hh.
+ */
+
 
 #include <jlib/glx/Plot.hh>
 #include <jlib/apps/Hyper.hh>
