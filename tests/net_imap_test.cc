@@ -165,6 +165,73 @@ static void the_three_shapes() {
        u.type() == response::kind::untagged && u.ok() &&
        u.code() == "UIDVALIDITY 3857529045", u.code());
 
+    // **The response code is a production now, not a blob** (#370).
+    //
+    // resp-text-code used to be `1*( any TEXT-CHAR except ] )`, so every
+    // caller that wanted a value out of one took it off the end of code()
+    // with an offset -- Imap4 used substr(7) for UNSEEN and substr(11) for
+    // CAPABILITY, two numbers that had to agree with two string literals and
+    // said so nowhere.
+    {
+        const response u2 =
+            response::parse("* OK [UNSEEN 12] Message 12 is first unseen\r\n");
+
+        ok("a code's number is read by the grammar",
+           u2.code_number() == 12, std::to_string(u2.code_number()));
+
+        ok("and the code text is unchanged for anyone still reading it",
+           u2.code() == "UNSEEN 12", u2.code());
+
+        const response n2 =
+            response::parse("* OK [UIDNEXT 4392] Predicted next UID\r\n");
+
+        ok("UIDNEXT too", n2.code_number() == 4392,
+           std::to_string(n2.code_number()));
+
+        // A code that carries no number does not invent one.
+        const response a2 = response::parse("* NO [ALERT] disk is full\r\n");
+
+        ok("a code with no number reads zero", a2.code_number() == 0,
+           std::to_string(a2.code_number()));
+
+        // **capability-data inside a code**, which is the greeting every
+        // server sends and the other half of what Imap4 was re-splitting.
+        const response g =
+            response::parse("* OK [CAPABILITY IMAP4rev1 STARTTLS] ready\r\n");
+
+        ok("CAPABILITY inside a response code is parsed as capabilities",
+           g.capabilities().size() == 2 &&
+               g.capabilities()[0] == "IMAP4rev1" &&
+               g.capabilities()[1] == "STARTTLS",
+           std::to_string(g.capabilities().size()));
+
+        // The fallback alternative: an atom this grammar does not enumerate
+        // still parses, with its text intact, because a server may send a
+        // code nobody here has heard of.
+        const response x =
+            response::parse("* OK [XVENDOR chunky bacon] hello\r\n");
+
+        ok("an unknown code still parses, as atom plus text",
+           x.code() == "XVENDOR chunky bacon", x.code());
+
+        // PERMANENTFLAGS carries a flag list rather than a number, and the
+        // \* in it is the one flag that is not an atom.
+        //
+        // **Weaker than the three assertions above, and kept anyway.** It
+        // proves the line parses and its text survives -- which the atom
+        // fallback alone also does. Moving atom to the front of the
+        // alternation reddens the three above and leaves this one green,
+        // so it is not evidence that the enumerated alternative was
+        // chosen. Nothing on `response` exposes the parsed flag-perm list,
+        // so there is nothing stronger to assert without an accessor no
+        // caller wants yet.
+        const response pf = response::parse(
+            "* OK [PERMANENTFLAGS (\\Deleted \\Seen \\*)] limited\r\n");
+
+        ok("PERMANENTFLAGS parses, including the \\* perm-flag",
+           pf.code().compare(0, 14, "PERMANENTFLAGS") == 0, pf.code());
+    }
+
     const response c = response::parse("+ Ready for additional command text\r\n");
 
     ok("a continuation", c.type() == response::kind::continuation &&

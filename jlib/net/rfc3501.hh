@@ -108,7 +108,43 @@ resp-cond-state =  cond-name SP resp-text
 cond-name       =  "OK" / "NO" / "BAD" / "PREAUTH" / "BYE"
 
 resp-text       =  [ "[" resp-text-code "]" SP ] text
-resp-text-code  =  1*( %x01-5C / %x5E-FF )   ; jlib: "any TEXT-CHAR except ]"
+
+; 7.1.  Enumerated rather than left opaque, and the order is not the RFC's.
+;
+; This was `1*( %x01-5C / %x5E-FF )` -- everything up to the closing bracket,
+; as one blob -- which meant every caller that wanted a value out of a code
+; re-parsed the blob by hand.  Imap4 did it with `substr(7)` and `substr(11)`,
+; two offsets that had to agree silently with two string literals above them.
+;
+; **Reordered for ordered choice.**  This is a PEG (see util/abnf.hh): the
+; first alternative that matches wins, so `atom` -- which matches every name
+; here -- has to come last, and the RFC's own ordering already puts it there.
+; `capability-data` must precede it for the same reason.  Longest-first
+; within a shared prefix: READ-WRITE before READ-ONLY is not required (they
+; differ at the fifth character) but UIDVALIDITY before UIDNEXT is not either
+; -- both diverge before either ends.  Nothing here shares a prefix with a
+; longer sibling, which is why the RFC's order survives unchanged apart from
+; the note above.
+resp-text-code  =  "ALERT"
+                /  "BADCHARSET" [ SP "(" astring *( SP astring ) ")" ]
+                /  capability-data
+                /  "PARSE"
+                /  "PERMANENTFLAGS" SP "(" [ flag-perm *( SP flag-perm ) ] ")"
+                /  "READ-ONLY"
+                /  "READ-WRITE"
+                /  "TRYCREATE"
+                /  "UIDNEXT" SP code-number
+                /  "UIDVALIDITY" SP code-number
+                /  "UNSEEN" SP code-number
+                /  atom [ SP 1*( %x01-5C / %x5E-FF ) ]
+
+; nz-number in the RFC.  Named for what a caller wants out of it: the number
+; carried by a response code, whichever code it was.
+code-number     =  nz-number
+nz-number       =  digit-nz *DIGIT
+digit-nz        =  %x31-39
+flag-perm       =  flag / "\*"
+
 text            =  *TEXT-CHAR
 
 ; 7.2

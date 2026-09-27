@@ -18,6 +18,8 @@
  */
 
 #include <jlib/net/imap_response.hh>
+
+#include <cstdlib>
 #include <jlib/net/rfc3501.hh>
 
 #include <jlib/util/abnf.hh>
@@ -74,7 +76,7 @@ options parse_options()
     o.captures = options::capture_policy::listed;
     o.capture_only = {
         "continue-req", "response-tagged", "response-data",
-        "rtag", "cond-name", "resp-text-code", "text",
+        "rtag", "cond-name", "resp-text-code", "code-number", "text",
         "mailbox-data", "capability-data", "list-name", "count-name",
         "mailbox", "delim", "capability", "message-data", "number",
         "flag-list", "flag",
@@ -349,6 +351,38 @@ sys::task<std::string> read(sys::async_reader& in)
 
 struct reader {
 
+    /**
+     * Everything a resp-text-code carries, wherever one appears.
+     *
+     * **Two callers, and forgetting the second is a real bug rather than a
+     * gap.** A code turns up in a tagged response, an untagged one and a
+     * continuation, and `A00002 OK [CAPABILITY ...]` after authentication is
+     * the one that matters: RFC 3501 6.2.2 lets a server send a new list
+     * there precisely because authenticating changes it, and a client that
+     * misses it keeps a stale `LOGINDISABLED` and refuses to send a password
+     * the server would now accept.
+     *
+     * Scoped to the code match rather than the whole response, so the
+     * untagged `* CAPABILITY ...` form -- which is capability-data outside
+     * any code -- is still data_of's to collect and is not counted twice.
+     */
+    static void code_of(response& r, const match& code)
+    {
+        if(!code) return;
+
+        r.m_code = code.str();
+
+        if(const match n = code["code-number"])
+            r.m_code_number = std::strtoul(n.str().c_str(), 0, 10);
+
+        if(const match c = code["capability-data"]) {
+            r.m_capabilities.clear();
+
+            for(const match& one : c.all("capability"))
+                r.m_capabilities.push_back(one.str());
+        }
+    }
+
     static void condition_of(response& r, const match& m)
     {
         const match c = m["cond-name"];
@@ -363,8 +397,9 @@ struct reader {
         else if(name == "PREAUTH") r.m_condition = response::condition::preauth;
         else if(name == "BYE")     r.m_condition = response::condition::bye;
 
-        if(const match code = m["resp-text-code"]) r.m_code = code.str();
-        if(const match text = m["text"])           r.m_text = text.str();
+        code_of(r, m["resp-text-code"]);
+
+        if(const match text = m["text"]) r.m_text = text.str();
     }
 
     static void flags_of(response& r, const match& m)
@@ -378,6 +413,18 @@ struct reader {
         // a part of it -- so looking for "CAPABILITY" inside mailbox-data,
         // which is what this did, found nothing and silently produced a
         // response with no name and no capabilities.
+        // **Only the bare form, `* CAPABILITY ...`, belongs to this
+        // function.** capability-data also appears inside a resp-text-code
+        // -- `* OK [CAPABILITY ...]` -- and code_of() takes that one, because
+        // a code replaces the client's list where a bare response *is* the
+        // list.
+        //
+        // The guard is needed rather than tidy: operator[] searches
+        // descendants, so without it the lookup below finds the one inside
+        // the code as well and every capability is counted twice. Which is
+        // what happened, and what the test asserting a count caught.
+        if(m["resp-text-code"]) return;
+
         if(const match c = m["capability-data"]) {
             r.m_name = "CAPABILITY";
 
@@ -459,7 +506,8 @@ struct reader {
             r.m_kind = response::kind::continuation;
 
             if(const match t = m["text"]) r.m_text = t.str();
-            if(const match c = m["resp-text-code"]) r.m_code = c.str();
+
+            code_of(r, m["resp-text-code"]);
 
             return r;
         }
