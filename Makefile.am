@@ -6,7 +6,7 @@ EXTRA_DIST = autogen.sh DOCKER TODO.md LICENSE NOTICE
 
 # The architecture documents, which are the map the headers cannot be: each
 # one spans files, and none of it belongs at any single declaration.
-doc_DATA = docs/async.md docs/jhttpd.md docs/ai.md \
+doc_DATA = docs/async.md docs/jhttpd.md docs/abnf.md docs/ai.md \
            docs/jserve.md docs/jchat.md docs/jalpaca.md docs/jcode.md
 EXTRA_DIST += $(doc_DATA)
 
