@@ -15,7 +15,50 @@
  * limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Project N dimensions onto a screen, and let somebody else draw it.
  *
+ * The geometry and the projection live here; `draw_point` and `draw_line`
+ * are pure virtual, so a backend supplies only the two primitives and knows
+ * nothing about dimensions.  `x::Plot`, `glx::Plot` and `glfw::Plot` are
+ * those backends, and `apps/Hyper.hh` is what turns a plot into a rotating
+ * hypercube on top of any of them.
+ *
+ * ## The reduction is a chain, not a single step
+ *
+ * N goes to N-1 goes to N-2, down to the target, each step an
+ * N-dimensional frustum whose last axis is depth and whose homogeneous
+ * coordinate is `w = -x_{d-1}`.
+ *
+ * **Whether each step actually divides by w is a rendering choice rather
+ * than a correctness one**, and it is the most consequential thing in this
+ * file, because it decides what the picture tells you:
+ *
+ *   perspective   divide at every step.  Physically what a camera in N
+ *                 dimensions would see, and the most convincing -- and it
+ *                 destroys parallelism, which is exactly what makes a
+ *                 hypercube's cell structure hard to read.
+ *
+ *   orthographic  divide at none.  Parallel edges stay parallel, so the
+ *                 combinatorial structure reads straight off the screen and
+ *                 the figure looks flat.
+ *
+ *   mixed         the default: divide at the outermost step and not after,
+ *                 so the last reduction to the screen has depth and the
+ *                 higher ones stay affine.  A compromise, chosen because
+ *                 neither extreme is legible for a 4-cube in motion.
+ *
+ * `cycle_projection_mode()` exists so the three can be compared by eye while
+ * the figure turns, which is the only way to see what each one costs.
+ *
+ * ## Where the target is fixed
+ *
+ * The chain reduces to two, and the backends join pixel pairs.  jhardhyper
+ * stops at three instead, because it draws solid faces and needs a surface
+ * to shade -- and it forks `HyperPlot` to do it, which is issue #20: the
+ * target is not a parameter here, and it should be.
  */
 
 #ifndef JLIB_MATH_PLOT_HH

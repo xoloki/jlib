@@ -18,6 +18,19 @@
  *
  */
 
+/**
+ * A lit, textured torus on GLFW.
+ *
+ * **Not a Plot app.**  It uses none of `math::Plot` or `HyperPlot`; it draws
+ * `gl::shapes::torus` directly through `gl::buffers` and `gl::lights`.  What
+ * it exercises is the OpenGL wrapper in `jlib/gl` -- vertex buffers,
+ * lighting, a window from `jlib/glfw` -- on a shape with curvature, where a
+ * normal per vertex actually matters.
+ *
+ * It sits beside the hyper apps because it shares their window layer and
+ * nothing else.
+ */
+
 #include <jlib/math/math.hh>
 #include <jlib/glfw/Window.hh>
 

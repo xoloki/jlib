@@ -18,6 +18,18 @@
  *
  */
 
+/**
+ * A lit, textured box on GLX.
+ *
+ * **Not a Plot app**, and the counterpart to jgltorus one window system
+ * over: the same `jlib/gl` wrapper -- buffers, lights, `glu` textures --
+ * with a GLX window rather than a GLFW one, on the simplest shape there is.
+ *
+ * Between the two of them, `jlib/gl` is exercised against both window
+ * layers and against both a flat-faced and a curved surface.  Neither
+ * touches the N-dimensional projection in `math::Plot`.
+ */
+
 
 #include <jlib/math/math.hh>
 #include <jlib/glx/Window.hh>

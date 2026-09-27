@@ -18,6 +18,14 @@
  *
  */
 
+/**
+ * The same rotating hypercube again, on GLFW rather than GLX.
+ *
+ * GLFW carries its own window and input handling, so this is the portable
+ * one -- it is what runs on macOS, where there is no GLX.  Geometry and
+ * colour come from the shared `HyperPlot`; see apps/Hyper.hh.
+ */
+
 #include <jlib/glfw/Plot.hh>
 #include "Hyper.hh"
 #include <iostream>

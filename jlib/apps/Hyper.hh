@@ -16,8 +16,47 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * TODO make it pretty.  turn on translucency alpha.  each vertex gets a color, and should be drawn as a glowing blob that is bigger than the edges.  the edges should blend the colors of the verticies in the line between them.  if am using HSV colors then i can just add the hues (letting them overflow) to get the color of the blended line.  make the lines thicker than they are currently, but the verticies should be larger.  change the brightness of the vertex/edge based on whats closer in 3d space.  this will require stopping at 3 dimensions to do this assay.
- * EVENTUALLY, MOVE THIS INTO VR
+ */
+
+/**
+ * An N-dimensional hypercube, rotating, drawn by whatever Plot it is given.
+ *
+ * `HyperPlot` is templated on the plot backend rather than deriving from a
+ * fixed one, and inserts itself between `math::Plot` and the application:
+ * `GLXPlot : HyperPlot<T, glx::Plot<T>>`, and the same shape for GLFW.  So
+ * the geometry, the rotation and the colouring are written once and the
+ * window system is a parameter -- the argument `ai::backend` makes about
+ * devices, for the same reason.
+ *
+ * `math::Plot` supplies the vertices, the N->2 projection and the
+ * `draw_point` / `draw_line` calls.  This supplies what makes it a hypercube
+ * rather than a point cloud: which pairs of vertices are edges, a rotation
+ * in every plane, and a colour per vertex.
+ *
+ * ## The note this file used to be
+ *
+ * Kept the way jhypermusic.cc keeps its own, because it says what the thing
+ * was for.  **About half of it is now done**, and a reader who takes it for
+ * a description of the code below will be wrong:
+ *
+ *     TODO make it pretty.  turn on translucency alpha.  each vertex gets a
+ *     color, and should be drawn as a glowing blob that is bigger than the
+ *     edges.  the edges should blend the colors of the verticies in the line
+ *     between them.  if am using HSV colors then i can just add the hues
+ *     (letting them overflow) to get the color of the blended line.  make the
+ *     lines thicker than they are currently, but the verticies should be
+ *     larger.  change the brightness of the vertex/edge based on whats closer
+ *     in 3d space.
+ *     EVENTUALLY, MOVE THIS INTO VR
+ *
+ * **Done**: a colour per vertex, and an edge blended between its endpoints
+ * on the colour wheel rather than in RGB.  See `hues` and `draw_line`, which
+ * say why averaging channels drives every edge toward grey and why the old
+ * half-edge scheme left a seam down the middle of each one.
+ *
+ * **Not done**: translucency, glowing vertices, thicker lines, brightness by
+ * depth, VR.  Those are #374, because a wish list at the top of a header is
+ * read as a description of what is under it.
  */
 
 #ifndef JLIB_APPS_HYPER_HH

@@ -18,6 +18,15 @@
  *
  */
 
+/**
+ * A rotating hypercube in an X11 window, with no OpenGL at all.
+ *
+ * `x::Plot` draws with Xlib primitives, so this runs over a plain X
+ * connection -- including a forwarded one -- on a machine with no GL.  It is
+ * the smallest of the hyper apps because `HyperPlot` and `math::Plot` hold
+ * everything that is not the window: see apps/Hyper.hh.
+ */
+
 #include <iostream>
 
 #include <cstdlib>

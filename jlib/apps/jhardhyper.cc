@@ -16,7 +16,40 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * XXX TODO fix this by printing the matrix contents out in a machine readable format.  correct for the different column layout, then get the same results from jhyper.  be rotating in all planes from the beginning. at some point the two modelview matricies will diverge, use this as a debugger to find out when/where it broke
+ */
+
+/**
+ * A hypercube with solid faces, rotating, on GLFW.
+ *
+ * The other hyper apps draw a wireframe: `math::Plot` reduces all the way to
+ * two dimensions and they join pixel pairs.  This one stops at three, so
+ * there is a surface to shade -- faces, normals and lighting -- which is
+ * what makes a cell of a 4-cube read as a solid rather than as a box drawn
+ * in lines.
+ *
+ * That floor of three is the whole reason `HyperPlot` is forked here instead
+ * of coming from `apps/Hyper.hh`; see the note at the reduction and issue
+ * #20, which is the parameterisation that would retire the fork.  The copy
+ * of `glut::Plot` that used to sit here as well is gone -- `glfw::Plot`
+ * replaced it.
+ *
+ * ## A verification that was planned and never run
+ *
+ * The note this file header used to be, kept because the technique is still
+ * the right one and **nobody has carried it out**, so it is a plan rather
+ * than a finding:
+ *
+ *     XXX TODO fix this by printing the matrix contents out in a machine
+ *     readable format.  correct for the different column layout, then get
+ *     the same results from jhyper.  be rotating in all planes from the
+ *     beginning. at some point the two modelview matricies will diverge, use
+ *     this as a debugger to find out when/where it broke
+ *
+ * Read it as a hypothesis with a method attached: *if* this renderer and
+ * jhyper disagree, dumping both modelview matrices in a comparable form and
+ * rotating in every plane from the start is how to find the frame where they
+ * part.  There is no recorded symptom -- no wrong picture anybody wrote
+ * down -- which is why this is a comment and not an issue.
  */
 
 #include <algorithm>
