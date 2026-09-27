@@ -84,6 +84,8 @@ in docs/:
 
     docs/abnf.md     grammars pasted from the RFCs, and the PEG that runs
                      them
+    docs/net.md      mail and HTTP clients, OAuth2, and the three habits
+                     layered by age
     docs/async.md    the reactor, the coroutine layer, and the two ways
                      sys::server serves a connection
     docs/jhttpd.md   the HTTP server, and the daemon built on it
