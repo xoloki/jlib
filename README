@@ -82,6 +82,8 @@ is where it stays correct.
 What a header cannot hold is the shape that spans several of them, and that is
 in docs/:
 
+    docs/abnf.md     grammars pasted from the RFCs, and the PEG that runs
+                     them
     docs/async.md    the reactor, the coroutine layer, and the two ways
                      sys::server serves a connection
     docs/jhttpd.md   the HTTP server, and the daemon built on it
