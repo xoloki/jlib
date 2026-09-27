@@ -155,16 +155,30 @@ namespace jlib {
                 m_attach.push_back(Email(m_raw.substr(header_end)));
             }
             else {
-                std::string encoding = jlib::util::upper(find("CONTENT-TRANSFER-ENCODING"));
+                // **A mechanism is a token, so it is compared and not
+                // searched for.**  RFC 2045 6.1 writes
+                //
+                //     mechanism := "7bit" / "8bit" / "binary" /
+                //                  "quoted-printable" / "base64" /
+                //                  ietf-token / x-token
+                //
+                // and this used to ask whether "BASE64" appeared *anywhere*
+                // in the value, so `x-not-base64` -- a legal x-token, and the
+                // obvious spelling for "deliberately not base64" -- decoded
+                // as base64.  Trimmed as well as upper-cased: the token is
+                // case-insensitive and folding leaves whitespace around it.
+                const std::string encoding =
+                    jlib::util::upper(jlib::util::trim(
+                        find("CONTENT-TRANSFER-ENCODING")));
 
                 // this is the end of the headers.  it's also possible to
                 // take ihead and grab the rest of it, but this is probaby faster
-                if(encoding.find("BASE64") != encoding.npos) {
+                if(encoding == "BASE64") {
                     if(header_end != m_raw.npos) {
                         m_data = jlib::util::base64::decode(m_raw.substr(header_end));
                     }
                 }
-                else if(encoding.find("QUOTED-PRINTABLE") != encoding.npos) {
+                else if(encoding == "QUOTED-PRINTABLE") {
                     if(header_end != m_raw.npos) {
                         m_data = jlib::util::qp::decode(m_raw.substr(header_end));
                     } 

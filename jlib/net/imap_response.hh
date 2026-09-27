@@ -160,6 +160,16 @@ public:
     /** The "[UIDVALIDITY 3857529045]" of a resp-text, without its brackets. */
     const std::string& code() const { return m_code; }
 
+    /**
+     * The number a response code carried, or 0 for one that carried none.
+     *
+     * `UNSEEN 12`, `UIDNEXT 4392`, `UIDVALIDITY 3857529045` -- the grammar
+     * reads it, so a caller does not take it off the end of code() with an
+     * offset that has to agree with a string literal. Imap4 did exactly that
+     * and it is the reason this exists.
+     */
+    unsigned long code_number() const { return m_code_number; }
+
     /** The human-readable remainder.  Not for a program to act on. */
     const std::string& text() const { return m_text; }
 
@@ -211,6 +221,7 @@ protected:
     kind m_kind = kind::untagged;
     condition m_condition = condition::none;
 
+    unsigned long m_code_number = 0;
     std::string m_raw;
     std::string m_tag;
     std::string m_code;

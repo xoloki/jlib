@@ -686,8 +686,11 @@ namespace jlib {
 
                 // The unseen count is a response-text-code on an OK, not a
                 // data response: "* OK [UNSEEN 12] Message 12 is first unseen".
+                // The grammar reads the number out of the code; this used
+                // to be substr(7), an offset that had to agree with the
+                // literal above it and said so nowhere.
                 if(util::ibegins(r.code(), "UNSEEN ")) {
-                    unseen(util::int_value(r.code().substr(7)));
+                    unseen(r.code_number());
                 }
             }
         }
@@ -852,8 +855,12 @@ namespace jlib {
                 // one back in the tagged OK's response code, or as an untagged
                 // response during the exchange; failing both, the cache is
                 // cleared rather than kept, and capability() will fetch it.
-                if(util::ibegins(r.code(), "CAPABILITY ")) {
-                    m_capabilities = util::tokenize(r.code().substr(11));
+                // capability-data is a production, and it is captured
+                // wherever it appears -- including inside this code. Was
+                // substr(11) and a re-tokenise of text the parser had
+                // already split.
+                if(!r.capabilities().empty()) {
+                    m_capabilities = r.capabilities();
                 }
                 else {
                     m_capabilities = capabilities;
