@@ -123,12 +123,24 @@ public:
      * A vertex and an edge, each told which object vertices they came from.
      *
      * The index is what lets a subclass colour an endpoint.  Without it the
-     * only thing an override could reach was a counter incremented by
-     * draw_point, so an edge could only be drawn in the colour of whichever
+     * only thing an override could reach was a counter incremented by the
+     * point pass, so an edge could only be drawn in the colour of whichever
      * end came first -- which is why edges used to be drawn in halves.
      */
-    virtual void draw_point(const math::vertex<T>& p, uint index);
-    virtual void draw_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
+    /**
+     * **Must be called inside a glBegin of the matching kind.**
+     *
+     * These used to open and close their own glBegin/glEnd, which is one
+     * pair per primitive -- about 131,000 a frame at D=14, measured at 95%
+     * of the frame and ~245ns each (#383).  The begin now lives in draw(),
+     * around the whole loop, and these emit vertices into it.
+     *
+     * Named emit_ rather than draw_ for exactly that reason: a draw_line
+     * that silently requires someone else's glBegin is a trap, and GL will
+     * not report it -- the vertices simply go nowhere.
+     */
+    virtual void emit_point(const math::vertex<T>& p, uint index);
+    virtual void emit_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
                            uint i1, uint i2);
 
     /**
@@ -351,27 +363,16 @@ void HPlot<T>::on_configure(int width, int height) {
 
 template<typename T>
 inline
-void HPlot<T>::draw_point(const math::vertex<T>& p, uint) {
-    glBegin(GL_POINTS);
-    //glVertex3d(p[0], p[1], p[2]);
+void HPlot<T>::emit_point(const math::vertex<T>& p, uint) {
     glVertex4dv(p.data());
-    glEnd();
 }
 
 template<typename T>
 inline
-void HPlot<T>::draw_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
+void HPlot<T>::emit_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
                          uint, uint) {
-    glBegin(GL_LINES);
-    //std::cout << "HPlot<T>::draw_line: p1.D: " << p1.D << "\n" << static_cast< math::matrix<T> >(p1) << std::endl
-    //          << "p2.D: " << p2.D << "\n" << static_cast< math::matrix<T> >(p2) << std::endl;
     glVertex4dv(p1.data());
     glVertex4dv(p2.data());
-    //glVertex4d(p1[0], p1[1], p1[2], p1[3]);
-    //glVertex4d(p2[0], p2[1], p2[2], p2[3]);
-    //glVertex3d(p1[0], p1[1], p1[2]);
-    //glVertex3d(p2[0], p2[1], p2[2]);
-    glEnd();
 }
 
 template<typename T>
@@ -453,8 +454,11 @@ void HPlot<T>::draw() {
 
     m_area = 0;
 
-    // Vertices are numbered across every object, matching the counter
-    // draw_point keeps, so a subclass can index one colour table with either.
+    // Vertices are numbered across every object, and both emit_point and
+    // emit_line are handed that number, so a subclass can colour a point and
+    // either end of an edge out of one table.  It used to be a counter the
+    // point pass incremented, which is why the index is passed explicitly
+    // now -- see the note on emit_point.
     uint base = 0;
 
     typename math::Plot<T>::objref i = math::Plot<T>::objects.begin();
@@ -813,9 +817,26 @@ void HPlot<T>::draw() {
         glLineWidth(2.0);
         glPointSize(5.0);
 
-        for(uint j = 0; j < object.size(); j++) {
-            draw_point(transformed[j], base + j);
+        // One glBegin around every edge and one around every point, rather
+        // than one pair per primitive.  At D=14 that was 16384 points plus
+        // 114,688 edges -- about 131,000 begin/end pairs a frame at roughly
+        // 245ns each, which measured at 95% of the frame once the reduction
+        // moved to the GPU (#383, and the measurement is in #376).
+        //
+        // **This reorders the drawing**, and that is a visible change rather
+        // than an invisible one.  The two loops used to be interleaved: each
+        // vertex drew its own point and then its edges, so points and edges
+        // covered each other in vertex order.  GL_DEPTH_TEST is never
+        // enabled in any of the hyper apps -- see the note in
+        // jlib/glfw/Plot.hh, where that started as a bug and has stayed as
+        // the behaviour -- so draw order *is* occlusion here.
+        //
+        // Edges first, so the vertices sit on top of the wireframe rather
+        // than under it.  That is a choice, not a consequence: swapping the
+        // two blocks puts the edges on top instead.
+        glBegin(GL_LINES);
 
+        for(uint j = 0; j < object.size(); j++) {
             // Once per edge, not once per endpoint.  Adjacency is symmetric,
             // so walking it visits every edge from both ends; that used to be
             // load-bearing, because half an edge was drawn from each end in
@@ -825,10 +846,19 @@ void HPlot<T>::draw() {
             for(uint k = 0; k < adjacent.size(); k++) {
                 if(adjacent[k] < j) continue;
 
-                draw_line(transformed[j], transformed[adjacent[k]],
+                emit_line(transformed[j], transformed[adjacent[k]],
                           base + j, base + adjacent[k]);
             }
         }
+
+        glEnd();
+
+        glBegin(GL_POINTS);
+
+        for(uint j = 0; j < object.size(); j++)
+            emit_point(transformed[j], base + j);
+
+        glEnd();
 
         glDisable(GL_POINT_SMOOTH);
         glDisable(GL_LINE_SMOOTH);
@@ -1131,8 +1161,8 @@ public:
 
     virtual void change(uint n);
     virtual void draw();
-    virtual void draw_point(const math::vertex<T>& point, uint index);
-    virtual void draw_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
+    virtual void emit_point(const math::vertex<T>& point, uint index);
+    virtual void emit_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
                            uint i1, uint i2);
     virtual void draw_face(const std::vector< math::vertex<T> >& corner,
                            const std::vector<T>& normal,
@@ -1326,7 +1356,7 @@ template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::draw() {
     // Colours are per vertex and have to exist before anything is drawn.
-    // draw_point used to generate them as it went, on the first frame only,
+    // The point pass used to generate them as it went, on the first frame,
     // which worked while points were the first thing drawn -- the face pass
     // now runs ahead of them and would have read an empty table.
     uint n = 0;
@@ -1350,12 +1380,14 @@ void HyperPlot<T,Plot>::change(uint n) {
 
 template<typename T, typename Plot>
 inline
-void HyperPlot<T,Plot>::draw_point(const math::vertex<T>& point, uint index) {
+void HyperPlot<T,Plot>::emit_point(const math::vertex<T>& point, uint index) {
     const triple<T> c = hsv(hues[index]);
 
+    // glColor inside a glBegin is legal and is the point of being here: the
+    // colour applies to the vertices that follow it in the same batch.
     glColor4f(c.r, c.g, c.b, 1.0);
 
-    Plot::draw_point(point, index);
+    Plot::emit_point(point, index);
 }
 
 
@@ -1399,7 +1431,7 @@ void HyperPlot<T,Plot>::draw_face(const std::vector< math::vertex<T> >& corner,
 
 template<typename T, typename Plot>
 inline
-void HyperPlot<T,Plot>::draw_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
+void HyperPlot<T,Plot>::emit_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
                                   uint i1, uint i2) {
     // A colour at each end and let the rasterizer interpolate.
     //
@@ -1412,12 +1444,10 @@ void HyperPlot<T,Plot>::draw_line(const math::vertex<T>& p1, const math::vertex<
     const triple<T> c1 = hsv(hues[i1]);
     const triple<T> c2 = hsv(hues[i2]);
 
-    glBegin(GL_LINES);
     glColor4f(c1.r, c1.g, c1.b, 1.0);
     glVertex4dv(p1.data());
     glColor4f(c2.r, c2.g, c2.b, 1.0);
     glVertex4dv(p2.data());
-    glEnd();
 }
 
 template<typename T, typename Plot>
@@ -1441,7 +1471,7 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
         // so the state is meaningless rather than merely unsupported.
         //
         // It was also unsafe.  The reduction stops at d > 3, so a vertex
-        // arrives at draw_point with whatever D the plot is set to, and
+        // arrives at emit_point with whatever D the plot is set to, and
         // vertex::data() points at D+1 doubles -- the coordinates plus the
         // homogeneous w.  glVertex4dv reads four of them, so D=2 read one
         // past the end and D=1 read two.  From the default D=5, pressing 'd'

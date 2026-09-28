@@ -153,27 +153,37 @@ std::vector<double> flatten(const math::matrix<double>& m, unsigned side) {
  * Returns n*4 doubles.
  */
 std::vector<double> cpu_reduce(unsigned d,
-                               const std::vector<double>& verts,
+                               const std::vector< math::vertex<double> >& src,
                                std::size_t n,
                                const math::matrix<double>& mv,
                                const std::vector< math::matrix<double> >& proj,
                                int mode,
                                std::size_t* degenerate) {
-    const unsigned w = d + 1;
-
     std::vector<double> out(n * 4);
 
     std::size_t bad = 0;
 
     for(std::size_t j = 0; j < n; j++) {
-        math::vertex<double> v(d);
-
-        for(unsigned k = 0; k <= d; k++)
-            v[k] = verts[j * w + k];
-
+        // One vertex constructed per source vertex, and the source read in
+        // place -- which is what HPlot<T>::transform does.
+        //
+        // This used to build a second vertex and copy the input into it
+        // every frame, which the app never does.  Removing it was a guess at
+        // why the app's CPU path looked ~35% cheaper than this number, and
+        // **the guess was wrong**: it moved D=14 from 20.0 ms to 20.1 and
+        // D=18 from 510 ms to 494, which is noise.  Kept because the
+        // reference should look like the thing it references, not because it
+        // explained anything.
+        //
+        // The gap is on the other side.  The app's GPU path pays per-frame
+        // costs this benchmark does not measure -- flattening the projection
+        // matrices, and unpacking every result into a freshly allocated
+        // math::vertex -- so the in-app GPU step costs more than the 1.9 ms
+        // here and the subtraction that implied a cheap CPU was measuring
+        // that overhead instead.  See #383.
         math::vertex<double> ret(d);
 
-        ret = mv * v();
+        ret = mv * src[j]();
 
         for(int s = int(d); s > 3; s--) {
             ret[s] = 1;
@@ -261,16 +271,31 @@ int main(int argc, char** argv) {
         // charged for its first-touch page faults.
         const int reps = (n <= 4096) ? 200 : (n <= 65536 ? 20 : 5);
 
+        // Built once, outside the timing: the app keeps its geometry in
+        // math::vertex objects across frames and does not rebuild them.
+        std::vector< math::vertex<double> > src;
+
+        src.reserve(n);
+
+        for(std::size_t j = 0; j < n; j++) {
+            math::vertex<double> v(d);
+
+            for(unsigned k = 0; k <= d; k++)
+                v[k] = verts[j * w + k];
+
+            src.push_back(std::move(v));
+        }
+
         std::size_t degenerate = 0;
 
         std::vector<double> want =
-            cpu_reduce(d, verts, n, mv, proj, mode, &degenerate);
+            cpu_reduce(d, src, n, mv, proj, mode, &degenerate);
 
         gpu->run(mvflat.data(), metal::hyper_reduce::mode(mode));
 
         const clk::time_point a = clk::now();
         for(int r = 0; r < reps; r++)
-            cpu_reduce(d, verts, n, mv, proj, mode, 0);
+            cpu_reduce(d, src, n, mv, proj, mode, 0);
         const clk::time_point b = clk::now();
 
         for(int r = 0; r < reps; r++)
