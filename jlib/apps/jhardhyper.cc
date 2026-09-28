@@ -1302,6 +1302,10 @@ void HyperPlot<T,Plot>::initialize(uint n) {
     // would not catch a rebuild that happened to land on both.
     this->m_topology++;
 
+    // And the frame-rate window in progress is about to span two different
+    // figures plus the cost of rebuilding one into the other.  Start again.
+    this->reset_frame_rate();
+
     bool surface = false;
 
     // Rotate in every plane, including those touching the highest axis.
