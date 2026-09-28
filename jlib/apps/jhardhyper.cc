@@ -123,13 +123,24 @@ public:
      * A vertex and an edge, each told which object vertices they came from.
      *
      * The index is what lets a subclass colour an endpoint.  Without it the
-     * only thing an override could reach was a counter incremented by
-     * draw_point, so an edge could only be drawn in the colour of whichever
+     * only thing an override could reach was a counter incremented by the
+     * point pass, so an edge could only be drawn in the colour of whichever
      * end came first -- which is why edges used to be drawn in halves.
      */
-    virtual void draw_point(const math::vertex<T>& p, uint index);
-    virtual void draw_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
-                           uint i1, uint i2);
+    /**
+     * Per-vertex RGBA for one object, for the colour array.
+     *
+     * base is the object's first vertex number across the plot, matching the
+     * index the old per-primitive path was handed.  A colour per vertex
+     * reproduces what that did exactly: a point takes its own colour, and an
+     * edge takes one at each end and lets GL_SMOOTH interpolate between them,
+     * which is what the per-primitive path used to do by hand.
+     *
+     * Called only when the shape changes, not per frame -- the hues do not
+     * move, only the geometry does.
+     */
+    virtual void fill_colors(uint base, std::size_t n,
+                             std::vector<GLfloat>& out) const;
 
     /**
      * One face, as a polygon with a normal per corner.
@@ -257,6 +268,38 @@ protected:
     mutable bool m_gpu_said = false;
 #endif
 
+    /**
+     * The wireframe as vertex arrays: two GL calls an object, not two a
+     * primitive.
+     *
+     * #383 hoisted glBegin out of the per-primitive calls, which took D=14
+     * from 34.4ms to 10.6ms.  What was left was ~229,000 glVertex4dv calls a
+     * frame at roughly 38ns each, and this is what removes them.
+     *
+     * glVertex4dv takes doubles, which no driver keeps -- they are narrowed
+     * to float on the way in.  So the array is float: the conversion happens
+     * once here instead of twice, and on the GPU path the reduction produced
+     * floats to begin with.
+     */
+    mutable std::vector<GLfloat> m_array;    // n*4 positions, per frame
+    mutable std::vector<GLuint>  m_index;    // two per edge, cached
+    mutable std::vector<GLfloat> m_rgba;     // n*4 colours, cached
+
+    /**
+     * What the two caches above were built for.
+     *
+     * Address and size are not enough on their own: a shape rebuilt at the
+     * same address with the same vertex count would keep a stale index
+     * buffer, and the drawing would be wrong rather than merely slow.  The
+     * counter is bumped whenever the geometry is rebuilt, which closes that.
+     */
+    mutable const void* m_cache_for = 0;
+    mutable std::size_t m_cache_n = 0;
+    mutable unsigned long m_cache_topology = 0;
+
+    /** Bumped by whoever rebuilds the objects; see m_cache_for. */
+    unsigned long m_topology = 0;
+
     // This one reduces N->3 and hands GL real 3-D coordinates, so it needs a
     // perspective projection rather than the base's pixel-space ortho2d.
     // glut::Main::default_reshape used gluPerspective(80, aspect, 0.1, 50),
@@ -351,27 +394,10 @@ void HPlot<T>::on_configure(int width, int height) {
 
 template<typename T>
 inline
-void HPlot<T>::draw_point(const math::vertex<T>& p, uint) {
-    glBegin(GL_POINTS);
-    //glVertex3d(p[0], p[1], p[2]);
-    glVertex4dv(p.data());
-    glEnd();
-}
-
-template<typename T>
-inline
-void HPlot<T>::draw_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
-                         uint, uint) {
-    glBegin(GL_LINES);
-    //std::cout << "HPlot<T>::draw_line: p1.D: " << p1.D << "\n" << static_cast< math::matrix<T> >(p1) << std::endl
-    //          << "p2.D: " << p2.D << "\n" << static_cast< math::matrix<T> >(p2) << std::endl;
-    glVertex4dv(p1.data());
-    glVertex4dv(p2.data());
-    //glVertex4d(p1[0], p1[1], p1[2], p1[3]);
-    //glVertex4d(p2[0], p2[1], p2[2], p2[3]);
-    //glVertex3d(p1[0], p1[1], p1[2]);
-    //glVertex3d(p2[0], p2[1], p2[2]);
-    glEnd();
+void HPlot<T>::fill_colors(uint, std::size_t n, std::vector<GLfloat>& out) const {
+    // White.  HPlot on its own draws no colour; HyperPlot is what colours a
+    // figure, and it overrides this.
+    out.assign(n * 4, 1.0f);
 }
 
 template<typename T>
@@ -453,8 +479,10 @@ void HPlot<T>::draw() {
 
     m_area = 0;
 
-    // Vertices are numbered across every object, matching the counter
-    // draw_point keeps, so a subclass can index one colour table with either.
+    // Vertices are numbered across every object, and fill_colors is handed
+    // that number as its base, so a subclass colours a point and either end
+    // of an edge out of one table.  It used to be a counter the point pass
+    // incremented, which is why the base is passed explicitly now.
     uint base = 0;
 
     typename math::Plot<T>::objref i = math::Plot<T>::objects.begin();
@@ -813,22 +841,92 @@ void HPlot<T>::draw() {
         glLineWidth(2.0);
         glPointSize(5.0);
 
-        for(uint j = 0; j < object.size(); j++) {
-            draw_point(transformed[j], base + j);
+        // One glBegin around every edge and one around every point, rather
+        // than one pair per primitive.  At D=14 that was 16384 points plus
+        // 114,688 edges -- about 131,000 begin/end pairs a frame at roughly
+        // 245ns each, which measured at 95% of the frame once the reduction
+        // moved to the GPU (#383, and the measurement is in #376).
+        //
+        // **This reorders the drawing**, and that is a visible change rather
+        // than an invisible one.  The two loops used to be interleaved: each
+        // vertex drew its own point and then its edges, so points and edges
+        // covered each other in vertex order.  GL_DEPTH_TEST is never
+        // enabled in any of the hyper apps -- see the note in
+        // jlib/glfw/Plot.hh, where that started as a bug and has stayed as
+        // the behaviour -- so draw order *is* occlusion here.
+        //
+        // Edges first, so the vertices sit on top of the wireframe rather
+        // than under it.  That is a choice, not a consequence: swapping the
+        // two blocks puts the edges on top instead.
+        const std::size_t count = object.size();
 
-            // Once per edge, not once per endpoint.  Adjacency is symmetric,
-            // so walking it visits every edge from both ends; that used to be
-            // load-bearing, because half an edge was drawn from each end in
-            // that end's colour.  An edge now carries both endpoints and
-            // blends across, so the second visit is pure overdraw.
-            const std::vector<uint>& adjacent = object.adjacent(j);
-            for(uint k = 0; k < adjacent.size(); k++) {
-                if(adjacent[k] < j) continue;
+        // Positions, every frame: this is the part that moves.  Narrowed to
+        // float here rather than handed to GL as doubles, which it would
+        // narrow anyway.
+        m_array.resize(count * 4);
 
-                draw_line(transformed[j], transformed[adjacent[k]],
-                          base + j, base + adjacent[k]);
-            }
+        for(std::size_t j = 0; j < count; j++) {
+            const math::vertex<T>& v = transformed[j];
+
+            m_array[j * 4 + 0] = GLfloat(v[0]);
+            m_array[j * 4 + 1] = GLfloat(v[1]);
+            m_array[j * 4 + 2] = GLfloat(v[2]);
+            m_array[j * 4 + 3] = 1.0f;
         }
+
+        // Topology and colour, only when the shape changes.  The edge list
+        // and the hues do not move between frames, and rebuilding them per
+        // frame would put back a good part of what the arrays just saved.
+        if(m_cache_for != static_cast<const void*>(&object)
+           || m_cache_n != count
+           || m_cache_topology != m_topology) {
+
+            m_index.clear();
+
+            for(std::size_t j = 0; j < count; j++) {
+                // Once per edge, not once per endpoint.  Adjacency is
+                // symmetric, so walking it visits every edge from both ends;
+                // that used to be load-bearing, because half an edge was
+                // drawn from each end in that end's colour.  An edge now
+                // carries both endpoints and blends across, so the second
+                // visit is pure overdraw.
+                const std::vector<uint>& adjacent = object.adjacent(uint(j));
+
+                for(uint k = 0; k < adjacent.size(); k++) {
+                    if(adjacent[k] < j) continue;
+
+                    m_index.push_back(GLuint(j));
+                    m_index.push_back(GLuint(adjacent[k]));
+                }
+            }
+
+            fill_colors(base, count, m_rgba);
+
+            m_cache_for = static_cast<const void*>(&object);
+            m_cache_n = count;
+            m_cache_topology = m_topology;
+        }
+
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glEnableClientState(GL_COLOR_ARRAY);
+
+        glVertexPointer(4, GL_FLOAT, 0, m_array.data());
+        glColorPointer(4, GL_FLOAT, 0, m_rgba.data());
+
+        // Edges first and points second, keeping the order #383 chose:
+        // GL_DEPTH_TEST is never enabled here, so this is what puts the
+        // vertices on top of the wireframe rather than under it.
+        if(!m_index.empty())
+            glDrawElements(GL_LINES, GLsizei(m_index.size()),
+                           GL_UNSIGNED_INT, m_index.data());
+
+        glDrawArrays(GL_POINTS, 0, GLsizei(count));
+
+        // Left disabled: the face pass above draws in immediate mode with
+        // glColor and glMaterial, and a client state left enabled here is
+        // the sort of thing that works until someone reorders the passes.
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDisableClientState(GL_VERTEX_ARRAY);
 
         glDisable(GL_POINT_SMOOTH);
         glDisable(GL_LINE_SMOOTH);
@@ -1131,9 +1229,8 @@ public:
 
     virtual void change(uint n);
     virtual void draw();
-    virtual void draw_point(const math::vertex<T>& point, uint index);
-    virtual void draw_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
-                           uint i1, uint i2);
+    virtual void fill_colors(uint base, std::size_t n,
+                             std::vector<GLfloat>& out) const;
     virtual void draw_face(const std::vector< math::vertex<T> >& corner,
                            const std::vector<T>& normal,
                            const std::vector<uint>& index);
@@ -1200,6 +1297,15 @@ HyperPlot<T,Plot>::HyperPlot(uint n, std::vector< std::pair<T,T> > c, uint w, ui
 template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::initialize(uint n) {
+    // The objects are about to be replaced, so the cached edge list and
+    // colour array that describe them are stale.  Address and vertex count
+    // would not catch a rebuild that happened to land on both.
+    this->m_topology++;
+
+    // And the frame-rate window in progress is about to span two different
+    // figures plus the cost of rebuilding one into the other.  Start again.
+    this->reset_frame_rate();
+
     bool surface = false;
 
     // Rotate in every plane, including those touching the highest axis.
@@ -1326,7 +1432,7 @@ template<typename T, typename Plot>
 inline
 void HyperPlot<T,Plot>::draw() {
     // Colours are per vertex and have to exist before anything is drawn.
-    // draw_point used to generate them as it went, on the first frame only,
+    // The point pass used to generate them as it went, on the first frame,
     // which worked while points were the first thing drawn -- the face pass
     // now runs ahead of them and would have read an empty table.
     uint n = 0;
@@ -1350,12 +1456,27 @@ void HyperPlot<T,Plot>::change(uint n) {
 
 template<typename T, typename Plot>
 inline
-void HyperPlot<T,Plot>::draw_point(const math::vertex<T>& point, uint index) {
-    const triple<T> c = hsv(hues[index]);
+void HyperPlot<T,Plot>::fill_colors(uint base, std::size_t n,
+                                    std::vector<GLfloat>& out) const {
+    out.resize(n * 4);
 
-    glColor4f(c.r, c.g, c.b, 1.0);
+    // A colour at each end of an edge, and let the rasterizer interpolate.
+    //
+    // Edges used to be drawn in halves -- p1 to the midpoint in p1's colour,
+    // relying on a second visit from the other end for the rest -- which met
+    // at the midpoint with a hard seam and made the wireframe look assembled
+    // from separate pieces.  One colour per vertex plus GL_SMOOTH gives the
+    // blend the 2021 design asked for, and now costs nothing per frame.
+    for(std::size_t j = 0; j < n; j++) {
+        // hues is filled to cover every vertex in draw() before the geometry
+        // is touched, so base + j is in range here.
+        const triple<T> c = hsv(hues[base + j]);
 
-    Plot::draw_point(point, index);
+        out[j * 4 + 0] = GLfloat(c.r);
+        out[j * 4 + 1] = GLfloat(c.g);
+        out[j * 4 + 2] = GLfloat(c.b);
+        out[j * 4 + 3] = 1.0f;
+    }
 }
 
 
@@ -1397,28 +1518,6 @@ void HyperPlot<T,Plot>::draw_face(const std::vector< math::vertex<T> >& corner,
     Plot::draw_face(corner, normal, index);
 }
 
-template<typename T, typename Plot>
-inline
-void HyperPlot<T,Plot>::draw_line(const math::vertex<T>& p1, const math::vertex<T>& p2,
-                                  uint i1, uint i2) {
-    // A colour at each end and let the rasterizer interpolate.
-    //
-    // This used to draw half an edge, from p1 to the midpoint, in p1's
-    // colour, and rely on the edge being visited again from the other end to
-    // fill in the rest.  The two halves met at the midpoint with a hard seam,
-    // which is what made the wireframe look like it was assembled from
-    // separate pieces.  Interpolating across the whole edge blends the two
-    // hues the way the 2021 design asked for, and needs one pass.
-    const triple<T> c1 = hsv(hues[i1]);
-    const triple<T> c2 = hsv(hues[i2]);
-
-    glBegin(GL_LINES);
-    glColor4f(c1.r, c1.g, c1.b, 1.0);
-    glVertex4dv(p1.data());
-    glColor4f(c2.r, c2.g, c2.b, 1.0);
-    glVertex4dv(p2.data());
-    glEnd();
-}
 
 template<typename T, typename Plot>
 inline
@@ -1441,7 +1540,7 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
         // so the state is meaningless rather than merely unsupported.
         //
         // It was also unsafe.  The reduction stops at d > 3, so a vertex
-        // arrives at draw_point with whatever D the plot is set to, and
+        // arrives at the draw path with whatever D the plot is set to, and
         // vertex::data() points at D+1 doubles -- the coordinates plus the
         // homogeneous w.  glVertex4dv reads four of them, so D=2 read one
         // past the end and D=1 read two.  From the default D=5, pressing 'd'

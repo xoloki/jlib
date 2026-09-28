@@ -168,11 +168,18 @@ void Window::count_frame() {
     const std::chrono::steady_clock::time_point now =
         std::chrono::steady_clock::now();
 
-    // The first frame of each window opens it rather than counting into it:
-    // without this the first report divides by the time since construction,
-    // which includes the GL setup and reads as a handful of fps.
-    if(m_fps_frames == 0)
+    // The frame that opens a window marks its start and is not counted into
+    // it.  That frame carries whatever happened before it -- GL setup and
+    // the first kernel compile at startup, a geometry rebuild after a reset
+    // -- and charging a measurement for it is how the first line came out
+    // at 0.6 fps.
+    if(!m_fps_open) {
+        m_fps_open = true;
         m_fps_since = now;
+        m_fps_frames = 0;
+
+        return;
+    }
 
     m_fps_frames++;
 
@@ -189,6 +196,14 @@ void Window::count_frame() {
 
     std::cout << line << std::endl;
 
+    // Carry straight on from this instant rather than reopening the window
+    // on the next frame, which would drop one frame from every report.
+    m_fps_since = now;
+    m_fps_frames = 0;
+}
+
+void Window::reset_frame_rate() {
+    m_fps_open = false;
     m_fps_frames = 0;
 }
 

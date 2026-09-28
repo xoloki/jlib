@@ -175,6 +175,23 @@ protected:
      */
     void count_frame();
 
+public:
+    /**
+     * Discard the frame-rate window in progress and start a fresh one.
+     *
+     * For a caller that is about to do something a measurement should not
+     * be charged for -- rebuilding geometry, recompiling a kernel, changing
+     * what is on screen.  Without it the next report averages frames from
+     * before the change with frames from after it, plus the cost of the
+     * change itself, and is wrong in whichever direction happens to
+     * dominate.  In jhardhyper that showed up as the first reading after a
+     * D change being faster than steady state at one dimension and slower
+     * at the next.
+     */
+    void reset_frame_rate();
+
+protected:
+
     GLFWwindow* m_window;
     std::string m_title;
     long m_timeout;
@@ -191,6 +208,13 @@ protected:
     // predictable branch a frame.
     unsigned long m_fps_frames = 0;
     std::chrono::steady_clock::time_point m_fps_since;
+
+    // Whether a measurement window is open.  Separate from the count
+    // because the frame that opens one must not be counted into it: it
+    // carries whatever one-off cost preceded it, and at startup that is the
+    // whole of GL setup and the first kernel compile -- which is why the
+    // first line used to read 0.6 fps.
+    bool m_fps_open = false;
 };
 
 }
