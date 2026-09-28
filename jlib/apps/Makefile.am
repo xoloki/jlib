@@ -187,8 +187,11 @@ jglfwhyper_CPPFLAGS = $(AM_CPPFLAGS) $(GLFW_CFLAGS)
 jglfwhyper_LDADD    = $(JGLFW_LA) $(JGLU_LA) $(JGL_LA) $(GLFW_LIBS) $(GLU_LIBS) $(GL_LIBS)
 
 jhardhyper_SOURCES  = jhardhyper.cc
-jhardhyper_CPPFLAGS = $(AM_CPPFLAGS) $(GLFW_CFLAGS)
-jhardhyper_LDADD    = $(JGLFW_LA) $(JGLU_LA) $(JGL_LA) $(GLFW_LIBS) $(GLU_LIBS) $(GL_LIBS)
+# METAL as well: the N->3 reduction has a Metal path, guarded by HAVE_METAL
+# and falling back to the CPU loop without it.  See #376 for the measurement.
+jhardhyper_CPPFLAGS = $(AM_CPPFLAGS) $(GLFW_CFLAGS) $(METAL_CPPFLAGS)
+jhardhyper_LDADD    = $(JGLFW_LA) $(JGLU_LA) $(JGL_LA) $(GLFW_LIBS) $(GLU_LIBS) $(GL_LIBS) \
+                      $(METAL_LA)
 
 jgltorus_SOURCES  = jgltorus.cc
 jgltorus_CPPFLAGS = $(AM_CPPFLAGS) $(GLFW_CFLAGS)

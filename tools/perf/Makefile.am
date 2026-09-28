@@ -17,11 +17,15 @@ AM_CPPFLAGS = -I$(top_srcdir) -I$(top_builddir)
 if HAVE_PERF
 if HAVE_METAL
 noinst_PROGRAMS = jperf-bench jperf-quick jperf-ops jperf-bwmax jperf-counters \
-                  jperf-devmem
+                  jperf-devmem jperf-hyper
 
 jperf_bench_SOURCES  = bench.cc
 jperf_quick_SOURCES  = quick.cc
 jperf_ops_SOURCES    = ops.cc
+
+# The one here that measures graphics rather than inference: jhardhyper's
+# reduction, CPU against GPU.  Needs no model file, unlike the others.
+jperf_hyper_SOURCES  = hyper.cc
 
 # Objective-C++ because it asks Metal directly, but it links jlib because
 # what it measures is what a jlib model costs.
@@ -46,4 +50,4 @@ jperf_counters_LDADD = $(METAL_LIBS)
 endif
 endif
 
-EXTRA_DIST = bench.cc quick.cc ops.cc devmem.mm bwmax.mm counters.mm README.md
+EXTRA_DIST = bench.cc quick.cc ops.cc hyper.cc devmem.mm bwmax.mm counters.mm README.md
