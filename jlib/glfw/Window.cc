@@ -24,6 +24,8 @@
 
 #include <chrono>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 
@@ -147,6 +149,47 @@ void Window::clear() {
 
 void Window::flush() {
     glfwSwapBuffers(m_window);
+
+    count_frame();
+}
+
+void Window::count_frame() {
+    // Read once.  getenv every frame would be a syscall-shaped cost in the
+    // one loop this is supposed to be measuring rather than perturbing.
+    static const bool want = []() {
+        const char* v = std::getenv("JLIB_FPS");
+
+        return v != 0 && *v != 0 && *v != '0';
+    }();
+
+    if(!want)
+        return;
+
+    const std::chrono::steady_clock::time_point now =
+        std::chrono::steady_clock::now();
+
+    // The first frame of each window opens it rather than counting into it:
+    // without this the first report divides by the time since construction,
+    // which includes the GL setup and reads as a handful of fps.
+    if(m_fps_frames == 0)
+        m_fps_since = now;
+
+    m_fps_frames++;
+
+    const double secs = std::chrono::duration<double>(now - m_fps_since).count();
+
+    if(secs < 1.0)
+        return;
+
+    char line[96];
+
+    std::snprintf(line, sizeof(line), "fps: %.1f (%.2f ms/frame)",
+                  double(m_fps_frames) / secs,
+                  1000.0 * secs / double(m_fps_frames));
+
+    std::cout << line << std::endl;
+
+    m_fps_frames = 0;
 }
 
 bool Window::should_close() const {

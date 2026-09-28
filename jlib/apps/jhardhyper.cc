@@ -1455,6 +1455,18 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
             return;
 
         initialize(d);
+
+        // Say which D the frame rate above and below this line belongs to.
+        // Sweeping e and d with JLIB_FPS set is how the cliff gets found,
+        // and an undifferentiated column of fps numbers cannot show it.
+        std::size_t n = 0;
+
+        for(auto i = math::Plot<T>::objects.begin();
+            i != math::Plot<T>::objects.end(); i++) {
+            n += (*i)->size();
+        }
+
+        std::cout << "D = " << d << ", " << n << " vertices" << std::endl;
     } else if(key == 'n' || key == 'b') {
         const uint want = (key == 'n' ? m_shells + 1 : m_shells - 1);
 
