@@ -88,6 +88,10 @@
 #include <jlib/math/dump.hh>
 #include <jlib/glfw/Plot.hh>
 
+#ifdef HAVE_METAL
+#include <jlib/metal/hyper_reduce.hh>
+#endif
+
 #include <vector>
 #include <stack>
 
@@ -220,6 +224,38 @@ public:
 
 protected:
     virtual math::vertex<T> transform(const math::vertex<T>& v) const;
+
+#ifdef HAVE_METAL
+    /**
+     * The whole reduction for one object on the GPU, or false to say no.
+     *
+     * Measured in #376: the CPU chain is 20 ms a frame at D=14 and 103 ms at
+     * D=16, which is the frame-rate cliff, and one fused Metal kernel takes
+     * 2-3 ms.  Float rather than double, which MSL has no choice about --
+     * relative error stays at 1e-7 across the whole range, so it costs well
+     * under a pixel; see the issue for the measurement.
+     *
+     * Returns false whenever the GPU path is not the right answer, and the
+     * caller falls back to the per-vertex loop.  The CPU path stays the
+     * reference and is never deleted.
+     */
+    bool reduce_batch(const math::object<T>& o,
+                      std::vector< math::vertex<T> >& out) const;
+
+    /** Off with the g key, so the two paths can be compared at runtime. */
+    bool m_gpu_want = true;
+
+    // Rebuilt when D changes, which recompiles the kernel; the projection
+    // matrices are refreshed every frame instead, because the clip volume
+    // moves on resize.  mutable because transform() and draw() are const.
+    mutable std::shared_ptr<metal::hyper_reduce> m_gpu;
+    mutable uint m_gpu_d = 0;
+    mutable const void* m_gpu_for = 0;
+    mutable std::size_t m_gpu_n = 0;
+    mutable bool m_gpu_failed = false;
+    mutable bool m_gpu_checked = false;
+    mutable bool m_gpu_said = false;
+#endif
 
     // This one reduces N->3 and hands GL real 3-D coordinates, so it needs a
     // perspective projection rather than the base's pixel-space ortho2d.
@@ -468,8 +504,13 @@ void HPlot<T>::draw() {
         std::vector< math::vertex<T> > transformed;
         transformed.reserve(object.size());
 
-        for(uint j = 0; j < object.size(); j++) {
-            transformed.push_back(transform(object[j]));
+#ifdef HAVE_METAL
+        if(!reduce_batch(object, transformed))
+#endif
+        {
+            for(uint j = 0; j < object.size(); j++) {
+                transformed.push_back(transform(object[j]));
+            }
         }
 
         // Frame the object: far enough back that the outermost vertex sits
@@ -908,6 +949,174 @@ math::vertex<T> HPlot<T>::transform(const math::vertex<T>& vertex) const {
     return ret;
 }
 
+#ifdef HAVE_METAL
+template<typename T>
+inline
+bool HPlot<T>::reduce_batch(const math::object<T>& o,
+                            std::vector< math::vertex<T> >& out) const {
+    const uint d = math::Plot<T>::D;
+
+    // Below the crossover the GPU loses, and not narrowly: there is a ~300 us
+    // floor that is dispatch and completion latency rather than arithmetic,
+    // flat from D=4 to D=12 whatever the vertex count.  At D=9 the CPU does
+    // the whole thing in less than that.  Measured in #376.
+    const uint crossover = 10;
+
+    if(!m_gpu_want || m_gpu_failed || d < crossover)
+        return false;
+
+    // The stereographic outermost step is not in the kernel: it is a
+    // different map, and it needs the percentile pass above to have run.
+    if(m_stereo)
+        return false;
+
+    // The dumper records one line per vertex from inside transform(), which
+    // the batch path never calls.  Rather than emit nothing and let a
+    // divergence trace silently cover half the vertices, hand the frame back
+    // to the CPU -- dumping is a debugging mode and is not timed.
+    if(math::dump::active())
+        return false;
+
+    const std::size_t n = o.size();
+
+    if(n == 0)
+        return false;
+
+    try {
+        if(!m_gpu || m_gpu_d != d) {
+            // Compiles the kernel, so only on a change of D.
+            m_gpu = metal::hyper_reduce::create(d);
+            m_gpu_d = d;
+            m_gpu_for = 0;
+        }
+
+        // Every frame: the clip volume moves on resize and math::Plot
+        // discards m_project when it does.
+        math::Plot<T>::build_projections();
+
+        std::vector< std::vector<double> > flat;
+
+        for(uint step = d; step > 3; step--) {
+            const math::matrix<T>& m = this->m_project[d - step];
+            const uint side = step + 1;
+
+            std::vector<double> f(std::size_t(side) * side);
+
+            for(uint i = 0; i < side; i++)
+                for(uint j = 0; j < side; j++)
+                    f[std::size_t(i) * side + j] = double(m(i, j));
+
+            flat.push_back(f);
+        }
+
+        m_gpu->projections(flat);
+
+        // The geometry is uploaded once and reused: it only changes when the
+        // shape is rebuilt, which is what the address and count catch.
+        if(m_gpu_for != static_cast<const void*>(&o) || m_gpu_n != n) {
+            std::vector<double> verts(n * (d + 1));
+
+            for(std::size_t j = 0; j < n; j++)
+                for(uint k = 0; k <= d; k++)
+                    verts[j * (d + 1) + k] = double(o[uint(j)][k]);
+
+            m_gpu->vertices(verts.data(), n);
+
+            m_gpu_for = static_cast<const void*>(&o);
+            m_gpu_n = n;
+        }
+
+        std::vector<double> mv(std::size_t(d + 1) * (d + 1));
+
+        for(uint i = 0; i <= d; i++)
+            for(uint j = 0; j <= d; j++)
+                mv[std::size_t(i) * (d + 1) + j] =
+                    double(math::Plot<T>::modelview.top()(i, j));
+
+        // Always perspective: this app has no key for the other two, and the
+        // constructor says why.
+        m_gpu->run(mv.data(), metal::hyper_reduce::mode::perspective);
+
+        const float* r = m_gpu->result();
+
+        out.clear();
+        out.reserve(n);
+
+        for(std::size_t j = 0; j < n; j++) {
+            // Dimension 3, which is where the chain stops; the constructor
+            // sets the homogeneous coordinate to the 1 the last change() left.
+            math::vertex<T> v(3);
+
+            v[0] = T(r[j * 4 + 0]);
+            v[1] = T(r[j * 4 + 1]);
+            v[2] = T(r[j * 4 + 2]);
+
+            // Moved, not copied: vertex's copy constructor allocates a
+            // fresh backing matrix, so an lvalue push_back here is two
+            // allocations a vertex a frame rather than one.  At D=18 that
+            // is half a million of them, against a reduction that now
+            // costs 14 ms -- the packaging is the sort of thing that
+            // becomes the ceiling once the arithmetic stops being it.
+            out.push_back(std::move(v));
+        }
+
+        // JHARDHYPER_VERIFY=1 runs the CPU path as well, once, and reports
+        // how far apart the two are on the geometry actually on screen.
+        //
+        // The benchmark in tools/perf compares the kernel against a
+        // transcription of transform(); this compares it against transform()
+        // itself, which is the part a transcription cannot check -- the
+        // flattening, the upload, and the unpacking, where an index or a
+        // transpose would still produce plausible-looking numbers.
+        if(!m_gpu_checked && math::dump::from_env("JHARDHYPER_VERIFY", 0)) {
+            m_gpu_checked = true;
+
+            double worst = 0;
+            double extent = 0;
+
+            for(std::size_t j = 0; j < n; j++) {
+                const math::vertex<T> want = transform(o[uint(j)]);
+
+                for(uint k = 0; k < 3; k++) {
+                    const double e = std::fabs(double(out[j][k]) - double(want[k]));
+
+                    if(e > worst) worst = e;
+                    if(std::fabs(double(want[k])) > extent)
+                        extent = std::fabs(double(want[k]));
+                }
+            }
+
+            std::cout << "jhardhyper: GPU vs CPU at D=" << d << " over " << n
+                      << " vertices: worst " << worst
+                      << ", extent " << extent
+                      << ", relative " << (extent > 0 ? worst / extent : 0)
+                      << std::endl;
+        }
+
+        if(!m_gpu_said) {
+            m_gpu_said = true;
+
+            std::cout << "jhardhyper: reducing on the GPU (Metal, float); "
+                      << "g toggles, " << crossover
+                      << " is the dimension below which the CPU is faster"
+                      << std::endl;
+        }
+
+        return true;
+    } catch(const std::exception& e) {
+        // Once, and then never again this run: a GPU that cannot compile the
+        // kernel will not start being able to, and retrying per frame would
+        // turn one message into sixty a second.
+        std::cerr << "jhardhyper: the GPU reduction is unavailable, using the CPU: "
+                  << e.what() << std::endl;
+
+        m_gpu_failed = true;
+
+        return false;
+    }
+}
+#endif
+
 typedef HPlot<T> PlotType;
 
 using apps::triple;
@@ -1246,6 +1455,18 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
             return;
 
         initialize(d);
+
+        // Say which D the frame rate above and below this line belongs to.
+        // Sweeping e and d with JLIB_FPS set is how the cliff gets found,
+        // and an undifferentiated column of fps numbers cannot show it.
+        std::size_t n = 0;
+
+        for(auto i = math::Plot<T>::objects.begin();
+            i != math::Plot<T>::objects.end(); i++) {
+            n += (*i)->size();
+        }
+
+        std::cout << "D = " << d << ", " << n << " vertices" << std::endl;
     } else if(key == 'n' || key == 'b') {
         const uint want = (key == 'n' ? m_shells + 1 : m_shells - 1);
 
@@ -1271,6 +1492,17 @@ void HyperPlot<T,Plot>::key_pressed(unsigned char key, int x, int y) {
             m_circles = want;
             if(m_shape == TORUS) initialize(this->D);
         }
+    } else if(key == 'g') {
+#ifdef HAVE_METAL
+        this->m_gpu_want = !this->m_gpu_want;
+
+        std::cout << "reduction: "
+                  << (this->m_gpu_want ? "GPU (Metal, float)" : "CPU (double)")
+                  << std::endl;
+#else
+        std::cout << "reduction: CPU (double); this build has no Metal"
+                  << std::endl;
+#endif
     } else if(key == 'l') {
         this->m_wire = !this->m_wire;
         this->draw();

@@ -24,6 +24,7 @@
 #include <jlib/gl/opengl.hh>
 #include <jlib/sys/signal.hh>
 
+#include <chrono>
 #include <exception>
 #include <string>
 
@@ -161,6 +162,19 @@ protected:
      */
     static std::string key_text(int key, int scancode, int mods);
 
+    /**
+     * Report the frame rate once a second, if JLIB_FPS says so.
+     *
+     * Called from flush(), which is where the buffers are swapped and so the
+     * only place that knows a frame actually reached the screen -- an
+     * iterate() can wake for a keystroke and draw nothing.
+     *
+     * To stdout rather than a window overlay: jlib has no text rendering of
+     * any kind, and building one to print a number would be the larger half
+     * of the job.  A HUD is worth having and is filed separately.
+     */
+    void count_frame();
+
     GLFWwindow* m_window;
     std::string m_title;
     long m_timeout;
@@ -171,6 +185,12 @@ protected:
      * never learns its own dimensions until the user happens to resize it.
      */
     bool m_configured;
+
+    // Frames since the last report, and when that window opened.  Only
+    // touched when JLIB_FPS is set, so an app that does not ask pays one
+    // predictable branch a frame.
+    unsigned long m_fps_frames = 0;
+    std::chrono::steady_clock::time_point m_fps_since;
 };
 
 }

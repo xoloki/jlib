@@ -46,7 +46,7 @@ endif
 # itself also exits 77 if there is no device, which covers a machine that has
 # the frameworks and no hardware.
 if HAVE_METAL
-METAL_TESTS    = metal_gemm_test metal_tensor_test
+METAL_TESTS    = metal_gemm_test metal_tensor_test metal_hyper_test
 METAL_CPPFLAGS = -DHAVE_METAL
 METAL_LA       = $(top_builddir)/jlib/metal/libjmetal.la $(METAL_LIBS)
 else
@@ -424,6 +424,9 @@ metal_gemm_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(METAL_LIBS)
 
 metal_tensor_test_SOURCES = metal_tensor_test.cc
 metal_tensor_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(JUTIL_LA) $(JSYS_LA) $(METAL_LIBS)
+
+metal_hyper_test_SOURCES = metal_hyper_test.cc
+metal_hyper_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(METAL_LIBS)
 
 app_jchat_test_SOURCES  = app_jchat_test.cc
 app_jchat_test_LDADD    = $(JSYS_LA)

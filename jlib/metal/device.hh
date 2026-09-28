@@ -105,6 +105,7 @@ private:
     std::unique_ptr<impl> m_impl;
 
     friend class matrix_multiply;
+    friend class compute;
 
     // Templates, so the friend declarations are too -- a plain `friend class
     // tensor;` forward-declares a non-template of that name and the real
