@@ -153,9 +153,21 @@ public:
      * every object in the plot, so a subclass can colour a face from whatever
      * it keeps per vertex.  The geometry here ignores it.
      */
-    virtual void draw_face(const std::vector< math::vertex<T> >& corner,
-                           const std::vector<T>& normal,
-                           const std::vector<uint>& index);
+    /**
+     * One face's corners, into a glBegin the caller has already opened.
+     *
+     * Reads the geometry in place.  This used to take the corners as a
+     * vector<vertex>, which the caller filled by copying one vertex per
+     * corner -- and vertex's copy constructor allocates, so at D=16 that was
+     * ~8M allocate/free pairs a frame on top of the 2M glBegin/glEnd pairs.
+     *
+     * Named emit_ for the same reason emit_point and emit_line are: it does
+     * not open its own glBegin, and GL will not tell you if nobody did.
+     */
+    virtual void emit_face(const std::vector< math::vertex<T> >& transformed,
+                           const typename math::object<T>::face_type& face,
+                           uint base,
+                           const std::vector<T>& normal);
 
     /** Solid faces as well as the wireframe.  The o key toggles it. */
     bool m_solid = true;
@@ -300,6 +312,23 @@ protected:
     /** Bumped by whoever rebuilds the objects; see m_cache_for. */
     unsigned long m_topology = 0;
 
+    /**
+     * The face pass's scratch, kept rather than rebuilt every frame.
+     *
+     * All of these are sized by the face count, which is C(D,2) * 2^(D-2) --
+     * 1.97M at D=16 and 10M at D=18.  As locals they were roughly 80MB of
+     * allocation and free per frame before anything was drawn.
+     */
+    mutable std::vector< std::pair<T,uint> > m_order;
+    mutable std::vector<T> m_fnormal;
+    mutable std::vector<bool> m_flat;
+    mutable std::vector<T> m_vnormal;
+    mutable std::vector<bool> m_seen;
+    mutable std::vector<T> m_corner_normal;
+
+    /** So the quad/polygon choice is reported once rather than never. */
+    mutable bool m_faces_said = false;
+
     // This one reduces N->3 and hands GL real 3-D coordinates, so it needs a
     // perspective projection rather than the base's pixel-space ortho2d.
     // glut::Main::default_reshape used gluPerspective(80, aspect, 0.1, 50),
@@ -402,15 +431,56 @@ void HPlot<T>::fill_colors(uint, std::size_t n, std::vector<GLfloat>& out) const
 
 template<typename T>
 inline
-void HPlot<T>::draw_face(const std::vector< math::vertex<T> >& corner,
-                         const std::vector<T>& normal,
-                         const std::vector<uint>&) {
-    glBegin(GL_POLYGON);
-    for(uint k = 0; k < corner.size(); k++) {
+void HPlot<T>::emit_face(const std::vector< math::vertex<T> >& transformed,
+                         const typename math::object<T>::face_type& face,
+                         uint,
+                         const std::vector<T>& normal) {
+    for(uint k = 0; k < face.size(); k++) {
         glNormal3d(normal[3 * k], normal[3 * k + 1], normal[3 * k + 2]);
-        glVertex4dv(corner[k].data());
+        glVertex4dv(transformed[face[k]].data());
     }
-    glEnd();
+}
+
+/**
+ * The same, reading the geometry in place rather than through a copy.
+ *
+ * The caller used to gather a face's corners into a vector<vertex> to call
+ * the overload below, which copy-constructs one vertex per corner -- and
+ * vertex's copy constructor allocates.  At D=16 that is 1.97M faces times
+ * four corners, every frame, in this pass alone.  Only corners 0, 1 and the
+ * last are ever read, so none of it was needed.
+ */
+template<typename T>
+bool face_normal(const std::vector< math::vertex<T> >& transformed,
+                 const std::vector<uint>& face,
+                 math::vertex<T>& normal) {
+    if(face.size() < 3)
+        return false;
+
+    const math::vertex<T>& c0 = transformed[face[0]];
+    const math::vertex<T>& c1 = transformed[face[1]];
+    const math::vertex<T>& cn = transformed[face[face.size() - 1]];
+
+    T a[3], b[3];
+    for(uint k = 0; k < 3; k++) {
+        a[k] = c1[k] - c0[k];
+        b[k] = cn[k] - c0[k];
+    }
+
+    T n[3];
+    n[0] = a[1] * b[2] - a[2] * b[1];
+    n[1] = a[2] * b[0] - a[0] * b[2];
+    n[2] = a[0] * b[1] - a[1] * b[0];
+
+    const T len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+
+    if(!(len > 0))
+        return false;
+
+    for(uint k = 0; k < 3; k++)
+        normal[k] = n[k] / len;
+
+    return true;
 }
 
 /**
@@ -654,26 +724,42 @@ void HPlot<T>::draw() {
             // The normals are wanted here too rather than at draw time,
             // because a vertex normal is the average over the faces meeting
             // at it and that cannot be known one face at a time.
-            std::vector< std::pair<T,uint> > order;
+            // Members, not locals.  These are sized by the face count, so
+            // at D=16 they are some 80MB of vectors that used to be
+            // allocated and freed every frame -- order alone is 1.97M pairs.
+            // assign() and resize() reuse the capacity instead.
+            std::vector< std::pair<T,uint> >& order = m_order;
+            std::vector<T>& fnormal = m_fnormal;
+            std::vector<bool>& flat = m_flat;
+
+            order.clear();
             order.reserve(faces.size());
 
-            std::vector<T> fnormal(3 * faces.size(), 0);
-            std::vector<bool> flat(faces.size(), false);
+            fnormal.assign(3 * faces.size(), 0);
+            flat.assign(faces.size(), false);
 
-            std::vector< math::vertex<T> > fcorner;
             math::vertex<T> fn(3);
+
+            // Whether every face has the same number of corners, which is
+            // what decides if they can share one glBegin.  Gathered here
+            // because this loop already walks every face; a separate pass
+            // over 1.97M faces to find out would not be free.
+            uint corners = faces.empty() ? 0 : uint(faces[0].size());
 
             for(uint f = 0; f < faces.size(); f++) {
                 T z = 0;
-                fcorner.clear();
-                for(uint k = 0; k < faces[f].size(); k++) {
+
+                if(faces[f].size() != corners)
+                    corners = 0;
+
+                for(uint k = 0; k < faces[f].size(); k++)
                     z += transformed[faces[f][k]][2];
-                    fcorner.push_back(transformed[faces[f][k]]);
-                }
 
                 order.push_back(std::make_pair(z / faces[f].size(), f));
 
-                if(face_normal(fcorner, fn)) {
+                // In place: gathering the corners into a vector<vertex> here
+                // cost four allocations a face.
+                if(face_normal(transformed, faces[f], fn)) {
                     flat[f] = true;
                     for(uint k = 0; k < 3; k++) fnormal[3 * f + k] = fn[k];
                 }
@@ -693,10 +779,12 @@ void HPlot<T>::draw() {
             // face at each vertex as the reference and flipping the rest to
             // agree keeps the average meaningful across a fold; the fold
             // itself then reads as a crease, which is what it is.
-            std::vector<T> vnormal;
+            std::vector<T>& vnormal = m_vnormal;
+            vnormal.clear();
             if(m_smooth) {
                 vnormal.assign(3 * object.size(), 0);
-                std::vector<bool> seen(object.size(), false);
+                std::vector<bool>& seen = m_seen;
+                seen.assign(object.size(), false);
 
                 for(uint f = 0; f < faces.size(); f++) {
                     if(!flat[f]) continue;
@@ -771,9 +859,40 @@ void HPlot<T>::draw() {
             glDisable(GL_CULL_FACE);
             glDepthMask(GL_FALSE);
 
-            std::vector< math::vertex<T> > corner;
-            std::vector<uint> index;
-            std::vector<T> normal;
+            // One glBegin around every face rather than one per face.
+            //
+            // GL_POLYGON cannot be concatenated -- consecutive polygons in
+            // one glBegin run together into a single ring -- but GL_QUADS
+            // and GL_TRIANGLES can, and they are what these shapes are made
+            // of.  glColor and glMaterial are both legal inside a glBegin,
+            // so the per-face colour and material survive and the figure
+            // looks the same.
+            //
+            // A shape with mixed corner counts falls back to a glBegin a
+            // face, which is what this always did.
+            const GLenum mode = (corners == 4) ? GL_QUADS
+                              : (corners == 3) ? GL_TRIANGLES : GL_POLYGON;
+            const bool batched = (mode != GL_POLYGON);
+
+            std::vector<T>& normal = m_corner_normal;
+
+            // Said once, because the fallback is silent otherwise: a shape
+            // whose faces have mixed corner counts still pays a glBegin
+            // each, and the frame rate would just fail to improve with no
+            // indication why.
+            if(!m_faces_said) {
+                m_faces_said = true;
+
+                std::cout << "jhardhyper: " << faces.size() << " faces, "
+                          << (batched
+                              ? (corners == 4 ? "batched as quads"
+                                              : "batched as triangles")
+                              : "one glBegin each (corner counts differ)")
+                          << std::endl;
+            }
+
+            if(batched)
+                glBegin(mode);
 
             for(uint o = 0; o < order.size(); o++) {
                 const uint f = order[o].second;
@@ -781,15 +900,10 @@ void HPlot<T>::draw() {
 
                 const typename math::object<T>::face_type& face = faces[f];
 
-                corner.clear();
-                index.clear();
                 normal.clear();
 
                 for(uint k = 0; k < face.size(); k++) {
                     const uint v = face[k];
-
-                    corner.push_back(transformed[v]);
-                    index.push_back(base + v);
 
                     // Per corner where the surface has a mean direction there,
                     // and the face's own normal otherwise -- which covers both
@@ -815,8 +929,17 @@ void HPlot<T>::draw() {
                     }
                 }
 
-                draw_face(corner, normal, index);
+                if(!batched)
+                    glBegin(GL_POLYGON);
+
+                emit_face(transformed, face, base, normal);
+
+                if(!batched)
+                    glEnd();
             }
+
+            if(batched)
+                glEnd();
 
             glDepthMask(GL_TRUE);
             glDisable(GL_BLEND);
@@ -1231,9 +1354,10 @@ public:
     virtual void draw();
     virtual void fill_colors(uint base, std::size_t n,
                              std::vector<GLfloat>& out) const;
-    virtual void draw_face(const std::vector< math::vertex<T> >& corner,
-                           const std::vector<T>& normal,
-                           const std::vector<uint>& index);
+    virtual void emit_face(const std::vector< math::vertex<T> >& transformed,
+                           const typename math::object<T>::face_type& face,
+                           uint base,
+                           const std::vector<T>& normal);
 
     void key_pressed(unsigned char key,int x,int y);
 
@@ -1260,6 +1384,10 @@ protected:
      * same colours every run -- which matters when comparing two builds.
      */
     std::vector<T> hues;
+
+    /** Scratch for emit_face's per-face hue mean; see the note there. */
+    mutable std::vector<T> m_face_hues;
+
     uint r;
     Shape m_shape = CUBOID;
 
@@ -1491,13 +1619,23 @@ void HyperPlot<T,Plot>::fill_colors(uint base, std::size_t n,
  */
 template<typename T, typename Plot>
 inline
-void HyperPlot<T,Plot>::draw_face(const std::vector< math::vertex<T> >& corner,
-                                  const std::vector<T>& normal,
-                                  const std::vector<uint>& index) {
-    std::vector<T> h;
-    for(uint k = 0; k < index.size(); k++)
-        if(index[k] < hues.size())
-            h.push_back(hues[index[k]]);
+void HyperPlot<T,Plot>::emit_face(const std::vector< math::vertex<T> >& transformed,
+                                  const typename math::object<T>::face_type& face,
+                                  uint base,
+                                  const std::vector<T>& normal) {
+    // A member rather than a local.  This runs once per face -- 1.97M times
+    // a frame at D=16 -- and a fresh vector each time is an allocation each
+    // time, for four values.
+    std::vector<T>& h = m_face_hues;
+
+    h.clear();
+
+    for(uint k = 0; k < face.size(); k++) {
+        const uint v = base + face[k];
+
+        if(v < hues.size())
+            h.push_back(hues[v]);
+    }
 
     const triple<T> color = hsv(hue_mean(h));
 
@@ -1515,7 +1653,7 @@ void HyperPlot<T,Plot>::draw_face(const std::vector< math::vertex<T> >& corner,
     glColor4fv(fcolors);
     glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, fcolors);
 
-    Plot::draw_face(corner, normal, index);
+    Plot::emit_face(transformed, face, base, normal);
 }
 
 
