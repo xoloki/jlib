@@ -130,14 +130,23 @@ Optional, each gating its own module:
 
 configure prints a summary of what it found and what it skipped.
 
-The names above are the upstream ones.  On Debian and Ubuntu,
+The names above are the upstream ones.  Two scripts translate them:
 
-    ./install-ubuntu-deps.sh            the toolchain and the required four
-    ./install-ubuntu-deps.sh full       the optional ones as well
-    ./install-ubuntu-deps.sh -n         print the apt-get line, install nothing
+    ./install-ubuntu-deps.sh [full]     Debian and Ubuntu, via apt-get
+    ./install-mac-deps.sh    [full]     macOS, via Homebrew
 
--n works anywhere, including where apt-get does not exist, so it doubles as
-the package-name list for anyone translating to another distribution.
+Without an argument each installs the toolchain and the four required
+dependencies; with "full" it adds the optional ones too.  Pass -n to print
+the command and install nothing -- that works anywhere, including where the
+package manager does not exist, so it doubles as the name mapping for
+anyone translating to another system.
+
+macOS needs a different set rather than different names for the same set.
+OpenGL and GLU come from -framework OpenGL, so nothing installs them and no
+pkg-config module finds them; Apple ships an ncurses with a .pc file, so
+Homebrew's keg-only one is not wanted; and X11 is XQuartz, a cask, which
+neither script installs because only jlib/x and jlib/glx want it and the
+GLFW backend does not.
 
 
 INSTALLATION
