@@ -2,7 +2,7 @@ ACLOCAL_AMFLAGS = -I m4
 
 SUBDIRS = jlib tests tools/perf
 
-EXTRA_DIST = autogen.sh install-ubuntu-deps.sh DOCKER TODO.md LICENSE NOTICE
+EXTRA_DIST = autogen.sh install-ubuntu-deps.sh install-mac-deps.sh DOCKER TODO.md LICENSE NOTICE
 
 # The architecture documents, which are the map the headers cannot be: each
 # one spans files, and none of it belongs at any single declaration.
