@@ -40,15 +40,51 @@ int main(int argc, char** argv) {
       "\n"
       "\n";
 
-    jlib::net::Email email(raw);
-    std::string received = "64.81.68.235";
+    int failures = 0;
 
-    if(email.get_received_ip() == received)
-       return 0;
-    else {
-        std::cerr << "ip: ["<<email.get_received_ip()
-                  << "] not: ["<<received<<"]"<<std::endl;
-        return 1;
+    auto expect = [&failures](const std::string& text, const std::string& want,
+                              const std::string& what) {
+        jlib::net::Email email(text);
+        const std::string got = email.get_received_ip();
 
-    }
+        if(got == want) {
+            std::cout << "  ok    " << what << "\n";
+        } else {
+            std::cout << "  FAIL  " << what << ": got [" << got
+                      << "] want [" << want << "]\n";
+            failures++;
+        }
+    };
+
+    expect(raw, "64.81.68.235", "the originating hop, skipping reserved ranges");
+
+    // The cases the POSIX regex this replaced got wrong.  It matched
+    // ([[:digit:]]{1,3}\.){3}[[:digit:]]{1,3} in effect, which has no idea
+    // what an octet is; RFC 3986's IPv4address does.
+    expect("Received: 999.999.999.999\n\nbody\n", "",
+           "999.999.999.999 is not an address");
+
+    expect("Received: 256.1.1.1\n\nbody\n", "",
+           "256 is not an octet");
+
+    // Four dot-separated numbers inside a longer run.  The regex picked
+    // "1.2.3.4" out of the front of this; the grammar rejects the run whole.
+    expect("Received: 1.2.3.4.5\n\nbody\n", "",
+           "a five-group run is not an address");
+
+    // A timestamp the regex would have mined for a false address.
+    expect("Received: from x; id 2026.10.01.12\n\nbody\n", "",
+           "a dotted timestamp is not an address");
+
+    // Still finds a real one next to other digits.
+    expect("Received: from mx (mx [203.0.113.5]) by id 12345\n\nbody\n",
+           "203.0.113.5", "a bracketed address beside other digits");
+
+    // And still skips reserved ranges when that is all there is.
+    expect("Received: 10.0.0.1\n\nbody\n", "",
+           "a reserved address yields nothing");
+
+    std::cout << (failures ? "FAILED" : "PASSED") << "\n";
+
+    return failures ? 1 : 0;
 }

@@ -53,7 +53,14 @@ namespace jlib {
         }
 
         Regex::Match& Regex::Match::operator=(const Regex::Match& m) {
-            copy(m);
+            // Self-assignment check, because copy() destroys before it reads.
+            //
+            // `m = m` used to free m_text and m_info and then copy out of
+            // them, which is a use-after-free and segfaults in practice --
+            // it is what the first run of util_regex_test did.
+            if(this != &m)
+                copy(m);
+
             return *this;
         }
 
@@ -162,7 +169,35 @@ namespace jlib {
         }
 
         Regex& Regex::operator=(const Regex& r) {
-            copy(r);
+            if(this == &r)
+                return *this;
+
+            // Compile the new pattern *before* releasing the old one.
+            //
+            // This used to call copy(), which calls init(), which calls
+            // regcomp straight over m_regex -- leaking the compiled regex
+            // that was already there, every assignment.  Doing it in the
+            // other order would fix the leak and introduce a worse bug: if
+            // regcomp then failed, init() throws, the destructor still runs
+            // and regfrees a regex that was already freed.
+            regex_t built;
+
+            int err = regcomp(&built, r.m_pattern.c_str(), r.m_flags);
+
+            if(err != 0) {
+                char buf[BUF_SIZE];
+                regerror(err, &built, buf, BUF_SIZE);
+                throw exception(buf);
+            }
+
+            regfree(&m_regex);
+
+            m_regex   = built;
+            m_pattern = r.m_pattern;
+            m_flags   = r.m_flags;
+            m_size    = r.m_size;
+            m_last    = r.m_last;
+
             return *this;
         }
 
