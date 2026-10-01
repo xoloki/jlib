@@ -252,7 +252,7 @@ namespace jlib {
             }
             else {
                 //cout << "mulitpart"<<endl;
-                //std::string bound = util::valueOf(rand())+"jlib"+util::valueOf(rand());
+                //std::string bound = util::string_value(rand())+"jlib"+util::string_value(rand());
                 std::string bound = util::slice(content_type,"\"","\"");
                 data += "\n";
                 data += "This is a multi-part message in MIME format.\n\n";

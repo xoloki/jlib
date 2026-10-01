@@ -97,24 +97,6 @@ namespace jlib {
             return ret;
         }
 
-        std::string excise(const std::string& s, const std::string& d1, const std::string& d2) {
-            std::string ret = s;
-
-            // These were ints compared against -1.  find() returns a
-            // size_type, so npos survived only as an implementation-defined
-            // narrowing that happens to give -1 -- and stops doing so the
-            // moment the string is longer than INT_MAX.
-            std::string::size_type i, j = 0;
-
-            while( (i=ret.find(d1,j)) != ret.npos && (j=ret.find(d2,i+1)) != ret.npos ) {
-                ret.erase(i,j+1-i);
-                j = i;
-                //cout << "Excising '" << ret.c_str() << "' between '" << d1.c_str() << "' and '" << d2.c_str() << "' = '" << ret.c_str() << "'\n";
-            }
-            
-            return ret;
-        }
-        
         std::string slice(const std::string& s, const std::string& d1, const std::string& d2) {
             std::string::size_type i, j;
             
@@ -150,33 +132,6 @@ namespace jlib {
             return chip(chop(s));
         }
         
-        void load(std::istream& is, std::map<std::string,std::string>& m, bool clear) {
-            if(clear) m.clear();
-            std::string buf, key, val;
-            while(!is.eof()) {
-                jlib::sys::getline(is,buf);
-                buf = buf.substr(0,buf.find("#"));
-                std::string::size_type p;
-                if( (p=buf.find("=")) != buf.npos ) {
-                    key = trim(buf.substr(0,p));
-                    val = trim(buf.substr(p+1));
-                    m[key]=val;
-                }
-            }
-        }
-        
-        void store(std::ostream& os, std::map<std::string,std::string>& m) {
-            std::map<std::string,std::string>::iterator i = m.begin();
-            while(i != m.end()) {
-                os << i->first << " = " << i->second << std::endl;
-                i++;
-            }
-        }
-
-        bool imaps(const std::map<std::string,std::string>& m, const std::string& key, const std::string& val) {
-            return (upper(const_cast< std::map<std::string,std::string>& >(m)[key]) == upper(val));
-        }
-        
         std::string upper(const std::string& s) {
             std::string ret = s;
             for(std::string::size_type i=0; i<ret.size(); i++) {
@@ -193,109 +148,53 @@ namespace jlib {
             return ret;
         }
         
-        /*
-         * Unfortunately, ostrstreams aren't working correctly here
-         * I'll stick to the C style implementation until I get
-         * them working, or until gcc3 comes out with real stringstreams
+        /**
+         * Zero-pad to `n` characters, after any sign.
+         *
+         * printf's "%0Nd" puts the padding after the sign, so -42 at width 5
+         * is "-0042" and not "0-042".  Everything here went through snprintf
+         * before, so that is the behaviour the call sites were written
+         * against.
          */
+        static std::string pad(std::string s, int n) {
+            if(n <= 0)
+                return s;
 
-        std::string string_value(int i, int n) { return valueOf(i,n); }
-        std::string valueOf(int i, int n) {
-            char* fmt = new char[SZ];
-            char* buf = new char[SZ];
+            const std::string::size_type width = std::string::size_type(n);
 
-            if(n == -1) 
-                snprintf(fmt,SZ-1,"%%d");
-            else
-                snprintf(fmt,SZ-1,"%%0%dd",n);
-            snprintf(buf,SZ-1,fmt,i);
+            if(s.size() >= width)
+                return s;
 
-            std::string ret(buf);
-            delete [] fmt;
-            delete [] buf;
-            return ret;
-        }
-        
-        std::string string_value(unsigned int i, int n) { return valueOf(i,n); }
-        std::string valueOf(unsigned int i, int n) {
-            char* fmt = new char[SZ];
-            char* buf = new char[SZ];
+            const std::string::size_type at =
+                (!s.empty() && (s[0] == '-' || s[0] == '+')) ? 1 : 0;
 
-            if(n == -1) 
-                snprintf(fmt,SZ-1,"%%u");
-            else
-                snprintf(fmt,SZ-1,"%%0%du",n);
-            snprintf(buf,SZ-1,fmt,i);
+            s.insert(at, width - s.size(), '0');
 
-            std::string ret(buf);
-            delete [] fmt;
-            delete [] buf;
-            return ret;
-        }
-        
-        std::string string_value(double i, int n) { return valueOf(i,n); }
-        std::string valueOf(double i, int n) {
-            char* fmt = new char[SZ];
-            char* buf = new char[SZ];
-
-            if(n == -1) 
-                snprintf(fmt,SZ-1,"%%f");
-            else
-                snprintf(fmt,SZ-1,"%%0%df",n);
-            snprintf(buf,SZ-1,fmt,i);
-
-            std::string ret(buf);
-            delete [] fmt;
-            delete [] buf;
-            return ret;
+            return s;
         }
 
+        std::string string_value(int i, int n) {
+            return pad(std::to_string(i), n);
+        }
 
-        /*
-        std::string valueOf(int i, int n) {
-            ostrstream os;
-            if(n == -1) 
-                os << i << ends;
-            else
-                os << setw(n) << setfill('0') << i << ends;
-            std::string ret(os.str());
-            delete [] os.str();
-            return ret;
+        std::string string_value(unsigned int i, int n) {
+            return pad(std::to_string(i), n);
         }
-        
-        std::string valueOf(unsigned int i, int n) {
-            ostrstream os;
-            if(n == -1) 
-                os << i << ends;
-            else
-                os << setw(n) << setfill('0') << i << ends;
-            std::string ret = os.str();
-            delete  [] os.str();
-            return ret;
+
+        std::string string_value(double i, int n) {
+            // to_string(double) is specified as "%f", which is what the
+            // snprintf this replaces used -- six decimal places either way.
+            return pad(std::to_string(i), n);
         }
-        
-        std::string valueOf(double i, int n) {
-            ostrstream os;
-            if(n == -1) 
-                os << i << ends;
-            else
-                os << setw(n) << setfill('0') << i << ends;
-            std::string ret = os.str();
-            delete [] os.str();
-            return ret;
+
+        int int_value(const std::string& s, int base) {
+            return int(strtol(s.c_str(), NULL, base));
         }
-        */
-        
-        int int_value(const std::string& s, int base) { return intValue(s,base); }
-        int intValue(const std::string& s, int base) {
-            return strtol(s.c_str(), NULL, base);
-        }
-        
-        double double_value(const std::string& s) { return doubleValue(s); }
-        double doubleValue(const std::string& s) {
+
+        double double_value(const std::string& s) {
             return strtod(s.c_str(), NULL);
         }
-        
+
         std::string hex_value(unsigned char c, bool upper) {
             /*
             std::ostringstream o;
@@ -352,7 +251,9 @@ namespace jlib {
         }
         
         bool icontains(const std::string& s, const std::string& t) {
-            // The cast to int truncated npos; see excise() above.
+            // Compared against npos, not cast to int.  This used to read
+            // `(int)upper(s).find(...) != -1`, which truncates npos on a
+            // 64-bit size_type and reported a match for every string.
             return (s.size() >= t.size() && upper(s).find(upper(t)) != std::string::npos);
         }
         
