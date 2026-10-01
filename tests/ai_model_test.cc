@@ -880,6 +880,88 @@ static void the_cache_changes_nothing() {
     ok("  a cache too small for the conversation is refused", threw);
 }
 
+/**
+ * Prefill can be given up partway through.
+ *
+ * #283. A long prompt is chunked, and the chunk loop emits no tokens, so the
+ * per-token callback -- the only place generation asked whether anybody was
+ * still listening -- cannot fire for the length of it. jserve held the model
+ * through the whole prefill of a prompt whose client had already gone.
+ *
+ * Synthetic and tiny: one layer, d_model 8, so 600 tokens of prefill is
+ * instant and this runs on a machine with no model file and no GPU. What it
+ * needs from the config is only `context` above the prompt, since the chunk
+ * size is a constant and a prompt has to exceed it to chunk at all.
+ *
+ * **The count of asks is the assertion.** A generation that gave up returns
+ * the ids it had, and so does one that was never asked; only the number of
+ * times the predicate was called distinguishes stopping from running on.
+ */
+static void prefill_stops_when_asked() {
+    std::cout << "\nprefill stops when asked:\n";
+
+    typename ai::model<float>::config c;
+
+    c.d_model = 8;
+    c.heads = 2;
+    c.kv_heads = 1;
+    c.d_ff = 16;
+    c.layers = 1;
+    c.vocab = 32;
+    c.context = 1024;
+
+    ai::host_backend<float> b;
+    ai::model<float> m(b, c);
+
+    // The chunked path is the *cached* one -- without a cache each forward
+    // re-reads the whole prompt, so there is nothing to chunk and nowhere to
+    // stop.  jserve's sessions are cached; this makes the synthetic one match.
+    m.enable_cache();
+
+    // Above the 256-token chunk, and not a multiple of it: 600 chunks twice
+    // and leaves a remainder, so a run that goes to the end asks twice and
+    // one that stops at the first ask is a different number rather than a
+    // different time.
+    std::vector<int> prompt;
+
+    for(int i = 0; i < 600; i++) prompt.push_back(i % 32);
+
+    ai::sampler::config sc;
+    sc.temperature = 1.0f;
+    sc.seed = 20260929;
+
+    unsigned int asked = 0;
+
+    ai::sampler s0(sc);
+
+    const std::vector<int> full =
+        ai::generate<float>(m, b, prompt, 4, s0, ai::stops(), nullptr,
+                            [&asked]{ asked++; return true; });
+
+    ok("  a prompt past the chunk size is asked more than once", asked == 2,
+       std::to_string(asked) + " asks");
+
+    ok("  and a prefill nobody interrupts generates", full.size() == prompt.size() + 4,
+       std::to_string(full.size() - prompt.size()) + " tokens");
+
+    asked = 0;
+
+    ai::sampler s1(sc);
+
+    const std::vector<int> cut =
+        ai::generate<float>(m, b, prompt, 4, s1, ai::stops(), nullptr,
+                            [&asked]{ asked++; return false; });
+
+    ok("  one that says no is not asked again", asked == 1,
+       std::to_string(asked) + " asks");
+
+    // And it produced nothing.  Returning the prompt is what the caller gets
+    // for an abandoned generation; what matters to jserve is that the model
+    // came back rather than what it came back with.
+    ok("  and no tokens were generated", cut.size() == prompt.size(),
+       std::to_string(cut.size()) + " vs " + std::to_string(prompt.size()));
+}
+
 int main(int argc, char** argv) {
     std::cout << std::unitbuf;
 
@@ -888,6 +970,7 @@ int main(int argc, char** argv) {
     // Runs with or without a model, so the generation loop is covered on a
     // machine that has neither the file nor a GPU.
     generation_stops_when_asked();
+    prefill_stops_when_asked();
     a_reply_ends_on_any_of_several_tokens();
     the_layers_share_one_scratch();
     the_cache_changes_nothing();

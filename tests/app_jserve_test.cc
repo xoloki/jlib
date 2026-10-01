@@ -89,6 +89,21 @@ struct script {
 
     /** Milliseconds per token, so a generation can be abandoned mid-flight. */
     unsigned int per_token_ms = 0;
+
+    /**
+     * Chunks of prefill to pretend to do before producing any token, and the
+     * delay for each.
+     *
+     * The real prefill produces nothing and so never reaches `on_token`, which
+     * is the whole of #283. The fake has to model that or the test cannot
+     * reach the gap: a session that goes straight to tokens is a session with
+     * no prefill to abandon.
+     */
+    unsigned int prefill_chunks = 0;
+    unsigned int per_chunk_ms = 0;
+
+    /** How many chunks were done before it gave up, which is the assertion. */
+    unsigned int chunks_done = 0;
 };
 
 static script g_script;
@@ -182,12 +197,26 @@ struct fake_session {
     std::vector<int> generate(ai::backend<T>&, const std::vector<int>& prompt,
                               unsigned int max_new, ai::sampler&,
                               const ai::stops& = ai::stops(),
-                              std::function<bool(int)> on_token = nullptr)
+                              std::function<bool(int)> on_token = nullptr,
+                              std::function<bool()> still_wanted = nullptr)
     {
         g_script.saw_prompt = prompt;
         g_script.saw_budget = max_new;
 
         std::vector<int> out = prompt;
+
+        // Prefill: no tokens, so `on_token` is never reached -- and the only
+        // thing that can end it is the predicate. The real loop asks after
+        // each chunk; so does this.
+        for(unsigned int c = 0; c < g_script.prefill_chunks; c++) {
+            if(g_script.per_chunk_ms)
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(g_script.per_chunk_ms));
+
+            g_script.chunks_done = c + 1;
+
+            if(still_wanted && !still_wanted()) return out;
+        }
 
         for(std::size_t i = 0; i < g_script.tokens.size() && i < max_new; i++) {
             if(g_script.per_token_ms)
@@ -1173,6 +1202,62 @@ static void a_client_that_hangs_up(jlib::net::http::server& s) {
        std::to_string(after.status) + " " + after.body);
 }
 
+/**
+ * A client that hangs up during **prefill** is noticed during prefill.
+ *
+ * #283. The test above covers the token phase, where `on_token` asks. Prefill
+ * produces no tokens, so for the length of a long prompt nothing was asked at
+ * all -- a client that left was discovered at the first token, minutes later
+ * for a 15,000-token prompt, and the model stayed held for a reply nobody
+ * would read.
+ *
+ * **The assertion is the chunk count, not the elapsed time.** A generation
+ * that gave up and one that ran to the end both free the model eventually, so
+ * timing alone cannot tell them apart without a race; counting the chunks says
+ * exactly how far it got.
+ */
+static void a_client_that_hangs_up_during_prefill(jlib::net::http::server& s) {
+    std::cout << "\na client that hangs up during prefill:\n";
+
+    const unsigned short port = s.port();
+
+    g_script = script();
+
+    // Twenty chunks at 100ms is two seconds of prefill; the hang-up is at
+    // 800ms, so a prefill that asks should stop around the eighth.
+    g_script.prefill_chunks = 20;
+    g_script.per_chunk_ms = 100;
+
+    // A token after it, so a run that ignores the predicate still terminates
+    // rather than hanging the suite.
+    g_script.tokens.push_back(int('z'));
+
+    std::thread gone([port]{
+        abandon(port,
+                R"({"model":"m","messages":[{"role":"user","content":"long"}]})");
+    });
+
+    gone.join();
+
+    // Long enough for a prefill that did *not* notice to finish its twenty
+    // chunks, so the two cases are distinguishable rather than racing.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+
+    ok("it stopped partway through the prefill",
+       g_script.chunks_done > 0 && g_script.chunks_done < 20,
+       std::to_string(g_script.chunks_done) + " of 20 chunks");
+
+    // And the model is free, which is the consequence that matters.
+    g_script.prefill_chunks = 0;
+    g_script.per_chunk_ms = 0;
+
+    const reply after =
+        post(s, R"({"model":"m","messages":[{"role":"user","content":"hi"}]})");
+
+    ok("  and the model is free again", after.status == 200,
+       std::to_string(after.status) + " " + after.body);
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -1211,6 +1296,7 @@ int main() {
     the_models_route(s);
     a_busy_model_answers_rather_than_waits(s);
     a_client_that_hangs_up(s);
+    a_client_that_hangs_up_during_prefill(s);
     a_whole_reply(s);
     a_streamed_reply(s);
     a_character_that_arrives_in_pieces(s);

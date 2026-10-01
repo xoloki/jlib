@@ -190,14 +190,19 @@ public:
          *
          * The backend is still the caller's, because the engine does not own
          * one -- it is passed to the constructor and shared by every model.
+         *
+         * `still_wanted` is asked between prefill chunks, where `on_token`
+         * cannot be because prefill produces none -- see ai::generate, and
+         * #283 for the held model that is.
          */
         std::vector<int> generate(backend<T>& b, const std::vector<int>& prompt,
                                   unsigned int max_new, sampler& s,
                                   const stops& ends = stops(),
-                                  std::function<bool(int)> on_token = nullptr)
+                                  std::function<bool(int)> on_token = nullptr,
+                                  std::function<bool()> still_wanted = nullptr)
         {
             return ai::generate<T>(model(), b, prompt, max_new, s, ends,
-                                   on_token);
+                                   on_token, still_wanted);
         }
 
         const std::string& name() const { return m_m->name; }
