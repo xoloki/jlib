@@ -85,6 +85,21 @@ dnl flight.  A missing return is never intentional, so make it fatal.
 AX_CHECK_COMPILE_FLAG([-Werror=return-type],
                       [CXXFLAGS="$CXXFLAGS -Werror=return-type"], [], [-Werror])
 
+dnl Clang warns on '/*' inside a block comment, by default rather than under
+dnl -Wall, and jlib's route patterns end in exactly that sequence: files("/*"),
+dnl protect("/admin/*") and site(...).files("/static/*") are the API's own
+dnl syntax, so a doc comment that shows a wildcard pattern cannot avoid it.
+dnl 238 instances over 20 sites, every one deliberate text rather than a nested
+dnl comment, 14 of them in net/http_server.hh where the patterns are specified.
+dnl The warning's other half -- a backslash-continued // comment, which really
+dnl does swallow the line after it -- matches nothing in the tree, so there is
+dnl nothing being guarded here to lose.  Measured rather than assumed: g++ 13.3
+dnl reports none of the 238 with or without this flag, because for gcc the
+dnl warning is under -Wall and nothing here passes -Wall -- so on Linux the flag
+dnl is a no-op and this is a clang-only annoyance.
+AX_CHECK_COMPILE_FLAG([-Wno-comment],
+                      [CXXFLAGS="$CXXFLAGS -Wno-comment"], [], [-Werror])
+
 AX_PTHREAD([], [AC_MSG_ERROR([a working pthread implementation is required])])
 LIBS="$PTHREAD_LIBS $LIBS"
 CXXFLAGS="$CXXFLAGS $PTHREAD_CFLAGS"
