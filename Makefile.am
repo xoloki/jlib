@@ -9,6 +9,7 @@ EXTRA_DIST = autogen.sh DOCKER TODO.md LICENSE NOTICE
 doc_DATA = docs/async.md docs/jhttpd.md docs/net.md docs/abnf.md \
            docs/ai.md \
            docs/audio.md \
+           docs/math.md docs/graphics.md \
            docs/jserve.md docs/jchat.md docs/jalpaca.md docs/jcode.md
 EXTRA_DIST += $(doc_DATA)
 
