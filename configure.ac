@@ -100,6 +100,28 @@ dnl is a no-op and this is a clang-only annoyance.
 AX_CHECK_COMPILE_FLAG([-Wno-comment],
                       [CXXFLAGS="$CXXFLAGS -Wno-comment"], [], [-Werror])
 
+dnl The same three flags for Objective-C++, which automake drives with its own
+dnl variable: a .mm file takes OBJCXXFLAGS and sees nothing of CXX or CXXFLAGS.
+dnl Missed until #393 -- the standard went on CXX alone, so every .mm in
+dnl jlib/metal and tools/perf compiled in the driver's default mode, which is
+dnl below C++17.  It worked only because clang takes the features as extensions
+dnl and says so; six -Wc++17-extensions warnings under --enable-perf were the
+dnl symptom, and the cost was that the Metal backend had neither C++20 nor the
+dnl -Werror=return-type above, whose whole point is a crash at -O2.
+dnl
+dnl Probed in the Objective-C++ language rather than inherited from the C++
+dnl probe, because OBJCXX is a separate variable and may be a stub where there
+dnl is no Objective-C++ compiler -- in which case these do not apply and nothing
+dnl compiles a .mm anyway, jlib/metal being gated on HAVE_METAL.
+AC_LANG_PUSH([Objective C++])
+AX_CHECK_COMPILE_FLAG([-std=c++20],
+                      [OBJCXXFLAGS="$OBJCXXFLAGS -std=c++20"], [], [-Werror])
+AX_CHECK_COMPILE_FLAG([-Werror=return-type],
+                      [OBJCXXFLAGS="$OBJCXXFLAGS -Werror=return-type"], [], [-Werror])
+AX_CHECK_COMPILE_FLAG([-Wno-comment],
+                      [OBJCXXFLAGS="$OBJCXXFLAGS -Wno-comment"], [], [-Werror])
+AC_LANG_POP([Objective C++])
+
 AX_PTHREAD([], [AC_MSG_ERROR([a working pthread implementation is required])])
 LIBS="$PTHREAD_LIBS $LIBS"
 CXXFLAGS="$CXXFLAGS $PTHREAD_CFLAGS"
