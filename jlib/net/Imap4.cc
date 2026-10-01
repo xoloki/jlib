@@ -562,7 +562,7 @@ namespace jlib {
         */
         
         bool Imap4::unseen(sys::socketstream& sock, int i) {
-            std::string s = util::valueOf(i);
+            std::string s = util::string_value(i);
             std::vector<std::string> buf = handshake(sock,"FETCH "+s+":"+s+" (FLAGS FLAGS)");
             for(unsigned int i=0;i<buf.size();i++) {
                 if(util::contains(buf[i], "\\Seen"))
@@ -659,7 +659,7 @@ namespace jlib {
 
         std::string Imap4::tag(int i) {
             num(num()+i);
-            return ("A"+util::valueOf(num(), m_width));
+            return ("A"+util::string_value(num(), m_width));
         }
 
         void Imap4::parse(std::vector<std::string> hand) {
@@ -811,7 +811,7 @@ namespace jlib {
                         cancel_authenticate(sock);
 
                         throw exception("AUTHENTICATE " + name + ": the server is still "
-                                        "challenging after " + util::valueOf(MAX_ROUNDS) +
+                                        "challenging after " + util::string_value(MAX_ROUNDS) +
                                         " rounds");
                     }
 

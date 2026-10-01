@@ -82,5 +82,73 @@ int main(int argc, char** argv) {
         exit(1);
     }
 
+    // string_value, int_value, double_value.
+    //
+    // These had no coverage at all despite ~100 call sites, which is how the
+    // implementation underneath them stayed at its 2001 shape -- a runtime
+    // format string snprintf'd into two heap buffers per call -- behind
+    // camelCase forwarders that nobody read.  The padding is the part worth
+    // pinning: printf's "%0Nd" puts the zeros *after* the sign.
+    struct { int i; int n; const char* want; } ints[] = {
+        {      42, -1,      "42" },
+        {      42,  0,      "42" },
+        {      42,  5,   "00042" },
+        {      42,  2,      "42" },   // already wide enough
+        {      42,  1,      "42" },   // never truncates
+        {     -42,  5,   "-0042" },   // padding after the sign
+        {       0,  3,     "000" },
+        { -123456,  3, "-123456" },
+    };
+
+    for(auto& t : ints) {
+        if(string_value(t.i, t.n) != t.want) {
+            std::cerr << "error: string_value(" << t.i << "," << t.n << ") == \""
+                      << string_value(t.i, t.n) << "\", want \"" << t.want << "\""
+                      << std::endl;
+            exit(1);
+        }
+    }
+
+    if(string_value(7u, 3) != "007") {
+        std::cerr << "error: string_value(unsigned) padding: "
+                  << string_value(7u, 3) << std::endl;
+        exit(1);
+    }
+
+    // to_string(double) is "%f" -- six decimals -- which is what the snprintf
+    // this replaced produced, so the width counts the whole thing.
+    if(string_value(3.5) != "3.500000") {
+        std::cerr << "error: string_value(double): " << string_value(3.5) << std::endl;
+        exit(1);
+    }
+
+    if(string_value(3.5, 10) != "003.500000") {
+        std::cerr << "error: string_value(double) padding: "
+                  << string_value(3.5, 10) << std::endl;
+        exit(1);
+    }
+
+    if(int_value("42") != 42 || int_value("-7") != -7) {
+        std::cerr << "error: int_value" << std::endl;
+        exit(1);
+    }
+
+    if(int_value("ff", 16) != 255 || int_value("0", 10) != 0) {
+        std::cerr << "error: int_value with a base" << std::endl;
+        exit(1);
+    }
+
+    // strtol semantics, kept deliberately: a string that is not a number is
+    // zero rather than an error, and every caller was written against that.
+    if(int_value("not a number") != 0) {
+        std::cerr << "error: int_value on junk should be 0" << std::endl;
+        exit(1);
+    }
+
+    if(double_value("2.5") != 2.5 || double_value("junk") != 0.0) {
+        std::cerr << "error: double_value" << std::endl;
+        exit(1);
+    }
+
     exit(0);
 }

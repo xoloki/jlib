@@ -166,7 +166,7 @@ namespace jlib {
             m_channels = util::get<u_short>(chunk, CHANNELS_OFFSET);
 
             if(m_format_tag != WAV_FMT_PCM && m_format_tag != WAV_FMT_OKI_ADPCM) 
-                throw AudioFile::exception("Unknown WAV format tag: "+util::valueOf(m_format_tag));
+                throw AudioFile::exception("Unknown WAV format tag: "+util::string_value(m_format_tag));
 
             if(m_format_tag == WAV_FMT_PCM) {
                 
@@ -183,7 +183,7 @@ namespace jlib {
             }
             else {
                 throw 
-                    AudioFile::exception("Unknown number of bits per sample: "+util::valueOf(m_bits_per_sample));
+                    AudioFile::exception("Unknown number of bits per sample: "+util::string_value(m_bits_per_sample));
             }
             /*
               stream >> wChannels;

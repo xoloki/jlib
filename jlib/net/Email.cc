@@ -24,7 +24,8 @@
 #include <jlib/sys/sys.hh>
 
 #include <jlib/util/Date.hh>
-#include <jlib/util/Regex.hh>
+#include <jlib/util/abnf.hh>
+#include <jlib/util/rfc3986.hh>
 #include <jlib/util/util.hh>
 
 #include <iomanip>
@@ -283,19 +284,86 @@ namespace jlib {
             m_flags.clear();
         }
 
-        std::string Email::get_received_ip() const {
-            jlib::util::Regex ipexp("([[:digit:]]{1,3}\\.[[:digit:]]{1,3}\\.[[:digit:]]{1,3}\\.[[:digit:]]{1,3})");
-            std::vector<std::string>::const_reverse_iterator r = m_received.rbegin();
+        namespace {
 
-            while(r != m_received.rend() && (!ipexp(*r) || is_reserved(ipexp[1])) ) r++;
+            /** Built on first use, as in util/URL.cc. */
+            const util::abnf::grammar& uri_grammar() {
+                static util::abnf::grammar g = [] {
+                    util::abnf::grammar g =
+                        util::abnf::compile(util::rfc3986::URI_GRAMMAR);
+                    g.check();
 
-            if(r != m_received.rend()) {
-                return ipexp[1];
+                    return g;
+                }();
+
+                return g;
             }
-            else {
+
+            /**
+             * The first dotted quad in a line, or "" -- the grammar deciding.
+             *
+             * This was a POSIX regex, `([[:digit:]]{1,3}\.){3}[[:digit:]]{1,3}`
+             * in effect, which accepts 999.999.999.999 and finds "026.10.01.12"
+             * inside a timestamp.  RFC 3986 has the production, and
+             * rfc3986.hh keeps IPv4address in the grammar *unreferenced* for
+             * exactly this -- "so that a caller holding a host can ask whether
+             * it is a dotted quad".  This is that caller.
+             *
+             * try_parse matches the whole input, so the scan is here: take
+             * each maximal run of digits and dots and ask the grammar about
+             * it.  A run like "1.2.3.4.5" is rejected entire rather than
+             * having "1.2.3.4" picked out of its front, which is what the
+             * regex did.
+             */
+            std::string first_dotted_quad(const std::string& line) {
+                const util::abnf::rule& ip = uri_grammar().at("IPv4address");
+
+                std::string::size_type i = 0;
+
+                while(i < line.size()) {
+                    if(!std::isdigit(static_cast<unsigned char>(line[i]))) {
+                        i++;
+                        continue;
+                    }
+
+                    std::string::size_type j = i;
+
+                    while(j < line.size() &&
+                          (std::isdigit(static_cast<unsigned char>(line[j])) || line[j] == '.')) {
+                        j++;
+                    }
+
+                    const std::string run = line.substr(i, j - i);
+
+                    if(ip.try_parse(run))
+                        return run;
+
+                    i = j;
+                }
+
                 return "";
             }
 
+        }
+
+        std::string Email::get_received_ip() const {
+            // Traversal unchanged: the newest Received is first, so walking
+            // back reaches the originating hop, and a line whose first quad
+            // is reserved is skipped whole rather than searched further.
+            std::vector<std::string>::const_reverse_iterator r = m_received.rbegin();
+
+            std::string found;
+
+            while(r != m_received.rend()) {
+                found = first_dotted_quad(*r);
+
+                if(!found.empty() && !is_reserved(found))
+                    return found;
+
+                r++;
+            }
+
+            return "";
         }
 
         std::string Email::get_primary_text() const { return get_text(false,false,false,true); }

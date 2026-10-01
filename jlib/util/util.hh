@@ -98,7 +98,6 @@ namespace jlib {
          * @param n desired min length of output (default -1 means don't pad)
          * @return i converted to string
          */
-        std::string valueOf(int i, int n=-1);
         std::string string_value(int i, int n=-1);
         
         /**
@@ -108,7 +107,6 @@ namespace jlib {
          * @param n desired min length of output (default -1 means don't pad)
          * @return i converted to string
          */
-        std::string valueOf(unsigned int i, int n=-1);
         std::string string_value(unsigned int i, int n=-1);
 
         /**
@@ -118,7 +116,6 @@ namespace jlib {
          * @param n desired min length of output (default -1 means don't pad)
          * @return i converted to string
          */
-        std::string valueOf(double i, int n=-1);
         std::string string_value(double i, int n=-1);
         
         /**
@@ -128,7 +125,6 @@ namespace jlib {
          * @param base radix to use on conversion
          * @return s converted to int
          */
-        int intValue(const std::string& s, int base = 10);
         int int_value(const std::string& s, int base = 10);
         
         /**
@@ -137,7 +133,6 @@ namespace jlib {
          * @param s std::string to convert to double
          * @return s converted to double
          */
-        double doubleValue(const std::string& s);
         double double_value(const std::string& s);
 
         std::string hex_value(unsigned char c, bool upper=false);
@@ -169,19 +164,9 @@ namespace jlib {
         std::string trim(const std::string& s);
         
         /**
-         * Remove characters between passed delimiters
-         *
-         * @param s std::string to excise
-         * @param d1 beginning delimiter
-         * @param d2 ending delimiter
-         * @return s without d1, d2, or anything between
-         */
-        std::string excise(const std::string& s, const std::string& d1, const std::string& d2);
-        
-        /**
          * Remove characters except between passed delimiters
          *
-         * @param s std::string to excise
+         * @param s std::string to slice
          * @param d1 beginning delimiter
          * @param d2 ending delimiter
          * @return s between d1 and d2, or unchanged if s doesn't contain d1 and d2
@@ -251,7 +236,6 @@ namespace jlib {
          */
         bool iequals(const std::string& s, const std::string& t);
 
-        bool imaps(const std::map<std::string,std::string>& m, const std::string& key, const std::string& val);
         
         // These read a T out of a byte buffer at an arbitrary offset, so the
         // address is not generally aligned for T.  Doing that by casting the
@@ -286,9 +270,6 @@ namespace jlib {
         void byte_copy(std::string& s, T* t, unsigned int n, unsigned int offset=0) {
             s.replace(offset, n, reinterpret_cast<char*>(t), n);
         }
-
-        void load(std::istream& is, std::map<std::string,std::string>& m, bool clear=true);
-        void store(std::ostream& os, std::map<std::string,std::string>& m);
 
         /**
          * base64, RFC 4648 section 4 as MIME uses it.

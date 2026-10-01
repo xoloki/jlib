@@ -128,6 +128,7 @@ TESTS = \
 	sys_task_test \
  \
 	util_test \
+	util_regex_test \
 	util_codec_test \
 	util_url_test \
 	util_date_test \
@@ -354,6 +355,9 @@ util_date_test_LDADD            = $(JUTIL_LA)
 
 util_url_test_SOURCES           = util_url_test.cc
 util_url_test_LDADD             = $(JUTIL_LA)
+
+util_regex_test_SOURCES = util_regex_test.cc
+util_regex_test_LDADD   = $(JUTIL_LA) $(JSYS_LA)
 
 util_codec_test_SOURCES         = util_codec_test.cc
 util_codec_test_LDADD           = $(JUTIL_LA)
