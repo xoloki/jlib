@@ -25,6 +25,7 @@
 #include <jlib/util/util.hh>
 
 #include <algorithm>
+#include <fstream>
 #include <sstream>
 
 #include <sys/types.h>
@@ -760,6 +761,58 @@ namespace jlib {
                 return getstat(path).st_mtime;
             }
             
+            /**
+             * Replace the contents of path with the contents of from.
+             *
+             * This was `system("cat " + from + " > " + path)`, and the ignored
+             * return value gcc warns about was the least of what was wrong
+             * with it.  The paths went to /bin/sh unquoted, so a mail folder
+             * whose path contains a space -- ordinary on macOS -- redirected to
+             * the first word, wrote the rebuilt mbox somewhere else and left
+             * the real one untouched; the folder name reaching the net.cc
+             * caller comes from a server or the user, so a `;` or a backtick in
+             * one ran as a command; and with nothing looking at the result, a
+             * failure to write the very file these functions exist to rewrite
+             * was silent, so a deleted message stayed deleted only in memory.
+             *
+             * No shell is involved now and every failure throws.
+             */
+            static void replace_contents(const std::string& path,
+                                         const std::string& from) {
+                std::ifstream in(from.c_str(), std::ios::binary);
+
+                if(!in)
+                    throw util_exception("could not read "+from);
+
+                std::ofstream out(path.c_str(),
+                                  std::ios::binary | std::ios::trunc);
+
+                if(!out)
+                    throw util_exception("could not open "+path+" for writing");
+
+                // Deliberately not `out << in.rdbuf()`, which sets failbit when
+                // it inserts no characters -- and an empty result is legitimate
+                // here, since every region of a file can be killed.
+                char buf[65536];
+
+                while(in.read(buf, sizeof buf) || in.gcount() > 0) {
+                    out.write(buf, in.gcount());
+
+                    if(!out)
+                        throw util_exception("short write to "+path);
+                }
+
+                if(!in.eof())
+                    throw util_exception("error reading "+from);
+
+                // Closed here rather than by the destructor, because a write
+                // can fail at the flush and that is the last chance to say so.
+                out.close();
+
+                if(!out)
+                    throw util_exception("error closing "+path);
+            }
+
             void kill(const std::string& path, std::vector<long>& pts) {
                 if(pts.size() == 0) return;
                 std::sort(pts.begin(), pts.end());
@@ -807,8 +860,7 @@ namespace jlib {
                 
                 pstream.close();
                 tfs.close();
-                std::string cmd = "cat "+tfs.get_path()+" > "+path;
-                system(cmd.c_str());
+                replace_contents(path, tfs.get_path());
             }
 
             void keep(const std::string& path, std::vector<long>& pts) {
@@ -843,8 +895,7 @@ namespace jlib {
                 
                 pstream.close();
                 tfs.close();
-                std::string cmd = "cat "+tfs.get_path()+" > "+path;
-                system(cmd.c_str());
+                replace_contents(path, tfs.get_path());
             }
 
         }
