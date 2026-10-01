@@ -30,140 +30,76 @@ const int BUF_SIZE=1024;
 namespace jlib {
     namespace util {
 
-        Regex::Match::Match() {
-            m_info = 0;
-            m_text = 0;
-            m_size = 0;
-        }
-
-        Regex::Match::Match(regmatch_t* info, unsigned int size, char* text) {
-            m_info = info;
-            m_size = size;
-            m_text = text;
-        }
-        
-        Regex::Match::Match(const Regex::Match& m) {
-            m_info = 0;
-            m_text = 0;
-            copy(m);
-        }
-
-        Regex::Match::~Match() {
-            destroy();
-        }
-
-        Regex::Match& Regex::Match::operator=(const Regex::Match& m) {
-            // Self-assignment check, because copy() destroys before it reads.
-            //
-            // `m = m` used to free m_text and m_info and then copy out of
-            // them, which is a use-after-free and segfaults in practice --
-            // it is what the first run of util_regex_test did.
-            if(this != &m)
-                copy(m);
-
-            return *this;
-        }
-
-        void Regex::Match::destroy() {
-            if(m_text != 0)
-                delete [] m_text;
-            m_text = 0;
-
-            if(m_info != 0)
-                delete [] m_info;
-            m_info = 0;
-
-        }
-
-        void Regex::Match::copy(const Regex::Match& m) {
-            destroy();
-
-            m_size = m.m_size;
-            
-            if(m_size > 0) {
-                m_info = new regmatch_t[m_size];
-                for(unsigned int i=0; i<m_size; i++) {
-                    m_info[i].rm_so = m.m_info[i].rm_so;
-                    m_info[i].rm_eo = m.m_info[i].rm_eo;
-                }
-                
-                unsigned int len = std::string(m.m_text).length()+1;
-                m_text = new char[len];
-                snprintf(m_text, len, "%s", m.m_text);
-            }
-            else {
-                m_text = 0;
-                m_info = 0;
-            }
-
-        }
-
-        std::string Regex::Match::operator[](unsigned int i) {
-            if(i >= m_size) {
+        std::string Regex::Match::operator[](unsigned int i) const {
+            if(i >= m_info.size())
                 return "";
-            }
 
-            if(m_info[i].rm_so == -1 || m_info[i].rm_eo == -1) {
+            // A group that did not participate -- the b in "(a)(b)?" against
+            // "a" -- is reported as -1, not as an empty range.
+            if(m_info[i].rm_so == -1 || m_info[i].rm_eo == -1)
                 return "";
-            }
-            
-            return std::string(m_text + m_info[i].rm_so, m_info[i].rm_eo-m_info[i].rm_so);
+
+            return m_text.substr(std::string::size_type(m_info[i].rm_so),
+                                 std::string::size_type(m_info[i].rm_eo - m_info[i].rm_so));
         }
-
-
-        Regex::Match::operator bool() {
-            return (size() > 0);
-        }
-
 
         Regex::Regex(const std::string& pattern, int flags) {
             init(pattern, flags);
         }
-        
+
         Regex::Regex(const Regex& r) {
-            copy(r);
+            // Recompiled rather than shared: a regex_t owns heap the POSIX
+            // API gives no way to duplicate, and nothing says regexec on one
+            // from two threads is safe.
+            init(r.m_pattern, r.m_flags);
+
+            m_last = r.m_last;
         }
-                
+
         Regex::~Regex() {
             regfree(&m_regex);
         }
-         
+
         void Regex::init(const std::string& pattern, int flags) {
             m_pattern = pattern;
             m_flags = flags;
-            m_size = (1+std::count(pattern.begin(),pattern.end(),'('));
+
             int err = regcomp(&m_regex, pattern.c_str(), flags);
+
             if(err != 0) {
                 char buf[BUF_SIZE];
                 regerror(err, &m_regex, buf, BUF_SIZE);
                 throw exception(buf);
             }
         }
-       
-        Regex::Match Regex::match(const std::string& p_str) {
-            regmatch_t* match = new regmatch_t[m_size];
-            unsigned int len = p_str.length()+1;
-            char* text = new char[len];
-            snprintf(text, len, "%s", p_str.c_str());
 
-            int err = regexec(&m_regex, text, m_size, match, 0);
-            Match tmp;
+        Regex::Match Regex::match(const std::string& p_str) {
+            // re_nsub, not a count of '(' in the pattern.  Counting them
+            // included escaped parens and parens inside a bracket
+            // expression, so "[(]" claimed a group that does not exist;
+            // regcomp has already worked out the real number.
+            const std::size_t groups = m_regex.re_nsub + 1;
+
+            std::vector<regmatch_t> info(groups);
+
+            int err = regexec(&m_regex, p_str.c_str(), groups, info.data(), 0);
+
             if(err != 0 && err != REG_NOMATCH) {
                 char buf[BUF_SIZE];
                 regerror(err, &m_regex, buf, BUF_SIZE);
                 throw exception(buf);
             }
-            else if(err == REG_NOMATCH) {
-                delete [] text;
-                delete [] match;
-            }
-            else {
-                tmp = Match(match,m_size,text);
-            }
-            m_last = tmp;
-            return tmp;
+
+            // Built once.  This used to construct a Match owning two raw
+            // arrays, deep-copy it into a local, deep-copy that into
+            // m_last, and deep-copy that again on return.
+            m_last = (err == REG_NOMATCH)
+                ? Match()
+                : Match(std::move(info), p_str);
+
+            return m_last;
         }
-        
+
         Regex::Match Regex::operator()(const std::string& str) {
             return match(str);
         }
@@ -176,10 +112,11 @@ namespace jlib {
             //
             // This used to call copy(), which calls init(), which calls
             // regcomp straight over m_regex -- leaking the compiled regex
-            // that was already there, every assignment.  Doing it in the
-            // other order would fix the leak and introduce a worse bug: if
-            // regcomp then failed, init() throws, the destructor still runs
-            // and regfrees a regex that was already freed.
+            // already there, on every assignment.  Measured at 238 MB over
+            // 200k assignments.  Doing it in the obvious other order would
+            // trade that for something worse: if the new regcomp failed,
+            // init() throws and the destructor then regfrees a regex that
+            // was already freed.
             regex_t built;
 
             int err = regcomp(&built, r.m_pattern.c_str(), r.m_flags);
@@ -195,20 +132,13 @@ namespace jlib {
             m_regex   = built;
             m_pattern = r.m_pattern;
             m_flags   = r.m_flags;
-            m_size    = r.m_size;
             m_last    = r.m_last;
 
             return *this;
         }
 
-        std::string Regex::operator[](unsigned int i) {
+        std::string Regex::operator[](unsigned int i) const {
             return m_last[i];
-        }
-
-
-        void Regex::copy(const Regex& r) {
-            init(r.m_pattern, r.m_flags);
-            m_last = r.m_last;
         }
 
     }

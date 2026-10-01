@@ -14,6 +14,7 @@
 
 #include <iostream>
 #include <string>
+#include <utility>
 
 using jlib::util::Regex;
 
@@ -137,6 +138,40 @@ int main() {
             r = Regex("([0-9]+)");
 
         check(r("x9")[1] == "9", "a Regex reassigned many times still matches");
+    }
+
+    // Group counting comes from regcomp's re_nsub, not from counting '('
+    // in the pattern.  Counting them claimed groups that do not exist.
+    {
+        Regex plain("abc");
+
+        check(plain("abc").size() == 1, "a pattern with no groups has size 1");
+
+        Regex bracketed("[(]x[)]");
+
+        check(bracketed("(x)").size() == 1,
+              "parens inside a bracket expression are not groups, size "
+              + std::to_string(bracketed("(x)").size()));
+
+        Regex escaped("a\\(b");
+
+        check(escaped("a(b").size() == 1,
+              "an escaped paren is not a group, size "
+              + std::to_string(escaped("a(b").size()));
+
+        Regex two("(a)(b)");
+
+        check(two("ab").size() == 3, "two groups plus the whole match");
+    }
+
+    // Match owns a string and a vector now, so moving works and leaves the
+    // source usable.  It could not move at all before.
+    {
+        Regex r("([0-9]+)");
+        Regex::Match m = r("x42");
+        Regex::Match moved = std::move(m);
+
+        check(moved[1] == "42", "a moved-from Match hands over its result");
     }
 
     std::cout << (failures ? "FAILED" : "PASSED") << "\n";
