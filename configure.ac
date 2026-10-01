@@ -4,6 +4,28 @@ AC_INIT([jlib], [2.0.0], [xoloki@gmail.com])
 
 AC_CONFIG_SRCDIR([jlib/sys/sys.hh])
 AC_CONFIG_MACRO_DIRS([m4])
+
+dnl Say which package is missing, rather than letting m4 guess badly.
+dnl
+dnl These two macro sets are not part of autoconf, and each fails in its own
+dnl unhelpful way when absent:
+dnl
+dnl   pkg.m4 (pkg-config).  PKG_CHECK_MODULES goes unexpanded, so its
+dnl   *arguments* reach configure verbatim -- and autoconf then complains
+dnl   about whatever AC_ token is nested inside one, 180 lines further down
+dnl   than the real problem.  Observed as
+dnl   "configure.ac:188: error: possibly undefined macro: AC_CHECK_LIB",
+dnl   which names a core macro that is obviously defined.
+dnl
+dnl   autoconf-archive (AX_*).  Worse: autoconf's m4_pattern_forbid covers
+dnl   AC_, AH_, AU_ and AM_ but not AX_, so a missing AX_PTHREAD is not
+dnl   reported at all.  autoreconf succeeds, writes a configure with the
+dnl   macro name still in it, and the failure surfaces much later as
+dnl   "AX_PTHREAD: command not found".
+m4_ifndef([PKG_PROG_PKG_CONFIG],
+  [m4_fatal([pkg.m4 not found.  Install pkg-config (Debian/Ubuntu: pkg-config, Fedora: pkgconf-pkg-config) and re-run autoreconf.])])
+m4_ifndef([AX_PTHREAD],
+  [m4_fatal([autoconf-archive not found.  Install it (Debian/Ubuntu: autoconf-archive, Fedora: autoconf-archive) and re-run autoreconf.])])
 AC_CONFIG_HEADERS([config.h])
 
 AM_INIT_AUTOMAKE([foreign subdir-objects])
