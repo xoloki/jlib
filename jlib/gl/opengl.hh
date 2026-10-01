@@ -30,8 +30,12 @@
  *
  * Apple deprecated OpenGL in 10.14.  It still works, but the headers warn
  * loudly, so quiet them here -- jlib's rendering is fixed-function 1.1/1.2 and
- * needs the legacy 2.1 context that Apple still provides.  See the note in
- * jlib/glut/main.cc about never requesting a 3.2+ core profile.
+ * needs the legacy 2.1 context that Apple still provides.  **Never request a
+ * 3.2+ core profile**: there is no shader path here to fall back to.
+ *
+ * This used to defer to a note in jlib/glut/main.cc.  That backend is gone --
+ * jlib/glut is not in SUBDIRS and holds nothing but a stale Makefile.in -- so
+ * the reason is stated here instead of pointed at.  See docs/graphics.md.
  */
 
 #ifdef __APPLE__
