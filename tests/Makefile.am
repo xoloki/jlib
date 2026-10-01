@@ -90,6 +90,7 @@ TESTS = \
 	net_imap_async_test \
 	net_imap_sasl_test \
 	net_http_test \
+	net_websocket_test \
 	net_http_server_test \
 	net_http_async_server_test \
 	net_http_keepalive_test \
@@ -278,6 +279,9 @@ net_http_keepalive_test_LDADD   = $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA)
 
 net_http_server_test_SOURCES    = net_http_server_test.cc
 net_http_server_test_LDADD      = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
+
+net_websocket_test_SOURCES = net_websocket_test.cc
+net_websocket_test_LDADD   = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)
 
 net_http_test_SOURCES           = net_http_test.cc
 net_http_test_LDADD             = $(JNET_LA) $(JUTIL_LA) $(JSYS_LA) $(OPENSSL_LIBS)

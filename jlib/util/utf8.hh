@@ -22,6 +22,7 @@
 #define JLIB_UTIL_UTF8_HH
 
 #include <string>
+#include <string_view>
 
 namespace jlib {
 namespace util {
@@ -195,6 +196,43 @@ inline std::string utf8_stream::feed(const std::string& bytes) {
  */
 inline bool utf8_ends_mid_character(const std::string& s);
 
+/**
+ * Is this string well-formed UTF-8?
+ *
+ * Strict in the three ways that matter: no overlong form, no codepoint in the
+ * surrogate range D800-DFFF, nothing past U+10FFFF -- plus the structural
+ * checks, a continuation byte with nothing before it and a sequence that runs
+ * off the end.  Implemented as a table of ranges on the lead byte, so the
+ * second byte's bounds are narrowed where the lead byte constrains them
+ * (E0 and ED, F0 and F4) rather than checked afterwards.
+ *
+ * **This is not utf8_stream.** That class is above, it answers "where does a
+ * character end" so ncurses is never handed half a sequence, and it says in its
+ * own header that it deliberately accepts overlong forms and surrogates because
+ * the only question there is a boundary.  Two different questions, and a caller
+ * that wants this one would get a wrong answer from that one.
+ *
+ * It is also **not** jlib::util::xml's validate_utf8(), which is strict in the
+ * same way and then additionally enforces XML 1.0 2.2's Char production -- no
+ * NUL, no form feed, no U+FFFE.  A WebSocket text frame may contain any of
+ * those (RFC 6455 8.1 asks only that the payload be valid UTF-8), so fusing the
+ * two checks the way a document format needs would refuse valid messages.
+ *
+ * **That makes four UTF-8 implementations in the tree, which is one more than
+ * this header's own story asks for, so it is tracked rather than left to drift:
+ * #401.** `xml.cc`'s is the one that should fold -- it is this plus the Char
+ * walk, and both carry the same lead-byte table. It was not folded in with #399
+ * because it reports a byte column through an XML parse error, and changing a
+ * conforming parser's diagnostics is a separate branch with a separate test
+ * burden. `ai/pretokenizer.cc`'s fourth is not a candidate at all: it decodes to
+ * codepoints to drive a grammar, so a bool is not the answer it needs.
+ *
+ * No position is reported.  A caller that needs to say *where* wants the xml
+ * one's error, and a caller that only has to decide whether to fail a
+ * connection does not.
+ */
+inline bool utf8_valid(std::string_view s);
+
 inline std::size_t utf8_stream::end() {
     const std::size_t n = m_held.size();
 
@@ -226,6 +264,47 @@ inline bool utf8_ends_mid_character(const std::string& s) {
     // Either the string is empty -- which ends on a boundary, vacuously -- or
     // it is nothing but continuation bytes, which is not a character.
     return !s.empty();
+}
+
+inline bool utf8_valid(std::string_view s)
+{
+    std::size_t i = 0;
+
+    while(i < s.size()) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+
+        std::size_t len = 0;
+        unsigned char lo = 0x80, hi = 0xBF;   // bounds for the *second* byte
+
+        if(c < 0x80)                    { len = 1; }
+        else if(c >= 0xC2 && c <= 0xDF) { len = 2; }
+        else if(c == 0xE0)              { len = 3; lo = 0xA0; }
+        else if(c == 0xED)              { len = 3; hi = 0x9F; }
+        else if(c >= 0xE1 && c <= 0xEF) { len = 3; }
+        else if(c == 0xF0)              { len = 4; lo = 0x90; }
+        else if(c == 0xF4)              { len = 4; hi = 0x8F; }
+        else if(c >= 0xF1 && c <= 0xF3) { len = 4; }
+        else {
+            // A continuation byte on its own; C0 and C1, which could only ever
+            // begin an overlong form; F5 and up, which could only encode
+            // something past the end of Unicode.
+            return false;
+        }
+
+        if(i + len > s.size()) return false;
+
+        for(std::size_t k = 1; k < len; k++) {
+            const unsigned char n = static_cast<unsigned char>(s[i + k]);
+            const unsigned char low  = (k == 1) ? lo : 0x80;
+            const unsigned char high = (k == 1) ? hi : 0xBF;
+
+            if(n < low || n > high) return false;
+        }
+
+        i += len;
+    }
+
+    return true;
 }
 
 }
