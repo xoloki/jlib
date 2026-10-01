@@ -539,6 +539,25 @@ private:
                 if(!whole.empty()) b.emit(whole);
 
                 return true;
+            },
+                       [&]() {
+                // **The same question, at the one boundary prefill has.**
+                //
+                // The callback above never runs during prefill, because
+                // prefill produces no tokens -- so a client that hung up mid
+                // request held the model for the whole pass and was noticed at
+                // the first token, which for a 15,000-token prompt is minutes
+                // later (#283). Chunked prefill (#285) gave that pass a
+                // boundary; this is what asks at it.
+                //
+                // Identical predicate rather than a second mechanism: one
+                // condition -- nobody is listening -- asked wherever there is
+                // somewhere to ask it.
+                //
+                // Safe from this thread for the reason above, and the same
+                // caveat applies: `sys::relay` joins in its destructor, so the
+                // generation cannot outlive the connection.
+                return b.wanted() && !out.peer_gone();
             });
 
             // Whatever is still waiting for continuation bytes is not going to

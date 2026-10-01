@@ -238,7 +238,8 @@ std::vector<int> generate(model<T>& m, backend<T>& b,
                           unsigned int max_new,
                           sampler& s,
                           const stops& ends = stops(),
-                          std::function<bool(int)> on_token = nullptr)
+                          std::function<bool(int)> on_token = nullptr,
+                          std::function<bool()> still_wanted = nullptr)
 {
     if(prompt.empty())
         throw backend_error("generate: an empty prompt has no last position");
@@ -293,6 +294,37 @@ std::vector<int> generate(model<T>& m, backend<T>& b,
             b.wait();
 
             at += prefill_chunk;
+
+            // **The one place prefill can be given up.**
+            //
+            // `on_token` is the only other way back to a caller and prefill
+            // produces no tokens, so for the length of a long prompt nothing
+            // was ever asked -- a client that hung up was discovered at the
+            // first token, which for 15,000 tokens of prompt is minutes
+            // later, and a Ctrl-C waited out the whole pass (#283).
+            //
+            // **A predicate rather than a `sys::cancel_token`**, which was
+            // the first choice and is the wrong one. A token has to be
+            // *requested* by somebody, and during prefill the only candidates
+            // are a reactor timer or this thread. A timer that reaches for the
+            // connection is the lifetime race `sys/server.cc` documents at
+            // `timed_out_after` -- and worse than the one it describes, since
+            // abandoning that timer is safe because it only requests a token,
+            // where this one would dereference a responder whose frame may be
+            // unwinding on another thread.
+            //
+            // This thread may simply ask. `async_responder::peer_gone()` is
+            // documented callable from any thread whose lifetime is bounded by
+            // the connection's -- which a `sys::relay`'s is, because it joins
+            // in its destructor -- and "cheap enough to call between units of
+            // work", which is exactly what a chunk boundary is.
+            //
+            // Returning what has been produced rather than throwing: during
+            // prefill that is nothing, and a caller that must tell this from a
+            // reply which simply ended knows its own predicate. A throw would
+            // make every caller handle an exception for a case most of them
+            // cannot cause.
+            if(still_wanted && !still_wanted()) return ids;
         }
 
         feed.erase(feed.begin(), feed.begin() + long(at));
