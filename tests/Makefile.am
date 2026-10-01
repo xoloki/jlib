@@ -351,6 +351,7 @@ util_test_LDADD   = $(JUTIL_LA)
 
 util_file_test_SOURCES = util_file_test.cc
 util_file_test_LDADD   = $(JUTIL_LA) $(JSYS_LA)
+
 util_rfc2047_test_SOURCES       = util_rfc2047_test.cc
 util_rfc2047_test_LDADD         = $(JUTIL_LA)
 
