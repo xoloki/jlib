@@ -650,8 +650,23 @@ namespace {
      * ever called with one of those, and the bound is checked anyway because
      * an out-of-range write here would be a memory error inside a signal
      * handler, which is the worst place to have one.
+     *
+     * An atomic, where wake_write above is a `volatile std::sig_atomic_t`, and
+     * the difference is that this one is **incremented** rather than assigned.
+     * `volatile` makes a load a load and a store a store; it does not make a
+     * read-modify-write a single operation, so `++` on it could lose a count
+     * against a second delivery or a concurrent reader of count().  C++20
+     * deprecated the expression rather than leaving that to the reader, which
+     * is the warning gcc and clang both emit here.  Being **lock-free** is what
+     * keeps an atomic legal in a handler -- a locking one could deadlock
+     * against the thread it interrupted -- so that is asserted rather than
+     * assumed.
      */
-    volatile std::sig_atomic_t wake_count[NSIG] = { 0 };
+    std::atomic<std::sig_atomic_t> wake_count[NSIG] = {};
+
+    static_assert(std::atomic<std::sig_atomic_t>::is_always_lock_free,
+                  "wake_count is incremented from a signal handler, which is "
+                  "only defined for a lock-free atomic");
 
 }
 

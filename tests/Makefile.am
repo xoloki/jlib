@@ -128,6 +128,7 @@ TESTS = \
 	sys_task_test \
  \
 	util_test \
+	util_file_test \
 	util_regex_test \
 	util_codec_test \
 	util_url_test \
@@ -347,6 +348,9 @@ util_http_test_LDADD   = $(JUTIL_LA) $(JSYS_LA)
 
 util_test_SOURCES = util_test.cc
 util_test_LDADD   = $(JUTIL_LA)
+
+util_file_test_SOURCES = util_file_test.cc
+util_file_test_LDADD   = $(JUTIL_LA) $(JSYS_LA)
 util_rfc2047_test_SOURCES       = util_rfc2047_test.cc
 util_rfc2047_test_LDADD         = $(JUTIL_LA)
 
