@@ -44,6 +44,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+
+#include <vector>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -395,6 +397,79 @@ static int last_status = 0;
 
 /** How many access records there have been. */
 static int noted = 0;
+
+/**
+ * Every access record, appended and never reset.
+ *
+ * **The counter above cannot say which record is yours, and that is #403.**
+ * It is one global, every subtest zeroes it and then waits for it to rise, and
+ * nothing establishes that the server is quiet first.  A connection abandoned
+ * by an earlier subtest has its record written during unwind -- after that
+ * subtest returned -- so the wait is satisfied by a straggler and the
+ * assertions then read a status this subtest did not cause.  Measured: the
+ * record is `/slow`'s, status 200, arriving before the two the keepalive
+ * subtest is counting.
+ *
+ * So a subtest takes a mark, acts, and waits for the record belonging to the
+ * connection *it* opened -- identified by the local port, which is in the
+ * record and is not what any assertion is about.  Matching on the status
+ * would be circular: it would turn "the status was wrong" into "no record
+ * arrived", which is the same failure wearing a worse message.
+ */
+struct record {
+    std::string host;
+    std::string target;
+    int status = 0;
+    unsigned short peer_port = 0;
+    std::string complaint;
+};
+
+static std::vector<record> records;
+
+/** Records so far.  Take this before acting; pass it to await_record. */
+static std::size_t mark_records() {
+    std::lock_guard<std::mutex> hold(said);
+
+    return records.size();
+}
+
+/** The local port of a connected socket, which is what the server records. */
+static unsigned short local_port(int fd) {
+    struct sockaddr_in me{};
+    socklen_t len = sizeof me;
+
+    if(fd < 0 || ::getsockname(fd, reinterpret_cast<struct sockaddr*>(&me), &len) != 0)
+        return 0;
+
+    return ntohs(me.sin_port);
+}
+
+/**
+ * Wait for the nth record from `port` at or after `from`; npos if it never came.
+ *
+ * `n` is 1 for the first, 2 for the second -- a keepalive connection writes
+ * one per request on one port.
+ */
+static std::size_t await_record(std::size_t from, unsigned short port,
+                                int n = 1, int ms = 2000) {
+    for(int waited = 0; waited <= ms; waited += 10) {
+        {
+            std::lock_guard<std::mutex> hold(said);
+
+            int seen = 0;
+
+            for(std::size_t i = from; i < records.size(); i++) {
+                if(records[i].peer_port != port) continue;
+
+                if(++seen == n) return i;
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    return std::string::npos;
+}
 
 /**
  * How many header fields one message may carry.
@@ -838,36 +913,50 @@ static void a_peer_that_says_nothing(http::server& s) {
         noted = 0;
     }
 
+    const std::size_t from = mark_records();
+    unsigned short mine = 0;
+
     // Connect and close, which is the whole of a preconnect.
     {
         sys::socketstream c("127.0.0.1", s.port(), 5);
+
+        mine = local_port(c.get_socket());
     }
 
-    for(int i = 0; i < 200; i++) {
-        {
-            std::lock_guard<std::mutex> hold(said);
-
-            if(noted > 0) break;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    // This connection's record, by local port.  Waiting for the counter to
+    // rise is satisfied by any straggler still unwinding from an earlier
+    // subtest, and the assertions below would then read its status.
+    const std::size_t at = await_record(from, mine);
 
     {
         std::lock_guard<std::mutex> hold(said);
 
-        ok("  it is still written down", noted == 1, std::to_string(noted));
+        ok("  it is still written down", at != std::string::npos,
+           at == std::string::npos
+               ? "no record for port " + std::to_string(mine) : "");
+
+        if(at == std::string::npos) return;
 
         // 408, not 400: nothing malformed arrived, nothing arrived at all.
         // RFC 9110 15.5.9 -- the server did not receive a complete request
         // within the time it was prepared to wait.
-        ok("  as a timeout rather than a bad request", last_status == 408,
-           std::to_string(last_status));
+        ok("  as a timeout rather than a bad request",
+           records[at].status == 408, std::to_string(records[at].status));
 
         // The half that made the error log useless: one line per preconnect
         // buries the traversal attempt somebody should be reading.
         ok("  and the operator is told nothing, because nothing went wrong",
-           complaint.empty(), complaint);
+           records[at].complaint.empty(), records[at].complaint);
+
+        // Counted inline rather than in a helper: this block already holds
+        // `said` and the mutex is not recursive.
+        int mine_n = 0;
+
+        for(std::size_t i = from; i < records.size(); i++)
+            if(records[i].peer_port == mine) mine_n++;
+
+        ok("  and it is the only record on that connection", mine_n == 1,
+           std::to_string(mine_n));
     }
 
     // **The line that must stay on the other side of it.**  A head cut short
@@ -882,31 +971,40 @@ static void a_peer_that_says_nothing(http::server& s) {
         noted = 0;
     }
 
+    const std::size_t cut_from = mark_records();
+    unsigned short cut_port = 0;
+
     {
         sys::socketstream c("127.0.0.1", s.port(), 5);
+
+        cut_port = local_port(c.get_socket());
 
         c << "GET /ok HTTP/1.1\r\nHost: x" << std::flush;
     }
 
-    for(int i = 0; i < 200; i++) {
-        {
-            std::lock_guard<std::mutex> hold(said);
-
-            if(noted > 0) break;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    // Its own record again.  This block has **no count assertion** -- it reads
+    // the status and the complaint only -- so a straggler satisfying a
+    // count-based wait would be read as this subtest's answer with nothing
+    // noticing.  That is why the fix cannot be "wait for a bigger count".
+    const std::size_t cut_at = await_record(cut_from, cut_port);
 
     {
         std::lock_guard<std::mutex> hold(said);
 
+        ok("  a head cut off part way is written down at all",
+           cut_at != std::string::npos,
+           cut_at == std::string::npos
+               ? "no record for port " + std::to_string(cut_port) : "");
+
+        if(cut_at == std::string::npos) return;
+
         ok("  a head cut off part way is still a bad request",
-           last_status == 400, std::to_string(last_status));
+           records[cut_at].status == 400,
+           std::to_string(records[cut_at].status));
         ok("  and the operator is still told why",
-           complaint.find("ended") != std::string::npos ||
-               complaint.find("octets") != std::string::npos,
-           complaint);
+           records[cut_at].complaint.find("ended") != std::string::npos ||
+               records[cut_at].complaint.find("octets") != std::string::npos,
+           records[cut_at].complaint);
     }
 }
 
@@ -1021,10 +1119,15 @@ static void a_keepalive_connection_that_finishes(http::server& s) {
         noted = 0;
     }
 
+    const std::size_t ka_from = mark_records();
+    unsigned short ka_port = 0;
+
     {
         sys::socketstream c("127.0.0.1", s.port(), 5);
 
         c.set_timeout(30);
+
+        ka_port = local_port(c.get_socket());
 
         // Two requests, neither asking to close, then the client hangs up --
         // which is what a browser does at the end of a visit and what 105 of
@@ -1043,30 +1146,63 @@ static void a_keepalive_connection_that_finishes(http::server& s) {
         }
     }
 
-    // Wait for both records, then keep waiting: the bug is an *extra* line
-    // arriving after the ones that should be there, so settling for "at least
-    // two" would pass with the bug still in.
-    for(int i = 0; i < 200; i++) {
-        {
-            std::lock_guard<std::mutex> hold(said);
-
-            if(noted >= 2) break;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    // Both of **this connection's** records, then keep waiting: the bug is an
+    // extra line, so settling for "at least two" would pass with it still in.
+    //
+    // By port rather than by count, because the count was the defect. The
+    // /slow connection the previous subtest abandons writes its record during
+    // unwind, after that subtest has returned, and it was landing inside this
+    // window and being counted here as a third line (#403).
+    await_record(ka_from, ka_port, 2);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    // **A straggler, on purpose**, because a fix that merely made this subtest
+    // slower would look identical from the outside.
+    //
+    // This is the shape of #403: a record from a connection that is not this
+    // one, landing inside this subtest's window -- really the /slow request
+    // the previous subtest abandons, whose record is written during unwind
+    // after that subtest has returned. Port 1 because no ephemeral client
+    // port is 1, so it cannot collide with a real connection.
+    //
+    // The two assertions below then say both halves: three records landed
+    // here, and two of them are ours. Counting records rather than *our*
+    // records is what made the third one a failure.
+    {
+        std::lock_guard<std::mutex> hold(said);
+
+        records.push_back(record{ "x", "/slow", 200, 1, "" });
+    }
 
     {
         std::lock_guard<std::mutex> hold(said);
 
-        ok("  two requests are two access lines, not three",
-           noted == 2, std::to_string(noted));
+        const int in_window = int(records.size() - ka_from);
+
+        int mine = 0;
+        std::size_t last = std::string::npos;
+
+        for(std::size_t i = ka_from; i < records.size(); i++) {
+            if(records[i].peer_port != ka_port) continue;
+
+            mine++;
+            last = i;
+        }
+
+        ok("  two requests are two access lines, not three", mine == 2,
+           std::to_string(mine));
+
+        // The guard on the guard: if this is not 3, the straggler above did
+        // not land and the assertion above passed without being tested.
+        ok("  with a foreign record in the window it would have counted three",
+           in_window == 3, std::to_string(in_window));
 
         // 0 is not a status, and it is what the deadline path used to write.
         ok("  and the last of them is the request, not a phantom timeout",
-           last_status == 200, std::to_string(last_status));
+           last != std::string::npos && records[last].status == 200,
+           last == std::string::npos ? "none"
+                                     : std::to_string(records[last].status));
     }
 }
 
@@ -1312,6 +1448,8 @@ int main() {
                 last_site = a.host;
                 last_status = a.status;
                 noted++;
+                records.push_back(record{ a.host, a.target, a.status,
+                                          a.peer_port, complaint });
             });
 
             running go(s);
@@ -1336,6 +1474,8 @@ int main() {
                 last_site = a.host;
                 last_status = a.status;
                 noted++;
+                records.push_back(record{ a.host, a.target, a.status,
+                                          a.peer_port, complaint });
             });
 
             running go(s);
