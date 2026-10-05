@@ -33,8 +33,12 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <algorithm>
+#include <set>
 #include <string>
 #include <vector>
+
+#include "reference_logits.hh"
 
 namespace ai = jlib::ai;
 
@@ -962,6 +966,174 @@ static void prefill_stops_when_asked() {
        std::to_string(cut.size()) + " vs " + std::to_string(prompt.size()));
 }
 
+/**
+ * The forward pass, against llama.cpp on the same GGUF (#184).
+ *
+ * This is the one level of `jlib::ai` that had no oracle outside the library.
+ * The tokenizer, the pre-tokenizer and the chat template are each checked
+ * against the vendor's own implementation; the arithmetic in between was
+ * checked only by the answer looking sensible, and three architectures rest
+ * on conventions no file states -- llama's interleaved rope, qwen2's split
+ * rope and Q/K/V biases, gemma2's GeGLU, embedding scale and two softcaps.
+ *
+ * **The bounds are measured on both sides, not chosen.** Four builds, the
+ * same prompt, max |delta| against the reference and the top-64 overlap:
+ *
+ *                       TinyLlama        qwen2         gemma2    rest of suite
+ *     correct          0.11  64/64   0.27  62/64   0.30  63/64      green
+ *     eps x10          0.95  57/64   0.28  62/64   0.30  63/64    **green**
+ *     eps x100         4.04  47/64       --            --         4 failures
+ *     wrong rope       5.07  29/64       --            --         5 failures
+ *     q pos off by 1   6.52  27/64  10.83  21/64  11.29  21/64    4 failures
+ *
+ * `eps x10` is the row this test exists for. Multiplying the attention norm's
+ * epsilon by ten -- using a value the file did not state -- leaves **the whole
+ * rest of this program green**, and the reply stays fluent and correct. The
+ * loud rows are caught without this test, so they calibrate rather than
+ * motivate: a wrong rope layout is also caught by the config assertion that
+ * reads the layout back, and both it and the position bug degrade output into
+ * repetition.
+ *
+ * Note that `eps x10` barely moves qwen2 or gemma2. A given error is not
+ * equally visible in every architecture, so one tolerance across three models
+ * is a floor on what each can detect and not a uniform sensitivity.
+ *
+ * The bound sits between the worst correct column (0.30) and the smallest
+ * error signal (0.95): 2x above correct, 1.6x below the bug. That is less
+ * headroom than is comfortable, and it is the honest consequence of wanting
+ * `eps x10` caught. **If a future llama.cpp release pushes a correct build
+ * over the bound, regenerate the fixture rather than raising it** -- the
+ * recorded commit is what makes that distinguishable from a regression.
+ *
+ * **The top-1 token is not the discriminating assertion.** It is identical to
+ * the reference in the correct build, under `eps x10`, under `eps x100` and
+ * under the wrong rope layout -- the sabotaged models still answer " Paris".
+ * An argmax agrees long after the distribution has drifted, and the
+ * distribution is what any temperature above zero draws from. It is asserted
+ * because it is free; the two that do the work are the difference bound and
+ * the set overlap.
+ *
+ * **The exact top-k ordering is deliberately not asserted.** Correct code
+ * agrees with llama.cpp on only the first 2 of its top 32 *in order*, because
+ * near-tied logits swap under a different summation order. Asserting the
+ * ordering would fail on correct code, which is how a test becomes one people
+ * switch off.
+ *
+ * What this does not establish: one prompt at one position per architecture,
+ * on the host backend. Not longer contexts, not the cache, and no position but
+ * the last. The Metal backend is not run here -- it is compared against the
+ * host elsewhere -- but it was measured against this same reference while the
+ * bounds were being set: `_Float16` on Metal gives max |delta| 0.18 and 64 of
+ * 64, so extending this to Metal would need no looser bound than the 0.6
+ * above. It also says nothing about *why* a disagreement appears -- the
+ * reference is a whole forward pass, so a failure localises to a model and
+ * not to a layer.
+ */
+static void the_forward_pass_matches_the_reference(const reference_logits& r) {
+    std::cout << "\nits forward pass agrees with llama.cpp on " << r.model
+              << ":\n";
+
+    const std::string path = find_named(r.model);
+
+    if(path.empty()) {
+        std::cout << "  (no " << r.model << " to hand)\n";
+
+        return;
+    }
+
+    // From the table above: between the worst correct column and the smallest
+    // error signal, 2x above the former.
+    const double max_delta   = 0.6;
+    const int    min_overlap = 60;
+
+    const ai::gguf g(path);
+    const ai::model<float>::config c = ai::model<float>::config::from(g);
+
+    // A file whose vocabulary differs is a different file, and comparing
+    // against the fixture anyway would report arithmetic for a mismatch of
+    // artefacts.
+    ok("  the file is the one the reference was dumped from",
+       int(c.vocab) == r.vocab,
+       std::to_string(c.vocab) + " vs " + std::to_string(r.vocab));
+
+    if(int(c.vocab) != r.vocab) return;
+
+    const std::vector<int> ids(r.ids, r.ids + r.id_count);
+
+    ai::host_backend<float> b;
+    ai::model<float> m(b, c);
+
+    m.load(g);
+    m.reserve(static_cast<unsigned int>(ids.size()));
+
+    ai::backend<float>::tensor_ptr logits =
+        b.make(c.vocab, static_cast<unsigned int>(ids.size()));
+
+    m.forward(ids, logits);
+    b.wait();
+
+    const jlib::math::matrix<float> l = logits->read();
+    const unsigned int last = l.N - 1;
+
+    std::vector<float> v(l.M);
+
+    bool finite = true;
+
+    for(unsigned int i = 0; i < l.M; i++) {
+        v[i] = float(l(i, last));
+
+        if(!std::isfinite(double(v[i]))) finite = false;
+    }
+
+    ok("  every logit is finite", finite);
+
+    // The distribution, sampled across the whole vocabulary.
+    double worst = 0.0;
+    int    worst_at = -1;
+
+    for(int j = 0; j < 256; j++) {
+        const unsigned int i = unsigned(j) * unsigned(r.stride);
+
+        if(i >= l.M) break;
+
+        const double d = std::fabs(double(v[i]) - double(r.sample[j]));
+
+        if(d > worst) { worst = d; worst_at = int(i); }
+    }
+
+    ok("  the logits agree across the vocabulary", worst <= max_delta,
+       "max |delta| " + std::to_string(worst) + " at token " +
+       std::to_string(worst_at));
+
+    // And the ranking, as a set rather than an order.
+    std::vector<int> order(l.M);
+
+    for(unsigned int i = 0; i < l.M; i++) order[i] = int(i);
+
+    std::partial_sort(order.begin(), order.begin() + 64, order.end(),
+                      [&v](int x, int y) {
+                          return v[std::size_t(x)] > v[std::size_t(y)];
+                      });
+
+    const std::set<int> mine(order.begin(), order.begin() + 64);
+
+    int overlap = 0;
+
+    for(int i = 0; i < 64; i++)
+        if(mine.count(r.top_id[i])) overlap++;
+
+    ok("  and the most likely tokens are the same ones", overlap >= min_overlap,
+       std::to_string(overlap) + " of 64 shared");
+
+    // Free, and the one that proves least -- see above.
+    ok("  the top token matches, which of these proves least",
+       order[0] == r.top_id[0],
+       std::to_string(order[0]) + " vs " + std::to_string(r.top_id[0]));
+
+    std::cout << "    reference top logit " << r.top_logit[0]
+              << ", jlib " << v[std::size_t(order[0])] << "\n";
+}
+
 int main(int argc, char** argv) {
     std::cout << std::unitbuf;
 
@@ -976,6 +1148,10 @@ int main(int argc, char** argv) {
     the_cache_changes_nothing();
     a_qwen_file_reads_with_its_own_conventions();
     a_gemma_file_reads_with_its_own_conventions();
+
+    the_forward_pass_matches_the_reference(REF_LLAMA);
+    the_forward_pass_matches_the_reference(REF_QWEN2);
+    the_forward_pass_matches_the_reference(REF_GEMMA2);
 
     if(path.empty()) {
         std::cout << "\n  (no model file, so only the generation loop is "

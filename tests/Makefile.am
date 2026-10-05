@@ -479,7 +479,7 @@ ai_tokenizer_test_SOURCES  = ai_tokenizer_test.cc llama3_tokens.hh llama3_splits
                              qwen_splits.hh qwen_tokens.hh
 ai_tokenizer_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 
-ai_model_test_SOURCES  = ai_model_test.cc
+ai_model_test_SOURCES  = ai_model_test.cc reference_logits.hh
 ai_model_test_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS)
 ai_model_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA) $(METAL_LA)
 

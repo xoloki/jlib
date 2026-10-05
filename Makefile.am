@@ -49,6 +49,12 @@ outline:
 
 EXTRA_DIST += tools/outline.sh tools/check-mermaid.sh
 
+# Regenerates tests/reference_logits.hh against llama.cpp.  Shipped but not
+# built: it needs a llama.cpp checkout, and jlib does not depend on one --
+# the fixture is recorded so that running the tests never does.
+EXTRA_DIST += tools/reflogits/dump_logits.cpp tools/reflogits/emit_header.py \
+	      tools/reflogits/README.md
+
 # The diagrams in docs/ are rendered by GitHub and by nothing here, so a
 # syntax error in one is found by a human opening the page.  This catches the
 # forms that have actually broken: see tools/check-mermaid.sh.
