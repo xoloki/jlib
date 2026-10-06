@@ -95,6 +95,29 @@ public:
         rope_layout layout = rope_layout::interleaved;
 
         /**
+         * Sliding-window attention, in keys; 0 is none (#181).
+         *
+         * Gemma 2 states this as `gemma2.attention.sliding_window` -- 4096
+         * against a context of 8192 -- and alternates local and global layers.
+         * **Which layers is not in the file**, so it joins the RoPE layout and
+         * the gate activation: ggml carries it per architecture, and Gemma 2
+         * alternates starting local.
+         *
+         * A file that does not mention a window means **no window** rather
+         * than a window of zero, which is why zero is the unbounded value and
+         * not a mask that drops everything.
+         */
+        unsigned int window = 0;
+
+        /**
+         * Whether only every other layer is windowed, starting with the first.
+         *
+         * Separate from `window` because the two are independent facts: the
+         * size comes from the file and the alternation does not.
+         */
+        bool window_alternates = false;
+
+        /**
          * Read the llama.* keys.
          *
          * head_count_kv is optional in the format and absent on models from
@@ -264,6 +287,20 @@ typename model<T>::config model<T>::config::from(const gguf& g) {
     // ai::rope_layout, and note that getting it wrong is silent.
     if(arch == "qwen2" || arch == "gemma2") c.layout = rope_layout::split;
 
+    // **Sliding-window attention, whose size is in the file and whose layout
+    // is not** (#181).  Gemma 2 alternates local and global layers starting
+    // with local; ggml carries that, as it carries the rope layout above.
+    //
+    // Read for any architecture that states it, because the key is the file's
+    // answer to "is there a window" and a llama file simply does not have it.
+    // Absence is no window, not a window of zero -- the latter would mask
+    // every key including the query's own.
+    if(g.has(a + "attention.sliding_window"))
+        c.window = static_cast<unsigned int>(
+            g.integer(a + "attention.sliding_window"));
+
+    if(arch == "gemma2") c.window_alternates = true;
+
     // Gemma 2's two unwritten conventions.  Neither is in the file and both
     // are load-bearing: without the scale the residual stream starts 48x too
     // small, and without the offset every norm weight is near zero and scales
@@ -331,6 +368,13 @@ model<T>::model(backend<T>& b, const config& c)
         l->set_gate_activation(c.gate);
         l->set_attention_cap(c.attn_cap);
         l->set_rope(true, c.rope_theta, c.layout);
+
+        // Local on the even layers, global on the odd ones, when the
+        // architecture alternates.  Without alternation a stated window
+        // applies to every layer, which is what a model that is windowed
+        // throughout would mean by it.
+        if(c.window && (!c.window_alternates || (i % 2) == 0))
+            l->set_window(c.window);
 
         m_layers.push_back(l);
     }

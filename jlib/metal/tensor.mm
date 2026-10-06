@@ -316,6 +316,7 @@ kernel void k_causal_mask(device T* s [[buffer(0)]],
                           constant uint& cols [[buffer(2)]],
                           constant uint& key_offset [[buffer(3)]],
                           constant uint& queries [[buffer(4)]],
+                          constant uint& window [[buffer(5)]],
                           uint c [[thread_position_in_grid]])
 {
     if(c >= cols) return;
@@ -323,11 +324,20 @@ kernel void k_causal_mask(device T* s [[buffer(0)]],
     // Which query this column is, when every head's scores sit side by side.
     const uint per_head = queries ? queries : cols;
     const uint i = c % per_head;
+    const uint pos = i + key_offset;
 
     device T* x = s + (ulong)c * rows;
 
-    for(uint r = i + key_offset + 1; r < rows; r++)
+    for(uint r = pos + 1; r < rows; r++)
         x[r] = T(-INFINITY);
+
+    // Gemma 2's sliding window (#181).  `r + window <= pos` rather than
+    // `pos - r >= window` because these are unsigned and the subtraction wraps
+    // for every row above the query.  Element (pos,pos) survives any window of
+    // at least one, so this still cannot empty a column.
+    if(window)
+        for(uint r = 0; r + window <= pos; r++)
+            x[r] = T(-INFINITY);
 }
 
 /**
@@ -1151,10 +1161,10 @@ INSTANTIATE(k_softmax, half, "_f16")(device const half*, device half*,
                                      uint, uint);
 INSTANTIATE(k_causal_mask, float, "_f32")(device float*, constant uint&,
                                           constant uint&, constant uint&,
-                                          constant uint&, uint);
+                                          constant uint&, constant uint&, uint);
 INSTANTIATE(k_causal_mask, half, "_f16")(device half*, constant uint&,
                                          constant uint&, constant uint&,
-                                         constant uint&, uint);
+                                         constant uint&, constant uint&, uint);
 INSTANTIATE(k_attn_scores, float, "_f32")(device const float*, device const float*,
                                           device float*, constant uint&,
                                           constant uint&, constant uint&,
@@ -1941,7 +1951,7 @@ void stream<T>::softmax(const tensor<T>& in, tensor<T>& out) {
 
 template<typename T>
 void stream<T>::causal_mask(tensor<T>& s, unsigned int key_offset,
-                            unsigned int queries)
+                            unsigned int queries, unsigned int window)
 {
     open();
 
@@ -1954,6 +1964,7 @@ void stream<T>::causal_mask(tensor<T>& s, unsigned int key_offset,
     [m_impl->enc setBytes:&cols length:sizeof(cols) atIndex:2];
     [m_impl->enc setBytes:&key_offset length:sizeof(key_offset) atIndex:3];
     [m_impl->enc setBytes:&queries length:sizeof(queries) atIndex:4];
+    [m_impl->enc setBytes:&window length:sizeof(window) atIndex:5];
 
     dispatch(m_impl->enc, m_impl->causal_mask, cols);
 

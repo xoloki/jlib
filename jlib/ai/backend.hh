@@ -320,8 +320,23 @@ public:
      *        every head side by side.  Zero means the whole width is one head's,
      *        which is what a single-head caller wants.
      */
+    /**
+     * @param window how many keys a query may see, counting itself.  Zero is
+     *        no window at all, which is what every architecture but Gemma 2
+     *        wants and what a file that does not mention one means -- "no
+     *        window" rather than "a window of zero", which would mask
+     *        everything (#181).
+     *
+     *        With a window, key `j` is masked for the query at absolute
+     *        position `i` when `i - j >= window`, as well as when `j > i`.
+     *        Element (i,i) survives any window of at least one, so a column
+     *        still cannot be wholly masked and softmax still cannot produce a
+     *        nan -- the same argument as above, and it is why the lower bound
+     *        is stated as `>= window` rather than `> window`.
+     */
     virtual void causal_mask(tensor_ptr& s, unsigned int key_offset = 0,
-                             unsigned int queries = 0) = 0;
+                             unsigned int queries = 0,
+                             unsigned int window = 0) = 0;
 
     /**
      * Every head's scores in one call: `s[j, h*queries + i]` is the dot product
@@ -505,7 +520,7 @@ public:
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
     void causal_mask(tensor_ptr& s, unsigned int key_offset = 0,
-                     unsigned int queries = 0);
+                     unsigned int queries = 0, unsigned int window = 0);
     void copy_columns(const tensor_ptr& src, tensor_ptr& dst,
                       unsigned int dst_first);
     void attention_scores(const tensor_ptr& q, const tensor_ptr& k,
@@ -984,7 +999,7 @@ void host_backend<T>::attention_weighted(const tensor_ptr& v,
 
 template<typename T>
 void host_backend<T>::causal_mask(tensor_ptr& s, unsigned int key_offset,
-                                  unsigned int queries)
+                                  unsigned int queries, unsigned int window)
 {
     math::matrix<T>& x = at(s);
 
@@ -996,9 +1011,19 @@ void host_backend<T>::causal_mask(tensor_ptr& s, unsigned int key_offset,
     // Which query a column belongs to, when the heads sit side by side.
     const uint per_head = queries ? queries : x.N;
 
-    for(uint c = 0; c < x.N; c++)
-        for(uint r = (c % per_head) + key_offset + 1; r < x.M; r++)
+    for(uint c = 0; c < x.N; c++) {
+        const uint pos = (c % per_head) + key_offset;
+
+        for(uint r = pos + 1; r < x.M; r++)
             x(r,c) = neg_inf;
+
+        // The window's far edge.  Written as `r + window <= pos` rather than
+        // `pos - r >= window` because these are unsigned and the subtraction
+        // wraps for every row above the query.
+        if(window)
+            for(uint r = 0; r + window <= pos; r++)
+                x(r,c) = neg_inf;
+    }
 }
 
 template<typename T>

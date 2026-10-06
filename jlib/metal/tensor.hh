@@ -259,7 +259,7 @@ public:
 
     /** Mask below the diagonal, offset by how many keys precede the queries. */
     void causal_mask(tensor<T>& s, unsigned int key_offset,
-                     unsigned int queries);
+                     unsigned int queries, unsigned int window = 0);
 
     /** Every head's scores in one dispatch; see ai::backend. */
     void attention_scores(const tensor<T>& q, const tensor<T>& k, tensor<T>& s,

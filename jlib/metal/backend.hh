@@ -82,7 +82,7 @@ public:
     void assign(const tensor_ptr& src, tensor_ptr& dst);
     void softmax(const tensor_ptr& in, tensor_ptr& out);
     void causal_mask(tensor_ptr& s, unsigned int key_offset = 0,
-                     unsigned int queries = 0);
+                     unsigned int queries = 0, unsigned int window = 0);
     void attention_scores(const tensor_ptr& q, const tensor_ptr& k,
                           tensor_ptr& scores, unsigned int heads,
                           unsigned int kv_heads, unsigned int d_head, T scale);

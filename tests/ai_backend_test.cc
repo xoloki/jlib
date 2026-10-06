@@ -1100,6 +1100,103 @@ static void the_column_copy(const char* name, std::vector<ai::backend<T>*>& back
  * That is the property the whole design rests on, so it is asserted directly
  * rather than inferred from attention working.
  */
+/** Which rows of a one-column mask survived, for a failure to read. */
+template<typename T>
+static std::string kept(const matrix<T>& m) {
+    std::string out;
+
+    for(uint r = 0; r < m.M; r++)
+        if(std::isfinite(float(m(r,0))))
+            out += (out.empty() ? "" : ",") + std::to_string(r);
+
+    return out.empty() ? "(none)" : out;
+}
+
+/**
+ * The sliding window, which is the other bound on the mask (#181).
+ *
+ * Gemma 2 alternates local and global attention by layer:
+ * `gemma2.attention.sliding_window` is 4096 against a context of 8192, so half
+ * its layers may see only the last 4096 keys. Everything else -- and a file
+ * that mentions no window -- wants no window at all, which is why zero means
+ * "unbounded" rather than "a window of zero".
+ *
+ * The case asserted is the one from the issue, because it is small enough to
+ * check by hand: with `window = 4`, the query at position 10 attends to keys
+ * 7, 8, 9 and 10, and not to 6. Written as the full mask rather than those
+ * five entries so that the causal bound is asserted at the same time -- a
+ * window that also dropped the upper bound would pass a test that only looked
+ * below the diagonal.
+ */
+template<typename T>
+static void the_window_mask(const char* name, std::vector<ai::backend<T>*>& backends) {
+    std::cout << "\nthe window mask, " << name << ":\n";
+
+    // Sixteen keys, one query at absolute position 10, reached as a cache of
+    // ten keys with one new token -- the shape a decode step actually has.
+    const uint keys = 16;
+    const uint queries = 1;
+    const uint offset = 10;
+    const uint window = 4;
+
+    for(ai::backend<T>* b : backends) {
+        matrix<T> ones(keys, queries);
+
+        for(uint r = 0; r < keys; r++) ones(r,0) = T(1.0f);
+
+        typename ai::backend<T>::tensor_ptr t = b->make(ones);
+
+        b->causal_mask(t, offset, queries, window);
+        b->wait();
+
+        const matrix<T> got = t->read();
+
+        // Keys 7..10 survive, 0..6 and 11..15 do not.
+        bool right = true;
+
+        for(uint r = 0; r < keys; r++) {
+            const bool masked = !std::isfinite(float(got(r,0)));
+            const bool want   = r > offset || r + window <= offset;
+
+            if(masked != want) right = false;
+        }
+
+        ok(std::string("  ") + b->name() +
+           ": query 10 with window 4 sees keys 7 to 10", right, "kept " + kept(got));
+
+        // And the window is off by default, so every other architecture is
+        // unaffected by this parameter existing.
+        typename ai::backend<T>::tensor_ptr u = b->make(ones);
+
+        b->causal_mask(u, offset, queries);
+        b->wait();
+
+        const matrix<T> none = u->read();
+
+        bool unbounded = true;
+
+        for(uint r = 0; r <= offset; r++)
+            if(!std::isfinite(float(none(r,0)))) unbounded = false;
+
+        ok(std::string("  ") + b->name() +
+           ": and no window means every earlier key, not none", unbounded,
+           "kept " + kept(none));
+
+        // A window can never empty a column, which is what would turn softmax
+        // into nan: the query's own key is at distance zero.
+        typename ai::backend<T>::tensor_ptr v = b->make(ones);
+
+        b->causal_mask(v, offset, queries, 1);
+        b->wait();
+
+        const matrix<T> tight = v->read();
+
+        ok(std::string("  ") + b->name() +
+           ": a window of one keeps the query's own key", 
+           std::isfinite(float(tight(offset,0))), "kept " + kept(tight));
+    }
+}
+
 template<typename T>
 static void the_offset_mask(const char* name, std::vector<ai::backend<T>*>& backends) {
     std::cout << "\nthe offset mask, " << name << ":\n";
@@ -1994,6 +2091,7 @@ int main() {
         the_quantised_gather<float>("float", b);
         the_column_copy<float>("float", b);
         the_offset_mask<float>("float", b);
+        the_window_mask<float>("float", b);
         beta_zero_does_not_read_the_output<float>("float", b);
         a_quantised_weight_multiplies<float>("float", b);
         a_kquant_weight_multiplies<float>("float", b);
@@ -2017,6 +2115,7 @@ int main() {
         the_quantised_gather<float>("float", b);
         the_column_copy<float>("float", b);
         the_offset_mask<float>("float", b);
+        the_window_mask<float>("float", b);
         beta_zero_does_not_read_the_output<float>("float", b);
         a_quantised_weight_multiplies<float>("float", b);
         a_kquant_weight_multiplies<float>("float", b);
@@ -2076,6 +2175,7 @@ int main() {
         the_quantised_gather<_Float16>("_Float16", b);
         the_column_copy<_Float16>("_Float16", b);
         the_offset_mask<_Float16>("_Float16", b);
+        the_window_mask<_Float16>("_Float16", b);
         beta_zero_does_not_read_the_output<_Float16>("_Float16", b);
         a_quantised_weight_multiplies<_Float16>("_Float16", b);
         a_kquant_weight_multiplies<_Float16>("_Float16", b);
