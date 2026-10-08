@@ -110,12 +110,23 @@ public:
         unsigned int window = 0;
 
         /**
-         * Whether only every other layer is windowed, starting with the first.
+         * The period of the local/global pattern, in layers.
          *
          * Separate from `window` because the two are independent facts: the
-         * size comes from the file and the alternation does not.
+         * size comes from the file and the pattern does not.
+         *
+         * Layer `i` is windowed when `i % window_stride < window_stride - 1`,
+         * and **0 means every layer**, which is what a model windowed
+         * throughout would mean by it. That is llama.cpp's own encoding --
+         * `set_swa_pattern` -- rather than a convention invented here, so the
+         * two can be compared: Gemma 2 is 2 (alternating, local first),
+         * Gemma 3 and gemma-embedding are 6 (five local to one global),
+         * Cohere2 and Llama 4 are 4, ModernBERT is 3 counting the other way.
+         * Only 2 is reachable today, because Gemma 2 is the only windowed
+         * architecture jlib reads; the field is an integer rather than a bool
+         * so that adding one of the others is a number and not a redesign.
          */
-        bool window_alternates = false;
+        unsigned int window_stride = 0;
 
         /**
          * Read the llama.* keys.
@@ -287,19 +298,48 @@ typename model<T>::config model<T>::config::from(const gguf& g) {
     // ai::rope_layout, and note that getting it wrong is silent.
     if(arch == "qwen2" || arch == "gemma2") c.layout = rope_layout::split;
 
-    // **Sliding-window attention, whose size is in the file and whose layout
+    // **Sliding-window attention, whose size is in the file and whose pattern
     // is not** (#181).  Gemma 2 alternates local and global layers starting
     // with local; ggml carries that, as it carries the rope layout above.
     //
-    // Read for any architecture that states it, because the key is the file's
-    // answer to "is there a window" and a llama file simply does not have it.
+    // **Per architecture, not for anything that states the key**, which is
+    // what llama.cpp does: it reads `n_swa` in each architecture's own
+    // loader, and `src/models/llama.cpp` and `src/models/qwen2.cpp` do not
+    // read it at all. So a `llama` file carrying the key would be windowed
+    // here and attended to fully by the reference.
+    //
+    // **That divergence is latent rather than observed**, and the obvious
+    // candidate does not produce it: Mistral 7B v0.1's HuggingFace config
+    // specifies a 4096 window, but its GGUF conversion drops the key -- the
+    // file carries twenty keys and none is about a window, and llama.cpp
+    // loads it with `n_swa = 0`. The conversion decides, not the model, so a
+    // different converter could emit it; gating on the architecture keeps
+    // this agreeing with the reference either way.
+    //
+    // Whether such a window should be *honoured* is a separate question and
+    // needs a file that states one to answer.
+    //
     // Absence is no window, not a window of zero -- the latter would mask
     // every key including the query's own.
-    if(g.has(a + "attention.sliding_window"))
-        c.window = static_cast<unsigned int>(
-            g.integer(a + "attention.sliding_window"));
+    // **The size has a per-architecture default too, and the file may omit
+    // it.**  llama.cpp's gemma2 loader opens with `hparams.n_swa = 4096; //
+    // default value of gemma 2` and then reads the key as *optional*, where
+    // its phi3 loader requires it. So a Gemma 2 conversion without the key is
+    // windowed at 4096 by the reference, and requiring it here would leave
+    // the same file unwindowed -- the #181 bug again, on the architecture
+    // this change is about.
+    //
+    // Which puts the size in the same class as the rope layout and the gate
+    // activation above: a constant ggml carries per architecture, with the
+    // file able to override it rather than having to state it.
+    if(arch == "gemma2") {
+        c.window        = 4096;
+        c.window_stride = 2;
 
-    if(arch == "gemma2") c.window_alternates = true;
+        if(g.has(a + "attention.sliding_window"))
+            c.window = static_cast<unsigned int>(
+                g.integer(a + "attention.sliding_window"));
+    }
 
     // Gemma 2's two unwritten conventions.  Neither is in the file and both
     // are load-bearing: without the scale the residual stream starts 48x too
@@ -369,11 +409,12 @@ model<T>::model(backend<T>& b, const config& c)
         l->set_attention_cap(c.attn_cap);
         l->set_rope(true, c.rope_theta, c.layout);
 
-        // Local on the even layers, global on the odd ones, when the
-        // architecture alternates.  Without alternation a stated window
-        // applies to every layer, which is what a model that is windowed
-        // throughout would mean by it.
-        if(c.window && (!c.window_alternates || (i % 2) == 0))
+        // Which layers the window applies to; see config::window_stride.
+        // Stride 2 is local on the even layers and global on the odd ones,
+        // which is Gemma 2.
+        if(c.window &&
+           (c.window_stride == 0 ||
+            (i % c.window_stride) < c.window_stride - 1))
             l->set_window(c.window);
 
         m_layers.push_back(l);
