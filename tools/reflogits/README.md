@@ -48,6 +48,18 @@ comparison**, and `emit_header.py` carries them hardcoded — if a vendor
 reships a tokenizer and the ids change, update both or the fixture will
 describe a prompt the test does not run.
 
+## Two settings that decide whether the comparison means anything
+
+**`swa_full = false`.** `llama_context_default_params()` sets it true, which
+keeps a full-size cache for sliding-window layers. The dump program sets it
+false so the window is actually enforced; with the default a windowed
+implementation looks wrong against the reference (#181).
+
+**`ids:1,2,3` instead of text.** Feeds the forward pass a token list directly,
+so both implementations are given the identical input and tokenization is out of
+a comparison that is about arithmetic. `dump_logits` prints the ids it used, so
+the usual flow is one text run to get them and `ids:` runs thereafter.
+
 ## CPU, not Metal
 
 `-ngl 0`. A reference wants to be reproducible before it wants to be fast,

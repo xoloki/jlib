@@ -172,9 +172,9 @@ void backend<T>::softmax(const tensor_ptr& in, tensor_ptr& out) {
 
 template<typename T>
 void backend<T>::causal_mask(tensor_ptr& s, unsigned int key_offset,
-                             unsigned int queries)
+                             unsigned int queries, unsigned int window)
 {
-    m_stream->causal_mask(at<T>(s), key_offset, queries);
+    m_stream->causal_mask(at<T>(s), key_offset, queries, window);
 }
 
 template<typename T>

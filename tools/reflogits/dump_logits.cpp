@@ -38,21 +38,43 @@ int main(int argc, char** argv) {
 
     const llama_vocab* vocab = llama_model_get_vocab(model);
 
-    // add_special = true, parse_special = true -- the same convention the
-    // tokenizer fixtures were recorded under.
-    const int n = -llama_tokenize(vocab, text.c_str(), int(text.size()),
-                                  nullptr, 0, true, true);
-    std::vector<llama_token> ids(size_t(n < 0 ? 0 : n));
-    if(llama_tokenize(vocab, text.c_str(), int(text.size()),
-                      ids.data(), int(ids.size()), true, true) < 0) {
-        fprintf(stderr, "tokenize failed\n");
-        return 1;
+    std::vector<llama_token> ids;
+
+    // "ids:1,2,3" feeds the forward pass directly, which is what a comparison
+    // against another implementation wants: two implementations have to be
+    // given the *same* input, and the tokenizer is checked separately.
+    if(text.rfind("ids:", 0) == 0) {
+        const char* p = text.c_str() + 4;
+
+        while(*p) {
+            ids.push_back(llama_token(strtol(p, nullptr, 10)));
+            while(*p && *p != ',') p++;
+            if(*p == ',') p++;
+        }
+    }
+    else {
+        // add_special = true, parse_special = true -- the same convention the
+        // tokenizer fixtures were recorded under.
+        const int n = -llama_tokenize(vocab, text.c_str(), int(text.size()),
+                                      nullptr, 0, true, true);
+        ids.resize(size_t(n < 0 ? 0 : n));
+        if(llama_tokenize(vocab, text.c_str(), int(text.size()),
+                          ids.data(), int(ids.size()), true, true) < 0) {
+            fprintf(stderr, "tokenize failed\n");
+            return 1;
+        }
     }
 
     llama_context_params cp = llama_context_default_params();
     cp.n_ctx   = uint32_t(ids.size() + 8);
     cp.n_batch = uint32_t(ids.size());
     cp.no_perf = true;
+
+    // **Off, and the comparison is meaningless without it.**  The default is
+    // true, which keeps a full-size cache for the sliding-window layers; with
+    // it the reference attends to everything and a windowed implementation
+    // looks wrong against it (#181).
+    cp.swa_full = false;
 
     llama_context* ctx = llama_init_from_model(model, cp);
     if(!ctx) { fprintf(stderr, "no context\n"); return 1; }

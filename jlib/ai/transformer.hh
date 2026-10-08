@@ -244,6 +244,17 @@ public:
     void set_eps(float eps) { m_eps = eps; }
 
     /**
+     * How many keys this layer's queries may see, counting their own.
+     *
+     * Zero is no window, which is every architecture but Gemma 2 and every
+     * *global* layer of Gemma 2 as well -- it alternates, so this is per layer
+     * and not per model (#181).  See backend::causal_mask for the bound.
+     */
+    void set_window(unsigned int keys) { m_window = keys; }
+
+    unsigned int window() const { return m_window; }
+
+    /**
      * Which non-linearity gates the feed-forward.
      *
      * SwiGLU on llama and qwen2, GeGLU on gemma2.  The gating structure is
@@ -376,6 +387,9 @@ private:
     unsigned int m_seq = 0;
 
     float m_eps = 1e-5f;
+
+    /** Sliding-window attention; 0 is unbounded.  See set_window(). */
+    unsigned int m_window = 0;
 
     /** Non-zero once the cache is on, and then its length. */
     unsigned int m_context = 0;
@@ -682,7 +696,7 @@ void block<T>::forward(const tensor_ptr& x, tensor_ptr& out, bool causal,
     // where base_pos should not have mattered at all.
     m_b.softcap(m_s->scores, m_attn_cap);
 
-    if(causal) m_b.causal_mask(m_s->scores, m_context ? at : 0, m_seq);
+    if(causal) m_b.causal_mask(m_s->scores, m_context ? at : 0, m_seq, m_window);
 
     m_b.softmax(m_s->scores, m_s->probs);
 
