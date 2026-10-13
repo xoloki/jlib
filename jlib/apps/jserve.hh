@@ -63,6 +63,8 @@
 #include <jlib/util/utf8.hh>
 
 #include <algorithm>
+#include <condition_variable>
+#include <thread>
 #include <ctime>
 #include <optional>
 #include <iostream>
@@ -109,6 +111,18 @@ struct options {
      * so two is enough for a server with one model.
      */
     unsigned int threads = 2;
+
+    /**
+     * Seconds a model may sit unused before it is dropped; 0 is never, and is
+     * the default (#278).
+     *
+     * **Off by default on purpose.** A server given one model on loopback --
+     * which is what this usually is -- should behave exactly as it did before
+     * this existed. Ollama defaults its equivalent (`OLLAMA_KEEP_ALIVE`) to
+     * five minutes, which is right for a daemon advertising many models and
+     * wrong for one holding the only model a harness is talking to.
+     */
+    unsigned int keep_alive = 0;
 
     ai::sampler::config sampling;
 
@@ -285,6 +299,83 @@ inline std::vector<ai::message> fold_system(const std::vector<ai::message>& in) 
     return out;
 }
 
+/**
+ * The thread that calls `engine::sweep()`, and nothing else.
+ *
+ * **A thread of its own rather than the pool.** A sweep frees gigabytes with a
+ * model's lock held, and the pool's two threads are what answer buffered
+ * requests and perform loads -- borrowing one for seconds would do to
+ * `/v1/models` what a one-thread pool already did once, measured at 6.96s
+ * against 0.000768s. And it may not be the reactor's thread for the same
+ * reason `acquire()` refuses to run there.
+ *
+ * It joins in its own destructor, which is why this is a class and not a bare
+ * thread in `endpoint`: a member with a destructor does the joining without
+ * `endpoint` needing one, and so without costing `endpoint` its implicit move
+ * operations.
+ */
+template<typename Engine>
+class sweeper {
+public:
+    sweeper(Engine& e, unsigned int keep_alive)
+        : m_e(e),
+          // A quarter of the idle time, so a model goes no more than 25% late,
+          // and at least a second, so a one-second keep-alive does not spin.
+          m_every(std::max(1u, keep_alive / 4)),
+          m_t([this] { run(); })
+    {}
+
+    ~sweeper() {
+        {
+            std::lock_guard<std::mutex> guard(m_lock);
+
+            m_stop = true;
+        }
+
+        // Woken rather than waited out: a shutdown should not sit through a
+        // whole interval, and with a five-minute keep-alive that interval is
+        // over a minute long.
+        m_wake.notify_one();
+
+        m_t.join();
+    }
+
+    sweeper(const sweeper&) = delete;
+    sweeper& operator=(const sweeper&) = delete;
+
+private:
+    void run() {
+        std::unique_lock<std::mutex> lock(m_lock);
+
+        while(!m_stop) {
+            m_wake.wait_for(lock, std::chrono::seconds(m_every),
+                            [this] { return m_stop; });
+
+            if(m_stop) break;
+
+            // **Not under this lock.** The sweep takes model locks and frees
+            // gigabytes; holding the sweeper's own lock through it would make
+            // the destructor wait for a free rather than interrupt a wait.
+            lock.unlock();
+
+            m_e.sweep();
+
+            lock.lock();
+        }
+    }
+
+    Engine& m_e;
+    unsigned int m_every;
+
+    std::mutex m_lock;
+    std::condition_variable m_wake;
+    bool m_stop = false;
+
+    // Last, so it is constructed after everything run() touches and destroyed
+    // before them.
+    std::thread m_t;
+};
+
 template<typename T, typename Engine = ai::engine<T> >
 class endpoint {
 public:
@@ -296,6 +387,11 @@ public:
 
         m_default = o.models.front().first;
 
+        if(o.keep_alive) {
+            m_engine.keep_alive(o.keep_alive);
+
+            m_sweeper.reset(new sweeper<Engine>(m_engine, o.keep_alive));
+        }
     }
 
     void wire(http::server& s) {
@@ -766,6 +862,19 @@ private:
     ai::backend<T>& m_backend;
 
     Engine m_engine;
+
+    /**
+     * Null unless `keep_alive` was asked for.
+     *
+     * By pointer because it holds a thread and a mutex, so it is neither
+     * movable nor default-constructible into a useful state, and because its
+     * absence is how "no sweeping" is spelled.
+     *
+     * Declared after `m_engine` so it is destroyed **before** it -- the
+     * sweeper joins in its destructor, and a thread calling `m_engine.sweep()`
+     * must stop before the engine it sweeps goes away.
+     */
+    std::unique_ptr<sweeper<Engine> > m_sweeper;
     options m_o;
     std::string m_default;
 };

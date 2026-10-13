@@ -30,6 +30,7 @@
 #include <jlib/sys/reactor.hh>
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <optional>
@@ -106,6 +107,28 @@ private:
         std::unique_ptr<model<T> > m;
 
         unsigned int context = 0;
+
+        /**
+         * When this model was last free, in steady-clock seconds; 0 if it is
+         * not loaded.
+         *
+         * **Atomic and outside the lock on purpose.** A sweep has to decide
+         * whether an entry is worth trying *before* it tries, and taking the
+         * lock to read a timestamp would mean waiting on the very conversation
+         * it is deciding about -- which is the thing the sweep must never do.
+         *
+         * Stamped in two places, and it needs both: after a load, so a model
+         * that `prepare()` loaded and nobody ever used still ages out, and in
+         * `session`'s destructor, so one that has been used ages from when it
+         * was last released rather than from when it was first loaded.
+         */
+        std::atomic<long long> freed{0};
+
+        /** Now, in the units `freed` is kept in. */
+        static long long stamp() {
+            return std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        }
     };
 
 public:
@@ -254,10 +277,66 @@ public:
      */
     void prepare(const std::string& name);
 
+    /**
+     * How long a model may sit unused before a sweep may drop it; 0 is never,
+     * and is the default (#278).
+     *
+     * **Idleness, not pressure.** Reclaiming on idleness cannot thrash: a model
+     * two conversations are alternating between is never idle, so it is never a
+     * candidate, and the alternating case stays as honest as it is today. A
+     * policy that evicted to make room would reload gigabytes on every turn
+     * instead -- measured at 2.7s for a 7.5 GB model -- which is worse than the
+     * single clear failure it replaces.
+     *
+     * Zero by default because a server given one model on loopback is the
+     * common case and should see none of this.
+     */
+    void keep_alive(unsigned int seconds) { m_keep_alive = seconds; }
+
+    unsigned int keep_alive() const { return m_keep_alive; }
+
+    /**
+     * Drop every loaded model that nothing has wanted for `keep_alive()`
+     * seconds, and say how many went.
+     *
+     * **The caller chooses the thread, and it must not be a reactor's.**
+     * Freeing gigabytes is not instant and this takes a model's lock while it
+     * happens, so run it from a pool thread or a thread of its own (#273's
+     * rule, and the same reason `try_acquire()` does not load).
+     *
+     * A model in use is skipped, not waited for: the lock is taken with
+     * `try_to_lock`, and a held lock *is* a conversation in progress. So a
+     * sweep never drops a model out from under a caller and never blocks
+     * behind one.
+     *
+     * Returns 0 and does nothing when `keep_alive()` is 0.
+     */
+    unsigned int sweep();
+
+    /**
+     * Drop one model now, whether or not it is idle. Returns whether it had
+     * been loaded.
+     *
+     * Blocks until the model is free, so it waits for a conversation rather
+     * than skipping it -- the opposite of `sweep()`, because a caller naming
+     * one model has asked for that model and not for whatever is convenient.
+     * Refuses to run on a reactor thread for the same reason `acquire()` does.
+     */
+    bool unload(const std::string& name);
+
+    /** Which models are loaded right now, in `add()` order. */
+    std::vector<std::string> resident() const;
+
 private:
     entry* find(const std::string& name) const;
 
+    /** Everything, so a sweep can walk it without holding the vector's lock. */
+    std::vector<std::shared_ptr<entry> > snapshot() const;
+
     backend<T>& m_b;
+
+    /** See keep_alive(); 0 is never, which is the default. */
+    unsigned int m_keep_alive = 0;
 
     // Held by pointer so a session can keep one across a rehash, and because
     // entry is not movable -- it has a mutex in it.
@@ -365,6 +444,10 @@ typename engine<T>::session engine<T>::acquire(const std::string& name) {
     // Under the lock, so nothing can see it true before the model is there.
     e->ready.store(true);
 
+    // So a model loaded and then never used still ages out.  The destructor
+    // stamps it again on release; this covers the gap before the first one.
+    e->freed.store(entry::stamp());
+
     return session(e, std::move(lock));
 }
 
@@ -443,7 +526,118 @@ engine<T>::session::session(session&& o)
 }
 
 template<typename T>
-engine<T>::session::~session() {}
+engine<T>::session::~session() {
+    // **With the lock still held.** A destructor's body runs before its
+    // members are destroyed, and `m_lock` is a member, so the entry is still
+    // this thread's while the stamp is written -- which is what keeps a sweep
+    // from reading a half-released entry.
+    //
+    // Guarded because a moved-from session has no entry: the move constructor
+    // nulls it, and both halves of a move run this.
+    if(m_m) m_m->freed.store(entry::stamp());
+}
+
+template<typename T>
+std::vector<std::shared_ptr<typename engine<T>::entry> >
+engine<T>::snapshot() const {
+    std::lock_guard<std::mutex> guard(m_lock);
+
+    return m_models;
+}
+
+template<typename T>
+unsigned int engine<T>::sweep() {
+    if(!m_keep_alive) return 0;
+
+    // A copy first, so the vector's lock is not held while gigabytes are
+    // freed -- `add()` and `names()` would wait behind it otherwise.
+    const std::vector<std::shared_ptr<entry> > all = snapshot();
+
+    const long long now = entry::stamp();
+
+    unsigned int dropped = 0;
+
+    for(const std::shared_ptr<entry>& e : all) {
+        // Askable without the lock, which is why `ready` is atomic.
+        if(!e->ready.load()) continue;
+
+        const long long when = e->freed.load();
+
+        if(!when || now - when < static_cast<long long>(m_keep_alive)) continue;
+
+        // **try_to_lock, never lock.** A held lock is a conversation in
+        // progress; waiting for it would make a sweep block on exactly the
+        // work it exists to stay out of the way of.
+        std::unique_lock<std::mutex> lock(e->lock, std::try_to_lock);
+
+        if(!lock) continue;
+
+        // Everything above was read without the lock, so read it again with
+        // it: a conversation could have begun and ended in between, which
+        // moves the stamp and makes this entry no longer a candidate.
+        if(!e->m) continue;
+
+        const long long again = e->freed.load();
+
+        if(!again || now - again < static_cast<long long>(m_keep_alive)) continue;
+
+        // False before the model goes, under the lock, so nothing sees it
+        // true with no model behind it -- the mirror of acquire().
+        e->ready.store(false);
+
+        e->m.reset();
+        e->ch.reset();
+        e->tok.reset();
+
+        e->context = 0;
+        e->freed.store(0);
+
+        dropped++;
+    }
+
+    return dropped;
+}
+
+template<typename T>
+bool engine<T>::unload(const std::string& name) {
+    // Frees gigabytes with a lock held and waits for a conversation to end.
+    // Both are reasons a reactor thread may not be here; see acquire().
+    if(sys::on_a_reactor_thread())
+        throw exception("unload() blocks, and this is a reactor thread");
+
+    entry* e = find(name);
+
+    if(!e) throw exception("no model called \"" + name + "\"");
+
+    // Blocking, unlike sweep(): a caller naming one model has asked for that
+    // model, not for whichever one happens to be free.
+    std::lock_guard<std::mutex> lock(e->lock);
+
+    if(!e->m) return false;
+
+    e->ready.store(false);
+
+    e->m.reset();
+    e->ch.reset();
+    e->tok.reset();
+
+    e->context = 0;
+    e->freed.store(0);
+
+    return true;
+}
+
+template<typename T>
+std::vector<std::string> engine<T>::resident() const {
+    const std::vector<std::shared_ptr<entry> > all = snapshot();
+
+    std::vector<std::string> out;
+
+    for(const std::shared_ptr<entry>& e : all)
+        if(e->ready.load()) out.push_back(e->name);
+
+    return out;
+}
 
 }
 }

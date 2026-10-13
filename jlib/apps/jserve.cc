@@ -139,6 +139,8 @@ void usage(std::ostream& o, const char* argv0) {
       << "  --host ADDR     (default 127.0.0.1; see the header before changing)\n"
                       << "  --threads N     pool workers; a model load runs here, so\n"
                       << "                  0 would load it on the reactor (default 2)\n"
+      << "  --keep-alive N  drop a model nothing has used for N seconds;\n"
+      << "                  0 is never, and is the default (#278)\n"
       << "  --temp F        when a request does not say (default 0.8)\n"
       << "  --top-k N       (default 40)\n"
       << "  --top-p F       (default 0.95)\n"
@@ -165,6 +167,8 @@ bool parse(int argc, char** argv, options& o) {
             if(a == "--port") o.port = (unsigned short)std::atoi(v.c_str());
             else if(a == "--host") o.host = v;
             else if(a == "--threads") o.threads = unsigned(std::atoi(v.c_str()));
+            else if(a == "--keep-alive")
+                o.keep_alive = unsigned(std::atoi(v.c_str()));
             else if(a == "--temp") o.sampling.temperature = float(std::atof(v.c_str()));
             else if(a == "--top-k") o.sampling.top_k = unsigned(std::atoi(v.c_str()));
             else if(a == "--top-p") o.sampling.top_p = float(std::atof(v.c_str()));

@@ -233,6 +233,17 @@ struct fake_session {
 };
 
 /** Exactly the surface `endpoint` uses, and nothing else. */
+/**
+ * What the sweeper did, read by the test and written by the fake (#278).
+ *
+ * File-scope for the same reason `g_script` is: the engine is a *member* of
+ * the endpoint, so a test holding an endpoint has no handle on it, and adding
+ * an accessor to production code for a test to read is the worse trade.
+ */
+static std::atomic<unsigned int> g_sweeps{0};
+static std::atomic<bool> g_swept_on_reactor{false};
+static unsigned int g_keep_alive = 0;
+
 struct fake_engine {
     typedef fake_session session;
 
@@ -251,6 +262,29 @@ struct fake_engine {
     }
 
     std::vector<std::string> names() const { return m_names; }
+
+    /**
+     * The sweeper's two calls, recorded rather than acted on (#278).
+     *
+     * The fake holds no model, so there is nothing for a sweep to free and
+     * nothing an unload would change. What the endpoint's half of #278 has to
+     * get right is not the freeing -- `ai_engine_test` covers that against a
+     * real engine -- but *that a sweeper exists, runs off the reactor, and
+     * stops when the endpoint goes away*. Counting the calls and recording the
+     * thread is what shows all three.
+     */
+    void keep_alive(unsigned int seconds) { g_keep_alive = seconds; }
+
+    unsigned int sweep() {
+        g_sweeps++;
+
+        // The thing a sweep must never be: the reactor's thread. Recorded
+        // rather than thrown so a failure names the sweeper rather than
+        // arriving as an unhandled exception on a thread nobody is watching.
+        if(jlib::sys::on_a_reactor_thread()) g_swept_on_reactor = true;
+
+        return 0;
+    }
 
     /**
      * The check that matters, in the fake as well as the real one.
@@ -1258,6 +1292,86 @@ static void a_client_that_hangs_up_during_prefill(jlib::net::http::server& s) {
        std::to_string(after.status) + " " + after.body);
 }
 
+/**
+ * The sweeper runs, runs off the reactor, and stops (#278).
+ *
+ * The endpoint's half of the idle timeout is not the freeing -- `ai_engine_test`
+ * covers that against a real engine with a real model. It is these three:
+ *
+ *   - it exists at all when `keep_alive` is asked for, and the engine is told;
+ *   - it is **not** on a reactor thread, because a sweep frees gigabytes with a
+ *     model's lock held and the reactor is the one thread that may not block;
+ *   - it **stops** when the endpoint goes away, which is the one with teeth. A
+ *     thread calling `engine::sweep()` after the engine is gone is a
+ *     use-after-free, and a leaked thread would show up here as a count that
+ *     keeps climbing after the endpoint has been destroyed.
+ */
+static void the_sweeper_runs_off_the_reactor_and_stops() {
+    std::cout << "\nthe sweeper runs off the reactor and stops:\n";
+
+    ai::host_backend<T> backend;
+
+    apps::options o;
+
+    o.port = 0;
+    o.host = "127.0.0.1";
+    o.models.push_back(std::make_pair(std::string("m"),
+                                      std::string("/nonesuch.gguf")));
+
+    // One second, so the interval is max(1, 1/4) = 1 and this test takes
+    // seconds rather than minutes.
+    o.keep_alive = 1;
+
+    g_sweeps = 0;
+    g_swept_on_reactor = false;
+    g_keep_alive = 0;
+
+    unsigned int at_exit = 0;
+
+    {
+        fake_endpoint e(backend, o);
+
+        ok("  the engine is told the timeout", g_keep_alive == 1,
+           std::to_string(g_keep_alive));
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+
+        ok("  and it sweeps more than once", g_sweeps >= 2,
+           std::to_string(g_sweeps.load()) + " sweeps");
+
+        at_exit = g_sweeps;
+    }
+
+    // The endpoint is gone, so its sweeper joined in its destructor. If it had
+    // not, this count would still be moving -- and it would be moving against
+    // an engine that no longer exists.
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    ok("  then stops when the endpoint goes away", g_sweeps == at_exit,
+       std::to_string(at_exit) + " at exit, " + std::to_string(g_sweeps.load())
+       + " two seconds later");
+
+    ok("  and never swept on a reactor thread", !g_swept_on_reactor);
+
+    // And the default is off, so none of this happens unless asked for.
+    o.keep_alive = 0;
+
+    g_sweeps = 0;
+    g_keep_alive = 99;
+
+    {
+        fake_endpoint e(backend, o);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    }
+
+    ok("  with no sweeper at all by default", g_sweeps == 0,
+       std::to_string(g_sweeps.load()) + " sweeps");
+
+    ok("  and the engine not told a timeout either", g_keep_alive == 99,
+       std::to_string(g_keep_alive));
+}
+
 int main() {
     std::cout << std::unitbuf;
 
@@ -1268,6 +1382,8 @@ int main() {
     o.port = 0;
     o.host = "127.0.0.1";
     o.models.push_back(std::make_pair(std::string("m"), std::string("/nonesuch.gguf")));
+
+    the_sweeper_runs_off_the_reactor_and_stops();
 
     fake_endpoint e(backend, o);
 
