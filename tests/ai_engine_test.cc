@@ -92,6 +92,144 @@ static void naming_a_model_does_not_load_it() {
 }
 
 /**
+ * The bookkeeping half of keep-alive, which needs no model (#278).
+ */
+static void keep_alive_is_off_until_it_is_asked_for() {
+    std::cout << "\nkeep-alive is off until it is asked for:\n";
+
+    ai::host_backend<float> b;
+    ai::engine<float> e(b);
+
+    e.add("first", "/nonexistent/a.gguf");
+
+    ok("  no idle timeout by default", e.keep_alive() == 0,
+       std::to_string(e.keep_alive()));
+
+    // The reason it is the default: a server given one model on loopback is
+    // the common case and should behave exactly as it did before this existed.
+    ok("  and a sweep does nothing at all with none set", e.sweep() == 0);
+
+    e.keep_alive(30);
+
+    ok("  it can be set", e.keep_alive() == 30, std::to_string(e.keep_alive()));
+
+    // Still nothing: the paths do not exist, so nothing is loaded, so there is
+    // nothing for a sweep to drop. Asserted because a sweep that touched an
+    // unloaded entry would have to open the file to know that.
+    ok("  a sweep with nothing loaded still drops nothing", e.sweep() == 0);
+
+    ok("  and nothing is resident", e.resident().empty(),
+       std::to_string(e.resident().size()));
+
+    ok("  unloading what was never loaded says so", !e.unload("first"));
+
+    bool threw = false;
+
+    try { e.unload("third"); }
+    catch(ai::engine<float>::exception&) { threw = true; }
+
+    ok("  unloading a name nobody added is refused", threw);
+}
+
+/**
+ * An idle model is dropped, a busy one is not (#278).
+ *
+ * `ai::engine` loaded a model on the first `acquire` and never released it:
+ * no unload, no eviction, no timeout. That is the missing half of a decision
+ * already taken -- deferring the load is what lets a daemon advertise more
+ * models than it can hold, and never unloading is what makes that
+ * advertisement a lie the moment a second one is asked for.
+ *
+ * **Reclaim on idleness, never on pressure**, which is why this test is about
+ * a timer and not about memory. Measured on this machine: a load larger than
+ * free physical memory *succeeds* and pages rather than failing, so there is
+ * no allocation error to catch and recover from; and a 7.5 GB model costs
+ * ~2.7s to reload, so evicting under pressure would pay that on every turn of
+ * an alternating conversation. A timeout cannot thrash, because a model two
+ * conversations are alternating between is never idle.
+ *
+ * The two assertions that carry it are **that a busy model is skipped** and
+ * **that an idle one goes**. The first is the one with teeth: a sweep takes
+ * each lock with `try_to_lock`, so a conversation in progress is passed over
+ * rather than waited for, and a model is never dropped out from under a
+ * caller.
+ */
+static void an_idle_model_is_dropped_and_a_busy_one_is_not(const std::string& path) {
+    std::cout << "\nan idle model is dropped, a busy one is not:\n";
+
+    ai::host_backend<float> b;
+    ai::engine<float> e(b);
+
+    e.add("tiny", path);
+
+    {
+        ai::engine<float>::session s = e.acquire("tiny");
+
+        ok("  acquiring loads it", e.loaded("tiny"));
+    }
+
+    ok("  and it stays loaded after the session ends", e.loaded("tiny"));
+
+    ok("  resident names it", e.resident() == std::vector<std::string>({ "tiny" }));
+
+    // Long enough that nothing is idle yet, so this separates "swept because
+    // idle" from "swept because a sweep drops whatever it finds".
+    e.keep_alive(3600);
+
+    ok("  a sweep leaves a model that is not idle yet", e.sweep() == 0 &&
+       e.loaded("tiny"));
+
+    // **Busy, so skipped.** The stamp is already old enough below, so the only
+    // thing keeping this model is the held lock.
+    e.keep_alive(1);
+
+    {
+        ai::engine<float>::session s = e.acquire("tiny");
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+
+        ok("  a sweep skips a model with a conversation on it",
+           e.sweep() == 0 && e.loaded("tiny"));
+    }
+
+    // Released, and the stamp is from the release rather than from the load,
+    // so it has to age again.
+    ok("  which is still loaded once the conversation ends", e.loaded("tiny"));
+
+    // **This is what the second stamp is for.** That conversation was held for
+    // longer than the keep-alive, so a model aging from its *load* would be
+    // over the limit the instant it was released and would go on the very next
+    // sweep -- dropped for being idle at the moment it stopped being used.
+    // Releasing resets the clock, so this sweep finds nothing.
+    ok("  and a sweep straight after release leaves it alone",
+       e.sweep() == 0 && e.loaded("tiny"));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+
+    ok("  and once idle it goes", e.sweep() == 1);
+
+    ok("  leaving nothing resident", !e.loaded("tiny") && e.resident().empty());
+
+    // The point of all of it: the name is still advertised, so a request can
+    // still have it -- dropping a model is not forgetting it.
+    ok("  but the model is still named", e.has("tiny") &&
+       e.names() == std::vector<std::string>({ "tiny" }));
+
+    {
+        ai::engine<float>::session s = e.acquire("tiny");
+
+        ok("  and asking again loads it back", e.loaded("tiny"));
+    }
+
+    ok("  unloading on demand reports that it did", e.unload("tiny"));
+
+    ok("  and a second unload reports that there was nothing to do",
+       !e.unload("tiny"));
+
+    ok("  with nothing resident either way", e.resident().empty());
+}
+
+/**
  * One session at a time, per model.
  *
  * The property the whole class exists for: `model<T>` holds the key-value
@@ -234,6 +372,7 @@ int main() {
     std::cout << std::unitbuf;
 
     naming_a_model_does_not_load_it();
+    keep_alive_is_off_until_it_is_asked_for();
 
     const std::string path = find_named("tinyllama-1.1b-chat-v1.0.Q8_0.gguf");
 
@@ -245,6 +384,7 @@ int main() {
         a_model_serves_one_conversation_at_a_time(path);
         a_session_starts_with_an_empty_cache(path);
         a_session_carries_what_a_reply_needs(path);
+        an_idle_model_is_dropped_and_a_busy_one_is_not(path);
     }
 
     // What a green run does not establish.
@@ -254,9 +394,12 @@ int main() {
     // stream, so their GPU work interleaves whatever this class does about
     // locking.  Nothing measures that.
     //
-    // Nothing about eviction.  A model added and acquired is held until the
-    // engine dies; four of the files on this machine are about nine
-    // gigabytes together, and there is no policy for that at all.
+    // Nothing about **pressure**.  There is an idle timeout now (#278), and a
+    // model nothing has wanted for long enough is dropped -- but admission is
+    // untouched: ask for two models that do not both fit and the second load
+    // still goes ahead, succeeds, and pages, because a load that does not fit
+    // does not fail.  Measured, not assumed.  A resident cap is the other half
+    // and is not here.
     //
     // And nothing about a session outliving the engine, which is a
     // use-after-free this does not prevent -- a session holds a raw entry
