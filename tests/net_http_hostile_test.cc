@@ -1193,10 +1193,34 @@ static void a_keepalive_connection_that_finishes(http::server& s) {
         ok("  two requests are two access lines, not three", mine == 2,
            std::to_string(mine));
 
-        // The guard on the guard: if this is not 3, the straggler above did
-        // not land and the assertion above passed without being tested.
-        ok("  with a foreign record in the window it would have counted three",
-           in_window == 3, std::to_string(in_window));
+        // **What the assertion above was tested against**: a foreign record
+        // really is in this window, so `mine == 2` is a filtered result and
+        // not merely a count of everything that happened to be here.
+        //
+        // It does not say "the plant landed", which an earlier version of
+        // this comment claimed.  The plant is an unconditional push_back
+        // under the mutex a few lines up, so it cannot fail to land, and
+        // asserting that it did would be a check that cannot fail (#407).
+        // What this does catch is a later edit that removes the plant, which
+        // would leave the assertion above passing on a quiet window and
+        // demonstrating nothing.
+        //
+        // Matched by port rather than counted, which is what port 1 was
+        // chosen for.  The earlier `in_window == 3` pinned the number of
+        // *foreign* records at exactly one -- an assertion that the machine
+        // is quiet, which is the #403 assumption reappearing in the one
+        // subtest written to show it retired.  The battery before this one
+        // decides how many connections are still unwinding, so under
+        // `make check` load the total is sometimes four.
+        int planted = 0;
+
+        for(std::size_t i = ka_from; i < records.size(); i++)
+            if(records[i].peer_port == 1) planted++;
+
+        ok("  a foreign record is in this window, so the count above was filtered",
+           planted == 1,
+           std::to_string(planted) + " planted of " + std::to_string(in_window) +
+           " in the window");
 
         // 0 is not a status, and it is what the deadline path used to write.
         ok("  and the last of them is the request, not a phantom timeout",
