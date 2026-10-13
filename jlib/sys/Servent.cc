@@ -130,8 +130,17 @@ namespace jlib {
             m_worker = std::thread([this]() { start(); });
         }
         
+        unsigned long Servent::passes() const {
+            return m_passes.load();
+        }
+
         void Servent::start() {
             while(m_bunny) {
+                // Counted at the top, before the poll, so a pass that throws
+                // is still a pass: the thing a caller wants to know is whether
+                // this loop ran, not whether it ran successfully.
+                m_passes++;
+
                 try {
                     // -1 blocks until a command arrives; 1 keeps the old
                     // cadence for a caller who registered periodic work.

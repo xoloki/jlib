@@ -123,19 +123,39 @@ static void an_idle_servent_costs_nothing() {
     // section measures the process.
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
+    const unsigned long passes_before = s.passes();
     const double before = cpu_seconds();
 
     std::this_thread::sleep_for(std::chrono::seconds(3));
 
+    const unsigned long woke = s.passes() - passes_before;
     const double used = cpu_seconds() - before;
 
-    // The old loop polled the command pipe on a 1ms timeout whether or not
-    // anyone had asked for a tick, and cost ~13ms of CPU per idle second.
-    // Blocking is below what getrusage resolves.  See sys_asservent_test for
-    // where this threshold came from -- the case it has to catch is not the
-    // 1ms poll but the cheaper 1ms *timed wait* somebody might write instead.
-    ok("three idle seconds burn no measurable CPU", used >= 0 && used < 0.005,
-       std::to_string(used) + "s over 3s idle");
+    // **Count the wakeups, do not time them.**
+    //
+    // The property is that an idle worker *blocks*: it polls with an infinite
+    // timeout, so it should not go round the loop at all while nothing
+    // arrives.  The old loop polled on a 1ms timeout whether or not anybody
+    // had asked for a tick, which is ~3000 passes over this interval against
+    // zero -- and the cheaper 1ms *timed wait* somebody might write instead
+    // has exactly the same signature here.
+    //
+    // This used to assert `used < 0.005` CPU-seconds, which is the same
+    // property measured through the host instead of through the loop.  It
+    // reads `getrusage` on the whole process, so it is a claim about the
+    // platform's scheduling overhead as much as about this code, and under
+    // contention the platform wins: measured failing at 0.0059s and 0.0063s
+    // on an idle *worker* with normal pass counts, while the host was at a
+    // load average near 100 (#408).  The threshold was well chosen -- 25x
+    // above a healthy run and 8x below a regressed one -- and it failed
+    // anyway, because a timing threshold stays hostage to the platform's
+    // noise floor however well it is centred.
+    //
+    // The CPU figure is still reported, because it is informative when
+    // somebody is looking at a failure.  It is simply not what is asserted.
+    ok("an idle worker does not go round the loop at all", woke == 0,
+       std::to_string(woke) + " passes in 3s idle, costing " +
+       std::to_string(used) + "s of CPU");
 
     s.exec(1);
 
@@ -166,10 +186,15 @@ static void a_registered_condition_still_ticks() {
 
     s.stop();
 
-    // At 1ms a pass, 300ms is on the order of 300 evaluations.  Asserting
+    // At 1ms a pass, 300ms is on the order of 300 evaluations, and a healthy
+    // run measures ~225.  The floor is 5 rather than 50 because the property
+    // is "it is evaluated repeatedly" and 5 draws that line as well as 50
+    // does, with 45x the margin instead of 4.5x: the lowest window observed
+    // under host contention was 105, which is only twice a floor of 50 (#408).
+    // Asserting
     // "more than 50" rather than a real figure, because the point is that it
     // is polling at all and the exact rate is the scheduler's business.
-    ok("the predicate is evaluated over and over", n > 50,
+    ok("the predicate is evaluated over and over", n > 5,
        std::to_string(n) + " evaluations in 300ms");
 }
 
@@ -210,7 +235,7 @@ static void adding_a_condition_wakes_a_sleeping_worker() {
     // stays in poll(-1) -- it decided to block back when there was nothing to
     // evaluate, and nothing else is going to arrive -- so this reads zero and
     // the condition is never evaluated at all.
-    ok("a condition added to a sleeping worker starts being evaluated", n > 50,
+    ok("a condition added to a sleeping worker starts being evaluated", n > 5,
        std::to_string(n) + " evaluations in 300ms");
 
     ok("and the knock was never dispatched as a command", knocks.load() == 0,
@@ -246,7 +271,7 @@ static void connecting_cycle_is_asking_for_a_tick() {
 
     s.stop();
 
-    ok("cycle emits over and over", n > 50,
+    ok("cycle emits over and over", n > 5,
        std::to_string(n) + " emissions in 300ms");
 }
 

@@ -26,6 +26,7 @@
 #include <jlib/sys/signal.hh>
 #include <jlib/sys/sync.hh>
 
+#include <atomic>
 #include <exception>
 #include <functional>
 #include <list>
@@ -131,6 +132,21 @@ namespace jlib {
             void start();
 
             /**
+             * How many times the worker loop has gone round.
+             *
+             * An idle worker polls with an infinite timeout, so it does not go
+             * round at all until something arrives: a caller can take this
+             * before a quiet interval and after it and expect no change. That
+             * is the property `an idle servent costs nothing` is really about,
+             * and counting passes says it directly rather than inferring it
+             * from CPU time -- which is a measurement of the host as much as
+             * of this loop, and under contention the host wins.
+             *
+             * Safe to read from another thread while the worker runs.
+             */
+            unsigned long passes() const;
+
+            /**
              * Stop the worker and wait for it to finish.
              *
              * A derived class must call this from its own destructor.  ~Servent
@@ -152,6 +168,7 @@ namespace jlib {
             std::thread m_worker;
             std::mutex m_lock;
             sync<bool> m_bunny;
+            std::atomic<unsigned long> m_passes{0};
         };
 
     }
