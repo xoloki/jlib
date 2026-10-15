@@ -31,21 +31,55 @@ namespace crypt {
 namespace curve {
 
 Scalar::Scalar() {
+    // Zeroed, not left as whatever was on the stack.  Every arithmetic path
+    // overwrites the whole buffer so this was invisible there, but `Scalar s;`
+    // is public API and a scalar is a key, a nonce or a blinding factor.
+    sodium_memzero(m_data, sizeof(m_data));
+}
+
+Scalar::~Scalar() {
+    // A secret should not outlive its scope in memory.  schnorr's nonce is the
+    // case that matters: `s = k - c*x` is published, so recovering k recovers
+    // the private x.
+    sodium_memzero(m_data, sizeof(m_data));
 }
 
 Scalar::Scalar(std::size_t x) {
-    std::memset(reinterpret_cast<unsigned char*>(&m_data), 0, crypto_core_ristretto255_SCALARBYTES);
+    sodium_memzero(m_data, sizeof(m_data));
 
-    for(int i = 0; i < sizeof(x); i++) {
-        char* px = reinterpret_cast<char*>(&x);
-        m_data[i] = px[i];
-    }
+    // Little-endian, by shifting rather than by copying the bytes of x: a
+    // memcpy of the object representation agrees with the ristretto255
+    // encoding only on a little-endian host.
+    static_assert(sizeof(x) <= crypto_core_ristretto255_SCALARBYTES,
+                  "std::size_t does not fit in a ristretto255 scalar");
+    for(std::size_t i = 0; i < sizeof(x); i++)
+        m_data[i] = static_cast<unsigned char>(x >> (8 * i));
 }
 
 Scalar::Scalar(const Hash<Scalar::HASHSIZE>& hash) {
     crypto_core_ristretto255_scalar_reduce(reinterpret_cast<unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&hash.m_data));
 }
     
+Scalar Scalar::from_bytes(const unsigned char* b) {
+    // The ristretto255 group order L, little-endian.  A scalar is canonical
+    // only if it is numerically below this; sodium_compare does that
+    // comparison in constant time and treats both operands as little-endian.
+    static const unsigned char L[crypto_core_ristretto255_SCALARBYTES] = {
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+        0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10
+    };
+
+    if(sodium_compare(b, L, crypto_core_ristretto255_SCALARBYTES) >= 0)
+        throw std::runtime_error("curve::Scalar::from_bytes: not a canonical scalar");
+
+    Scalar result;
+    std::memcpy(result.m_data, b, crypto_core_ristretto255_SCALARBYTES);
+
+    return result;
+}
+
 Scalar Scalar::random() {
     Scalar result;
     
@@ -74,9 +108,6 @@ const unsigned char* Scalar::data() const {
     return reinterpret_cast<const unsigned char*>(m_data);
 }
     
-unsigned char* Scalar::data() {
-    return reinterpret_cast<unsigned char*>(m_data);
-}
     
 Scalar Scalar::operator+(const Scalar& x) const {
     Scalar result;
@@ -105,9 +136,16 @@ Scalar Scalar::operator*(const Scalar& x) const {
 Scalar Scalar::operator^(int k) const { 
     if(k == -1) {
         Scalar result;
-        
-        crypto_core_ristretto255_scalar_invert(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&m_data));
-        
+
+        // Checked, like every other libsodium call in this file.  invert()
+        // returns -1 for a scalar with no inverse, which in a prime field means
+        // zero -- and the old code returned the output buffer regardless, so
+        // inverting zero yielded a valid-looking zero and the protocol carried
+        // on with the blinding removed.
+        int e = crypto_core_ristretto255_scalar_invert(result.m_data, m_data);
+        if(e != 0)
+            throw std::runtime_error("curve::Scalar::operator^(-1): scalar has no inverse");
+
         return result;
     }
 
@@ -173,6 +211,7 @@ Scalar& Scalar::operator*=(const Scalar& x) {
 }    
 
 Point::Point() {
+    sodium_memzero(m_data, sizeof(m_data));
 }
     
 Point::Point(const Scalar& scalar) {
@@ -185,6 +224,35 @@ Point::Point(const Hash<Point::HASHSIZE>& hash) {
     crypto_core_ristretto255_from_hash(reinterpret_cast<unsigned char*>(&m_data), reinterpret_cast<const unsigned char*>(&hash.m_data));
 }
     
+Point Point::from_bytes(const unsigned char* b) {
+    // The ristretto255 field prime p = 2^255 - 19, little-endian.  A
+    // ristretto255 encoding is a canonical field element or it is not an
+    // encoding at all, and that is checked here rather than left to libsodium
+    // deliberately: libsodium 1.0.18 accepts every encoding with bit 255 set
+    // -- measured, 200 of 200 random points stayed "valid" with the bit forced
+    // on -- where 1.0.22 rejects them.
+    //
+    // Two byte strings decoding to one point is malleability, and these
+    // encodings go straight into the Fiat-Shamir challenge in schnorr and
+    // groth, where Hash::update takes the stored bytes.  So the guarantee has
+    // to be this library's and not the installed libsodium's, the same way
+    // Scalar::from_bytes checks against the group order itself.
+    static const unsigned char P[crypto_core_ristretto255_BYTES] = {
+        0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f };
+
+    if(sodium_compare(b, P, crypto_core_ristretto255_BYTES) >= 0)
+        throw std::runtime_error("curve::Point::from_bytes: not a canonical field element");
+
+    if(crypto_core_ristretto255_is_valid_point(b) != 1)
+        throw std::runtime_error("curve::Point::from_bytes: not a ristretto255 point");
+
+    Point result;
+    std::memcpy(result.m_data, b, crypto_core_ristretto255_BYTES);
+
+    return result;
+}
+
 Point Point::zero() {
     Point result;
 
@@ -209,9 +277,6 @@ const unsigned char* Point::data() const {
     return reinterpret_cast<const unsigned char*>(m_data);
 }
     
-unsigned char* Point::data() {
-    return reinterpret_cast<unsigned char*>(m_data);
-}
 
 Point Point::operator+(const Point& x) const {
     Point result;
@@ -236,7 +301,16 @@ Point Point::operator*(const Scalar& x) const {
 
     int e = crypto_scalarmult_ristretto255(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&x.m_data), reinterpret_cast<const unsigned char*>(&m_data));
 
-    if(e == -1 && x == Scalar::zero())
+    // scalarmult returns -1 either for an invalid input point or for a result
+    // that is the identity.  Every Point is a valid ristretto255 encoding by
+    // construction -- from_bytes validates, and every other way of making one
+    // goes through a libsodium operation that produces a valid point -- so the
+    // first case cannot arise here and -1 means the identity.
+    //
+    // The `&& x == Scalar::zero()` that used to be part of this condition
+    // decided the branch on whether a possibly-secret scalar was zero.  It was
+    // also redundant: libsodium has already told us what the answer is.
+    if(e == -1)
         return Point::zero();
 
     if(e != 0)
@@ -269,7 +343,9 @@ Point BasePoint::operator*(const Scalar& x) const {
     Point result;
 
     int e = crypto_scalarmult_ristretto255_base(reinterpret_cast<unsigned char*>(&result.m_data), reinterpret_cast<const unsigned char*>(&x.m_data));
-    if(e == -1 && x == Scalar::zero())
+    // As in Point::operator*: -1 is the identity result, and the scalar
+    // comparison that used to be in this condition branched on a secret.
+    if(e == -1)
         return Point::zero();
 
     if(e != 0)
@@ -290,7 +366,10 @@ std::ostream& operator<<(std::ostream& out, const Point& d) {
 }
 
 bool operator==(const Scalar& x, const Scalar& y) {
-    return (std::memcmp(x.m_data, y.m_data, crypto_core_ristretto255_SCALARBYTES) == 0);
+    // sodium_memcmp, not memcmp: a Scalar is secret, and memcmp returns at the
+    // first differing byte, which makes comparing one against an
+    // attacker-influenced value a prefix oracle.
+    return (sodium_memcmp(x.m_data, y.m_data, crypto_core_ristretto255_SCALARBYTES) == 0);
 }
     
 bool operator!=(const Scalar& x, const Scalar& y) {
@@ -298,7 +377,9 @@ bool operator!=(const Scalar& x, const Scalar& y) {
 }
     
 bool operator==(const Point& x, const Point& y) {
-    return (std::memcmp(x.m_data, y.m_data, crypto_core_ristretto255_BYTES) == 0);
+    // A point is public, so this one is not a leak -- but using the same
+    // primitive for both means nobody has to work out which is which.
+    return (sodium_memcmp(x.m_data, y.m_data, crypto_core_ristretto255_BYTES) == 0);
 }
 
 bool operator!=(const Point& x, const Point& y) {
@@ -311,7 +392,12 @@ const BasePoint& Commitment::G() {
 }
 
 const Point& Commitment::H() {
-    static const Point h = hash<Point::HASHSIZE>(G());
+    // Hash-to-curve, via crypto_core_ristretto255_from_hash.  H has to be a
+    // point whose discrete log with respect to G nobody knows -- that is the
+    // whole of Pedersen binding -- so it must come from a real map to the
+    // group and never from hash-to-scalar followed by a base multiply.  The
+    // cast now says which of the two this is.
+    static const Point h(hash<Point::HASHSIZE>(G()));
     return h;
 }
     

@@ -1,6 +1,6 @@
 /* -*- mode: C++ c-basic-offset: 4 -*-
  *
- * Copyright (c) 1999 Joey Yandle <xoloki@gmail.com>
+ * Copyright (c) 2020 Joey Yandle <xoloki@gmail.com>
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,11 +18,56 @@
  *
  */
 
-#include <jlib/crypt/groth.hh>
+#include <jlib/crypt/curve.hh>
 
+#include <cstring>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 
 using namespace jlib::crypt::curve;
+
+static int failures = 0;
+
+static void ok(const std::string& what, bool good, const std::string& detail = "") {
+    if(!good) ++failures;
+    std::cout << (good ? "  ok   " : "  FAIL ") << what;
+    if(!detail.empty()) std::cout << ": " << detail;
+    std::cout << "\n";
+}
+
+template<typename F>
+static bool throws(F f) {
+    try {
+        f();
+    } catch(const std::exception&) {
+        return true;
+    }
+    return false;
+}
+
+/** Leave a recognisable pattern on the stack for the next frame to inherit. */
+static void dirty_stack() __attribute__((noinline));
+static void dirty_stack() {
+    volatile unsigned char junk[512];
+
+    for(int i = 0; i < 512; i++)
+        junk[i] = static_cast<unsigned char>(0xa5 + i);
+}
+
+static bool all_zero(const unsigned char* p, std::size_t n) {
+    for(std::size_t i = 0; i < n; i++)
+        if(p[i] != 0)
+            return false;
+
+    return true;
+}
+
+/** The ristretto255 group order L, little-endian. */
+static const unsigned char L[Scalar::SIZE] = {
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10
+};
 
 int main(int argc, char** argv) {
     // libsodium requires this before any other call into it.
@@ -31,285 +76,214 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    // scalar and point addition
+    std::cout << "curve::Scalar\n";
     {
-        Scalar a = Scalar::one();
-        Scalar b = Scalar::zero();
-        Scalar c = a + b;
-
-        std::cout << a << " + " << b << " = " << c << std::endl;
-
-        if(c != a) {
-            std::cerr << "Adding zero to a Scalar one doesn't give us Scalar one" << std::endl;
-            return -1;
+        // #417: the default constructor left m_data as whatever was on the
+        // stack, so a Scalar that had not been assigned was a usable secret
+        // nobody chose.  Best-effort: the check depends on the compiler
+        // reusing the frame dirty_stack() just wrote, which it need not do --
+        // so a pass is weak evidence and a failure is conclusive.
+        bool zeroed = true;
+        for(int i = 0; i < 8 && zeroed; i++) {
+            dirty_stack();
+            Scalar s;
+            zeroed = all_zero(s.data(), Scalar::SIZE);
         }
+        ok("#417 a default-constructed Scalar is zeroed, over eight tries", zeroed);
 
-        Scalar d = Scalar::zero();
-        for(int i = 0; i < 23; i++) {
-            d += Scalar::one();
-        }
+        ok("Scalar(0) is zero", Scalar(std::size_t(0)) == Scalar::zero());
 
-        Scalar e = Scalar(23);
-        std::cout << "Scalar(23) = " << e << std::endl;
-        
-        if(d != e) {
-            std::cerr << "Adding a Scalar 23X doesn't give us Scalar(23)" << std::endl;
-            return -1;
-        }
-        
-        
-        Point z = Point::zero();
-        Point p = Point::random();
-        Point s = z + p;
+        // The size_t constructor used to memcpy the object representation of
+        // x, which agrees with the little-endian scalar encoding only on a
+        // little-endian host.
+        ok("Scalar(1) is one", Scalar(std::size_t(1)) == Scalar::one());
+        ok("and Scalar(2) is one + one",
+           Scalar(std::size_t(2)) == Scalar::one() + Scalar::one());
 
-        std::cout << z << " + " << p << " = " << s << std::endl;
+        const Scalar x = Scalar::random();
+        const Scalar y = Scalar::random();
 
-        if(p != s) {
-            std::cerr << "Adding a zero point to a random point doesn't give us the random point back" << std::endl;
-            return -1;
-        }
-    }
-    // scalar and point subtraction
-    {
-        Scalar a = Scalar::one();
-        Scalar b = Scalar::zero();
-        Scalar c = a - b;
+        ok("two random scalars differ", x != y);
+        ok("x + 0 == x", x + Scalar::zero() == x);
+        ok("x - x == 0", x - x == Scalar::zero());
+        ok("x * 1 == x", x * Scalar::one() == x);
+        ok("x * 0 == 0", x * Scalar::zero() == Scalar::zero());
+        ok("addition commutes", x + y == y + x);
+        ok("-x + x == 0", -x + x == Scalar::zero());
+        ok("x * x^-1 == 1", x * (x^-1) == Scalar::one());
+        ok("x^0 == 1", (x^0) == Scalar::one());
+        ok("x^1 == x", (x^1) == x);
+        ok("x^2 == x*x", (x^2) == x*x);
+        ok("x^-2 == (x*x)^-1", (x^-2) == ((x*x)^-1));
 
-        std::cout << a << " - " << b << " = " << c << std::endl;
-
-        if(c != a) {
-            std::cerr << "Subtracting zero from a Scalar one doesn't give us Scalar one" << std::endl;
-            return -1;
-        }
-
-        Point z = Point::zero();
-        Point p = Point::random();
-        Point s = p - z;
-
-        std::cout << p << " - " << z << " = " << s << std::endl;
-
-        if(p != s) {
-            std::cerr << "Subtracing a zero point from a random point doesn't give us the random point back" << std::endl;
-            return -1;
-        }
-
-        Scalar d = Scalar::random();
-        Scalar e = d - b;
-        Scalar f = d; f -= b;
-
-        if(e != f) {
-            std::cerr << "Scalar::operator-= with zero does not give the same result as operator- " << std::endl;
-            return -1;
-        }
-
-        Scalar g = d - Scalar(23);
-        Scalar h = d; h -= (Scalar(23));
-
-        if(g != h) {
-            std::cerr << "Scalar::operator-= Scalar(23) does not give the same result as operator- " << std::endl;
-            return -1;
-        }
-
-        Scalar g1 = Scalar(23) - d;
-        Scalar h1 = Scalar(23); h1 -= d;
-
-        std::cout << "g1 = " << g1 << std::endl;
-        std::cout << "h1 = " << h1 << std::endl;
-
-        if(g1 != h1) {
-            std::cerr << "Scalar(23)::operator-= random scalar does not give the same result as operator- " << std::endl;
-            return -1;
-        }
-    }
-    {
-        Scalar a = Scalar::random();
-        Scalar b = Scalar::one();
-        Scalar c = a * b;
-
-        std::cout << a << " * " << b << " = " << c << std::endl;
-
-        if(c != a) {
-            std::cerr << "Mutiplying a Scalar by one doesn't give us the Scalar back" << std::endl;
-            return -1;
-        }
-    }
-    {
-        Scalar a = Scalar::random();
-        Scalar a2 = a^2;
-        Scalar c = a * a;
-
-        std::cout << a << " * " << a << " = " << c << std::endl;
-        std::cout << a << "^2 " << " = " << a2 << std::endl;
-
-        if(c != a2) {
-            std::cerr << "Squaring Scalar doesn't give us the same as multiplying the Scalar by itself" << std::endl;
-            return -1;
-        }
-    }
-    {
-        Scalar a = Scalar::random();
-        Scalar an2 = a^(-2);
-        Scalar c = (a * a)^(-1);
-
-        std::cout << "(" << a << " * " << a << ")^(-1) = " << c << std::endl;
-        std::cout << a << "^(-2) " << " = " << an2 << std::endl;
-
-        if(c != an2) {
-            std::cerr << "Raising a Scalar to -2 doesn't give us the same as squaring the Scalar then inverting" << std::endl;
-            return -1;
-        }
-    }
-    {
-        Scalar a = Scalar::random();
-        Scalar na_2 = (-a)^2;
-        Scalar n_a2 = -(a^2);
-
-        if(na_2 != n_a2) {
-            std::cerr << "Negating a Scalar to then raising to a power doesn't give us the same as raising the Scalar then inverting" << std::endl;
-            //return -1;
-        }
-    }
-    {
-        Scalar a = Scalar::random();
-        Scalar a0 = a^0;
-        Scalar c = Scalar::one();
-
-        std::cout << a << "^0 = " << a0 << std::endl;
-
-        if(c != a0) {
-            std::cerr << "Raising a Scalar to 0 doesn't give us scalar one" << std::endl;
-            return -1;
-        }
-    }
-    {
-        Scalar a = Scalar::random();
-        Scalar an1 = a^(-1);
-        Scalar b = a * an1;
-
-        if(b != Scalar::one()) {
-            std::cerr << "Multiplying a Scalar by its multiplicative inverse does not give one" << std::endl;
-            return -1;
-        }
-    }
-    {
-        Scalar x = Scalar::random();
-        Scalar y = Scalar::random();
-        Scalar z = x + y;
-
-        std::cout << x << " + " << y << " = " << z << std::endl;
-    }
-    {
-        Scalar x = Scalar::random();
-        Scalar y = Scalar::random();
-        Commitment c(x, y);
-
-        std::cout << "c = " << c << std::endl;
-
-        Point c1 = x * Commitment::G() + y * Commitment::H();
-
-        std::cout << "c1 = " << c1 << std::endl;
-
-        if(c != c1) {
-            std::cerr << "Manually doing commitment returns different result from ctor" << std::endl;
-            return -1;
-        }
-
-        Commitment c0y(Scalar::zero(), y);
-        Point cy0 = y * Commitment::H();
-
-        if(c0y != cy0) {
-            std::cerr << "Manually doing commitment to zero returns different result from ctor" << std::endl;
-            return -1;
-        }
-
-        Commitment c0x(x, Scalar::zero());
-        Point cx0 = x * Commitment::G();
-
-        if(c0x != cx0) {
-            std::cerr << "Manually doing commitment to blinding zero returns different result from ctor" << std::endl;
-            return -1;
-        }
-
-    }
-    // does a curve commitment raised to a power behave?
-    {
-        Scalar x = Scalar::random();
-        Scalar y = Scalar::random();
-        int k = 23;
-        Scalar z = Scalar::one();
-        for(int i = 0; i < k; i++) {
-            z += Scalar::one();
-        }
-        
-        Commitment c(x, y);
-
-        // raising a commitment to a power is the same as multiplying the curve elements by the power
-
-        Point d = z * c;
-        Commitment e(z*x, z*y);
-
-        if(d != e) {
-            std::cerr << "Multiplying a commitment by a scalar gives a different result from multiplying the factors by the scalar" << std::endl;
-            return -1;
-        }
-    }
-    // monero
-    {
-        BasePoint G;
-
-        // private key
-        Scalar a = Scalar::random();
-        Scalar b = Scalar::random();
-
-        // public key
-        Point A = a * G;
-        Point B = b * G;
-
-        std::cout << "keypair (A, B) (" << A << ", " << B << ")" << std::endl;
-
-        Scalar s = Scalar::random();
-        Point R = s * G;
-
-        Point aR = a * R;
-        Scalar Hs = Hash<Point::HASHSIZE>::generic(aR);
-
-        Point Y = Hs * G + B;
-
-        Scalar x = Hs + b;
-
-        Point Y1 = x;
-
-        if(Y != Y1)
-            std::cerr << "points don't match" << std::endl;
-
-        // schnorr proof
-        Scalar v = Scalar::random();
-        Point t = v * G;
-
-        Scalar c = hash<Scalar::HASHSIZE>(G, Y, t);
-        Scalar r = v - c*x;
-
-        Point P = r * G + c * Y;
-
-        if(P != t) {
-            std::cerr << "schnorr proof didn't verify" << std::endl;
-            return -1;
-        } 
-    }
-    // balance proof
-    {
-        Scalar s1 = Scalar::random(), s2 = Scalar::random(), s3 = Scalar::random(), v1 = Scalar::one(), v2 = Scalar::one(), v3 = v1 + v2;
-
-        Commitment c1(v1, s1), c2(v2, s2), c3(v3, s3);
-
-        Point s = c3 - c1 - c2;
-        Scalar z = s3 - s1 - s2;
-
-        if(s != Commitment(0, z) || s != (Commitment::H() * z)) {
-            std::cerr << "balance proof didn't verify" << std::endl;
-            return -1;
-        }
+        // #418: invert() returns -1 for a scalar with no inverse, and the old
+        // code returned the output buffer regardless -- so inverting zero
+        // yielded a valid-looking zero and the caller carried on with the
+        // blinding removed.
+        ok("#418 inverting zero throws rather than returning zero",
+           throws([] { return Scalar::zero() ^ -1; }));
     }
 
-    return 0;
+    std::cout << "\ncurve::Scalar::from_bytes\n";
+    {
+        const Scalar x = Scalar::random();
+        ok("#422 a scalar round-trips through its encoding",
+           Scalar::from_bytes(x.data()) == x);
+
+        unsigned char zero[Scalar::SIZE] = { 0 };
+        ok("#422 the zero encoding is canonical and accepted",
+           Scalar::from_bytes(zero) == Scalar::zero());
+
+        unsigned char below[Scalar::SIZE];
+        std::memcpy(below, L, Scalar::SIZE);
+        below[0] -= 1;
+        ok("#422 L-1 is the largest canonical scalar and is accepted",
+           !throws([&below] { return Scalar::from_bytes(below); }));
+
+        ok("#422 L itself is rejected", throws([] { return Scalar::from_bytes(L); }));
+
+        unsigned char ones[Scalar::SIZE];
+        std::memset(ones, 0xff, Scalar::SIZE);
+        ok("#422 an all-ones encoding is rejected",
+           throws([&ones] { return Scalar::from_bytes(ones); }));
+
+        unsigned char high[Scalar::SIZE];
+        std::memcpy(high, L, Scalar::SIZE);
+        high[Scalar::SIZE - 1] |= 0x80;
+        ok("#422 a scalar with the top bit set is rejected",
+           throws([&high] { return Scalar::from_bytes(high); }));
+    }
+
+    std::cout << "\ncurve::Point\n";
+    {
+        const BasePoint G;
+        const Scalar x = Scalar::random();
+        const Scalar y = Scalar::random();
+
+        ok("#417 a default-constructed Point is zeroed",
+           all_zero(Point().data(), Point::SIZE));
+
+        ok("Point::from(x) is x * G", Point::from(x) == x * G);
+        ok("0 + P == P", Point::zero() + Point::from(x) == Point::from(x));
+        ok("P - P == 0", Point::from(x) - Point::from(x) == Point::zero());
+        ok("(x + y) * G == x*G + y*G", Point::from(x + y) == x * G + y * G);
+        ok("P * 1 == P", Point::from(x) * Scalar::one() == Point::from(x));
+        ok("two random points differ", Point::random() != Point::random());
+    }
+
+    std::cout << "\ncurve::Point::from_bytes\n";
+    {
+        const Point P = Point::random();
+        ok("#422 a point round-trips through its encoding", Point::from_bytes(P.data()) == P);
+
+        unsigned char identity[Point::SIZE] = { 0 };
+        ok("#422 the all-zero encoding is the identity and is accepted",
+           Point::from_bytes(identity) == Point::zero());
+
+        // A ristretto255 encoding is a canonical field element, so bit 255 is
+        // always clear and setting it is rejected for every point rather than
+        // for most of them.
+        //
+        // from_bytes checks this itself rather than leaving it to libsodium,
+        // which is what makes the assertion portable: libsodium 1.0.18 masks
+        // bit 255 before checking canonicity, so it accepts a forced bit 255
+        // for every point where 1.0.22 rejects it.  This failed in a container
+        // and passed on the host until the canonicity test moved into
+        // from_bytes.
+        unsigned char high[Point::SIZE];
+        std::memcpy(high, P.data(), Point::SIZE);
+        high[Point::SIZE - 1] |= 0x80;
+        ok("#422 an encoding with the top bit set is rejected",
+           throws([&high] { return Point::from_bytes(high); }));
+
+        // Non-canonical with the top bit clear: the field prime itself.  Both
+        // libsodium versions measured reject this one on their own -- 1.0.18's
+        // divergence is only the masked bit above -- so this documents the
+        // boundary rather than guarding from_bytes's own check.
+        unsigned char prime[Point::SIZE] = {
+            0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f };
+        ok("#422 the field prime is not a canonical field element and is rejected",
+           throws([&prime] { return Point::from_bytes(prime); }));
+
+        unsigned char ones[Point::SIZE];
+        std::memset(ones, 0xff, Point::SIZE);
+        ok("#422 an all-ones encoding is rejected",
+           throws([&ones] { return Point::from_bytes(ones); }));
+    }
+
+    std::cout << "\ncurve::Commitment\n";
+    {
+        const BasePoint G;
+
+        ok("H is not G", Commitment::H() != static_cast<const Point&>(G));
+        ok("and H is the same point every call", &Commitment::H() == &Commitment::H());
+
+        const Scalar v1 = Scalar::random(), b1 = Scalar::random();
+        const Scalar v2 = Scalar::random(), b2 = Scalar::random();
+
+        ok("Com(v, b) is v*G + b*H",
+           static_cast<const Point&>(Commitment(v1, b1)) == v1 * G + b1 * Commitment::H());
+
+        // The homomorphism is the whole point of a Pedersen commitment, and
+        // it is what groth's proofs are built on.
+        ok("Com(v1,b1) + Com(v2,b2) == Com(v1+v2, b1+b2)",
+           Commitment(v1, b1) + Commitment(v2, b2) ==
+           static_cast<const Point&>(Commitment(v1 + v2, b1 + b2)));
+
+        // Hiding: the same value twice must not give the same commitment,
+        // which is exactly what the random blinding factor is for.
+        ok("committing to one value twice gives two different commitments",
+           static_cast<const Point&>(Commitment(v1)) !=
+           static_cast<const Point&>(Commitment(v1)));
+    }
+
+    std::cout << "\ncurve::Hash\n";
+    {
+        const BasePoint G;
+        const Hash<Point::HASHSIZE> h = hash<Point::HASHSIZE>(G);
+
+        ok("hashing the same input twice gives the same point",
+           Point(h) == Point(hash<Point::HASHSIZE>(G)));
+        ok("and a different input gives a different point",
+           Point(h) != Point(hash<Point::HASHSIZE>(Point::random())));
+
+        // Scalar::HASHSIZE and Point::HASHSIZE are both
+        // crypto_core_ristretto255_HASHBYTES, so one Hash satisfies both
+        // constructors -- as a Scalar it is reduced mod the group order, as a
+        // Point it goes through crypto_core_ristretto255_from_hash.  Both are
+        // right and they are not the same thing, which is why neither
+        // conversion is implicit any more.
+        ok("the same hash as a scalar and as a point are unrelated",
+           Point::from(Scalar(h)) != Point(h));
+
+        // H has to be a point whose discrete log with respect to G nobody
+        // knows: that is all Pedersen binding rests on.  It therefore has to
+        // come from a real map to the group, and must not be hash-to-scalar
+        // followed by a base multiply, which would hand the dlog to anyone
+        // who recomputed the hash.
+        ok("H is hash-to-curve, not hash-to-scalar times G",
+           Commitment::H() == Point(hash<Point::HASHSIZE>(static_cast<const Point&>(G))) &&
+           Commitment::H() != Point::from(Scalar(hash<Scalar::HASHSIZE>(static_cast<const Point&>(G)))));
+    }
+
+    // Deliberately not tested here:
+    //
+    // That ~Scalar() scrubs its bytes.  It does, with sodium_memzero, but
+    // reading the storage of a destroyed object to check is undefined
+    // behaviour, and a test that performs it is not evidence about anything.
+    // The guarantee is in the destructor and in curve.hh.
+    //
+    // Nor that the comparisons are constant-time.  They use sodium_memcmp,
+    // which is; timing that from a unit test would measure the host rather
+    // than the code, and a threshold on it would key on the host's load.
+    //
+    // Nor Scalar::random()'s distribution, which is libsodium's business --
+    // crypto_core_ristretto255_scalar_random -- and not something a hundred
+    // samples can say anything about.
+
+    std::cout << "\n" << (failures ? "FAILED" : "PASSED") << ": " << failures
+              << " failure(s)\n";
+
+    return failures ? 1 : 0;
 }

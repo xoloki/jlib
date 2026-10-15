@@ -10,7 +10,8 @@ doc_DATA = docs/async.md docs/jhttpd.md docs/net.md docs/abnf.md \
            docs/ai.md \
            docs/audio.md \
            docs/math.md docs/graphics.md docs/util.md \
-           docs/jserve.md docs/jchat.md docs/jalpaca.md docs/jcode.md
+           docs/jserve.md docs/jchat.md docs/jalpaca.md docs/jcode.md \
+           docs/crypt.md
 EXTRA_DIST += $(doc_DATA)
 
 # The coverage-guided fuzzers (#268).

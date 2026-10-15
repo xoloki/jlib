@@ -18,8 +18,6 @@
  *
  */
 
-#include <bitset>
-#include <cmath>
 #include <ostream>
 
 #include <jlib/crypt/schnorr.hh>
@@ -28,46 +26,36 @@ namespace jlib {
 namespace crypt {
 namespace schnorr {
 
-Proof prove(const curve::Point& g, const curve::Point& y, const curve::Scalar& x) {
-    curve::Scalar v = curve::Scalar::random();
-    curve::Point t = v * g;
-    curve::Scalar c = curve::hash<curve::Scalar::HASHSIZE>(g, y, t);
-    curve::Scalar r = v - c*x;
-    
-    return Proof{g, y, r, t};
-}
+Proof prove(const curve::Point& G, const curve::Point& Y, const curve::Scalar& x,
+            const std::optional<std::string>& message)
+{
+    Proof proof;
 
-bool verify(const Proof& proof) {
-    curve::Scalar c = curve::hash<curve::Scalar::HASHSIZE>(proof.g, proof.y, proof.t);
-    curve::Point p = proof.r * proof.g + c * proof.y;
-    
-    return (p == proof.t);
-}
+    const curve::Scalar k = curve::Scalar::random();
 
-DoubleProof prove(const curve::Point& y, const curve::Scalar& s, const curve::Scalar& t) {
-    DoubleProof proof;
+    proof.R = k * G;
 
-    proof.y = y;
-    
-    curve::Scalar s0 = curve::Scalar::random();
-    curve::Scalar t0 = curve::Scalar::random();
+    // One generator, so the single-generator case of the same challenge the
+    // template uses -- shared rather than written twice, because a prove and a
+    // verify that hash different things is the one bug this scheme cannot
+    // survive and the easiest one to introduce by duplication.
+    const Generators<1> gens{ G };
+    const curve::Scalar c = challenge<1>(gens, Y, proof.R, message);
 
-    proof.u = (proof.g * s0) + (proof.h * t0);
+    proof.s = k - (c * x);
 
-    curve::Scalar c = curve::hash<curve::Scalar::HASHSIZE>(proof.y, proof.u);
-
-    proof.s = (s0 - (c * s));
-    proof.t = (t0 - (c * t));
-    
     return proof;
 }
 
-bool verify(const DoubleProof& proof) {
-    curve::Scalar c = curve::hash<curve::Scalar::HASHSIZE>(proof.y, proof.u);
+bool verify(const Proof& proof, const curve::Point& G, const curve::Point& Y,
+            const std::optional<std::string>& message)
+{
+    const Generators<1> gens{ G };
+    const curve::Scalar c = challenge<1>(gens, Y, proof.R, message);
 
-    curve::Point u = (proof.y * c) + (proof.g * proof.s) + (proof.h * proof.t);
+    const curve::Point P = (proof.s * G) + (c * Y);
 
-    return (u == proof.u);
+    return (P == proof.R);
 }
 
 }

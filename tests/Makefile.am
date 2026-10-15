@@ -32,6 +32,9 @@ MEDIA_TESTS = media_datastream_test \
               media_live_test
 endif
 
+# The ristretto255 tests, gated because libsodium is optional.  crypt_gpg_test
+# is in TESTS unconditionally instead: gpgme is a hard dependency, and that
+# test exits 77 by itself when there is no engine to drive.
 if HAVE_SODIUM
 CURVE_TESTS = crypt_curve_test crypt_schnorr_test crypt_groth_test
 endif
@@ -151,6 +154,7 @@ TESTS = \
 	app_jcode_test \
 	app_jcode_run_test \
 	app_jserve_test \
+	crypt_gpg_test \
  \
 	$(X_TESTS) \
 	$(METAL_TESTS) \
@@ -431,6 +435,9 @@ crypt_schnorr_test_LDADD   = $(JUTIL_LA) $(JCRYPT_LA) $(SODIUM_LIBS)
 
 crypt_groth_test_SOURCES = crypt_groth_test.cc
 crypt_groth_test_LDADD   = $(JUTIL_LA) $(JCRYPT_LA) $(SODIUM_LIBS)
+
+crypt_gpg_test_SOURCES = crypt_gpg_test.cc
+crypt_gpg_test_LDADD   = $(JUTIL_LA) $(JSYS_LA) $(JCRYPT_LA) $(GPGME_LIBS) $(GPGERROR_LIBS)
 
 metal_gemm_test_SOURCES = metal_gemm_test.cc
 metal_gemm_test_LDADD   = $(top_builddir)/jlib/metal/libjmetal.la $(METAL_LIBS)

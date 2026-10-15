@@ -21,8 +21,11 @@
 #ifndef JLIB_CRYPT_SCHNORR_HH
 #define JLIB_CRYPT_SCHNORR_HH
 
+#include <array>
+#include <cstddef>
+#include <optional>
 #include <ostream>
-#include <iterator>
+#include <string>
 
 #include <sodium.h>
 #include <sodium/crypto_core_ristretto255.h>
@@ -34,107 +37,181 @@ namespace jlib {
 namespace crypt {
 namespace schnorr {
 
-// a schnorr::Proof is a proof that the maker knew the secret key x
-// such that x * g == y
+/**
+ * Non-interactive proofs of knowledge of a discrete logarithm, Fiat-Shamir
+ * over ristretto255.
+ *
+ * **The proof is `(R, s)` and nothing else.**  The statement being proved --
+ * the generators and the public point -- is an argument to both `prove` and
+ * `verify`, never a member of the proof.
+ *
+ * That is not a style choice.  These structures used to carry their own `g`
+ * and `y`, and `verify(proof)` read both out of the proof, so a `true` return
+ * meant "this is a valid proof about whatever point it contains" rather than
+ * "a valid proof about the key you care about".  A caller had to compare the
+ * proof's own fields against the expected ones, separately, and nothing said
+ * so.  Now the statement cannot be omitted because there is nowhere to put it.
+ *
+ * Naming follows the usual convention: **upper case for curve points, lower
+ * case for scalars.**
+ *
+ * `message` binds the proof to a byte string, Fiat-Shamir style, by including
+ * it in the challenge.  Without one these are proofs of knowledge and not
+ * signatures: a proof with no message is equally valid attached to anything.
+ */
+
+/** A proof of knowledge of `x` such that `Y == x * G`. */
 struct Proof {
-    curve::Point g;
-    curve::Point y;
-    curve::Scalar r;
-    curve::Point t;
+    curve::Point  R;   ///< the commitment, `k * G`
+    curve::Scalar s;   ///< the response, `k - c*x`
 };
 
-Proof prove(const curve::Point& g, const curve::Point& y, const curve::Scalar& x);
+/**
+ * Prove knowledge of `x` with `Y == x * G`.
+ *
+ * The challenge is `c = H(G, Y, R [, message])`.  G is in the hash because a
+ * challenge that omits a generator lets the generator be substituted after the
+ * fact without changing anything that was committed to.
+ */
+Proof prove(const curve::Point& G, const curve::Point& Y, const curve::Scalar& x,
+            const std::optional<std::string>& message = std::nullopt);
 
-bool verify(const Proof& proof);
+/** Check `s*G + c*Y == R`.  The message must match the one proved, if any. */
+bool verify(const Proof& proof, const curve::Point& G, const curve::Point& Y,
+            const std::optional<std::string>& message = std::nullopt);
 
-struct DoubleProof {
-    curve::Point g;
-    curve::Point h;
-    curve::Point y;
-    curve::Scalar s;
-    curve::Scalar t;
-    curve::Point u;
+/** N generators, the statement for a MultiProof. */
+template<std::size_t N>
+using Generators = std::array<curve::Point, N>;
 
-    DoubleProof() {
-        g = curve::BasePoint();
-        h = curve::hash<curve::Point::HASHSIZE>(g);
-    }
+/**
+ * A proof of knowledge of `x[0..N-1]` such that `Y == sum(x[i] * G[i])`.
+ *
+ * This replaces both `DoubleProof` and `GeneralProof<N>`, which were the same
+ * scheme written twice -- `DoubleProof` was exactly the N=2 case.  Both also
+ * hashed a challenge that omitted every generator, and both kept the
+ * generators inside the proof where a deserialised one could carry anything.
+ */
+template<std::size_t N>
+struct MultiProof {
+    curve::Point  R;      ///< the commitment, `sum(k[i] * G[i])`
+    curve::Scalar s[N];   ///< the responses, `k[i] - c*x[i]`
 };
 
-DoubleProof prove(const curve::Point& y, const curve::Scalar& s, const curve::Scalar& t);
+/**
+ * The default generator chain: `G[0]` is the ristretto255 base point and each
+ * subsequent generator is the hash of the one before it, so no discrete-log
+ * relation between them is known.
+ *
+ * Built once on first use.  It used to be recomputed in every proof's
+ * constructor, which meant N-1 hashes per object.
+ */
+template<std::size_t N>
+const Generators<N>& generators();
 
-bool verify(const DoubleProof& proof);
+template<std::size_t N>
+MultiProof<N> prove(const Generators<N>& G, const curve::Point& Y,
+                    const curve::Scalar (&x)[N],
+                    const std::optional<std::string>& message = std::nullopt);
 
-template<int N>
-struct GeneralProof {
-    curve::Point g;
-    curve::Point h[N-1];
-    curve::Point y;
-    curve::Scalar r[N];
-    curve::Point t;
+template<std::size_t N>
+bool verify(const MultiProof<N>& proof, const Generators<N>& G, const curve::Point& Y,
+            const std::optional<std::string>& message = std::nullopt);
 
-    GeneralProof() {
-        g = curve::BasePoint();
-        for(int i = 0; i < N-1; i++) {
-            if(i == 0) {
-                h[0] = curve::hash<curve::Point::HASHSIZE>(g);
-            } else {
-                h[i] = curve::hash<curve::Point::HASHSIZE>(h[i-1]);
-            }
-        }
+/* ------------------------------------------------------------------ detail */
+
+/** The challenge, shared by prove and verify so they cannot disagree. */
+template<std::size_t N>
+curve::Scalar challenge(const Generators<N>& G, const curve::Point& Y,
+                        const curve::Point& R,
+                        const std::optional<std::string>& message)
+{
+    curve::Hash<curve::Scalar::HASHSIZE> h;
+
+    for(std::size_t i = 0; i < N; i++)
+        h.update(G[i]);
+
+    h.update(Y);
+    h.update(R);
+
+    // A presence byte, so that no message and an empty message are different
+    // challenges.  Updating a hash with zero bytes is the same as not
+    // updating it, so without this a bare proof of knowledge -- which is not
+    // a signature on anything -- verified as a signature on "", and a
+    // signature on "" verified as a bare proof of knowledge.
+    //
+    // The length goes in with it.  The message is last and everything before
+    // it is fixed-size, so nothing is ambiguous today, but a hash whose final
+    // field is unlengthed is one field away from being so, and this costs
+    // eight bytes.
+    if(message) {
+        const unsigned char present = 0x01;
+        h.update(&present, 1);
+        h.update(curve::Scalar(message->size()));
+        h.update(reinterpret_cast<const unsigned char*>(message->data()), message->size());
+    } else {
+        const unsigned char absent = 0x00;
+        h.update(&absent, 1);
     }
-};
 
-template<int N>
-GeneralProof<N> prove(const curve::Point& y, const curve::Scalar (&x)[N]);
+    h.finalize();
 
-template<int N>
-bool verify(const GeneralProof<N>& proof);
+    return curve::Scalar(h);
+}
 
-template<int N>
-GeneralProof<N> prove(const curve::Point& y, const curve::Scalar (&x)[N]) {
-    if(sizeof(x) != (N * sizeof(*x)))
-        throw std::runtime_error("x is not the same size as N");
+template<std::size_t N>
+const Generators<N>& generators() {
+    static const Generators<N> G = [] {
+        Generators<N> g;
 
-    GeneralProof<N> proof;
+        g[0] = curve::BasePoint();
+        for(std::size_t i = 1; i < N; i++)
+            g[i] = curve::Point(curve::hash<curve::Point::HASHSIZE>(g[i-1]));
 
-    proof.y = y;
+        return g;
+    }();
 
-    curve::Scalar r[N];
-    
-    for(int i = 0; i < N; i++) {
-        r[i] = curve::Scalar::random();
-    }
-    
-    proof.t = r[0] * proof.g;
-    for(int i = 0; i < (N-1); i++) {
-        proof.t += (r[i+1] * proof.h[i]);
-    }
+    return G;
+}
 
-    // hash y,t for the challenge
-    curve::Scalar c = curve::hash<curve::Scalar::HASHSIZE>(proof.y, proof.t);
-        
-    //curve::Scalar r = v - c*x;
-    for(int i = 0; i < N; i++) {
-        proof.r[i] = (r[i] - (c * x[i]));
-    }
-    
+template<std::size_t N>
+MultiProof<N> prove(const Generators<N>& G, const curve::Point& Y,
+                    const curve::Scalar (&x)[N],
+                    const std::optional<std::string>& message)
+{
+    MultiProof<N> proof;
+
+    curve::Scalar k[N];
+
+    for(std::size_t i = 0; i < N; i++)
+        k[i] = curve::Scalar::random();
+
+    proof.R = k[0] * G[0];
+    for(std::size_t i = 1; i < N; i++)
+        proof.R += (k[i] * G[i]);
+
+    const curve::Scalar c = challenge<N>(G, Y, proof.R, message);
+
+    for(std::size_t i = 0; i < N; i++)
+        proof.s[i] = k[i] - (c * x[i]);
+
     return proof;
 }
 
-template<int N>
-bool verify(const GeneralProof<N>& proof) {
-    curve::Scalar c = curve::hash<curve::Scalar::HASHSIZE>(proof.y, proof.t);
+template<std::size_t N>
+bool verify(const MultiProof<N>& proof, const Generators<N>& G, const curve::Point& Y,
+            const std::optional<std::string>& message)
+{
+    const curve::Scalar c = challenge<N>(G, Y, proof.R, message);
 
-    curve::Point p = proof.y * c;
-    p += (proof.r[0] * proof.g);
-    for(int i = 0; i < N-1; i++) {
-        p += (proof.r[i+1] * proof.h[i]);
-    }
-    
-    return (p == proof.t);
+    curve::Point P = c * Y;
+
+    for(std::size_t i = 0; i < N; i++)
+        P += (proof.s[i] * G[i]);
+
+    return (P == proof.R);
 }
-    
+
 }
 }
 }
