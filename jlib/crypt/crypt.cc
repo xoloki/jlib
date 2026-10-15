@@ -43,6 +43,10 @@ namespace jlib {
                 gpgme_release(m_ctx);
             }
 
+            gpgme_ctx_t ctx::gpgme() {
+                return m_ctx;
+            }
+
             void ctx::set_protocol(gpgme_protocol_t proto) {
                 gpgme_error_t err = gpgme_set_protocol(m_ctx, proto);
                 if(gpgme_err_code(err) != GPG_ERR_NO_ERROR) {
@@ -124,9 +128,12 @@ namespace jlib {
             }
 
 
-            void ctx::op_encrypt(key::list rcpts, data::ptr plain, data::ptr cipher) {
-                gpgme_key_t* arr = key::to_array(rcpts);
-                gpgme_error_t err = gpgme_op_encrypt(m_ctx, arr, GPGME_ENCRYPT_ALWAYS_TRUST, plain->m_data, cipher->m_data);
+            void ctx::op_encrypt(const key::list& rcpts, data::ptr plain, data::ptr cipher,
+                                 trust t) {
+                std::vector<gpgme_key_t> arr = key::to_array(rcpts);
+                gpgme_encrypt_flags_t flags =
+                    (t == trust::always) ? GPGME_ENCRYPT_ALWAYS_TRUST : gpgme_encrypt_flags_t(0);
+                gpgme_error_t err = gpgme_op_encrypt(m_ctx, arr.data(), flags, plain->m_data, cipher->m_data);
                 if(gpgme_err_code(err) != GPG_ERR_NO_ERROR) {
                     throw exception(err);
                 } 
@@ -137,9 +144,12 @@ namespace jlib {
                 return gpgme_op_encrypt_result(m_ctx);
             }
 
-            void ctx::op_encrypt_sign(key::list rcpts, data::ptr plain, data::ptr cipher) {
-                gpgme_key_t* arr = key::to_array(rcpts);
-                gpgme_error_t err = gpgme_op_encrypt_sign(m_ctx, arr, GPGME_ENCRYPT_ALWAYS_TRUST, plain->m_data, cipher->m_data);
+            void ctx::op_encrypt_sign(const key::list& rcpts, data::ptr plain, data::ptr cipher,
+                                      trust t) {
+                std::vector<gpgme_key_t> arr = key::to_array(rcpts);
+                gpgme_encrypt_flags_t flags =
+                    (t == trust::always) ? GPGME_ENCRYPT_ALWAYS_TRUST : gpgme_encrypt_flags_t(0);
+                gpgme_error_t err = gpgme_op_encrypt_sign(m_ctx, arr.data(), flags, plain->m_data, cipher->m_data);
                 if(gpgme_err_code(err) != GPG_ERR_NO_ERROR) {
                     throw exception(err);
                 } 
@@ -148,6 +158,19 @@ namespace jlib {
             
             gpgme_verify_result_t ctx::op_verify(data::ptr sig, data::ptr plain) {
                 gpgme_error_t err = gpgme_op_verify(m_ctx, sig->m_data, 0, plain->m_data);
+                if(gpgme_err_code(err) != GPG_ERR_NO_ERROR) {
+                    throw exception(err);
+                } 
+
+                return gpgme_op_verify_result(m_ctx);
+            }
+
+            gpgme_verify_result_t ctx::op_verify_detached(data::ptr sig, data::ptr signed_text) {
+                // The signed text goes in gpgme's second argument and the
+                // output one is null; op_verify above is the other way round.
+                // That argument was hardcoded to null, so this call could not
+                // be made at all.
+                gpgme_error_t err = gpgme_op_verify(m_ctx, sig->m_data, signed_text->m_data, 0);
                 if(gpgme_err_code(err) != GPG_ERR_NO_ERROR) {
                     throw exception(err);
                 } 
@@ -190,15 +213,17 @@ namespace jlib {
                     gpgme_key_unref(m_key);
             }
 
-            gpgme_key_t* key::to_array(key::list l) {
-                gpgme_key_t* ret = new gpgme_key_t[l.size() + 1];
-                unsigned int x = 0;
-                key::list::iterator i = l.begin();
+            std::vector<gpgme_key_t> key::to_array(const key::list& l) {
+                std::vector<gpgme_key_t> ret;
 
-                for(; i != l.end(); i++, x++) {
-                    ret[x] = (*i)->gpgme();
-                }
-                ret[x] = 0;
+                ret.reserve(l.size() + 1);
+
+                for(const key::ptr& k : l)
+                    ret.push_back(k->gpgme());
+
+                // gpgme reads until the NULL, so the terminator is part of the
+                // array and not merely slack.
+                ret.push_back(0);
 
                 return ret;
             }
@@ -310,8 +335,17 @@ namespace jlib {
             }
 
             void data::write(const std::string& data) {
-                std::size_t n = gpgme_data_write(m_data, data.data(), data.length());
-                if(n != data.size()) {
+                // ssize_t, not size_t.  gpgme_data_write returns -1 on
+                // failure, which as an unsigned became SIZE_MAX -- so the
+                // short-write branch caught it first and reported "Only wrote
+                // 18446744073709551615", and the errno branch below it was
+                // unreachable.
+                ssize_t n = gpgme_data_write(m_data, data.data(), data.length());
+
+                if(n < 0)
+                    throw exception(errno);
+
+                if(static_cast<std::size_t>(n) != data.size()) {
                     std::ostringstream os;
                     // `<< " of " << data.size()`, not `" of " + size`:
                     // the latter advances a pointer into a six-byte literal
@@ -321,30 +355,26 @@ namespace jlib {
                     os << "Only wrote " << n << " of " << data.size();
                     throw std::runtime_error(os.str());
                 }
-                    
-
-                if(n == -1) {
-                    throw exception(errno);
-                } 
             }
 
             void init(gpgme_protocol_t proto) {
-                const char* version = gpgme_check_version(0);
+                // Required before any other gpgme call, and it is the call
+                // that initialises the library -- the returned version string
+                // was assigned to a variable nobody read.
+                gpgme_check_version(0);
 
-                gpgme_set_locale (NULL, LC_CTYPE, setlocale (LC_CTYPE, NULL));
+                gpgme_set_locale(NULL, LC_CTYPE, setlocale(LC_CTYPE, NULL));
 
-                gpgme_error_t err = gpgme_engine_check_version(GPGME_PROTOCOL_OpenPGP);
+                // proto, not a hardcoded GPGME_PROTOCOL_OpenPGP: the argument
+                // was accepted and then ignored, so asking for CMS checked for
+                // an OpenPGP engine and reported success on a host with no CMS
+                // engine at all.
+                gpgme_error_t err = gpgme_engine_check_version(proto);
 
                 if(gpgme_err_code(err) != GPG_ERR_NO_ERROR) {
                     throw exception(err);
                 } 
             }
-
-            /*
-            GpgmeIdleFunc register_idle(GpgmeIdleFunc idle) {
-                return gpgme_register_idle(idle);
-            }
-            */
 
             key::list list_keys(const std::string& id, bool secret_only) {
                 key::list keys;
@@ -364,32 +394,50 @@ namespace jlib {
                 return keys;
             }
 
-            std::string verify(const std::string& sig) {
-                return "";
-            }
+            bool verified(gpgme_verify_result_t result, trust t) {
+                if(result == 0)
+                    return false;
 
-            std::string verify(const std::string& sig,std::list<std::string> data) {
-                return "";
-            }
+                // No signature is not a good signature.  This is the case a
+                // caller who only checked whether op_verify threw would have
+                // read as success, because an unsigned document verifies
+                // without error and reports nothing.
+                if(result->signatures == 0)
+                    return false;
 
-            std::string decrypt(const std::string& text, const std::string& pass) {
-                return "";
-            }
+                // Every flag here disqualifies a signature on its own.  RED is
+                // gpgme saying the signature is bad; the rest say it cannot be
+                // judged, which is not the same as good.
+                const unsigned int disqualifying =
+                    GPGME_SIGSUM_RED |
+                    GPGME_SIGSUM_KEY_REVOKED |
+                    GPGME_SIGSUM_KEY_EXPIRED |
+                    GPGME_SIGSUM_SIG_EXPIRED |
+                    GPGME_SIGSUM_KEY_MISSING |
+                    GPGME_SIGSUM_CRL_MISSING |
+                    GPGME_SIGSUM_CRL_TOO_OLD |
+                    GPGME_SIGSUM_BAD_POLICY |
+                    GPGME_SIGSUM_SYS_ERROR;
 
-            std::string decrypt(const std::string& text, const std::string& pass, std::string& out) {
-                return "";
-            }
+                for(gpgme_signature_t sig = result->signatures; sig != 0; sig = sig->next) {
+                    if(gpgme_err_code(sig->status) != GPG_ERR_NO_ERROR)
+                        return false;
 
-            std::string sign(const std::string& from, const std::string& data, const std::string& pass) {
-                return "";
-            }
+                    if(sig->summary & disqualifying)
+                        return false;
 
-            std::string encrypt(const std::string& to, const std::string& data) {
-                return "";
-            }
+                    if(!(sig->summary & GPGME_SIGSUM_GREEN))
+                        return false;
 
-            std::string sign_encrypt(const std::string& from, const std::string& to, const std::string& data, const std::string& pass) {
-                return "";
+                    // GREEN is a well-formed signature by the key it names.
+                    // VALID is gpgme saying that key is one the trust model
+                    // accepts, which is the question a caller usually means.
+                    if(t == trust::required && !(sig->summary & GPGME_SIGSUM_VALID))
+                        return false;
+                }
+
+                // Every signature present was good, and there was at least one.
+                return true;
             }
 
 

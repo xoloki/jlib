@@ -110,12 +110,12 @@ T Polynomial<T,P>::operator[](int i) const {
     if(i < m_params.size())
         return m_params[i];
     else
-        return 0;
+        return T(0);
 }
 
 template<typename T, typename P>
 T Polynomial<T,P>::operator()(const T& x) const {
-    T sum = 0;
+    T sum = T(0);
     for(int i = 0; i < m_params.size(); i++) {
         //std::cout << "m_params[" << i << "] = " << m_params[i] << std::endl;
         if(i > 0)

@@ -63,11 +63,6 @@ public:
     void update(const unsigned char* data, std::size_t n);
     void finalize();
     
-    static Hash generic(const Point& p);
-    static Hash generic(const Scalar& x);
-    static Hash generic(const Commitment& x);
-    static Hash generic(const unsigned char* data, std::size_t n);
- 
     friend class Point; 
     friend class Scalar;
   
@@ -109,8 +104,28 @@ public:
     };
     
     Scalar();
-    Scalar(std::size_t x);
-    Scalar(const Hash<HASHSIZE>& hash);
+    /*
+     * Both of these are explicit, and Point's two matching ones are as well.
+     *
+     * Scalar::HASHSIZE and Point::HASHSIZE are both
+     * crypto_core_ristretto255_HASHBYTES, so a Hash<64> satisfies either
+     * constructor: as a Scalar it is reduced mod the group order, as a Point
+     * it goes through crypto_core_ristretto255_from_hash.  Both are correct
+     * and they mean entirely different things, and with the conversions
+     * implicit the one you got was decided by the destination type -- so a
+     * hash meant as a scalar, handed to something taking a Point, became a
+     * curve point with no diagnostic.  Converting a hash is now something
+     * the caller has to write down.
+     */
+    explicit Scalar(std::size_t x);
+    explicit Scalar(const Hash<HASHSIZE>& hash);
+
+    /**
+     * Scrubs the bytes.  A Scalar is a key, a nonce or a blinding factor, and
+     * schnorr publishes `s = k - c*x` -- so a nonce left in freed memory is
+     * the private key left in freed memory.
+     */
+    ~Scalar();
 
     Scalar operator+(const Scalar& x) const;
     Scalar operator-(const Scalar& x) const;
@@ -124,7 +139,17 @@ public:
     Scalar& operator*=(const Scalar& x);
 
     const unsigned char* data() const;
-    unsigned char* data();
+
+    /**
+     * 32 little-endian bytes, rejected unless they are a canonical scalar --
+     * that is, numerically below the group order.  A larger value is not a
+     * scalar; accepting one and reducing it silently would make two different
+     * encodings mean the same secret.
+     *
+     * There used to be a non-const `data()` instead, which was this without
+     * the check: a caller could write any 32 bytes into a live Scalar.
+     */
+    static Scalar from_bytes(const unsigned char* b);
 
     static Scalar random();
     static Scalar zero();
@@ -148,8 +173,22 @@ public:
     static const int SIZE = crypto_core_ristretto255_BYTES;
 
     Point();
-    Point(const Scalar& scalar);
-    Point(const Hash<HASHSIZE>& hash);
+    // Explicit for the reason given above Scalar's constructors, and
+    // because this one is a base point multiply: implicitly, a Scalar passed
+    // to anything taking a Point silently became that scalar's public key.
+    explicit Point(const Scalar& scalar);
+    explicit Point(const Hash<HASHSIZE>& hash);
+
+    /*
+     * Class invariant: every Point holds a valid ristretto255 encoding.
+     *
+     * from_bytes is the only way bytes get in from outside and it validates;
+     * every other constructor and operator produces its value through a
+     * libsodium call that yields a valid point.  operator* relies on this to
+     * read a -1 from scalarmult as "the result is the identity" rather than
+     * "the input point was not a point", which are the two things libsodium
+     * reports with the same value.
+     */
 
     Point operator+(const Point& x) const;
     Point operator-(const Point& x) const;
@@ -158,7 +197,18 @@ public:
     Point& operator*=(const Scalar& x);
     
     const unsigned char* data() const;
-    unsigned char* data();
+
+    /**
+     * 32 bytes, rejected unless `crypto_core_ristretto255_is_valid_point`
+     * accepts them.  Ristretto255 has exactly one valid encoding per point,
+     * which is most of the reason to choose it, and this is the check that
+     * makes that worth having.
+     *
+     * Replaces a non-const `data()`: arbitrary bytes could be written into a
+     * live Point, and the only thing that caught it was a libsodium -1 at the
+     * *next* operation, reported as "add failed" rather than "not a point".
+     */
+    static Point from_bytes(const unsigned char* b);
 
     static Point zero();
     static Point random();
@@ -195,7 +245,9 @@ bool operator!=(const Point& x, const Point& y);
 class Commitment : public Point {
 public:
     Commitment();
-    Commitment(const Scalar& value);
+    // Explicit because it draws a random blinding factor.  Committing to a
+    // value is a deliberate act that consumes randomness, not a conversion.
+    explicit Commitment(const Scalar& value);
     Commitment(const Scalar& value, const Scalar& blind);
     
     const Scalar& value() const;
@@ -250,37 +302,13 @@ void Hash<N>::finalize() {
     crypto_generichash_final(&m_state, reinterpret_cast<unsigned char*>(&m_data), N);
 }
     
-template<int N>
-Hash<N> Hash<N>::generic(const Point& p) {
-    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(&p.m_data), Point::SIZE);
-}
-
-template<int N>
-Hash<N> Hash<N>::generic(const Scalar& x) {
-    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(&x.m_data), Scalar::SIZE);
-}
-
-template<int N>
-Hash<N> Hash<N>::generic(const Commitment& c) {
-    return Hash<N>::generic(reinterpret_cast<const unsigned char*>(c.data()), Point::SIZE);
-}
-
-template<int N>
-Hash<N> Hash<N>::generic(const unsigned char* data, std::size_t n) {
-    Hash<N> result;
-    
-    crypto_generichash(reinterpret_cast<unsigned char*>(&result.m_data), crypto_generichash_BYTES, data, n, NULL, 0);
-
-    return result;
-}
-    
 template<int N, typename... Args>
 Hash<N> hash(Args&&... args) {
     Hash<N> hasher;
 
     do_hash(hasher, args...);
     hasher.finalize();
-    
+
     return hasher;
 }
 
