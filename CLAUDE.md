@@ -42,7 +42,9 @@ or `cuda`.
 - `jcrypt` — GPGME encrypt/decrypt filter. `jcurve` — **a stub**: 48 lines,
   `sodium_init()` and an empty `try` block. It is in `bin_PROGRAMS` and does
   nothing, which is the same defect as the seven `return "";` functions deleted
-  from `crypt.cc` — either it becomes a driver for the proofs or it goes.
+  from `crypt.cc`. #424 is the plan to make it the driver for the ristretto255
+  half, starting with `--gen-key`; nothing outside `tests/` drives that half
+  today, which is part of why #414–#423 sat unnoticed.
 - `jhyper`, `jglxhyper`, `jglfwhyper`, `jhardhyper` — the 4-D hypercube/torus
   visualizations, named for their backend. Shared logic is in `Hyper.hh`
   (`HyperPlot<T, Plot>`, templated on the plot backend so the same code renders

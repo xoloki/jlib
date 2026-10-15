@@ -80,7 +80,8 @@ belt-and-braces. Measured across the two versions jlib builds against:
 
 1.0.18 masks bit 255 and then checks the low 255 bits, so `x | 2^255` decodes
 to the same point as `x`. A ristretto255 encoding is by definition a canonical
-field element, so those are not encodings at all.
+field element, so those are not encodings at all. The measurement and why
+raising the configure floor is not the fix are in #430.
 
 Two byte strings decoding to one point is malleability, and it is not abstract
 here: `Hash::update(const Point&)` hashes the **stored** bytes, and those
@@ -205,7 +206,7 @@ function is written exactly once and shared by `prove` and `verify`.
 
 That is not tidiness. A `prove` and a `verify` that hash different things is
 the one bug neither scheme survives, and duplication is the easiest way to
-introduce it. It is also why **every** first-round commitment is in the hash,
+introduce it — #425 is how that happened here, and why no test could catch it. It is also why **every** first-round commitment is in the hash,
 including the ones it is tempting to leave out: a commitment outside the
 challenge is one the prover can still choose *after* seeing the challenge, and
 the verifying equations are linear in it, so a prover who can pick it
@@ -268,7 +269,10 @@ from the right one. It is a parameter, and it defaults to off.
   a licence header, `sodium_init()` and an empty `try` block. Said here because
   a reader who finds it in the binary list should not have to open it to learn
   that. The four test programs under `tests/` are the working examples, and
-  `crypt_groth_test` is the one that exercises the most.
+  `crypt_groth_test` is the one that exercises the most. #424 is the plan for
+  making jcurve real, and the interesting part of it is not the flag list: a
+  command-line tool has to have a wire format, which this library deliberately
+  does not.
 - **Zero-knowledge is argued, not tested.** It is a property of a simulator,
   not of any run. What the tests do pin is that the nonce commitment differs
   between two proofs of one statement, which is the part whose failure would
