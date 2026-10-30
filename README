@@ -35,8 +35,10 @@ per connection now, where the blocking one would have to hold a thread for
 every client that might ask again -- and once connections were reusable, the
 things a reusable connection makes worth having followed: chunked output so a
 streamed body has an end, route patterns, HEAD, conditional requests, byte
-ranges, and a handler for serving a directory.  It is still not hardened for a
-public port and the header still says so, at rather more length than before.
+ranges, and a handler for serving a directory.  Its defaults are still not a
+public-port configuration, and the header says so at more length than before.
+A configured one can be public: jhttpd is the worked example, and it serves
+six sites.
 
 Errors are thrown rather than returned, and each class nests its own
 exception type.  Everything lives in namespace jlib::<module>.
@@ -70,6 +72,7 @@ Some programs it builds:
     jlib-mail   a command-line mail client
     jchat       talk to a GGUF model
     jserve      an OpenAI-compatible endpoint, which aider can drive
+    jhttpd      a static web server with TLS and virtual hosts
     jhardhyper  4-D hypercubes and tori as solid 3-D geometry
     jcrypt      a GPGME encrypt/decrypt filter
 
@@ -84,6 +87,8 @@ in docs/:
 
     docs/abnf.md     grammars pasted from the RFCs, and the PEG that runs
                      them
+    docs/util.md     the layer between bytes and values -- dates, media
+                     types, URLs, header sets, trees
     docs/net.md      mail and HTTP clients, OAuth2, and the three habits
                      layered by age
     docs/async.md    the reactor, the coroutine layer, and the two ways
@@ -99,6 +104,10 @@ in docs/:
                      write that is deliberately not a tool
     docs/audio.md    synthesis, sampling and mixing, and the streambuf you
                      write notes into
+    docs/math.md     arbitrary-dimension linear algebra, and the projection
+                     that makes a 16-cube something a screen can show
+    docs/graphics.md three backends, one plot, and where the work happens
+                     before OpenGL sees anything
     docs/crypt.md    the gpgme wrapper, ristretto255, and the proofs built
                      on it
 
