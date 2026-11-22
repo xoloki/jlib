@@ -1599,6 +1599,49 @@ static void the_error_line() {
     }
 
     {
+        // **#438.** A TLS close_notify: the peer ending the conversation the
+        // way the protocol says to. Before this it reached the `core:error`
+        // fallback, and on the live server it was *all* of it -- 23 of 23
+        // lines over 46 hours, in the bucket reserved for our own failures.
+        const jlib::sys::async_tls::closed gone(
+            "SSL_write failed: the connection was closed");
+        const jhttpd::sorted_error s = jhttpd::sort_error(gone);
+
+        ok("  #438 a TLS peer closing cleanly is http, and only info",
+           std::string(s.module) == "http" && s.at == jhttpd::level::info,
+           std::string(s.module) + ":" + jhttpd::level_name(s.at));
+    }
+
+    {
+        // **Sorted by type, which is the fix.** This message is one word off
+        // the text rule written for async_writer -- "octets still to be
+        // written" against "octets *were* still to be written" -- and that is
+        // precisely how async_tls's own peer-closed throw used to miss and
+        // land at core:error. The wording no longer decides.
+        const jlib::sys::async_tls::closed gone(
+            "the peer closed with 160 octets still to be written");
+        const jhttpd::sorted_error s = jhttpd::sort_error(gone);
+
+        ok("  #438 and the type decides it, not the wording",
+           std::string(s.module) == "http" && s.at == jhttpd::level::info,
+           std::string(s.module) + ":" + jhttpd::level_name(s.at));
+    }
+
+    {
+        // **The control, and the one that would catch an over-broad fix.** A
+        // syscall or protocol failure from the same class is still ours: the
+        // demotion is for `closed` alone, not for everything async_tls can
+        // throw. Without this, demoting the base type would look like a pass.
+        const jlib::sys::async_tls::exception real(
+            "SSL_write failed: a protocol error; wrong version number");
+        const jhttpd::sorted_error s = jhttpd::sort_error(real);
+
+        ok("  #438 but a real TLS failure is still core, at error",
+           std::string(s.module) == "core" && s.at == jhttpd::level::error,
+           std::string(s.module) + ":" + jhttpd::level_name(s.at));
+    }
+
+    {
         // A server's own failure is the one thing a level must never hide.
         const std::runtime_error ours("cannot read /etc/ssl/private/key.pem");
         const jhttpd::sorted_error s = jhttpd::sort_error(ours);

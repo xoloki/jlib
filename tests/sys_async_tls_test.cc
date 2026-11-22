@@ -448,6 +448,37 @@ int main() {
 
     // What a green run does not establish.
     //
+    // **That async_tls throws `closed` rather than `exception` when the peer
+    // closes cleanly** -- the library half of #438. jhttpd's sort_error()
+    // sorts by type and its tests construct the exception directly, so with
+    // both throws reverted to the base type, every one of them still passes:
+    // checked, three green assertions and zero `closed` in the library. The
+    // thrower is therefore unguarded, and it is unguarded on purpose rather
+    // than by oversight.
+    //
+    // A test was written for it and removed. Three findings, in order:
+    //
+    //   - `SSL_ERROR_ZERO_RETURN` on a *write* is the case production shows
+    //     -- all 23 lines that prompted #438 read "the connection was
+    //     closed" -- and it needs a peer that sends close_notify and leaves
+    //     the socket open. A tlsstream cannot: basic_tlsbuf::close() is
+    //     SSL_shutdown followed by Base::close(), so the alert and the FIN
+    //     always travel together.
+    //   - What a departing tlsstream peer actually produces is
+    //     SSL_ERROR_SYSCALL, "an I/O error ... Broken pipe". Measured twice,
+    //     with the server returning at once and with it holding the thread
+    //     two seconds after close().
+    //   - And that is not even stable. The same write *succeeded* under
+    //     `make check -j4` where it had thrown when the test ran alone: the
+    //     64 KB went into the socket buffer before the FIN was processed.
+    //     Three outcomes from one scenario, chosen by the scheduler.
+    //
+    // So no assertion here can pin the thrower without keying on a race, and
+    // a test whose answer moves with the load is worse than none -- it fails
+    // intermittently until somebody deletes it or adds a retry. Raw OpenSSL
+    // on the server side of this file would do it, and that is its own piece
+    // of work.
+    //
     // That the *server* side handshakes asynchronously.  async_tls takes a
     // tls_server_t and the code path exists, but every test here is an async
     // client against a blocking jlib server -- which is deliberate, since two

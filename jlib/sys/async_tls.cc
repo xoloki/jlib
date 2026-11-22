@@ -145,13 +145,29 @@ public:
 
             if(e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
                 if(!co_await m_tls.want(e, "SSL_write")) {
-                    throw async_tls::exception(
+                    // `closed`, not `exception`: the peer went away. Until
+                    // #438 this was the base type, and jhttpd sorted it by
+                    // text -- against a pattern written for async_writer's
+                    // wording, "octets *were* still to be written". One word
+                    // apart, so it missed and was logged as a server failure.
+                    throw async_tls::closed(
                         "the peer closed with " + std::to_string(n - sent) +
                         " octets still to be written");
                 }
 
                 continue;
             }
+
+            // close_notify, which the read path above treats as a clean end
+            // and says so. A write cannot end quietly -- the octets did not
+            // go, and the caller has to know -- but it is still the peer
+            // finishing properly rather than anything failing here.
+            //
+            // SYSCALL and SSL fall through to `exception` and stay at error,
+            // which is the point of distinguishing them: this must not become
+            // a blanket demotion of everything async_tls can throw.
+            if(e == SSL_ERROR_ZERO_RETURN)
+                throw async_tls::closed(why(m_tls.m_ssl, "SSL_write", took));
 
             throw async_tls::exception(why(m_tls.m_ssl, "SSL_write", took));
         }
