@@ -99,6 +99,30 @@ public:
     };
 
     /**
+     * The peer closed the connection.  Not a failure of ours.
+     *
+     * A distinct type because the alternative is matching the message text,
+     * and that is exactly how a TLS `close_notify` -- the peer ending the
+     * conversation the way the protocol says to -- came to be logged by
+     * jhttpd as `core:error`, the bucket reserved for the server's own
+     * failures (#438).  Measured on the live server: 23 of 23 lines in that
+     * bucket over 46 hours were this.
+     *
+     * read() needs nothing like this: `SSL_ERROR_ZERO_RETURN` there is a
+     * clean end and it returns false.  write() cannot do the same -- a caller
+     * that asked for n octets has to be told they did not go -- so it throws,
+     * and the type is what says whose doing it was.
+     *
+     * Deriving from `exception` means a caller that only wants "the write
+     * failed" keeps working unchanged; only code that cares about the
+     * difference has to know.
+     */
+    class closed : public exception {
+    public:
+        closed(const std::string& msg = "") : exception(msg) {}
+    };
+
+    /**
      * A client.  The handshake has **not** happened; co_await handshake().
      *
      * Which is the difference from basic_tlsstream, where open_ssl() runs in

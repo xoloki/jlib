@@ -23,6 +23,7 @@
 
 #include <jlib/net/http_server.hh>
 
+#include <jlib/sys/async_tls.hh>
 #include <jlib/sys/sync.hh>
 #include <jlib/sys/sys.hh>
 #include <jlib/util/conf.hh>
@@ -798,6 +799,30 @@ inline sorted_error sort_error(const std::exception& e) {
     // which reads as the server breaking while writing. It is a client that
     // closed a tab, and it belongs with the other went-away cases.
     if(what.find("octets were still to be written") != std::string::npos)
+        return { "http", level::info };
+
+    // **A TLS peer that closed the connection.**
+    //
+    // Sorted by *type*, not by message, and that is the whole of the fix.
+    // `SSL_ERROR_ZERO_RETURN` is a close_notify: the peer ending the
+    // conversation the way the protocol says to, which async_tls's read path
+    // already treats as a clean end. Its write path has to throw, because
+    // octets the caller handed over did not go -- but it is not our failure.
+    //
+    // Measured before the change: **23 of 23 lines in `core:error` over 46
+    // hours on the live server were this** (#438). The bucket reserved for
+    // the server's own failures held nothing but clients behaving correctly.
+    //
+    // Both of async_tls's peer-closed throws land here however they are
+    // phrased, which the text rules above could not manage: one of them read
+    // "octets still to be written" where the rule two cases up says "octets
+    // *were* still to be written". A single word, and it reached the
+    // fallback.
+    //
+    // Note what is deliberately *not* demoted: `async_tls::exception` itself.
+    // A SYSCALL or a protocol error is still ours until shown otherwise, and
+    // still arrives at `core:error` through the last rule in this function.
+    if(dynamic_cast<const jlib::sys::async_tls::closed*>(&e))
         return { "http", level::info };
 
     // **An empty request head is a knock, not a diagnosis.**
