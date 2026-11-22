@@ -1083,6 +1083,7 @@ namespace {
         case 503: return "Service Unavailable";
         case 413: return "Content Too Large";
         case 414: return "URI Too Long";
+        case 426: return "Upgrade Required";
         case 431: return "Request Header Fields Too Large";
         case 500: return "Internal Server Error";
         case 501: return "Not Implemented";
@@ -1269,27 +1270,47 @@ void server::redirect_insecure(unsigned short from, unsigned short to) {
 }
 
 /**
- * Where an insecure request should have gone, or "" if it should stay.
+ * Where an insecure request should have gone, or that it cannot go.
  *
  * `authority` is what authority_of() decided -- folded, and with any port
  * already stripped -- so this works for every site on the listener without
  * being told which they are.
  */
-std::string server::redirected(const sys::peer& from,
-                               const std::string& authority,
-                               const std::string& target) const
+server::redirect server::redirected(const sys::peer& from,
+                                    const std::string& authority,
+                                    const std::string& target) const
 {
-    if(m_redirect.empty() || from.secure) return std::string();
+    redirect out;
+
+    // Nothing to do: no listener redirects, or this one is already TLS.
+    if(m_redirect.empty() || from.secure) return out;
 
     const std::map<unsigned short, unsigned short>::const_iterator i =
         m_redirect.find(from.local_port);
 
-    if(i == m_redirect.end()) return std::string();
+    // A plaintext listener with no marker genuinely serves. Not every
+    // insecure port is a redirect port, which is why m_redirect is a map.
+    if(i == m_redirect.end()) return out;
 
     // A request with no authority at all -- HTTP/1.0 without Host -- has
-    // nowhere to be sent.  Left alone rather than guessed at: a Location
-    // naming the wrong host is worse than no redirect.
-    if(authority.empty()) return std::string();
+    // nowhere to be sent.  Still not guessed at: a Location naming the wrong
+    // host is worse than no redirect, and that reasoning has not changed.
+    //
+    // What changed is the third answer.  This used to return "" and be served
+    // like any other request, which is the one thing this listener was
+    // configured never to do -- content over cleartext, and a guarded path
+    // reaching protect() with the password to follow (#388).  It is refused
+    // instead.
+    //
+    // 426 rather than 400 because the request is not malformed: HTTP/1.0 does
+    // not require a Host, so a client sending none is obeying its own version
+    // of the protocol.  What is wrong is the protocol, and 426 says exactly
+    // that where 400 would say something untrue.
+    if(authority.empty()) {
+        out.what = redirect::answer::upgrade;
+
+        return out;
+    }
 
     std::string where = "https://" + authority;
 
@@ -1297,7 +1318,10 @@ std::string server::redirected(const sys::peer& from,
     // address bar.  Any other port has to be said.
     if(i->second != 443) where += ":" + std::to_string(i->second);
 
-    return where + target;
+    out.what = redirect::answer::moved;
+    out.where = where + target;
+
+    return out;
 }
 
 std::string server::url(const std::string& path) const {
@@ -2684,17 +2708,42 @@ void server::serve(sys::socketstream& s, const sys::peer& from) {
     // 404 over cleartext would be a worse answer than a redirect to the same
     // path over TLS, and an attacker could otherwise map the site on port 80.
     {
-        const std::string where = redirected(from, noted_site, q.target());
+        const redirect r = redirected(from, noted_site, q.target());
 
-        if(!where.empty()) {
+        if(r.what == redirect::answer::moved) {
             response moved;
 
-            moved.status(301).field("Location", where);
+            moved.status(301).field("Location", r.where);
 
             noted_status = moved.status();
             noted_bytes = moved.body().size();
 
             s << moved.str(m_options.server_name) << std::flush;
+
+            return;
+        }
+
+        if(r.what == redirect::answer::upgrade) {
+            response upgrade;
+
+        // RFC 9110 15.5.22 requires an Upgrade field on a 426, and 7.8
+        // requires an "Upgrade" connection option beside it so an
+        // intermediary does not forward a hop-by-hop field.  `close` rides in
+        // the same list because this connection has nothing further to do:
+        // whatever the client upgrades to, it will not be answered here.
+        //
+        // No client acts on the invitation -- RFC 2817's in-band TLS upgrade
+        // was never implemented by a browser, and this library's own client
+        // ignores Upgrade too.  The refusal is the point; the field is what
+        // makes the refusal say something true.
+            upgrade.status(426)
+                   .field("Upgrade", "TLS/1.0, HTTP/1.1")
+                   .field("Connection", "Upgrade, close");
+
+            noted_status = upgrade.status();
+            noted_bytes = upgrade.body().size();
+
+            s << upgrade.str(m_options.server_name) << std::flush;
 
             return;
         }
@@ -3464,12 +3513,37 @@ sys::task<bool> server::serve_request_async(sys::server::connection& c,
     // 404 over cleartext would be a worse answer than a redirect to the same
     // path over TLS, and an attacker could otherwise map the site on port 80.
     {
-        const std::string where = redirected(from, noted_site, q.target());
+        const redirect r = redirected(from, noted_site, q.target());
 
-        if(!where.empty()) {
+        if(r.what == redirect::answer::upgrade) {
+            response upgrade;
+
+        // RFC 9110 15.5.22 requires an Upgrade field on a 426, and 7.8
+        // requires an "Upgrade" connection option beside it so an
+        // intermediary does not forward a hop-by-hop field.  `close` rides in
+        // the same list because this connection has nothing further to do:
+        // whatever the client upgrades to, it will not be answered here.
+        //
+        // No client acts on the invitation -- RFC 2817's in-band TLS upgrade
+        // was never implemented by a browser, and this library's own client
+        // ignores Upgrade too.  The refusal is the point; the field is what
+        // makes the refusal say something true.
+            upgrade.status(426)
+                   .field("Upgrade", "TLS/1.0, HTTP/1.1")
+                   .field("Connection", "Upgrade, close");
+
+            noted_status = upgrade.status();
+            noted_bytes = upgrade.body().size();
+
+            co_await out.send(upgrade);
+
+            co_return false;
+        }
+
+        if(r.what == redirect::answer::moved) {
             response moved;
 
-            moved.status(301).field("Location", where);
+            moved.status(301).field("Location", r.where);
 
             noted_status = moved.status();
             noted_bytes = moved.body().size();

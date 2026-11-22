@@ -1644,9 +1644,34 @@ private:
     std::function<void(const access&)> m_on_request;
     limiter m_limits;
     handler m_otherwise;
-    /** Where an insecure request should have gone, or "" if it should stay. */
-    std::string redirected(const sys::peer& from, const std::string& authority,
-                           const std::string& target) const;
+    /**
+     * What to do with a request that arrived on a plaintext listener.
+     *
+     * Three answers, and the third is why this is not a string. `redirected()`
+     * used to return the Location or `""`, and `""` carried two opposite
+     * instructions: *this listener serves content, carry on* and *this request
+     * cannot be redirected*. The caller could only act on the first, so a
+     * request with no authority -- HTTP/1.0 with no Host -- was served over
+     * cleartext from a listener configured to redirect everything, and could
+     * reach `protect()` (#388).
+     *
+     * Keeping them apart is the whole fix. The information was always present
+     * here; it was destroyed on the way out.
+     */
+    struct redirect {
+        enum class answer {
+            serve,     ///< not a redirect listener, or already secure: carry on
+            moved,     ///< 301 to `where`
+            upgrade,   ///< 426: nowhere to send it, and this listener serves nothing
+        };
+
+        answer what = answer::serve;
+        std::string where;   ///< only meaningful for `moved`
+    };
+
+    /** Where an insecure request should have gone, or that it cannot go. */
+    redirect redirected(const sys::peer& from, const std::string& authority,
+                        const std::string& target) const;
 
     std::unique_ptr<sys::server> m_transport;
     bool m_tls = false;

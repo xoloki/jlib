@@ -206,13 +206,39 @@ static void where_an_insecure_request_is_sent(bool async) {
     }
 
     {
-        // HTTP/1.0 with no Host has no authority to build a Location from.
-        // Left alone rather than guessed at.
+        // **#388.** HTTP/1.0 with no Host has no authority to build a Location
+        // from. Not guessing a hostname was right and still is -- a Location
+        // naming the wrong host is worse than none. Serving it anyway was the
+        // error: content over cleartext from a listener configured to send
+        // everything to TLS.
+        //
+        // This assertion read `status_of(r) == 200` until #388, under the name
+        // "a request with no name to send anywhere is served instead". It was
+        // a deliberate decision, and it was the bug.
+        //
+        // 426 rather than 400 because HTTP/1.0 does not require a Host, so the
+        // request is not malformed. The protocol is what is wrong, and that is
+        // what 426 says.
         const std::string r =
             raw(insecure, "GET /page HTTP/1.0\r\nConnection: close\r\n\r\n");
 
-        ok("  a request with no name to send anywhere is served instead",
-           status_of(r) == 200, std::to_string(status_of(r)));
+        ok("  #388 a request with nowhere to go is refused, not served",
+           status_of(r) == 426, std::to_string(status_of(r)));
+
+        // The assertion that would have caught #388 on its own: whatever the
+        // status, the representation must not cross the wire in the clear.
+        ok("  and the body never reaches the client",
+           r.find("served\n") == std::string::npos,
+           r.find("served\n") == std::string::npos ? "" : "the body was served");
+
+        // RFC 9110 15.5.22 makes Upgrade mandatory on a 426, and 7.8 makes an
+        // "Upgrade" connection option mandatory beside it.
+        ok("  and names the protocol it requires",
+           field_of(r, "Upgrade") == "TLS/1.0, HTTP/1.1", field_of(r, "Upgrade"));
+
+        ok("  and marks Upgrade hop-by-hop, as 7.8 requires",
+           field_of(r, "Connection").find("Upgrade") != std::string::npos,
+           field_of(r, "Connection"));
     }
 
     turn.done();
@@ -277,6 +303,31 @@ static void a_guard_is_not_offered_over_cleartext(bool async) {
         ok("  the port is named when it is not 443",
            field_of(r, "Location") == "https://a.example:8443/private",
            field_of(r, "Location"));
+    }
+
+    {
+        // **#388, and the reason it is a security issue rather than a
+        // cosmetic one.**
+        //
+        // A guarded path asked for over HTTP/1.0 with no Host used to be
+        // *served* -- which means it reached protect(), and protect() answers
+        // a missing credential with a challenge. The server would have asked
+        // for a password over cleartext, which is precisely what the redirect
+        // is placed before the guard to prevent. The redirect declined, and
+        // the guard did not know that.
+        const std::string r =
+            raw(insecure, "GET /private HTTP/1.0\r\nConnection: close\r\n\r\n");
+
+        ok("  #388 a guarded path with no name to send anywhere is refused",
+           status_of(r) == 426, std::to_string(status_of(r)));
+
+        ok("  and still no challenge is sent over cleartext",
+           field_of(r, "WWW-Authenticate").empty(),
+           field_of(r, "WWW-Authenticate"));
+
+        ok("  and the secret never reaches the client",
+           r.find("secret\n") == std::string::npos,
+           r.find("secret\n") == std::string::npos ? "" : "the secret was served");
     }
 
     {
