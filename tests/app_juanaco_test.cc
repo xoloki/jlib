@@ -53,6 +53,7 @@
 #include "vt.hh"
 
 #include <jlib/sys/server.hh>
+#include <jlib/sys/sys.hh>
 
 #include <chrono>
 #include <cctype>
@@ -60,6 +61,9 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
+
+#include <unistd.h>
 
 namespace sys = jlib::sys;
 namespace tests = jlib::tests;
@@ -89,6 +93,13 @@ static std::string juanaco() {
     if(const char* e = std::getenv("JUANACO")) return e;
 
     return "../jlib/apps/juanaco";
+}
+
+/** jcode, beside juanaco in the build tree, for the sections that compare. */
+static std::string jcode_path() {
+    if(const char* e = std::getenv("JCODE")) return e;
+
+    return "../jlib/apps/jcode";
 }
 
 static const int ROWS = 30;
@@ -159,10 +170,86 @@ static double seconds_since(std::chrono::steady_clock::time_point t) {
         .count();
 }
 
+/** What a write question has on its row and nothing else does. */
+static const std::string DIALOG = "[y] yes";
+
+/** The write question on the prompt row, or empty when there is none. */
+static std::string question_on(const tests::vt& v, int row = PROMPT_ROW) {
+    const std::string r = v.row(row);
+
+    return r.find(DIALOG) == std::string::npos ? std::string() : r;
+}
+
+/**
+ * Answer every write question with `key` until the worker is idle, and say
+ * how many there were.
+ *
+ * **Every question is seen, by construction.** The worker blocks on each one
+ * until a key arrives, so none can be answered behind this loop's back --
+ * which is what makes the count a measurement rather than a sample. That
+ * count is the "one dialog, not two" assertion #449 says has teeth.
+ *
+ * It waits for each question to *leave* before looking for the next, so a
+ * question still on screen because its answer has not been read yet is not
+ * answered twice -- which would be the double-tap the program itself guards
+ * against, committed by the test.
+ */
+static int answer_every(tests::pty& p, const std::string& key,
+                        std::vector<std::string>* asked = 0)
+{
+    // Started, first: straight after Return the status line can still say
+    // idle, and reading that as "finished" would end this before it began.
+    until(p, [](const tests::vt& v) {
+        return !question_on(v).empty() ||
+               v.row(STATUS_ROW).find("idle") == std::string::npos;
+    }, 10.0);
+
+    int n = 0;
+
+    for(;;) {
+        std::string q;
+
+        until(p, [&q](const tests::vt& v) {
+            q = question_on(v);
+
+            return !q.empty() ||
+                   v.row(STATUS_ROW).find("idle") != std::string::npos;
+        }, 30.0);
+
+        if(q.empty()) return n;
+
+        n++;
+
+        if(asked) asked->push_back(q);
+
+        p.send(key);
+
+        until(p, [&q](const tests::vt& v) { return question_on(v) != q; },
+              10.0);
+    }
+}
+
+/** Write a file and return what an edit to it produced, for comparison. */
+static std::string hunks_reply(const std::string& name) {
+    return name + "\n"
+           "<<<<<<< SEARCH\n"
+           "    return 1;\n"
+           "=======\n"
+           "    return 0;\n"
+           ">>>>>>> REPLACE\n"
+           "\n" + name + "\n"
+           "<<<<<<< SEARCH\n"
+           "// first\n"
+           "=======\n"
+           "// first, and changed\n"
+           ">>>>>>> REPLACE\n";
+}
+
 int main() {
     std::cout << std::unitbuf;
 
     const std::string prog = juanaco();
+    const std::string jcode = jcode_path();
 
     std::cout << "juanaco's skeleton, through a pty:\n";
 
@@ -433,7 +520,7 @@ int main() {
     }
 
     {
-        std::cout << "\nwithout --yes, which is #449's bargain:\n";
+        std::cout << "\nwithout --yes, every write is a question:\n";
 
         tests::tree tr;
 
@@ -441,33 +528,571 @@ int main() {
 
         sc.content = tests::listing("hello.cc", "changed\n");
 
+        // Slow, so there is a stretch in which to type a draft the dialog
+        // must not destroy.
+        sc.chunk_delay = 0.15;
+
         tests::pty p({ prog, "--url", url, "--root", tr.path,
                        "hello.cc" }, ROWS, COLS);
 
         until(p, [](const tests::vt& v) { return v.shows("juanaco"); }, 10.0);
 
-        ok("  it says up front that nothing will be written",
-           shown(p).shows("announced and not written"), shown(p).dump());
-
-        p.send("/mode whole\r");
-
-        until(p, [](const tests::vt& v) { return v.shows("-- edits whole"); },
-              10.0);
+        ok("  it says up front that writes are asked about",
+           shown(p).shows("every write is asked about first"), shown(p).dump());
 
         p.send("change it\r");
 
         until(p, [](const tests::vt& v) {
-            return v.shows("would write hello.cc");
+            return v.row(STATUS_ROW).find("streaming") != std::string::npos;
         }, 20.0);
 
-        ok("  an edit is announced", shown(p).shows("would write hello.cc"),
+        // A draft, typed while the reply arrives and not submitted.
+        p.send("my next thought");
+
+        const bool asked = until(p, [](const tests::vt& v) {
+            return !question_on(v).empty();
+        }, 30.0);
+
+        {
+            const tests::vt v = shown(p);
+
+            ok("  a question appears", asked, v.dump());
+
+            ok("  naming the file and the keys",
+               question_on(v).find("write hello.cc?") != std::string::npos,
+               "[" + v.row(PROMPT_ROW) + "]");
+
+            // **The worker is blocked on you, and must say so.** `idle`
+            // would read as finished, and `streaming` -- what this said
+            // until a live run -- as busy.
+            ok("  and the status line says it is asking",
+               v.row(STATUS_ROW).find("asking") != std::string::npos,
+               "[" + v.row(STATUS_ROW) + "]");
+
+            ok("  nothing is written while the question is up",
+               tr.get("hello.cc") == "original\n",
+               "[" + tr.get("hello.cc") + "]");
+        }
+
+        // **A letter that is not an answer does nothing.** It must not land
+        // in the hidden draft either, which is what the next assertion
+        // would show.
+        p.send("q");
+        p.settle(0.5);
+
+        ok("  a key that is not y, n or Escape is not an answer",
+           !question_on(shown(p)).empty(), "[" + shown(p).row(PROMPT_ROW) + "]");
+
+        p.send("n");
+
+        until(p, [](const tests::vt& v) {
+            return v.row(STATUS_ROW).find("idle") != std::string::npos;
+        }, 20.0);
+
+        {
+            const tests::vt v = shown(p);
+
+            ok("  no leaves the file alone", tr.get("hello.cc") == "original\n",
+               "[" + tr.get("hello.cc") + "]");
+
+            ok("  and says so", v.shows("left hello.cc alone"), v.dump());
+
+            ok("  and the answer is on the record",
+               v.shows("asked: write hello.cc? no"), v.dump());
+
+            // **The dialog borrows the row; it does not clear it.** The
+            // draft comes back exactly, and without the `q` that was not an
+            // answer.
+            ok("  the draft typed before the question comes back intact",
+               v.row(PROMPT_ROW).find("> my next thought") != std::string::npos &&
+                   v.row(PROMPT_ROW).find("thoughtq") == std::string::npos,
+               "[" + v.row(PROMPT_ROW) + "]");
+        }
+
+        sc.chunk_delay = 0;
+
+        p.send("\x15/quit\r");
+
+        ok("  /quit leaves", p.wait_for_exit(10.0) == 0);
+    }
+
+    {
+        std::cout << "\ntwo edits, and the dry run refuses one:\n";
+
+        tests::tree tr;
+
+        tr.put("hello.cc", "original\n");
+
+        const std::string away = "/tmp/juanaco_escape_" +
+                                 tr.path.substr(tr.path.find_last_of('/') + 1) +
+                                 ".cc";
+
+        ::unlink(away.c_str());
+
+        // **The refused one first**, so that asking before classifying would
+        // put it in front of the user before anything else.
+        sc.content = tests::listing(away, "escaped\n") +
+                     tests::listing("hello.cc", "accepted\n");
+
+        tests::pty p({ prog, "--url", url, "--root", tr.path,
+                       "hello.cc" }, ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("juanaco"); }, 10.0);
+
+        p.send("change them\r");
+
+        std::vector<std::string> questions;
+
+        const int n = answer_every(p, "y", &questions);
+
+        const tests::vt v = shown(p);
+
+        // **The assertion with teeth.** Asking first and refusing afterwards
+        // writes exactly the same bytes, which is what makes it the easy
+        // mistake -- so the bytes cannot be what this checks. The count can.
+        ok("  exactly one question, not two", n == 1,
+           std::to_string(n) + " asked" +
+               (questions.empty() ? std::string() : ", first [" + questions[0] + "]"));
+
+        ok("  and it was about the file that could be written",
+           !questions.empty() &&
+               questions[0].find("hello.cc") != std::string::npos &&
+               questions[0].find("escape") == std::string::npos,
+           questions.empty() ? std::string("none") : questions[0]);
+
+        ok("  the refusal is a line with its reason, not a question",
+           v.shows("refused " + away + ":"), v.dump());
+
+        ok("  yes writes the one that could be written",
+           tr.get("hello.cc") == "accepted\n", "[" + tr.get("hello.cc") + "]");
+
+        ok("  and nothing reached the refused path",
+           ::access(away.c_str(), F_OK) != 0, away);
+
+        ::unlink(away.c_str());
+
+        p.send("/quit\r");
+
+        ok("  /quit leaves", p.wait_for_exit(10.0) == 0);
+    }
+
+    {
+        std::cout << "\nyes, then Escape:\n";
+
+        tests::tree tr;
+
+        tr.put("a.cc", "a\n");
+        tr.put("b.cc", "b\n");
+
+        sc.content = tests::listing("a.cc", "a changed\n") +
+                     tests::listing("b.cc", "b changed\n");
+
+        // **A build that always fails**, which is what makes a second attempt
+        // the thing that would happen next. With no build, the first write
+        // counts as success and the attempts end whether or not Escape
+        // stopped the worker -- so the request count below could not fail.
+        tests::pty p({ prog, "--url", url, "--root", tr.path,
+                       "--build", "false", "a.cc", "b.cc" }, ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("juanaco"); }, 10.0);
+
+        p.send("/mode build on\r");
+
+        until(p, [](const tests::vt& v) { return v.shows("-- build on"); }, 10.0);
+
+        const int before = sc.requests.load();
+
+        p.send("change both\r");
+
+        until(p, [](const tests::vt& v) { return !question_on(v).empty(); },
+              30.0);
+
+        const std::string first = question_on(shown(p));
+
+        p.send("y");
+
+        until(p, [&first](const tests::vt& v) {
+            const std::string q = question_on(v);
+
+            return !q.empty() && q != first;
+        }, 10.0);
+
+        const std::string second = question_on(shown(p));
+
+        ok("  the second file is asked about in turn",
+           second.find("b.cc") != std::string::npos, "[" + second + "]");
+
+        p.send("\x1b");
+
+        until(p, [](const tests::vt& v) {
+            return v.row(STATUS_ROW).find("idle") != std::string::npos;
+        }, 20.0);
+
+        {
+            const tests::vt v = shown(p);
+
+            ok("  the one agreed to is written", tr.get("a.cc") == "a changed\n",
+               "[" + tr.get("a.cc") + "]");
+
+            ok("  the one stopped at is not", tr.get("b.cc") == "b\n",
+               "[" + tr.get("b.cc") + "]");
+
+            ok("  and it says the asking was stopped",
+               v.shows("stopped at the confirm"), v.dump());
+
+            // Stop is not no: the attempt is over, not merely this file. An
+            // edit agreed to before the Escape would otherwise be built and
+            // sent round again, and the person who pressed Escape would be
+            // asked about the next attempt's edits.
+            // A difference, not a total: the endpoint has served every
+            // section before this one, so "more than none" is true of any
+            // run at all and could not fail -- which is what this read
+            // until it was looked at again before it was ever run.
+            ok("  and no second request went out",
+               sc.requests.load() - before == 1,
+               std::to_string(sc.requests.load() - before) + " requests");
+        }
+
+        p.send("/quit\r");
+
+        ok("  /quit leaves", p.wait_for_exit(10.0) == 0);
+    }
+
+    {
+        std::cout << "\nno is not stop:\n";
+
+        tests::tree tr;
+
+        tr.put("a.cc", "a\n");
+        tr.put("b.cc", "b\n");
+
+        sc.content = tests::listing("a.cc", "a changed\n") +
+                     tests::listing("b.cc", "b changed\n");
+
+        tests::pty p({ prog, "--url", url, "--root", tr.path,
+                       "a.cc", "b.cc" }, ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("juanaco"); }, 10.0);
+
+        p.send("change both\r");
+
+        // n to the first, y to the second: a "no" that silently meant "stop"
+        // would never ask the second question at all.
+        std::vector<std::string> questions;
+
+        until(p, [](const tests::vt& v) { return !question_on(v).empty(); },
+              30.0);
+
+        questions.push_back(question_on(shown(p)));
+
+        p.send("n");
+
+        const bool second = until(p, [&questions](const tests::vt& v) {
+            const std::string q = question_on(v);
+
+            return !q.empty() && q != questions[0];
+        }, 10.0);
+
+        ok("  a no to the first file still asks about the second", second,
            shown(p).dump());
 
-        // The assertion that matters: not that it announced, but that the
-        // file is still there. An announcement and a write look identical
-        // from inside the transcript.
-        ok("  and the file is untouched", tr.get("hello.cc") == "original\n",
+        p.send("y");
+
+        until(p, [](const tests::vt& v) {
+            return v.row(STATUS_ROW).find("idle") != std::string::npos;
+        }, 20.0);
+
+        ok("  the first is left alone", tr.get("a.cc") == "a\n",
+           "[" + tr.get("a.cc") + "]");
+
+        ok("  and the second is written", tr.get("b.cc") == "b changed\n",
+           "[" + tr.get("b.cc") + "]");
+
+        p.send("/quit\r");
+
+        ok("  /quit leaves", p.wait_for_exit(10.0) == 0);
+    }
+
+    {
+        std::cout << "\ny pressed twice:\n";
+
+        tests::tree tr;
+
+        tr.put("a.cc", "a\n");
+        tr.put("b.cc", "b\n");
+
+        sc.content = tests::listing("a.cc", "a changed\n") +
+                     tests::listing("b.cc", "b changed\n");
+
+        tests::pty p({ prog, "--url", url, "--root", tr.path,
+                       "a.cc", "b.cc" }, ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("juanaco"); }, 10.0);
+
+        p.send("change both\r");
+
+        until(p, [](const tests::vt& v) { return !question_on(v).empty(); },
+              30.0);
+
+        const std::string first = question_on(shown(p));
+
+        // **A double tap.** Both bytes go down in one write, so the second
+        // is already waiting when the first is read -- and the next question
+        // appears microseconds later. Without the flushinp() after an answer
+        // it lands somewhere: on the second question, unseen, or in the
+        // prompt. Both are checked.
+        p.send("yy");
+
+        until(p, [&first](const tests::vt& v) {
+            const std::string q = question_on(v);
+
+            return !q.empty() && q != first;
+        }, 10.0);
+
+        p.settle(0.5);
+
+        const std::string second = question_on(shown(p));
+
+        ok("  the second press did not answer the second question",
+           second.find("b.cc") != std::string::npos, "[" + second + "]");
+
+        p.send("n");
+
+        until(p, [](const tests::vt& v) {
+            return v.row(STATUS_ROW).find("idle") != std::string::npos;
+        }, 20.0);
+
+        {
+            const tests::vt v = shown(p);
+
+            // vt::row trims trailing spaces, so an empty prompt reads ">".
+            ok("  nor did it land in the prompt", v.row(PROMPT_ROW) == ">",
+               "[" + v.row(PROMPT_ROW) + "]");
+
+            ok("  so b.cc is exactly as it was", tr.get("b.cc") == "b\n",
+               "[" + tr.get("b.cc") + "]");
+
+            ok("  and a.cc was written", tr.get("a.cc") == "a changed\n",
+               "[" + tr.get("a.cc") + "]");
+        }
+
+        p.send("/quit\r");
+
+        ok("  /quit leaves", p.wait_for_exit(10.0) == 0);
+    }
+
+    {
+        std::cout << "\nthe window resized mid-question:\n";
+
+        tests::tree tr;
+
+        tr.put("hello.cc", "original\n");
+
+        sc.content = tests::listing("hello.cc", "resized\n");
+
+        tests::pty p({ prog, "--url", url, "--root", tr.path,
+                       "hello.cc" }, ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("juanaco"); }, 10.0);
+
+        p.send("change it\r");
+
+        until(p, [](const tests::vt& v) { return !question_on(v).empty(); },
+              30.0);
+
+        // Bigger, so nothing drawn before the resize is clipped by the model
+        // the screen is rebuilt into. The prompt row moves with the bottom.
+        const int R2 = ROWS + 6;
+        const int C2 = COLS + 10;
+
+        ok("  the harness can resize the terminal", p.resize(R2, C2));
+
+        const auto bigger = [&p, R2, C2]() {
+            tests::vt v(R2, C2);
+
+            v.feed(p.seen());
+
+            return v;
+        };
+
+        bool still = false;
+
+        for(int i = 0; i < 50 && !still; i++) {
+            p.settle(0.1);
+
+            still = !question_on(bigger(), R2 - 2).empty();
+        }
+
+        ok("  the question is still on screen after it, on the new prompt row",
+           still, "[" + bigger().row(R2 - 2) + "]");
+
+        p.send("y");
+
+        until(p, [](const tests::vt& v) { return v.shows("written hello.cc"); },
+              20.0);
+
+        ok("  and answering it still works", tr.get("hello.cc") == "resized\n",
            "[" + tr.get("hello.cc") + "]");
+
+        p.send("/quit\r");
+
+        ok("  /quit leaves", p.wait_for_exit(10.0) == 0);
+    }
+
+    {
+        std::cout << "\nCtrl-C while the worker is blocked on a question:\n";
+
+        tests::tree tr;
+
+        tr.put("hello.cc", "original\n");
+
+        sc.content = tests::listing("hello.cc", "interrupted\n");
+
+        tests::pty p({ prog, "--url", url, "--root", tr.path,
+                       "hello.cc" }, ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("juanaco"); }, 10.0);
+
+        p.send("change it\r");
+
+        until(p, [](const tests::vt& v) { return !question_on(v).empty(); },
+              30.0);
+
+        const auto began = std::chrono::steady_clock::now();
+
+        p.send("\x03");
+
+        const int status = p.wait_for_exit(15.0);
+        const double took = seconds_since(began);
+
+        ok("  it leaves", status == 0, std::to_string(status));
+
+        // **The measurement with teeth.** Left blocked, the worker would sit
+        // out the whole two-second grace and be `_Exit`ed past with the
+        // "still in flight" line. Abandoned first, it wakes, writes nothing,
+        // and is joined -- inside the grace and silently.
+        ok("  promptly, rather than sitting out the grace", took < 1.5,
+           std::to_string(took) + "s");
+
+        ok("  and joins the worker rather than abandoning it",
+           p.seen().find("still in flight") == std::string::npos);
+
+        ok("  with nothing written", tr.get("hello.cc") == "original\n",
+           "[" + tr.get("hello.cc") + "]");
+    }
+
+    {
+        std::cout << "\njcode asks the same question, through the same policy:\n";
+
+        // **jcode's asking path had never been run by a test.** sys::run
+        // leaves a child's stdin inherited from whatever runs `make check`,
+        // which is why app_jcode_run_test passes --yes on every run -- a
+        // [y/N] reading the runner's terminal would hang the suite. A pty is
+        // a stdin this file controls.
+        tests::tree tr;
+
+        tr.put("hello.cc", "original\n");
+
+        const std::string away = "/tmp/jcode_escape_" +
+                                 tr.path.substr(tr.path.find_last_of('/') + 1) +
+                                 ".cc";
+
+        ::unlink(away.c_str());
+
+        sc.content = tests::listing(away, "escaped\n") +
+                     tests::listing("hello.cc", "accepted\n");
+
+        tests::pty p({ jcode, "--url", url, "--root", tr.path,
+                       "change them", "hello.cc" }, ROWS, COLS);
+
+        int prompts = 0;
+        int status = -1;
+
+        for(int i = 0; i < 300; i++) {
+            p.settle(0.1);
+
+            int seen = 0;
+
+            for(std::size_t at = p.seen().find("[y/N]"); at != std::string::npos;
+                at = p.seen().find("[y/N]", at + 1)) seen++;
+
+            if(seen > prompts) { prompts = seen; p.send("n\r"); }
+
+            status = p.wait_for_exit(0.0);
+
+            if(status != -1) break;
+        }
+
+        ok("  jcode asks once, as juanaco did", prompts == 1,
+           std::to_string(prompts) + " prompts");
+
+        ok("  about the file that could be written",
+           p.seen().find("write hello.cc? [y/N]") != std::string::npos);
+
+        ok("  and no leaves it alone", tr.get("hello.cc") == "original\n",
+           "[" + tr.get("hello.cc") + "]");
+
+        ok("  saying so in jcode's voice",
+           p.seen().find("jcode: left hello.cc alone") != std::string::npos);
+
+        ::unlink(away.c_str());
+    }
+
+    {
+        std::cout << "\njcode --yes and juanaco's yes write the same bytes:\n";
+
+        // Hunks, so apply() resolves search text against the file and the
+        // comparison is of two programs doing real work, not of two copies
+        // of what the model sent.
+        const std::string original = "// first\n"
+                                     "int main() {\n"
+                                     "    return 1;\n"
+                                     "}\n";
+
+        sc.content = hunks_reply("main.cc");
+
+        tests::tree by_jcode;
+        tests::tree by_juanaco;
+
+        by_jcode.put("main.cc", original);
+        by_juanaco.put("main.cc", original);
+
+        std::string out, err;
+
+        int js = -1;
+
+        try {
+            js = sys::run({ jcode, "--url", url, "--root", by_jcode.path,
+                            "--yes", "--format", "hunks", "change it",
+                            "main.cc" }, out, err);
+        }
+        catch(std::exception& e) { err = e.what(); }
+
+        ok("  jcode --yes succeeds", js == 0, std::to_string(js) + " " + err);
+
+        tests::pty p({ prog, "--url", url, "--root", by_juanaco.path,
+                       "main.cc" }, ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("juanaco"); }, 10.0);
+
+        p.send("/mode hunks\r");
+
+        until(p, [](const tests::vt& v) { return v.shows("-- edits hunks"); },
+              10.0);
+
+        p.send("change it\r");
+
+        const int n = answer_every(p, "y");
+
+        ok("  juanaco asked once and was told yes", n == 1, std::to_string(n));
+
+        const std::string a = by_jcode.get("main.cc");
+        const std::string b = by_juanaco.get("main.cc");
+
+        ok("  both changed the file", a != original && b != original,
+           "[" + a + "] [" + b + "]");
+
+        ok("  and byte for byte the same", a == b, "[" + a + "] vs [" + b + "]");
 
         p.send("/quit\r");
 

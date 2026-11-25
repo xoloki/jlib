@@ -537,6 +537,63 @@ struct result {
 std::vector<result> apply(const reply& r, const std::string& root,
                           bool dry_run = false);
 
+// ------------------------------------------------------------ the one policy
+
+/** What a person said to one edit. */
+enum class consent {
+    yes,    ///< write it
+    no,     ///< leave this one alone, and go on asking about the rest
+    stop    ///< leave this one alone, and every one after it, unasked
+};
+
+/** Asks about one edit that is already known to apply. */
+typedef std::function<consent(const result&)> asker;
+
+/** Says one line of what is happening. */
+typedef std::function<void(const std::string&)> teller;
+
+/**
+ * Put a reply on disk the way every front end must: decided first, asked
+ * second, written third.
+ *
+ * ## Why this is here and not in each program
+ *
+ * jcode asked down a pipe and juanaco asks in a dialog, and **what is asked
+ * about must not depend on which one you ran.** If a front end decides for
+ * itself which edits are worth a question, the two can drift in what they
+ * will write to your disk -- and only one of them is covered by
+ * `app_jcode_run_test`. #449 was written to say "copy jcode_main's control
+ * flow exactly", and the copy juanaco took in #447 had **already drifted**
+ * by the time it was read again: it named an unnamed refusal differently and
+ * had no dry-run branch at all. A copy is a second policy waiting to happen.
+ * So there is one, and the front ends inject only the saying and the asking.
+ *
+ * ## The order, which is the whole of it
+ *
+ * Guesses first, before any question, so a person deciding about a file
+ * knows what was assumed to arrive at its name.
+ *
+ * Then `apply(dry_run)` classifies every edit **before anything is asked**.
+ * A `refused` edit is a line with its reason and never a question; an
+ * `unchanged` one is a line and never a question; only `created` and
+ * `written` are asked about. Asking first and refusing afterwards also
+ * "works" -- it writes the same bytes -- which is what makes it the easy
+ * mistake: the person is asked to approve a write that was never going to
+ * happen, and learns so only after saying yes.
+ *
+ * Then the edits that were agreed to are written together, and each outcome
+ * said.
+ *
+ * @param ask     empty means yes to everything, which is `--yes`
+ * @param dry_run decide and say, ask nothing, write nothing
+ * @return        whether anything reached the disk -- `writer`'s contract
+ *
+ * The lines `say` is given carry no prefix; jcode puts `jcode: ` in front of
+ * each and juanaco puts them in the transcript.
+ */
+bool deliver(const reply& r, const std::string& root, const teller& say,
+             const asker& ask = asker(), bool dry_run = false);
+
 }
 }
 }
