@@ -105,10 +105,8 @@ Prefill is superlinear — doubling the prompt roughly triples the wait — and 
 
 Two consequences, and the first is the one that surprised me:
 
-- **Decode needs no attention at all.** At 9.6 to 20 tok/s, rendering a token at
-a time is free, and throughput polish would be effort spent where there are no seconds to save.
-- **An elapsed counter is the floor, not the answer.** Thirty seconds of silence
-with a ticking number still reads as hung. #451 is the real fix and it belongs to jserve: the prefill loop already calls a predicate every 256 tokens, added in #402 so a departed client could be noticed, and a loop that asks "does anyone still want this?" can answer "and this is chunk 12 of 16" for nothing.
+- **Decode needs no attention at all.** At 9.6 to 20 tok/s, rendering a token at a time is free, and throughput polish would be effort spent where there are no seconds to save.
+- **An elapsed counter is the floor, not the answer.** Thirty seconds of silence with a ticking number still reads as hung. #451 is the real fix and it belongs to jserve: the prefill loop already calls a predicate every 256 tokens, added in #402 so a departed client could be noticed, and a loop that asks "does anyone still want this?" can answer "and this is chunk 12 of 16" for nothing.
 
 There is no progress bar in juanaco itself, deliberately. Prefill is superlinear and machine-dependent, so a client-side estimate would be fabricated, and a fabricated bar is worse than a counter that is merely unhelpful.
 

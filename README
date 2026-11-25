@@ -117,6 +117,16 @@ Each is a map rather than a reference: it says how the pieces fit and why they
 are shaped that way, and points at the header for the detail.  Where a
 document and a header disagree, the header is right and the document is a bug.
 
+The prose in them is not hard-wrapped: one line per paragraph, because a
+renderer reflows it anyway and a hard wrap only ever costs an edit.  Tables,
+diagrams and code keep their own line structure.  Commits that only reflowed
+text are recorded in .git-blame-ignore-revs, so that
+
+    git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+makes `git blame` point at whoever wrote a sentence rather than at the reflow.
+GitHub honours the file without being asked; the command line does not.
+
 
 REQUIREMENTS
 ------------
