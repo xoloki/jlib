@@ -29,7 +29,12 @@
  * prompt keeps taking keys and the screen keeps repainting through a request
  * that blocks for minutes -- and now the tokens appear one at a time as the
  * server emits them. Escape stops the reply without ending the conversation.
- * Still no confirm dialog; that is #449.
+ *
+ * **And every write is asked about** (#449, phase 5), by the same policy
+ * jcode uses -- `jcode::deliver`, which both programs call, so what is asked,
+ * in what order, and what reaches the disk cannot depend on which one you
+ * ran. The dialog is the one exchange that runs backwards: the worker asks,
+ * blocks, and is answered by a keystroke only the UI thread can collect.
  *
  * All of it is driven by `make check` against the scripted endpoint
  * `app_jcode_run_test` already hand-rolls: no GGUF, no model, no network.
@@ -76,12 +81,14 @@
 
 #include <chrono>
 #include <clocale>
+#include <condition_variable>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -270,6 +277,18 @@ struct state {
     /** Set when Escape has been pressed and the worker has not stopped yet. */
     bool cancelling = false;
 
+    /**
+     * The write question on screen, or empty when there is none.
+     *
+     * **Held here, in what draw() draws from, and that is the resize
+     * guarantee.** A dialog painted once and then left to the terminal would
+     * be erased by the first KEY_RESIZE, which repaints from state; the
+     * worker would still be blocked waiting for an answer to a question
+     * nobody can see any more. Kept in state, it is redrawn with everything
+     * else.
+     */
+    std::string question;
+
     std::string mode_name() const {
         return edits == jcode::format::whole ? "whole" : "hunks";
     }
@@ -352,7 +371,8 @@ enum class news {
     say,       ///< a finished line, tagged by `k`
     token,     ///< a fragment, appended to the entry being streamed
     sealed,    ///< nothing more belongs to that entry
-    counts     ///< the numbers, for the status line and /stats
+    counts,    ///< the numbers, for the status line and /stats
+    ask        ///< a write question; the worker is now blocked on the answer
 };
 
 struct event {
@@ -365,6 +385,98 @@ struct event {
     unsigned long long tokens_out = 0;
     unsigned int context_used = 0;
     unsigned int context_total = 0;
+};
+
+/**
+ * The one exchange that runs backwards: the worker asks, blocks, and is
+ * answered by a keystroke only the UI thread can collect.
+ *
+ * ## Why not a second relay
+ *
+ * `sys::relay` carries items one way with a stop flag the other, and its own
+ * header says so -- "nothing else" crosses. A relay pointing the other way
+ * would work, but it would be a descriptor and a queue to carry a single
+ * value that is only ever outstanding once, because the worker is blocked
+ * until it arrives. A mutex, a condition variable and one slot say exactly
+ * that and nothing more.
+ *
+ * ## The three ways this could hang a program, and what stops each
+ *
+ * **Escape at the dialog.** Not "no" to this file but an abandonment of the
+ * rest -- so it is `abandon()`, which answers `stop` to this question and to
+ * every later one without waiting, rather than an answer the worker then has
+ * to be asked again for.
+ *
+ * **The window resizing mid-dialog.** Nothing to do with this class: the
+ * question lives in `state`, and draw() repaints from state. See
+ * state::question.
+ *
+ * **The program leaving while the worker is blocked.** The relay joins in its
+ * destructor, so a worker waiting for ever on an answer nobody will give is a
+ * hang on exit -- and the exit path's two-second grace would expire and
+ * `_Exit` past it, which is the wrong way to leave a worker that is merely
+ * waiting for a reply it can be given. So the exit path abandons first: the
+ * worker wakes, writes nothing more, and finishes inside the grace, and is
+ * joined properly.
+ *
+ * **What it relies on.** Exactly one question is ever outstanding, because
+ * the worker is blocked on it; so one slot is enough and `wait()` consumes
+ * it, which is what stops an answer to one question being read as the answer
+ * to the next.
+ */
+class confirmer {
+public:
+    /** Worker side: block until the question just posted is answered. */
+    jcode::consent wait() {
+        std::unique_lock<std::mutex> lock(m_mutex);
+
+        m_cv.wait(lock, [this] { return m_answered || m_abandoned; });
+
+        if(m_abandoned) return jcode::consent::stop;
+
+        m_answered = false;
+
+        return m_answer;
+    }
+
+    /** UI side: the answer to the question that is on screen. */
+    void answer(jcode::consent c) {
+        {
+            std::lock_guard<std::mutex> guard(m_mutex);
+
+            m_answer = c;
+            m_answered = true;
+        }
+
+        m_cv.notify_one();
+    }
+
+    /** UI side: stop, to this question and to every one after it. */
+    void abandon() {
+        {
+            std::lock_guard<std::mutex> guard(m_mutex);
+
+            m_abandoned = true;
+        }
+
+        m_cv.notify_one();
+    }
+
+    /** Whether abandon() was called, for the worker's last word. */
+    bool abandoned() {
+        std::lock_guard<std::mutex> guard(m_mutex);
+
+        return m_abandoned;
+    }
+
+private:
+    std::mutex m_mutex;
+    std::condition_variable m_cv;
+
+    jcode::consent m_answer = jcode::consent::no;
+
+    bool m_answered = false;
+    bool m_abandoned = false;
 };
 
 /**
@@ -473,13 +585,14 @@ std::vector<std::string> first_lines(const std::string& text, std::size_t most) 
  * curses loop can drain it between keystrokes without a condition variable
  * or a lock it has to remember to take.
  *
- * ## What does not cross the boundary, and the one thing that will have to
+ * ## What crosses the boundary, and the one thing that runs the other way
  *
- * Items one way, a stop flag the other. **The confirm is the exception and it
- * is not here**: asking before a write means the worker blocking on a
- * keystroke the UI thread owns, which is the one direction `relay` has no
- * answer for. So this phase either writes with `--yes` or announces what it
- * would have written and does nothing, and #449 designs the way back.
+ * Items one way, a stop flag the other. **The confirm is the exception**:
+ * asking before a write means the worker blocking on a keystroke the UI
+ * thread owns, which is the one direction `relay` has no answer for. That is
+ * `confirmer`, a single slot rather than a second relay, and its own header
+ * says why and what it does about the three ways a blocked worker can hang a
+ * program.
  *
  * `stop()` is also weaker than it looks. `wanted()` is read between items,
  * and a worker sitting in a ten-minute HTTP read is not between items. The
@@ -487,7 +600,7 @@ std::vector<std::string> first_lines(const std::string& text, std::size_t most) 
  * boundary rather than at a packet -- see the end of main() for what that
  * costs on the way out.
  */
-void work(sys::relay<event>& r, const job& j) {
+void work(sys::relay<event>& r, const job& j, confirmer& confirm) {
     const auto say = [&r](kind k, const std::string& text) {
         event e;
 
@@ -705,65 +818,34 @@ void work(sys::relay<event>& r, const job& j) {
         return a;
     };
 
-    // **Everything that cannot live in a library**, which for the write is
-    // #242's constraint: every write announced, and never a tool the model
-    // calls, because that moves the decision inside the loop.
+    // **The policy is jcode::deliver's, and only the voice is here** -- the
+    // same function jcode calls, so the two cannot disagree about which edits
+    // are asked about, in what order, or what reaches the disk. #449 asked
+    // for jcode_main's flow to be copied exactly; the copy this file took in
+    // #447 had already drifted from it, which is the argument for sharing
+    // rather than copying.
+    const jcode::teller tell = [&](const std::string& line) {
+        say(kind::edit, line);
+    };
+
+    jcode::asker ask;
+
+    if(!j.yes)
+        ask = [&](const jcode::result& d) {
+            event e;
+
+            e.n = news::ask;
+            e.text = std::string(d.what == jcode::outcome::created ? "create"
+                                                                   : "write") +
+                     " " + d.name + "?";
+
+            r.emit(e);
+
+            return confirm.wait();
+        };
+
     const jcode::writer put = [&](const jcode::reply& parsed) -> bool {
-        for(const std::string& g : parsed.guesses())
-            say(kind::note, "guessed: " + g);
-
-        // Decided first, written second, so nothing is announced that then
-        // turns out not to apply.  parse()'s own refusals arrive here too:
-        // apply() turns each into a result rather than dropping it.
-        const std::vector<jcode::result> dry = jcode::apply(parsed, j.root, true);
-
-        jcode::reply going;
-
-        for(const jcode::result& res : dry) {
-            if(res.what == jcode::outcome::refused) {
-                say(kind::edit, "refused " +
-                                (res.name.empty() ? "a block" : res.name) +
-                                ": " + res.why);
-
-                continue;
-            }
-
-            if(res.what == jcode::outcome::unchanged) {
-                say(kind::edit, res.name + " is already what the model sent");
-
-                continue;
-            }
-
-            // "would written" is what spell() gives and it is not English.
-            const char* verb =
-                res.what == jcode::outcome::created ? "create" : "write";
-
-            if(!j.yes) {
-                say(kind::edit, std::string("would ") + verb + " " + res.name +
-                                " -- nothing is written without --yes until "
-                                "#449 adds the confirm");
-
-                continue;
-            }
-
-            for(const jcode::edit& e : parsed.edits)
-                if(e.name == res.name) going.edits.push_back(e);
-        }
-
-        if(going.edits.empty()) return false;
-
-        bool wrote = false;
-
-        for(const jcode::result& res : jcode::apply(going, j.root)) {
-            say(kind::edit, std::string(jcode::spell(res.what)) + " " +
-                            res.name +
-                            (res.why.empty() ? std::string() : ": " + res.why));
-
-            if(res.what == jcode::outcome::written ||
-               res.what == jcode::outcome::created) wrote = true;
-        }
-
-        return wrote;
+        return jcode::deliver(parsed, j.root, tell, ask);
     };
 
     // **Without a build command there is nothing to iterate against**, so one
@@ -817,7 +899,11 @@ void work(sys::relay<event>& r, const job& j) {
     // machinery produces "the conversation failed -- failed: cancelled" --
     // which says the harness broke when in fact it did as it was told, and
     // says "failed" twice while doing it.
-    if(!r.wanted()) {
+    if(confirm.abandoned()) {
+        say(kind::note, "stopped at the confirm -- every edit not yet agreed "
+                        "to was left alone");
+    }
+    else if(!r.wanted()) {
         say(kind::note, "cancelled -- the reply so far is kept, and so is "
                         "the conversation");
     }
@@ -970,8 +1056,20 @@ public:
 
         const int prow = 3 + view;
 
-        const int caret_y = show_prompt(prompt, caret, prow, prompt_rows);
-        const int caret_x = caret_col(prompt, caret);
+        int caret_y = prow;
+        int caret_x = 0;
+
+        if(!s.question.empty()) {
+            // **The question replaces the prompt, and the draft is kept.**
+            // Whatever was being typed is still in `prompt` and comes back
+            // when the question has been answered -- the dialog borrows the
+            // row, it does not clear it.
+            caret_x = show_question(s.question, prow, prompt_rows);
+        }
+        else {
+            caret_y = show_prompt(prompt, caret, prow, prompt_rows);
+            caret_x = int(caret_col(prompt, caret)) + 2;
+        }
 
         status(s);
 
@@ -980,7 +1078,7 @@ public:
         // prompt parks the hardware cursor at the end of the status line --
         // which is where it sat, one row below the prompt it belongs in.
         // Anything that writes after this moves it again.
-        move(caret_y, caret_x + 2);
+        move(caret_y, caret_x);
 
         refresh();
     }
@@ -1103,6 +1201,35 @@ private:
         return chars_in(prompt.substr(line_start), caret - line_start);
     }
 
+    /**
+     * Draws a write question where the prompt goes; returns the caret column.
+     *
+     * The keys are on the line because a dialog that has to be learned is a
+     * dialog that gets answered wrongly, and because `[y]` is what the pty
+     * test looks for -- a question is recognised by its keys, not its wording.
+     */
+    int show_question(const std::string& q, int row, int rows) {
+        for(int i = 0; i < rows; i++) {
+            move(row + i, 0);
+            clrtoeol();
+        }
+
+        const std::string keys = "   [y] yes   [n] no   [Esc] stop asking";
+        const std::string line = "? " + q;
+
+        if(m_colour) attron(COLOR_PAIR(head_tone));
+
+        mvaddstr(row, 0, head(line, std::size_t(m_cols > 1 ? m_cols - 1 : 1)).c_str());
+
+        if(m_colour) attroff(COLOR_PAIR(head_tone));
+
+        const int at = int(chars_in(line, line.size()));
+
+        if(at + int(keys.size()) < m_cols) mvaddstr(row, at, keys.c_str());
+
+        return at < m_cols ? at : m_cols - 1;
+    }
+
     /** Draws the prompt and returns the screen row the caret belongs on. */
     int show_prompt(const std::string& prompt, std::size_t caret,
                     int row, int rows)
@@ -1158,10 +1285,17 @@ private:
         // would be invented. #451 is the protocol addition that would make a
         // real one possible, and until then an honest clock beats a
         // fabricated bar.
+        // **`asking`, while a write question is up**, because then the worker
+        // is blocked on the person and not on the stream -- a live run read
+        // `streaming 7s` beside a dialog, which says the program is busy
+        // when in fact it is waiting for you. Same rule as `waiting` rather
+        // than `prefill`: say what is true.
         if(!s.working) line += "   idle";
         else {
-            line += s.cancelling ? "   cancelling "
-                                 : (s.streaming ? "   streaming " : "   waiting ");
+            line += s.cancelling        ? "   cancelling "
+                  : !s.question.empty() ? "   asking "
+                  : s.streaming         ? "   streaming "
+                                        : "   waiting ";
 
             line += std::to_string(s.elapsed) + "s";
         }
@@ -1223,7 +1357,8 @@ const char* HELP[] = {
     "A prompt that starts with a slash is written //like-this.",
     "Enter sends; Ctrl-J adds a line without sending; Ctrl-U clears it.",
     "Escape stops a reply, and keeps the conversation.",
-    "Anything else is sent to the model.  Nothing is written without --yes.",
+    "Anything else is sent to the model.",
+    "At a write question: y writes it, n leaves it, Escape leaves it and the rest.",
     0
 };
 
@@ -1394,6 +1529,16 @@ void absorb(const event& e, state& s, transcript& t) {
         t.add(e.k, e.text);
 
         return;
+
+    case news::ask:
+        s.question = e.text;
+
+        // **Typeahead must not answer a question nobody has seen.** A key
+        // already in the input buffer when the question appears was pressed
+        // for something else -- a `y` to the last question, typed twice.
+        flushinp();
+
+        return;
     }
 }
 
@@ -1408,8 +1553,8 @@ void usage(std::ostream& o, const char* me) {
       << "  reply, the tool calls, the build and the edits all land in the\n"
       << "  transcript while the prompt goes on taking keys.\n"
       << "\n"
-      << "  Nothing is written without --yes: the confirm dialog is #449,\n"
-      << "  and until it exists an edit is announced and not applied.\n"
+      << "  Every write is asked about first, one file at a time; --yes\n"
+      << "  skips the asking.\n"
       << "\n"
       << "  --url URL       an OpenAI-compatible endpoint\n"
       << "                  (default http://127.0.0.1:8080/v1)\n"
@@ -1490,8 +1635,8 @@ int main(int argc, char** argv) {
                              " file(s) under " + o.root));
 
     if(!o.yes)
-        t.add(kind::note, "no --yes, so an edit is announced and not written "
-                          "(#449)");
+        t.add(kind::note, "every write is asked about first; --yes skips the "
+                          "asking");
 
     ui sc;
 
@@ -1500,6 +1645,10 @@ int main(int argc, char** argv) {
     // being set is the same fact as `state::working`, which exists only
     // because `status` draws from `state` and not from here.
     std::unique_ptr<sys::relay<event> > worker;
+
+    // Shared, because the worker may still be inside wait() when the UI
+    // decides to leave, and the object it is waiting on must outlive that.
+    std::shared_ptr<confirmer> confirm;
 
     // When the request in flight went out, for the status line's clock.
     std::chrono::steady_clock::time_point began;
@@ -1558,6 +1707,13 @@ int main(int argc, char** argv) {
                 // next one appended to it.
                 t.seal();
 
+                // A worker that ended cannot be waiting on an answer, so any
+                // question still showing is stale -- and would swallow the
+                // next y or n typed.
+                s.question.clear();
+
+                confirm.reset();
+
                 moved = true;
             }
 
@@ -1569,6 +1725,50 @@ int main(int argc, char** argv) {
         if(c == KEY_RESIZE) { sc.layout(); sc.draw(t, s, prompt, caret); continue; }
 
         if(c == ERR) continue;
+
+        // **While a question is up it owns the keyboard.** A `y` meant for
+        // the dialog must not land in the prompt, and a letter meant for the
+        // prompt must not answer the dialog -- so nothing else is read until
+        // it is answered. Resize was handled above, and Ctrl-C arrives as a
+        // signal rather than a key, so neither is trapped here.
+        if(!s.question.empty() && confirm) {
+            jcode::consent said;
+            const char* word = 0;
+
+            if(c == 'y' || c == 'Y')      { said = jcode::consent::yes;  word = "yes"; }
+            else if(c == 'n' || c == 'N') { said = jcode::consent::no;   word = "no"; }
+            else if(c == 27)              { said = jcode::consent::stop; word = "stop"; }
+            else continue;
+
+            // On the record, because the transcript is the only account of
+            // what was agreed to -- "written" says what happened, not that
+            // somebody said yes to it.
+            t.add(kind::edit, "asked: " + s.question + " " + word);
+
+            s.question.clear();
+
+            if(said == jcode::consent::stop) {
+                // Stop, and stop the work too: a person who has seen enough
+                // of the edits has seen enough of the attempt. Without this,
+                // an edit agreed to before the Escape would be built and the
+                // loop would go round again on its own.
+                confirm->abandon();
+
+                if(worker) worker->stop();
+
+                s.cancelling = true;
+            }
+            else confirm->answer(said);
+
+            // **Discard what was typed ahead**, so a `y` pressed twice is not
+            // the answer to a question the second press never saw. Paired
+            // with the flushinp() when a question appears; see absorb().
+            flushinp();
+
+            sc.draw(t, s, prompt, caret);
+
+            continue;
+        }
 
         // Ctrl-D on an empty prompt leaves, which is what a shell does.
         if(c == 4 && prompt.empty()) break;
@@ -1614,11 +1814,19 @@ int main(int argc, char** argv) {
 
                 worker.reset(new sys::relay<event>());
 
+                confirm = std::make_shared<confirmer>();
+
                 // By value into the thread: see `job`, which is copied for
                 // exactly this.
                 const job j = compose(o, s, text);
 
-                worker->start([j](sys::relay<event>& r) { work(r, j); });
+                // The confirmer by shared pointer, so it outlives a worker
+                // that is still inside wait() whatever order teardown runs in.
+                std::shared_ptr<confirmer> asks = confirm;
+
+                worker->start([j, asks](sys::relay<event>& r) {
+                    work(r, j, *asks);
+                });
 
                 began = std::chrono::steady_clock::now();
 
@@ -1755,6 +1963,13 @@ int main(int argc, char** argv) {
     // is a window, and closing it means atomic replacement inside apply(),
     // which is the library's to do and not this exit path's.
     if(worker) {
+        // **Abandon first.** A worker blocked on a write question would
+        // otherwise sit out the whole grace below and be `_Exit`ed past --
+        // the wrong way to leave something that was only waiting for an
+        // answer it could be given. Abandoned, it writes nothing more,
+        // finishes, and is joined.
+        if(confirm) confirm->abandon();
+
         worker->stop();
 
         for(int i = 0; i < 20 && !worker->done(); i++) ::usleep(100 * 1000);

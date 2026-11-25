@@ -167,6 +167,8 @@ public:
 
         const std::string path = slave;
 
+        m_slave = path;
+
         m_child = ::fork();
 
         if(m_child < 0) {
@@ -190,7 +192,8 @@ public:
             ::ioctl(fd, TIOCSCTTY, 0);
 #endif
             // **The size goes on the slave, here, and nowhere else.** Two
-            // other places look right and are not, both measured on macOS:
+            // other places look right and are not, both measured on macOS
+            // *at this moment*, before the child has opened the slave:
             //
             //   - the master fails outright. `TIOCSWINSZ` on it returns
             //     ENOTTY, "Inappropriate ioctl for device", and the first
@@ -198,6 +201,13 @@ public:
             //     harness quietly set no size at all.
             //   - a slave fd the *parent* opens, sets and closes succeeds and
             //     then does not persist: reopening reports 0 by 0.
+            //
+            // **Both stop being true once the child holds the slave open** --
+            // measured for #449, and see resize(), which depends on it. The
+            // terminal exists then, so a size set on it persists and the
+            // kernel tells the foreground group. Neither failure was about
+            // the master or the parent; both were about there being no
+            // terminal yet to hold a size.
             //
             // So it has to be the descriptor the child keeps. The dup2s below
             // share this file description, so closing `fd` afterwards does
@@ -248,6 +258,38 @@ public:
 
     pty(const pty&) = delete;
     pty& operator=(const pty&) = delete;
+
+    /**
+     * Change the window size, as dragging a terminal's corner does.
+     *
+     * Through the slave by path, and only while the child holds it open --
+     * which is the condition under which the constructor's two failures stop
+     * applying. Measured on macOS for #449: with the child running,
+     * `TIOCSWINSZ` on a parent-opened slave fd returns 0, the size persists,
+     * the kernel delivers SIGWINCH to the foreground group, and curses reports
+     * KEY_RESIZE with LINES and COLS already updated. The master works then as
+     * well, but the slave is the descriptor POSIX describes, so it is the one
+     * used.
+     *
+     * @return false when the size could not be set, which a caller asserting
+     *         on a resized screen needs to know before it asserts
+     */
+    bool resize(unsigned short rows, unsigned short cols) {
+        const int fd = ::open(m_slave.c_str(), O_RDWR | O_NOCTTY);
+
+        if(fd < 0) return false;
+
+        struct winsize ws = {};
+
+        ws.ws_row = rows;
+        ws.ws_col = cols;
+
+        const bool good = ::ioctl(fd, TIOCSWINSZ, &ws) == 0;
+
+        ::close(fd);
+
+        return good;
+    }
 
     /** Type at it.  Escape is "\x1b", Return "\r" -- not "\n", which a
      *  terminal in canonical mode would not treat as submit. */
@@ -435,6 +477,9 @@ private:
     pid_t m_child = -1;
     bool m_reaped = false;
     std::string m_seen;
+
+    /** The slave's path, for resize().  Held open by the child, not by us. */
+    std::string m_slave;
 };
 
 } // namespace tests

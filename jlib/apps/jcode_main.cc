@@ -472,71 +472,26 @@ int main(int argc, char** argv) {
     // every write is announced and confirmed, and a `write_file` would move
     // that decision inside the loop where nobody sees it.
     const jcode::writer put = [&](const jcode::reply& parsed) -> bool {
-        for(const std::string& g : parsed.guesses())
-            std::cerr << "jcode: guessed: " << g << "\n";
+        // **The policy is jcode::deliver's, and only the voice is here.**
+        // juanaco calls the same function with a dialog where this has a
+        // [y/N] on stderr, so the two cannot disagree about what gets asked,
+        // in what order, or what reaches the disk.
+        const jcode::teller say = [](const std::string& line) {
+            std::cerr << "jcode: " << line << "\n";
+        };
 
-        // Decided first, written second: a caller is asked about an edit that
-        // is already known to be applicable, rather than being asked and then
-        // told it was refused.
-        const std::vector<jcode::result> dry =
-            jcode::apply(parsed, o.root, true);
+        jcode::asker ask;
 
-        jcode::reply going;
+        if(!o.yes)
+            ask = [](const jcode::result& r) {
+                return confirm(std::string("jcode: ") +
+                               (r.what == jcode::outcome::created ? "create"
+                                                                  : "write") +
+                               " " + r.name + "?")
+                    ? jcode::consent::yes : jcode::consent::no;
+            };
 
-        for(const jcode::result& r : dry) {
-            if(r.what == jcode::outcome::refused) {
-                std::cerr << "jcode: refused " << r.name << ": " << r.why
-                          << "\n";
-
-                continue;
-            }
-
-            if(r.what == jcode::outcome::unchanged) {
-                std::cerr << "jcode: " << r.name
-                          << " is already what the model sent\n";
-
-                continue;
-            }
-
-            if(o.dry_run) {
-                // "would written" is what spell() gives, and it is not
-                // English.  The outcomes are named for what happened, which
-                // is the right name everywhere except in front of "would".
-                std::cerr << "jcode: would "
-                          << (r.what == jcode::outcome::created ? "create"
-                                                                : "write")
-                          << " " << r.name << "\n";
-
-                continue;
-            }
-
-            if(!o.yes && !confirm(std::string("jcode: ") +
-                                  (r.what == jcode::outcome::created
-                                       ? "create" : "write") +
-                                  " " + r.name + "?"))
-            {
-                std::cerr << "jcode: left " << r.name << " alone\n";
-
-                continue;
-            }
-
-            for(const jcode::edit& e : parsed.edits)
-                if(e.name == r.name) going.edits.push_back(e);
-        }
-
-        if(going.edits.empty()) return false;
-
-        bool wrote = false;
-
-        for(const jcode::result& r : jcode::apply(going, o.root)) {
-            std::cerr << "jcode: " << jcode::spell(r.what) << " " << r.name
-                      << (r.why.empty() ? "" : ": " + r.why) << "\n";
-
-            if(r.what == jcode::outcome::written ||
-               r.what == jcode::outcome::created) wrote = true;
-        }
-
-        return wrote;
+        return jcode::deliver(parsed, o.root, say, ask, o.dry_run);
     };
 
     // **Without a build command there is nothing to iterate against**, so one

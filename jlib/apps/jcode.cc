@@ -1465,6 +1465,93 @@ std::vector<result> apply(const reply& r, const std::string& root, bool dry_run)
     return out;
 }
 
+bool deliver(const reply& r, const std::string& root, const teller& say,
+             const asker& ask, bool dry_run)
+{
+    for(const std::string& g : r.guesses()) say("guessed: " + g);
+
+    // Decided first, written second: a person is asked about an edit that is
+    // already known to be applicable, rather than being asked and then told
+    // it was refused.
+    //
+    // **Qualified, both calls, and not for tidiness.** An argument of type
+    // std::string puts namespace std in the lookup, and `std::apply` is a
+    // perfect-forwarding template -- so for a non-const `reply` it beats
+    // jcode's `const reply&` overload and fails to compile, from inside
+    // <tuple>, nowhere near the call that caused it.
+    const std::vector<result> dry = jcode::apply(r, root, true);
+
+    reply going;
+
+    bool stopped = false;
+
+    for(const result& d : dry) {
+        if(d.what == outcome::refused) {
+            // A block can be refused *because* it had no usable name, and
+            // "refused : why" reads like a formatting accident.
+            say("refused " + (d.name.empty() ? std::string("a block") : d.name) +
+                ": " + d.why);
+
+            continue;
+        }
+
+        if(d.what == outcome::unchanged) {
+            say(d.name + " is already what the model sent");
+
+            continue;
+        }
+
+        // "would written" is what spell() gives, and it is not English. The
+        // outcomes are named for what happened, which is the right name
+        // everywhere except in front of "would".
+        const char* verb = d.what == outcome::created ? "create" : "write";
+
+        if(dry_run) {
+            say(std::string("would ") + verb + " " + d.name);
+
+            continue;
+        }
+
+        // **Stop is not no.** No leaves this file and goes on asking; stop
+        // leaves this one and every one after it, and asks nothing more --
+        // which is what Escape at a dialog means, and why a person who has
+        // seen enough is not made to refuse each remaining file in turn.
+        if(!stopped && ask) {
+            const consent c = ask(d);
+
+            if(c == consent::stop) stopped = true;
+
+            if(c != consent::yes) {
+                say("left " + d.name + " alone");
+
+                continue;
+            }
+        }
+        else if(stopped) {
+            say("left " + d.name + " alone");
+
+            continue;
+        }
+
+        for(const edit& e : r.edits)
+            if(e.name == d.name) going.edits.push_back(e);
+    }
+
+    if(going.edits.empty()) return false;
+
+    bool wrote = false;
+
+    for(const result& w : jcode::apply(going, root)) {
+        say(std::string(spell(w.what)) + " " + w.name +
+            (w.why.empty() ? std::string() : ": " + w.why));
+
+        if(w.what == outcome::written || w.what == outcome::created)
+            wrote = true;
+    }
+
+    return wrote;
+}
+
 }
 }
 }
