@@ -27,26 +27,21 @@
 // The server is hand-rolled rather than jserve because jserve needs a GGUF --
 // that is #236's bargain, and the point here is the *client*. What a real
 // model says is still untested by anything, and always will be by this.
+//
+// The endpoint itself now lives in `scripted.hh`, because #447 gave juanaco
+// the same need and two hand-rolled servers speaking one protocol drift.
 
-#include <jlib/ai/openai.hh>
-#include <jlib/sys/server.hh>
+#include "scripted.hh"
+
 #include <jlib/sys/sys.hh>
-#include <jlib/util/http.hh>
 
-#include <atomic>
-#include <fstream>
 #include <iostream>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
-#include <stdlib.h>
-#include <unistd.h>
-
-namespace oa = jlib::ai::openai;
 namespace sys = jlib::sys;
-namespace util = jlib::util;
+namespace tests = jlib::tests;
 
 static int failures = 0;
 
@@ -71,108 +66,6 @@ static std::string find_jcode() {
     return "";
 }
 
-struct tree {
-    std::string path;
-
-    tree() {
-        char t[] = "/tmp/jcode_run_XXXXXX";
-
-        path = ::mkdtemp(t) ? t : "";
-    }
-
-    ~tree() {
-        if(!path.empty() && system(("rm -rf '" + path + "'").c_str())) {}
-    }
-
-    void put(const std::string& name, const std::string& body) const {
-        std::ofstream o(path + "/" + name, std::ios::binary);
-
-        o << body;
-    }
-
-    std::string get(const std::string& name) const {
-        std::ifstream i(path + "/" + name, std::ios::binary);
-
-        std::ostringstream all;
-
-        all << i.rdbuf();
-
-        return all.str();
-    }
-};
-
-/** What the scripted endpoint will answer, and what it was asked. */
-struct script {
-    std::string content;             ///< the model's "reply"
-    bool stream = false;
-    std::atomic<int> requests{0};
-    std::string last_body;
-};
-
-static void serve(sys::socketstream& s, script& sc) {
-    for(;;) {
-        util::http::Request q;
-
-        try { q = util::http::read_request_head(s); }
-        catch(std::exception&) { return; }
-
-        const std::string body =
-            util::http::read_body(s, q.body_framing(), q.content_length());
-
-        sc.requests++;
-        sc.last_body = body;
-
-        std::string payload;
-        std::string type;
-
-        if(sc.stream) {
-            type = "text/event-stream";
-
-            oa::delta first;
-
-            first.role = true;
-
-            payload += oa::event(oa::chunk("id", "m", 1, first));
-
-            // In pieces, because that is what a stream is and the reader has
-            // to put them back together.
-            for(std::size_t at = 0; at < sc.content.size(); at += 7) {
-                oa::delta d;
-
-                d.content = sc.content.substr(at, 7);
-
-                payload += oa::event(oa::chunk("id", "m", 1, d));
-            }
-
-            oa::delta last;
-
-            last.done = true;
-
-            payload += oa::event(oa::chunk("id", "m", 1, last));
-            payload += oa::done();
-        }
-        else {
-            type = "application/json";
-
-            // A plausible count rather than a round number: jcode prints
-            // its estimate against this, and a made-up 40 would make the
-            // drift line read like a defect in the estimator.
-            payload = oa::completion("id", "m", 1, sc.content,
-                                     oa::finish::stop,
-                                     unsigned(double(body.size()) / 3.8), 20);
-        }
-
-        std::ostringstream out;
-
-        out << "HTTP/1.1 200 OK\r\n"
-            << "Content-Type: " << type << "\r\n"
-            << "Content-Length: " << payload.size() << "\r\n"
-            << "Connection: keep-alive\r\n\r\n" << payload;
-
-        s << out.str() << std::flush;
-    }
-}
-
 struct run_result {
     int status = 0;
     std::string out;
@@ -180,7 +73,7 @@ struct run_result {
 };
 
 static run_result run_jcode(const std::string& jcode, const std::string& url,
-                            const tree& t, const std::vector<std::string>& more)
+                            const tests::tree& t, const std::vector<std::string>& more)
 {
     run_result r;
 
@@ -193,10 +86,6 @@ static run_result run_jcode(const std::string& jcode, const std::string& url,
     catch(std::exception& e) { r.err = e.what(); r.status = -1; }
 
     return r;
-}
-
-static std::string listing(const std::string& name, const std::string& body) {
-    return "Here you go.\n\n" + name + "\n```\n" + body + "```\n";
 }
 
 int main() {
@@ -212,11 +101,11 @@ int main() {
 
     std::cout << "app_jcode_run_test: " << jcode << "\n";
 
-    script sc;
+    tests::script sc;
 
     sys::server server(0,
                        [&sc](sys::socketstream& s, const sys::peer&) {
-                           serve(s, sc);
+                           tests::serve(s, sc);
                        },
                        "127.0.0.1");
 
@@ -230,11 +119,11 @@ int main() {
     {
         std::cout << "\nan edit, all the way through:\n";
 
-        tree t;
+        tests::tree t;
 
         t.put("hello.cc", "int main() { return 1; }\n");
 
-        sc.content = listing("hello.cc", "int main() { return 0; }\n");
+        sc.content = tests::listing("hello.cc", "int main() { return 0; }\n");
 
         const run_result r = run_jcode(jcode, url, t,
                                        { "make it succeed", "hello.cc" });
@@ -265,7 +154,7 @@ int main() {
     {
         std::cout << "\na reply that stopped mid-file:\n";
 
-        tree t;
+        tests::tree t;
 
         t.put("hello.cc", "original\n");
 
@@ -284,7 +173,7 @@ int main() {
     {
         std::cout << "\nan illustration at the end of a reply:\n";
 
-        tree t;
+        tests::tree t;
 
         t.put("hello.cc", "int main() { return 1; }\n");
 
@@ -309,7 +198,7 @@ int main() {
     {
         std::cout << "\nan edit to somewhere else entirely:\n";
 
-        tree t;
+        tests::tree t;
 
         t.put("hello.cc", "original\n");
 
@@ -318,7 +207,7 @@ int main() {
 
         ::unlink(away.c_str());
 
-        sc.content = listing(away, "escaped\n");
+        sc.content = tests::listing(away, "escaped\n");
 
         const run_result r = run_jcode(jcode, url, t, { "escape", "hello.cc" });
 
@@ -333,11 +222,11 @@ int main() {
     {
         std::cout << "\nwhat --dry-run does:\n";
 
-        tree t;
+        tests::tree t;
 
         t.put("hello.cc", "original\n");
 
-        sc.content = listing("hello.cc", "changed\n");
+        sc.content = tests::listing("hello.cc", "changed\n");
 
         const run_result r = run_jcode(jcode, url, t,
                                        { "--dry-run", "change it", "hello.cc" });
@@ -351,13 +240,13 @@ int main() {
     {
         std::cout << "\nthe guesses reach the user:\n";
 
-        tree t;
+        tests::tree t;
 
         t.put("hello.cc", "original\n");
 
         // The envelope a model actually sends: bold, and the prompt's own
         // path prefix pasted back.
-        sc.content = listing("**path/to/hello.cc**", "guessed\n");
+        sc.content = tests::listing("**path/to/hello.cc**", "guessed\n");
 
         const run_result r = run_jcode(jcode, url, t, { "change it", "hello.cc" });
 
@@ -373,12 +262,12 @@ int main() {
     {
         std::cout << "\nstreaming, which is what the machinery was for:\n";
 
-        tree t;
+        tests::tree t;
 
         t.put("hello.cc", "original\n");
 
         sc.stream = true;
-        sc.content = listing("hello.cc", "streamed\n");
+        sc.content = tests::listing("hello.cc", "streamed\n");
 
         run_result r;
 
@@ -396,6 +285,8 @@ int main() {
         ok("  and was printed as it came",
            r.out.find("streamed") != std::string::npos, r.out);
     }
+
+    sc.closing = true;
 
     server.stop();
     th.join();

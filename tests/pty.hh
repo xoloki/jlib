@@ -303,8 +303,40 @@ public:
      * `expect` is the wrong primitive there, because the text a test sends is
      * echoed back by the program's own prompt, so expecting it matches the
      * typing rather than the reply and returns before the program has acted.
+     *
+     * **A loop to the deadline, because one pump() is not a wait.** pump()
+     * returns as soon as its select does, and a pty master hands back as
+     * little as **one byte per read** -- measured here, 228 single-byte reads
+     * in one run of `app_juanaco_test`. So a `settle(0.1)` with anything at
+     * all buffered returned in microseconds having consumed one character,
+     * and a poll built on it became a spin: 300 iterations of what was meant
+     * to be a thirty-second wait went by in 0.1 seconds, read ~300 bytes of
+     * backlog, and gave up before the program had written the line the test
+     * was waiting for.
+     *
+     * It failed six runs out of six and **passed as soon as a printf was
+     * added to pump**, which is what it looks like when the bug is that
+     * nothing is waiting: the printf was the only delay in the loop.
      */
-    void settle(double seconds) { pump(seconds); }
+    void settle(double seconds) {
+        const double deadline = now() + seconds;
+
+        for(;;) {
+            const double left = deadline - now();
+
+            if(left <= 0) return;
+
+            // False is the far end closed, and there is nothing further to
+            // wait for -- but drain what is still buffered first, which is
+            // where a program's last words live when it exits immediately
+            // after writing them.
+            if(!pump(left > 0.02 ? 0.02 : left)) {
+                while(pump(0.0)) ;
+
+                return;
+            }
+        }
+    }
 
     /**
      * Wait for the child to exit and return its status, or -1 on timeout.
