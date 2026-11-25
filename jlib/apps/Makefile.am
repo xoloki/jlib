@@ -10,7 +10,7 @@ AM_CPPFLAGS = -I$(top_srcdir) \
 # link rather than being skipped cleanly.
 
 if HAVE_CURSES
-alpaca_programs = jalpaca
+alpaca_programs = jalpaca juanaco
 endif
 
 if HAVE_SODIUM
@@ -92,6 +92,11 @@ jcrypt_LDADD   = $(JCRYPT_LA) $(JSYS_LA)
 
 jm3u_SOURCES = jm3u.cc
 jm3u_LDADD   = $(JSYS_LA) $(JUTIL_LA)
+
+juanaco_SOURCES  = juanaco.cc jcode.cc
+juanaco_CPPFLAGS = $(AM_CPPFLAGS) $(CURSES_CFLAGS)
+juanaco_LDADD    = $(JAI_LA) $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) $(JSYS_LA) \
+                   $(CURSES_LIBS)
 
 jalpaca_SOURCES  = jalpaca.cc
 jalpaca_CPPFLAGS = $(AM_CPPFLAGS) $(METAL_CPPFLAGS) $(CURSES_CFLAGS)
