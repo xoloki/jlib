@@ -18,7 +18,7 @@
  *
  */
 
-// juanaco, driven through a pty -- #446 and #447, phases 2 and 3 of #444.
+// juanaco, driven through a pty -- #446, #447 and #448, phases 2 to 4 of #444.
 //
 // This is what #445 was built for, and the reason it was built first: jlib's
 // other curses program has no test at all, and #247 records that its harness
@@ -36,10 +36,17 @@
 // reaches the disk. No model, no GGUF, no network.
 //
 // **A server that never answers** is the one that needed a feature added to
-// the harness to write at all. It is how the status line's "working", the
+// the harness to write at all. It is how the status line's state, the
 // refusal of a second request, and leaving without waiting out a ten-minute
 // timeout are checked -- none of which can be observed against an endpoint
 // that replies in a millisecond.
+//
+// **A server that answers slowly** is the same argument one step on, and it
+// is what #448 needed. A stream that arrives instantly cannot distinguish a
+// client that renders tokens as they come from one that waits for all of
+// them: the reply is on screen in one repaint either way. So the scripted
+// endpoint delays its chunks, and the assertions are about what is on screen
+// *before* the reply has finished.
 
 #include "pty.hh"
 #include "scripted.hh"
@@ -372,41 +379,40 @@ int main() {
                sc.last_body.find("int main() { return 1; }") !=
                    std::string::npos);
 
-            // **The phase's own bargain, asserted rather than assumed.**
-            // `request::str` adds the key only when streaming, so its
-            // absence is the proof. This assertion is meant to fail when
-            // #448 lands, which is the point of it.
-            ok("  and asked for the whole body rather than a stream",
-               sc.last_body.find("\"stream\"") == std::string::npos);
+            // **The assertion #447 wrote to fail here, turned round.**
+            // `request::str` adds the key only when streaming, so it is the
+            // request body that says which path was taken -- and this is now
+            // the streaming one, with `--no-stream` tested below.
+            ok("  and asked for it as a stream",
+               sc.last_body.find("\"stream\"") != std::string::npos,
+               sc.last_body.substr(0, 200));
 
             ok("  the layout was reported", v.shows("1 of 1 file(s)"), v.dump());
 
-            // The estimate against what the server counted, which is the only
-            // place the true bytes-per-token ratio is visible from this side.
-            ok("  and what the token guess was worth",
-               v.shows("estimated") && v.shows("the server counted"),
-               v.dump());
+            // **No drift line here, and that is the protocol.** The estimate
+            // can only be checked against a usage block, and a chunk has
+            // none -- so this is asserted in the --no-stream section and its
+            // absence is asserted here, which is the pair that says the two
+            // paths really do differ.
+            ok("  and no drift line, there being no usage block to check it "
+               "against",
+               !v.shows("the server counted"), v.dump());
         }
 
-        // The counters stop being a decoration once something has been sent.
+        // **A chunk carries no usage block**, so on the streaming path the
+        // counters stay at nought -- and /stats has to say which kind of
+        // zero that is rather than leaving a user to read it as a defect.
         p.send("/stats\r");
 
-        until(p, [](const tests::vt& v) {
-            return v.shows("tokens in,") &&
-                   !v.shows("nothing has been sent yet");
-        }, 10.0);
+        until(p, [](const tests::vt& v) { return v.shows("tokens in,"); }, 10.0);
 
         {
             const tests::vt v = shown(p);
 
-            ok("  /stats is no longer all zero",
-               !v.shows("nothing has been sent yet"), v.dump());
+            ok("  /stats says why streaming has no token count",
+               v.shows("a chunk carries no usage block"), v.dump());
 
-            ok("  and the status line counted the same request",
-               v.row(STATUS_ROW).find(" 0 in / 0 out") == std::string::npos,
-               "[" + v.row(STATUS_ROW) + "]");
-
-            ok("  which is back to idle now the worker has finished",
+            ok("  and the status line is back to idle",
                v.row(STATUS_ROW).find("idle") != std::string::npos,
                "[" + v.row(STATUS_ROW) + "]");
         }
@@ -469,6 +475,307 @@ int main() {
     }
 
     {
+        std::cout << "\na reply that arrives a piece at a time:\n";
+
+        tests::tree tr;
+
+        tr.put("hello.cc", "int main() { return 1; }\n");
+
+        // Long enough to take many chunks at seven characters each, so there
+        // is a middle of the reply to catch it in.
+        sc.content = tests::listing("hello.cc",
+                                    "int main() {\n"
+                                    "    // one\n"
+                                    "    // two\n"
+                                    "    // three\n"
+                                    "    // four\n"
+                                    "    return 0;\n"
+                                    "}\n");
+
+        sc.chunk_delay = 0.06;
+
+        tests::pty p({ prog, "--url", url, "--root", tr.path, "--yes",
+                       "--task", "watch it arrive", "hello.cc" }, ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("juanaco"); }, 10.0);
+
+        p.send("write it out\r");
+
+        // **Caught in the middle, which is the whole assertion.** The head of
+        // the reply has to be on screen while the tail has not arrived; an
+        // endpoint that answered at once would satisfy "the reply is shown"
+        // for a client that waited for all of it.
+        bool mid = false;
+
+        for(int i = 0; i < 400 && !mid; i++) {
+            const tests::vt v = shown(p);
+
+            mid = v.shows("Here you go.") && !v.shows("** written hello.cc");
+
+            if(!mid) p.settle(0.02);
+        }
+
+        ok("  the head of the reply is on screen before the tail arrives", mid,
+           shown(p).dump());
+
+        ok("  and the status line says it is streaming, not waiting",
+           mid && shown(p).row(STATUS_ROW).find("streaming") !=
+                      std::string::npos,
+           "[" + shown(p).row(STATUS_ROW) + "]");
+
+        until(p, [](const tests::vt& v) {
+            return v.shows("** written hello.cc");
+        }, 30.0);
+
+        {
+            const tests::vt v = shown(p);
+
+            // **One entry, not one per chunk.** The transcript is re-wrapped
+            // from text on every draw, so fragments that did not accumulate
+            // would wrap to one row each -- `    // two` appearing on its own
+            // row is what that looks like, and it is what `extend` prevents.
+            ok("  the fragments accumulated into one entry",
+               v.find("    // two") >= 0 &&
+                   v.find("    // three") == v.find("    // two") + 1,
+               "rows " + std::to_string(v.find("    // two")) + " and " +
+                   std::to_string(v.find("    // three")));
+
+            ok("  and the whole reply still parsed and applied",
+               tr.get("hello.cc").find("// four") != std::string::npos,
+               "[" + tr.get("hello.cc") + "]");
+        }
+
+        p.send("/quit\r");
+
+        ok("  /quit leaves", p.wait_for_exit(10.0) == 0);
+
+        sc.chunk_delay = 0;
+    }
+
+    {
+        std::cout << "\nEscape, mid-reply:\n";
+
+        tests::tree tr;
+
+        tr.put("hello.cc", "original\n");
+
+        sc.content = tests::listing("hello.cc", "this should never land\n");
+
+        // Slow enough that there is a mid-reply to press Escape in.
+        sc.chunk_delay = 0.25;
+
+        tests::pty p({ prog, "--url", url, "--root", tr.path, "--yes",
+                       "--task", "escape mid-reply", "hello.cc" }, ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("juanaco"); }, 10.0);
+
+        p.send("start writing\r");
+
+        const bool arriving = until(p, [](const tests::vt& v) {
+            return v.shows("Here you go.") && !v.shows("** written hello.cc");
+        }, 30.0);
+
+        ok("  the reply starts arriving", arriving, shown(p).dump());
+
+        p.send("\x1b");
+
+        until(p, [](const tests::vt& v) { return v.shows("cancelled"); }, 10.0);
+
+        {
+            const tests::vt v = shown(p);
+
+            ok("  Escape says the reply was cancelled",
+               v.shows("cancelled -- the reply so far is kept"), v.dump());
+
+            // **What arrived is kept.** A cancel that cleared the pane would
+            // throw away the only thing the user had, and the point of
+            // stopping a reply is usually that its beginning was enough.
+            ok("  and what had arrived is still in the transcript",
+               v.shows("Here you go."), v.dump());
+
+            // **The note goes last, and a live run against a real model is
+            // what put this assertion here.** The sink refuses at the next
+            // chunk, so tokens keep arriving for a moment after the key --
+            // and a note added on the keypress closed the streaming entry,
+            // so the rest of the reply appeared *below* it:
+            //
+            //     To
+            //     -- cancelled -- the reply so far is kept
+            //      rewrite `hello.cc` as a long heavily commented ...
+            //
+            // So the cancel note has to be the last thing in the transcript.
+            // Nothing in the scripted sections noticed; the screen of a real
+            // 7B reply did.
+            int last = -1;
+
+            for(int rr = FIRST_ROW; rr <= LAST_ROW; rr++)
+                if(!v.row(rr).empty()) last = rr;
+
+            ok("  and the note is the last line, not spliced into the reply",
+               last >= 0 &&
+                   v.row(last).find("cancelled") != std::string::npos,
+               "last row " + std::to_string(last) + " [" +
+                   (last >= 0 ? v.row(last) : std::string()) + "]");
+
+            // A user-initiated stop is not a defect, and the machinery would
+            // spell it "the conversation failed -- failed: cancelled".
+            ok("  and a cancel is not reported as a failure",
+               !v.shows("the conversation failed"), v.dump());
+        }
+
+        // **The cancel is not instant and the status line says so.** The sink
+        // refuses at the next chunk, the exchange throws, `converse` turns
+        // that into an ending and the worker unwinds -- so there is a stretch
+        // of `cancelling` before `idle`, and a prompt typed during it is
+        // refused like any other. Waiting for idle is what a user does; the
+        // first version of this test asserted into the gap and failed.
+        const bool settled = until(p, [](const tests::vt& v) {
+            return v.row(STATUS_ROW).find("idle") != std::string::npos;
+        }, 15.0);
+
+        ok("  and it settles back to idle rather than sticking", settled,
+           "[" + shown(p).row(STATUS_ROW) + "]");
+
+        // **Checked after it has settled, and a sabotage is why.** This sat
+        // immediately after the cancel note and still passed with the cancel
+        // taken out of the sink: the reply had not finished arriving yet, so
+        // the file was untouched for a reason that had nothing to do with
+        // Escape. The note above is printed by the UI the moment the key is
+        // pressed, so it says the key was seen and nothing about whether the
+        // work stopped. **This** is the assertion that says that.
+        ok("  and nothing was ever written",
+           tr.get("hello.cc") == "original\n",
+           "[" + tr.get("hello.cc") + "]");
+
+        // **The conversation survives**, which is jalpaca's rule: Escape
+        // stops a reply, it does not end the session. A second prompt has to
+        // go out and be answered.
+        sc.chunk_delay = 0;
+        sc.content = tests::listing("hello.cc", "the second reply landed\n");
+
+        p.send("try again\r");
+
+        until(p, [](const tests::vt& v) {
+            return v.shows("** written hello.cc");
+        }, 30.0);
+
+        ok("  a prompt after a cancel is still answered",
+           tr.get("hello.cc") == "the second reply landed\n",
+           "[" + tr.get("hello.cc") + "]");
+
+        p.send("/quit\r");
+
+        ok("  /quit leaves", p.wait_for_exit(10.0) == 0);
+    }
+
+    {
+        std::cout << "\nEscape during the silent stretch:\n";
+
+        tests::tree tr;
+
+        tr.put("hello.cc", "original\n");
+
+        sc.content = tests::listing("hello.cc", "too late\n");
+
+        // Head sent, then silence -- which is prefill, and is the one stretch
+        // where the sink is never called, so Escape cannot land immediately.
+        sc.first_delay = 3.0;
+
+        tests::pty p({ prog, "--url", url, "--root", tr.path, "--yes",
+                       "hello.cc" }, ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("juanaco"); }, 10.0);
+
+        p.send("this will be abandoned\r");
+
+        until(p, [](const tests::vt& v) {
+            return v.row(STATUS_ROW).find("waiting") != std::string::npos;
+        }, 20.0);
+
+        p.send("\x1b");
+
+        until(p, [](const tests::vt& v) {
+            return v.shows("takes effect at the first token");
+        }, 10.0);
+
+        {
+            const tests::vt v = shown(p);
+
+            // **The honest version.** It would be easy to print "cancelled"
+            // here and leave the request running, which is the lie this whole
+            // arc keeps finding. The gap is #451's to close.
+            ok("  it says the cancel is recorded, not done",
+               v.shows("takes effect at the first token"), v.dump());
+
+            ok("  and the status line says cancelling",
+               v.row(STATUS_ROW).find("cancelling") != std::string::npos,
+               "[" + v.row(STATUS_ROW) + "]");
+        }
+
+        // And then it is honoured, at the first chunk.
+        until(p, [](const tests::vt& v) {
+            return v.row(STATUS_ROW).find("idle") != std::string::npos;
+        }, 30.0);
+
+        ok("  and it is honoured once something arrives",
+           shown(p).row(STATUS_ROW).find("idle") != std::string::npos,
+           "[" + shown(p).row(STATUS_ROW) + "]");
+
+        // After idle, for the same reason: before it, an untouched file
+        // proves only that the reply had not arrived yet.
+        ok("  with nothing written", tr.get("hello.cc") == "original\n",
+           "[" + tr.get("hello.cc") + "]");
+
+        p.send("/quit\r");
+
+        ok("  /quit leaves", p.wait_for_exit(10.0) == 0);
+
+        sc.first_delay = 0;
+    }
+
+    {
+        std::cout << "\n--no-stream, which is the only path with a token count:\n";
+
+        tests::tree tr;
+
+        tr.put("hello.cc", "int main() { return 1; }\n");
+
+        sc.content = tests::listing("hello.cc", "int main() { return 0; }\n");
+
+        tests::pty p({ prog, "--url", url, "--root", tr.path, "--yes",
+                       "--no-stream", "--task", "no stream", "hello.cc" },
+                     ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("juanaco"); }, 10.0);
+
+        p.send("make it return zero\r");
+
+        until(p, [](const tests::vt& v) {
+            return v.shows("** written hello.cc");
+        }, 30.0);
+
+        ok("  it still works without streaming",
+           tr.get("hello.cc") == "int main() { return 0; }\n",
+           "[" + tr.get("hello.cc") + "]");
+
+        ok("  and did not ask for a stream",
+           sc.last_body.find("\"stream\"") == std::string::npos,
+           sc.last_body.substr(0, 200));
+
+        // The usage block only exists here, which is what --no-stream buys.
+        ok("  the token count arrives, which streaming cannot give",
+           shown(p).row(STATUS_ROW).find(" 0 in / 0 out") == std::string::npos,
+           "[" + shown(p).row(STATUS_ROW) + "]");
+
+        ok("  and the drift line with it",
+           shown(p).shows("the server counted"), shown(p).dump());
+
+        p.send("/quit\r");
+
+        ok("  /quit leaves", p.wait_for_exit(10.0) == 0);
+    }
+
+    {
         std::cout << "\na server that never answers:\n";
 
         sc.hang = true;
@@ -484,11 +791,22 @@ int main() {
 
         p.send("this will not come back\r");
 
-        const bool working = until(p, [](const tests::vt& v) {
-            return v.row(STATUS_ROW).find("working") != std::string::npos;
+        // **"waiting", not "prefill".** Nothing is on the wire, and from the
+        // client's side a server that is prefilling and one that has died
+        // are the same thing -- which is #451 in one assertion.
+        const bool waiting = until(p, [](const tests::vt& v) {
+            return v.row(STATUS_ROW).find("waiting") != std::string::npos;
         }, 20.0);
 
-        ok("  the status line says a request is in flight", working,
+        ok("  the status line says it is waiting, with a clock", waiting,
+           "[" + shown(p).row(STATUS_ROW) + "]");
+
+        // The clock is the only thing that changes during the silent
+        // stretch, so it is the only proof the screen is still being painted.
+        p.settle(2.5);
+
+        ok("  and the clock advances while nothing arrives",
+           shown(p).row(STATUS_ROW).find("waiting 0s") == std::string::npos,
            "[" + shown(p).row(STATUS_ROW) + "]");
 
         // **The screen keeps repainting through a blocking request**, which
