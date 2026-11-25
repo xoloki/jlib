@@ -14,6 +14,12 @@
 #
 # One hash per line, longest-lived first, with a comment saying what it did.
 
-# docs: unwrap every doc -- prose on one line per paragraph, no hard wraps
-# (hash added in the follow-up commit, because it cannot be known until the
-#  commit it names exists)
+# docs: unwrap every doc -- prose on one line per paragraph, no hard wraps.
+#
+# Not purely a reflow, and the imprecision is worth stating rather than
+# discovering: the same commit also added the README paragraph describing this
+# convention and this file itself. An ignored commit is ignored for *every*
+# line it touched, so blame for those few lines becomes less precise rather
+# than more. The 1175 deleted lines across fifteen documents are what the
+# entry is for.
+0f879b343b77aa48bcf512992c59a34b6e2871fe
