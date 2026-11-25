@@ -3,7 +3,8 @@
 AM_CPPFLAGS = -I$(top_srcdir) \
 	$(GPGME_CFLAGS) $(GPGERROR_CFLAGS) $(SODIUM_CFLAGS) $(OPENSSL_CFLAGS) $(JSONC_CFLAGS) $(PORTAUDIO_CFLAGS)
 
-EXTRA_DIST = audio_test.hh certificate.hh mailserver.hh httpserver.hh pty.hh vt.hh
+EXTRA_DIST = audio_test.hh certificate.hh mailserver.hh httpserver.hh pty.hh vt.hh \
+             scripted.hh
 
 JSYS_LA   = $(top_builddir)/jlib/sys/libjsys.la
 JUTIL_LA  = $(top_builddir)/jlib/util/libjutil.la
@@ -175,7 +176,13 @@ check_PROGRAMS = $(TESTS)
 # Drives the built program through a pty, so it needs no curses itself --
 # only the harness header.  JUANACO overrides the path when it is not where
 # the build puts it.
-app_juanaco_test_SOURCES = app_juanaco_test.cc pty.hh vt.hh
+#
+# It links jlib because of scripted.hh: the endpoint juanaco is pointed at is
+# a real sys::server speaking the real wire format, which is the whole of why
+# a client test against it is worth anything.
+app_juanaco_test_SOURCES = app_juanaco_test.cc pty.hh vt.hh scripted.hh
+app_juanaco_test_LDADD   = $(JAI_LA) $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) \
+                           $(JSYS_LA)
 
 sys_pty_test_SOURCES  = sys_pty_test.cc pty.hh
 sys_pty_test_CPPFLAGS = $(AM_CPPFLAGS) $(CURSES_CFLAGS)
@@ -482,7 +489,7 @@ app_jcode_test_CPPFLAGS = $(AM_CPPFLAGS)
 app_jcode_test_LDADD    = $(JAI_LA) $(JUTIL_LA) $(JSYS_LA)
 
 # jcode end to end: the program, against a scripted endpoint, with no model.
-app_jcode_run_test_SOURCES = app_jcode_run_test.cc
+app_jcode_run_test_SOURCES = app_jcode_run_test.cc scripted.hh
 app_jcode_run_test_LDADD   = $(JAI_LA) $(JNET_LA) $(JCRYPT_LA) $(JUTIL_LA) \
                              $(JSYS_LA)
 
