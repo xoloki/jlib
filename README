@@ -102,6 +102,8 @@ in docs/:
                      program
     docs/jcode.md    the coding harness, its two edit formats, and the
                      write that is deliberately not a tool
+    docs/juanaco.md  the same harness in a terminal interface, and the
+                     three seams it reuses rather than reimplements
     docs/audio.md    synthesis, sampling and mixing, and the streambuf you
                      write notes into
     docs/math.md     arbitrary-dimension linear algebra, and the projection
