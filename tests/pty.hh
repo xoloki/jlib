@@ -66,6 +66,33 @@
  * curses writes contiguously, and accept that the question being answered is
  * "did the program ever paint this" rather than "is this visible".
  *
+ * ### Four ways an assertion against this lies, all met in practice
+ *
+ * `app_juanaco_test` needed four attempts to assert one property -- that a
+ * key added a line to the prompt rather than submitting it -- and every
+ * failure was a property of the stream rather than of the program. Worth
+ * reading before writing the next one:
+ *
+ * - **A prompt being typed cannot be matched at all.** curses repaints only
+ *   the cell that changed, so text being entered arrives one character at a
+ *   time at an addressed position and is never contiguous. Assert on what the
+ *   program does with a *submitted* line, not on the line being typed.
+ * - **Counting occurrences counts redraws, not events.** A pane repainted on
+ *   every keystroke re-emits everything on it, so a count of a message read
+ *   46 where the test wanted 1.
+ * - **A fresh row is painted as one string; a reused row is not.** The same
+ *   assertion passed early in a test and silently stopped discriminating once
+ *   earlier output had filled the pane. If an assertion depends on that, it
+ *   has to say so where someone reordering the test will read it.
+ * - **A negative needs its own bounded wait.** `expect` returns the moment it
+ *   matches, so asking `seen()` immediately afterwards reads a stream the next
+ *   paint has not reached. "X never appears" can only be "X has not appeared
+ *   after waiting" -- use `expect` for the negative too and spend the time on
+ *   purpose.
+ *
+ * Each of those made a test pass against a deliberately broken build, which
+ * is the only reason they were found.
+ *
  * ### posix_openpt rather than forkpty
  *
  * `forkpty` is shorter and lives in libutil on glibc, which would mean a link
@@ -268,6 +295,16 @@ public:
 
     /** Everything read so far: drawing commands and all. */
     const std::string& seen() const { return m_seen; }
+
+    /**
+     * Read for a while and assert nothing.
+     *
+     * For a caller polling a *screen* rather than waiting for a string:
+     * `expect` is the wrong primitive there, because the text a test sends is
+     * echoed back by the program's own prompt, so expecting it matches the
+     * typing rather than the reply and returns before the program has acted.
+     */
+    void settle(double seconds) { pump(seconds); }
 
     /**
      * Wait for the child to exit and return its status, or -1 on timeout.

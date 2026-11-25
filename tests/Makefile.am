@@ -3,7 +3,7 @@
 AM_CPPFLAGS = -I$(top_srcdir) \
 	$(GPGME_CFLAGS) $(GPGERROR_CFLAGS) $(SODIUM_CFLAGS) $(OPENSSL_CFLAGS) $(JSONC_CFLAGS) $(PORTAUDIO_CFLAGS)
 
-EXTRA_DIST = audio_test.hh certificate.hh mailserver.hh httpserver.hh pty.hh
+EXTRA_DIST = audio_test.hh certificate.hh mailserver.hh httpserver.hh pty.hh vt.hh
 
 JSYS_LA   = $(top_builddir)/jlib/sys/libjsys.la
 JUTIL_LA  = $(top_builddir)/jlib/util/libjutil.la
@@ -68,7 +68,7 @@ endif
 # program, and with no arguments it is the test that drives one through a pty.
 # So it needs curses, and is gated where jalpaca is.
 if HAVE_CURSES
-CURSES_TESTS = sys_pty_test
+CURSES_TESTS = sys_pty_test app_juanaco_test
 endif
 
 TESTS = \
@@ -171,6 +171,11 @@ TESTS = \
 	$(APP_TESTS)
 
 check_PROGRAMS = $(TESTS)
+
+# Drives the built program through a pty, so it needs no curses itself --
+# only the harness header.  JUANACO overrides the path when it is not where
+# the build puts it.
+app_juanaco_test_SOURCES = app_juanaco_test.cc pty.hh vt.hh
 
 sys_pty_test_SOURCES  = sys_pty_test.cc pty.hh
 sys_pty_test_CPPFLAGS = $(AM_CPPFLAGS) $(CURSES_CFLAGS)
