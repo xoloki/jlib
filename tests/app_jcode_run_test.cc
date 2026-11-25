@@ -266,7 +266,8 @@ int main() {
 
         t.put("hello.cc", "original\n");
 
-        sc.stream = true;
+        // No `sc.stream = true` any more: the endpoint answers the way it
+        // was asked, so this run also proves jcode asked.  See scripted.hh.
         sc.content = tests::listing("hello.cc", "streamed\n");
 
         run_result r;
@@ -277,7 +278,8 @@ int main() {
         try { r.status = sys::run(argv, r.out, r.err); }
         catch(std::exception& e) { r.err = e.what(); r.status = -1; }
 
-        sc.stream = false;
+        ok("  and it asked for a stream to get them",
+           sc.last_body.find("\"stream\"") != std::string::npos);
 
         ok("the reply arrives in pieces and still parses",
            t.get("hello.cc") == "streamed\n", t.get("hello.cc"));

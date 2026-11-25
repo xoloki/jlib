@@ -43,10 +43,17 @@
  *
  * ## What it can be told to do
  *
- * Answer, answer in pieces, or **answer never**. The last one is not a
- * curiosity: a wedged inference server is what a ten-minute timeout exists
- * for, and it is the only way to find out what a client does on the way out
- * while one request is still in flight.
+ * Answer, answer in pieces, answer slowly, or **answer never**. The last two
+ * are not curiosities. A wedged inference server is what a ten-minute timeout
+ * exists for, and it is the only way to find out what a client does on the
+ * way out while one request is still in flight. And a stream that arrives
+ * *instantly* cannot show that a client renders tokens as they come: the
+ * whole reply is on screen in one repaint either way, and the assertion
+ * passes for a client that waited for all of it.
+ *
+ * So `first_delay` stands in for prefill -- head sent, then silence, which is
+ * exactly what jserve does and what #451 is about -- and `chunk_delay` stands
+ * in for the decode rate.
  */
 
 #include <jlib/ai/openai.hh>
@@ -57,6 +64,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <stdlib.h>
 #include <unistd.h>
@@ -67,7 +75,36 @@ namespace tests {
 /** What the scripted endpoint will answer, and what it was asked. */
 struct script {
     std::string content;             ///< the model's "reply"
+
+    /**
+     * Whether to answer with SSE.  **Decided by the request, not set here.**
+     *
+     * This was a field a test set, and #448 found what that costs: a juanaco
+     * test asked for a stream, the endpoint answered a `chat.completion`
+     * object because nothing had switched the field on, and the client
+     * rendered nothing. Eleven assertions failed and all of them pointed at
+     * the client.
+     *
+     * **A client test whose server ignores the client's own request can only
+     * exercise the path the test author remembered to switch on** -- and the
+     * one it answers instead is the path that was already working. So it is
+     * read out of the request now, the way a real server reads it, and left
+     * here only for a test that wants to see what the far end was asked.
+     */
     bool stream = false;
+
+    /**
+     * Seconds of silence after the response head, before the first event.
+     *
+     * The head goes out immediately -- a server has to send it before it can
+     * stream a body -- so this is the stretch where a client has parsed the
+     * status, is inside the body read, and **its sink has not been called
+     * once**. Everything about prefill follows from that.
+     */
+    double first_delay = 0;
+
+    /** Seconds between events afterwards. */
+    double chunk_delay = 0;
 
     /**
      * Read the request and answer nothing, until `closing`.
@@ -86,6 +123,12 @@ struct script {
     std::atomic<bool> closing{false};
 };
 
+/** Sleep, in slices, so `closing` can cut it short.  See script::hang. */
+inline void nap(const script& sc, double seconds) {
+    for(int i = 0; i < int(seconds * 20) && !sc.closing.load(); i++)
+        ::usleep(50 * 1000);
+}
+
 inline void serve(sys::socketstream& s, script& sc) {
     for(;;) {
         util::http::Request q;
@@ -98,6 +141,12 @@ inline void serve(sys::socketstream& s, script& sc) {
 
         sc.requests++;
         sc.last_body = body;
+
+        // The request decides.  Lenient about a body that will not parse:
+        // one of these tests sends deliberate rubbish one day, and a server
+        // that threw here would look like a client defect.
+        try { sc.stream = ai::openai::request::parse(body).stream; }
+        catch(std::exception&) { sc.stream = false; }
 
         if(sc.hang) {
             for(int i = 0; i < 300 && !sc.closing.load(); i++)
@@ -112,12 +161,18 @@ inline void serve(sys::socketstream& s, script& sc) {
         if(sc.stream) {
             type = "text/event-stream";
 
+            // **One event per element, not one string.** They have to be
+            // writable separately for the delays below to mean anything, and
+            // the total length still has to be known before the head goes
+            // out, so they are built first and sent afterwards.
+            std::vector<std::string> events;
+
             ai::openai::delta first;
 
             first.role = true;
 
-            payload += ai::openai::event(
-                ai::openai::chunk("id", "m", 1, first));
+            events.push_back(
+                ai::openai::event(ai::openai::chunk("id", "m", 1, first)));
 
             // In pieces, because that is what a stream is and the reader has
             // to put them back together.
@@ -126,19 +181,63 @@ inline void serve(sys::socketstream& s, script& sc) {
 
                 d.content = sc.content.substr(at, 7);
 
-                payload += ai::openai::event(
-                    ai::openai::chunk("id", "m", 1, d));
+                events.push_back(
+                    ai::openai::event(ai::openai::chunk("id", "m", 1, d)));
             }
 
             ai::openai::delta last;
 
             last.done = true;
 
-            payload += ai::openai::event(
-                ai::openai::chunk("id", "m", 1, last));
-            payload += ai::openai::done();
+            events.push_back(
+                ai::openai::event(ai::openai::chunk("id", "m", 1, last)));
+            events.push_back(ai::openai::done());
+
+            // **Chunked, not Content-Length, and that distinction cost an
+            // afternoon.** This sent an SSE body with a Content-Length, and
+            // every delay above was invisible: the client read the whole
+            // body and called its sink **once, at the end**, because a
+            // reader given a length is entitled to fill its buffer before
+            // handing anything over. Nothing was wrong with the client and
+            // nothing was wrong with the delays; the response was simply not
+            // shaped like a stream.
+            //
+            // jserve sends chunked SSE, which is what makes incremental
+            // delivery the only thing a reader can do -- a chunk is a unit
+            // the framing itself delimits. So this sends chunked too, which
+            // is the same rule as reading `stream` out of the request: a
+            // scripted endpoint that does not behave like the real one tests
+            // the client against a server that does not exist.
+            std::ostringstream head;
+
+            head << "HTTP/1.1 200 OK\r\n"
+                 << "Content-Type: " << type << "\r\n"
+                 << "Transfer-Encoding: chunked\r\n"
+                 << "Connection: keep-alive\r\n\r\n";
+
+            s << head.str() << std::flush;
+
+            nap(sc, sc.first_delay);
+
+            for(std::size_t i = 0; i < events.size(); i++) {
+                // A client that gave up closed the socket, and writing to it
+                // is how this finds out.  jlib suppresses SIGPIPE itself --
+                // SO_NOSIGPIPE, or a per-thread block where there is none --
+                // so the stream merely goes bad.
+                if(!s) return;
+
+                s << std::hex << events[i].size() << std::dec << "\r\n"
+                  << events[i] << "\r\n" << std::flush;
+
+                if(i + 1 < events.size()) nap(sc, sc.chunk_delay);
+            }
+
+            if(s) s << "0\r\n\r\n" << std::flush;
+
+            continue;
         }
-        else {
+
+        {
             type = "application/json";
 
             // A plausible count rather than a round number: a client prints

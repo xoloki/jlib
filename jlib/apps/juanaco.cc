@@ -24,13 +24,12 @@
  * A single pane: the task summarised at the top, a scrolling transcript in the
  * middle, a prompt pinned below it, and a status line under that.
  *
- * **A reply now comes from somewhere** (#447, phase 3 of #444). The whole of
+ * **The reply arrives as it is written** (#448, phase 4 of #444). The whole of
  * jcode runs on a thread of its own and reports back through a pipe, so the
  * prompt keeps taking keys and the screen keeps repainting through a request
- * that blocks for minutes. Still no streaming -- the reply arrives as one
- * body, which is what keeps the relay's output to a handful of events while
- * the loop is being proven -- and still no confirm dialog. #448 has the
- * first, #449 the second.
+ * that blocks for minutes -- and now the tokens appear one at a time as the
+ * server emits them. Escape stops the reply without ending the conversation.
+ * Still no confirm dialog; that is #449.
  *
  * All of it is driven by `make check` against the scripted endpoint
  * `app_jcode_run_test` already hand-rolls: no GGUF, no model, no network.
@@ -75,6 +74,7 @@
 // after it gets its own identifiers rewritten.
 #include <ncurses.h>
 
+#include <chrono>
 #include <clocale>
 #include <csignal>
 #include <cstdlib>
@@ -158,6 +158,7 @@ struct entry {
  */
 class transcript {
 public:
+    /** A finished line.  Closes whatever extend() had open. */
     void add(kind k, const std::string& text) {
         entry e;
 
@@ -165,12 +166,48 @@ public:
         e.text = text;
 
         m_entries.push_back(e);
+
+        m_open = false;
     }
+
+    /**
+     * Append to the entry being streamed, starting one if there is none.
+     *
+     * **Why a reply is one entry and not one per token.** The transcript is
+     * re-wrapped from text on every draw, so a reply arriving in fragments
+     * has to accumulate into a single string or the wrapping is wrong --
+     * sixty entries of four characters each wrap to sixty rows. Appending
+     * also means a resize mid-reply re-flows what has arrived so far, which
+     * is the whole reason the transcript is text (#446).
+     */
+    void extend(kind k, const std::string& text) {
+        if(m_open && !m_entries.empty() && m_entries.back().k == k) {
+            m_entries.back().text += text;
+
+            return;
+        }
+
+        add(k, text);
+
+        m_open = true;
+    }
+
+    /**
+     * Nothing more will be appended to the last entry.
+     *
+     * Needed because two replies in a row -- two rounds of a tool loop --
+     * would otherwise run together into one entry, there being no other
+     * event between them.
+     */
+    void seal() { m_open = false; }
 
     const std::vector<entry>& entries() const { return m_entries; }
 
 private:
     std::vector<entry> m_entries;
+
+    /** Whether the last entry is still being written to. */
+    bool m_open = false;
 };
 
 /** What the top line says, and what `/mode` changes. */
@@ -213,6 +250,25 @@ struct state {
 
     /** Whether a request is in flight.  Owned by the UI thread. */
     bool working = false;
+
+    /**
+     * Whether anything has come back yet for the request in flight.
+     *
+     * **Not "whether the server is prefilling", which cannot be known from
+     * here.** Nothing is on the wire between a request arriving and the first
+     * token being generated -- #451 measured 30.13 seconds of it at a 4096
+     * token prompt, about 93% of the whole wait -- and from this side that is
+     * indistinguishable from a server that has died. So the status line says
+     * `waiting`, which is what is true, rather than `prefill`, which is a
+     * guess dressed as a fact.
+     */
+    bool streaming = false;
+
+    /** Seconds the request in flight has taken, for the status line. */
+    long elapsed = 0;
+
+    /** Set when Escape has been pressed and the worker has not stopped yet. */
+    bool cancelling = false;
 
     std::string mode_name() const {
         return edits == jcode::format::whole ? "whole" : "hunks";
@@ -261,6 +317,17 @@ struct options {
     /** The build command, split on whitespace.  Empty means none at all. */
     std::string build;
 
+    /**
+     * Whether to ask for the reply as it is written.
+     *
+     * On, because the whole of phase 4 is that a coding reply is long enough
+     * that watching it arrive is the difference between a harness and a
+     * wait. `--no-stream` keeps the other path reachable, which matters
+     * because it is the only one the protocol gives a usage block to -- see
+     * the drift line, which is blank without it.
+     */
+    bool stream = true;
+
     bool yes = false;
 
     /** The files put in front of the model, named on the command line. */
@@ -281,7 +348,12 @@ struct options {
  * prose and `k` decides which row it becomes; `counts` is the one event that
  * is not a line of text.
  */
-enum class news { say, counts };
+enum class news {
+    say,       ///< a finished line, tagged by `k`
+    token,     ///< a fragment, appended to the entry being streamed
+    sealed,    ///< nothing more belongs to that entry
+    counts     ///< the numbers, for the status line and /stats
+};
 
 struct event {
     news n = news::say;
@@ -318,6 +390,7 @@ struct job {
     unsigned int attempts = 3;
 
     bool yes = false;
+    bool stream = true;
 
     jcode::format shape = jcode::format::whole;
 
@@ -345,6 +418,7 @@ job compose(const options& o, const state& s, const std::string& request) {
     j.attempts = s.attempts;
 
     j.yes = o.yes;
+    j.stream = o.stream;
     j.shape = s.edits;
 
     j.request = request;
@@ -476,13 +550,7 @@ void work(sys::relay<event>& r, const job& j) {
         oa::request req;
 
         req.model = j.model;
-
-        // **Not streaming, and this is the phase allowed not to be.** One
-        // body means the relay carries a handful of events rather than one
-        // per token, so the loop is provable before the token path exists.
-        // #448 turns it on, and Escape with it.
-        req.stream = false;
-
+        req.stream = j.stream;
         req.max_tokens = j.tokens;
         req.tools = declared;
         req.messages = turns;
@@ -493,24 +561,127 @@ void work(sys::relay<event>& r, const job& j) {
 
         send.add("Content-Type", "application/json");
 
-        const util::http::Response res =
-            conn->request("POST", target, send, req.str());
+        oa::answer a;
 
-        if(!res.ok()) {
-            oa::failure f;
+        if(j.stream) {
+            // **The signature never changes, and that is the point.**
+            // `jcode::exchange` returns a complete `answer`, which reads like
+            // a prohibition on token-by-token rendering and is not one: the
+            // chunks are pushed to the UI as a side effect on the way past
+            // and the assembled answer is still what comes back. So
+            // `converse` and every test of it are untouched.
+            oa::event_reader events;
 
-            // Thrown rather than returned: converse turns it into an ending
-            // that says the far end refused, which is a different outcome
-            // from the model having had nothing to say.
-            throw std::runtime_error(
-                "the server refused: " +
-                (oa::failure::parse(res.body(), f) ? f.message : res.reason()));
+            std::string got;
+
+            // Kept for the failure path only. With a sink the Response comes
+            // back with **no body in it** -- deliberately, says net::http, a
+            // caller that said it would not hold the whole thing -- so a
+            // refusal's `error.message` would otherwise be lost and the user
+            // would get a bare status line. Bounded, because it exists to be
+            // read by a person.
+            std::string raw;
+
+            bool gave_up = false;
+
+            const util::http::Response res = conn->request(
+                "POST", target, send, req.str(),
+                [&](std::string_view piece) {
+                    if(raw.size() < 8192) raw.append(piece);
+
+                    // **Where Escape lands.** Returning false abandons the
+                    // body, which closes the socket -- and a closed socket is
+                    // what jserve notices, in `peer_gone()` between tokens
+                    // and since #402 during prefill as well. So this frees
+                    // the server's model rather than merely stopping the
+                    // listening.
+                    if(!r.wanted()) { gave_up = true; return false; }
+
+                    for(const std::string& one : events.feed(std::string(piece)))
+                    {
+                        try {
+                            const oa::delta d = oa::delta::parse(one);
+
+                            got += d.content;
+
+                            if(!d.content.empty()) {
+                                event e;
+
+                                e.n = news::token;
+                                e.k = kind::model;
+                                e.text = d.content;
+
+                                r.emit(e);
+                            }
+
+                            // Whole calls, because jserve sends them whole --
+                            // see openai::delta::calls.
+                            for(std::size_t i = 0; i < d.calls.size(); i++)
+                                a.calls.push_back(d.calls[i]);
+                        }
+                        catch(std::exception& e) {
+                            say(kind::note, std::string("a chunk that did not "
+                                                        "parse: ") + e.what());
+                        }
+                    }
+
+                    return true;
+                });
+
+            {
+                event e;
+
+                e.n = news::sealed;
+
+                r.emit(e);
+            }
+
+            if(gave_up) throw std::runtime_error("cancelled");
+
+            if(!res.ok()) {
+                oa::failure f;
+
+                throw std::runtime_error(
+                    "the server refused: " +
+                    (oa::failure::parse(raw, f) ? f.message : res.reason()));
+            }
+
+            // **A stream that ended without [DONE] may be short**, which is
+            // #256's hazard arriving from the other side: a whole-file reply
+            // cut off mid-fence is a corrupted file, and parse() refuses an
+            // unclosed block for exactly that reason. Said rather than
+            // guessed at.
+            if(!events.done())
+                say(kind::note, "the stream ended without [DONE], so the "
+                                "reply may be short");
+
+            a.content = got;
+        }
+        else {
+            const util::http::Response res =
+                conn->request("POST", target, send, req.str());
+
+            if(!res.ok()) {
+                oa::failure f;
+
+                // Thrown rather than returned: converse turns it into an
+                // ending that says the far end refused, which is a different
+                // outcome from the model having had nothing to say.
+                throw std::runtime_error(
+                    "the server refused: " +
+                    (oa::failure::parse(res.body(), f) ? f.message
+                                                       : res.reason()));
+            }
+
+            a = oa::answer::parse(res.body());
+
+            if(!a.content.empty()) say(kind::model, a.content);
         }
 
-        const oa::answer a = oa::answer::parse(res.body());
-
-        if(!a.content.empty()) say(kind::model, a.content);
-
+        // **Zero on the streaming path, and that is the protocol.** There is
+        // no usage block in a chunk, so these stay at nought and the drift
+        // line below has nothing to report -- the one thing `--no-stream`
+        // is still good for.
         in += a.prompt_tokens;
         out += a.completion_tokens;
 
@@ -640,7 +811,17 @@ void work(sys::relay<event>& r, const job& j) {
 
     if(!drift.empty()) say(kind::note, drift);
 
-    if(done.why == jcode::settled::built) {
+    // **A cancel the user asked for is not a failure, and must not be
+    // spelled like one.** `converse` turns the sink's refusal into
+    // `ending::failed` and `until_built` wraps that again, so the honest
+    // machinery produces "the conversation failed -- failed: cancelled" --
+    // which says the harness broke when in fact it did as it was told, and
+    // says "failed" twice while doing it.
+    if(!r.wanted()) {
+        say(kind::note, "cancelled -- the reply so far is kept, and so is "
+                        "the conversation");
+    }
+    else if(done.why == jcode::settled::built) {
         if(!j.build.empty()) say(kind::note, "and `" + j.build + "` passes");
     }
     else {
@@ -967,11 +1148,23 @@ private:
 
         std::string line = buf;
 
-        // **Whether a request is in flight belongs on screen.** A harness
-        // that looks identical while waiting and while idle is the thing the
-        // worker was added to avoid -- the user cannot tell "thinking" from
-        // "did not take my Return".
-        line += s.working ? "   working" : "   idle";
+        // **Whether a request is in flight belongs on screen, and so does
+        // how long it has been.** A harness that looks identical while
+        // waiting and while idle is the thing the worker was added to avoid
+        // -- the user cannot tell "thinking" from "did not take my Return".
+        //
+        // Elapsed seconds and nothing else, because elapsed seconds are all
+        // there is: nothing is on the wire during prefill, so a percentage
+        // would be invented. #451 is the protocol addition that would make a
+        // real one possible, and until then an honest clock beats a
+        // fabricated bar.
+        if(!s.working) line += "   idle";
+        else {
+            line += s.cancelling ? "   cancelling "
+                                 : (s.streaming ? "   streaming " : "   waiting ");
+
+            line += std::to_string(s.elapsed) + "s";
+        }
 
         if(int(line.size()) > m_cols) line = line.substr(0, std::size_t(m_cols));
 
@@ -1029,6 +1222,7 @@ const char* HELP[] = {
     "",
     "A prompt that starts with a slash is written //like-this.",
     "Enter sends; Ctrl-J adds a line without sending; Ctrl-U clears it.",
+    "Escape stops a reply, and keeps the conversation.",
     "Anything else is sent to the model.  Nothing is written without --yes.",
     0
 };
@@ -1062,7 +1256,8 @@ bool command(const std::string& line, state& s, transcript& t,
             t.add(kind::note, "edits " + s.mode_name() +
                               ", build " + (s.build ? "on" : "off") +
                               ", rounds " + std::to_string(s.rounds) +
-                              ", attempts " + std::to_string(s.attempts));
+                              ", attempts " + std::to_string(s.attempts) +
+                              (o.stream ? ", streaming" : ", whole replies"));
 
             return true;
         }
@@ -1126,10 +1321,17 @@ bool command(const std::string& line, state& s, transcript& t,
                           std::to_string(s.context_used) + " of " +
                           std::to_string(s.context_total));
 
-        // Zero because nothing was counted is a different fact from zero
-        // because nothing was sent, and only one of them is a defect.
+        // **Three kinds of nought, and a user staring at one needs told
+        // which.** Nothing sent yet; sent, but streaming, where the protocol
+        // puts no usage block in a chunk; or sent and counted. The first
+        // version tested `context_total`, which the counts event sets to the
+        // context size whether or not any tokens were counted -- so the
+        // streaming case said nothing at all and read as the third.
         if(!s.context_total)
             t.add(kind::note, "all zero: nothing has been sent yet");
+        else if(!s.tokens_in && !s.tokens_out)
+            t.add(kind::note, "no token count: a chunk carries no usage "
+                              "block, so these need --no-stream");
 
         return true;
     }
@@ -1165,16 +1367,34 @@ bool command(const std::string& line, state& s, transcript& t,
  * runs on the UI thread -- which is what makes neither of them need a lock.
  */
 void absorb(const event& e, state& s, transcript& t) {
-    if(e.n == news::counts) {
+    switch(e.n) {
+    case news::counts:
         s.tokens_in = e.tokens_in;
         s.tokens_out = e.tokens_out;
         s.context_used = e.context_used;
         s.context_total = e.context_total;
 
         return;
-    }
 
-    t.add(e.k, e.text);
+    case news::token:
+        // The first fragment is what tells the status line that something is
+        // on the wire at last; see state::streaming.
+        s.streaming = true;
+
+        t.extend(e.k, e.text);
+
+        return;
+
+    case news::sealed:
+        t.seal();
+
+        return;
+
+    case news::say:
+        t.add(e.k, e.text);
+
+        return;
+    }
 }
 
 volatile std::sig_atomic_t g_interrupted = 0;
@@ -1202,11 +1422,13 @@ void usage(std::ostream& o, const char* me) {
       << "  --build CMD     a build command the model may run, split on\n"
       << "                  whitespace; no shell is involved\n"
       << "  --yes           write without asking\n"
+      << "  --no-stream     wait for the whole reply rather than watching\n"
+      << "                  it arrive; the only way to get a token count\n"
       << "  --task TEXT     what the top line says\n"
       << "  --help\n"
       << "\n"
       << "  Enter sends, Ctrl-J adds a line, Ctrl-U clears the prompt,\n"
-      << "  Ctrl-C or /quit leaves.\n";
+      << "  Escape stops a reply, Ctrl-C or /quit leaves.\n";
 }
 
 } // namespace
@@ -1230,6 +1452,7 @@ int main(int argc, char** argv) {
         else if(a == "--timeout" && has_next) o.timeout = std::atof(argv[++i]);
         else if(a == "--build" && has_next)   o.build = argv[++i];
         else if(a == "--yes")                 o.yes = true;
+        else if(a == "--no-stream")           o.stream = false;
 
         else if(!a.empty() && a[0] == '-') {
             // **Before initscr, and that is the point.** A usage error from
@@ -1278,6 +1501,9 @@ int main(int argc, char** argv) {
     // because `status` draws from `state` and not from here.
     std::unique_ptr<sys::relay<event> > worker;
 
+    // When the request in flight went out, for the status line's clock.
+    std::chrono::steady_clock::time_point began;
+
     std::string prompt;
     std::size_t caret = 0;
 
@@ -1294,6 +1520,16 @@ int main(int argc, char** argv) {
             bool moved = false;
 
             for(const event& e : worker->take()) { absorb(e, s, t); moved = true; }
+
+            // **The clock is its own reason to repaint.** Everything else
+            // here draws because something arrived, and during prefill
+            // nothing does -- which is the one stretch where the user most
+            // needs to see that the program is alive. A second is the unit
+            // shown, so a second is how often this can matter.
+            const long now = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - began).count();
+
+            if(now != s.elapsed) { s.elapsed = now; moved = true; }
 
             if(worker->done()) {
                 // **take() and done() are two facts about a thread that is
@@ -1314,6 +1550,14 @@ int main(int argc, char** argv) {
                 worker.reset();
 
                 s.working = false;
+                s.streaming = false;
+                s.cancelling = false;
+
+                // The last entry is finished whether or not the stream said
+                // so: a cancelled reply has no [DONE] and must not have the
+                // next one appended to it.
+                t.seal();
+
                 moved = true;
             }
 
@@ -1376,7 +1620,12 @@ int main(int argc, char** argv) {
 
                 worker->start([j](sys::relay<event>& r) { work(r, j); });
 
+                began = std::chrono::steady_clock::now();
+
                 s.working = true;
+                s.streaming = false;
+                s.cancelling = false;
+                s.elapsed = 0;
             }
 
             sc.draw(t, s, prompt, caret);
@@ -1431,9 +1680,53 @@ int main(int argc, char** argv) {
         if(c == KEY_LEFT)  { if(caret) { std::size_t at = caret - 1; while(at > 0 && (prompt[at] & 0xc0) == 0x80) at--; caret = at; } sc.draw(t, s, prompt, caret); continue; }
         if(c == KEY_RIGHT) { if(caret < prompt.size()) { std::size_t at = caret + 1; while(at < prompt.size() && (prompt[at] & 0xc0) == 0x80) at++; caret = at; } sc.draw(t, s, prompt, caret); continue; }
 
-        // Escape is reserved: #448 gives it cancellation, and nothing else
-        // should take it before then.
-        if(c == 27) continue;
+        // **Escape stops the reply without ending the conversation**, which
+        // is jalpaca's rule and the right one: the turns so far are still
+        // the context for the next prompt, and a key that threw them away
+        // would make a mis-hit expensive.
+        //
+        // What it cannot do is land instantly during prefill. The sink is
+        // where cancellation is noticed and the sink is not called until
+        // something arrives, so an Escape in the silent stretch is
+        // *recorded* and honoured at the first chunk. #451's prefill chunk
+        // would close that gap -- the same addition that would give the
+        // clock above something real to show, which is why they are one
+        // issue and not two.
+        if(c == 27) {
+            if(worker && !s.cancelling) {
+                worker->stop();
+
+                s.cancelling = true;
+
+                // **No note here while a reply is arriving, and a live run
+                // is what taught that.** The sink refuses at the *next*
+                // chunk, so tokens keep landing for a moment after the key
+                // -- and a note added now closes the streaming entry, so the
+                // rest of the reply started a second one *below* the note.
+                // Against a real model it read:
+                //
+                //     To
+                //     -- cancelled -- the reply so far is kept
+                //      rewrite `hello.cc` as a long heavily commented ...
+                //
+                // The status line says `cancelling` immediately, which is
+                // the feedback that the key was seen; the worker says
+                // `cancelled` when it has actually stopped, in order.
+                //
+                // During the silent stretch there is no open entry to split
+                // and nothing else is coming, so there the note is the only
+                // way to know the key registered -- and it has to say that
+                // it is recorded rather than done.
+                if(!s.streaming)
+                    t.add(kind::note, "cancelling; nothing has arrived yet, "
+                                      "so it takes effect at the first token "
+                                      "(#451)");
+
+                sc.draw(t, s, prompt, caret);
+            }
+
+            continue;
+        }
 
         if(c >= 32 && c < 256) {
             prompt.insert(caret, 1, char(c));
