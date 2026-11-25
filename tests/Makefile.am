@@ -3,7 +3,7 @@
 AM_CPPFLAGS = -I$(top_srcdir) \
 	$(GPGME_CFLAGS) $(GPGERROR_CFLAGS) $(SODIUM_CFLAGS) $(OPENSSL_CFLAGS) $(JSONC_CFLAGS) $(PORTAUDIO_CFLAGS)
 
-EXTRA_DIST = audio_test.hh certificate.hh mailserver.hh httpserver.hh
+EXTRA_DIST = audio_test.hh certificate.hh mailserver.hh httpserver.hh pty.hh
 
 JSYS_LA   = $(top_builddir)/jlib/sys/libjsys.la
 JUTIL_LA  = $(top_builddir)/jlib/util/libjutil.la
@@ -62,6 +62,13 @@ endif
 # is unconditional.
 if HAVE_MAGICK
 APP_TESTS = app_jneural_alpha_test
+endif
+
+# sys_pty_test is both halves of itself: run with --child it is the curses
+# program, and with no arguments it is the test that drives one through a pty.
+# So it needs curses, and is gated where jalpaca is.
+if HAVE_CURSES
+CURSES_TESTS = sys_pty_test
 endif
 
 TESTS = \
@@ -160,9 +167,14 @@ TESTS = \
 	$(METAL_TESTS) \
 	$(MEDIA_TESTS) \
 	$(CURVE_TESTS) \
+	$(CURSES_TESTS) \
 	$(APP_TESTS)
 
 check_PROGRAMS = $(TESTS)
+
+sys_pty_test_SOURCES  = sys_pty_test.cc pty.hh
+sys_pty_test_CPPFLAGS = $(AM_CPPFLAGS) $(CURSES_CFLAGS)
+sys_pty_test_LDADD    = $(CURSES_LIBS)
 
 media_datastream_test_SOURCES = media_datastream_test.cc
 media_datastream_test_LDADD   = $(JMEDIA_LA) $(JSYS_LA)
