@@ -1,19 +1,13 @@
 # jcode
 
-A map. Every type named here is documented at its declaration, and where the
-two disagree the header is right.
+A map. Every type named here is documented at its declaration, and where the two disagree the header is right.
 
 - `jlib/apps/jcode.hh`, `jcode.cc`, `jcode_main.cc`
 - `docs/jserve.md` — the server it talks to
 
-A coding harness over jserve: read the files, lay out a request that fits,
-send it down a connection that stays open, stream the reply, read the edits
-out of it, and put them on disk after saying what will happen.
+A coding harness over jserve: read the files, lay out a request that fits, send it down a connection that stays open, stream the reply, read the edits out of it, and put them on disk after saying what will happen.
 
-**It asks before it writes**, unless `--yes`. A harness that writes without
-asking is fine when version control is watching and reckless when it is not,
-and jcode cannot tell which it is in. `--dry-run` decides everything and
-writes nothing.
+**It asks before it writes**, unless `--yes`. A harness that writes without asking is fine when version control is watching and reckless when it is not, and jcode cannot tell which it is in. `--dry-run` decides everything and writes nothing.
 
 ## Two edit formats, because they fail differently
 
@@ -25,34 +19,19 @@ This is the part worth understanding, and the reason both exist (#348):
 | needs tool calling | no | no |
 | how it goes wrong | **by omission, into the file** | **by not matching, into a refusal** |
 
-A whole-file reply that quietly drops a function writes a file missing a
-function, and nothing notices until something fails to build. A hunk whose
-`search` text is not in the file cannot be applied, so it is refused and
-said out loud. `search` is the text **as it is now, exactly** — not a pattern
-and not a paraphrase — and `apply()` refuses a hunk it cannot find *and one
-it finds twice*, rather than guessing which was meant.
+A whole-file reply that quietly drops a function writes a file missing a function, and nothing notices until something fails to build. A hunk whose `search` text is not in the file cannot be applied, so it is refused and said out loud. `search` is the text **as it is now, exactly** — not a pattern and not a paraphrase — and `apply()` refuses a hunk it cannot find *and one it finds twice*, rather than guessing which was meant.
 
-The two are alternatives rather than layers: a reply is in one form or the
-other, and an edit carries whichever arrived.
+The two are alternatives rather than layers: a reply is in one form or the other, and an edit carries whichever arrived.
 
 ## Lenient about the envelope, with every guess on the record
 
-Models get the wrapper wrong constantly — they bold the filename, end it with
-a colon, make it a heading, wrap it in backticks, or paste the `path/to`
-prefix out of the prompt's own example. A harness that refuses a reply over
-any of that is useless, so each is absorbed.
+Models get the wrapper wrong constantly — they bold the filename, end it with a colon, make it a heading, wrap it in backticks, or paste the `path/to` prefix out of the prompt's own example. A harness that refuses a reply over any of that is useless, so each is absorbed.
 
-**Each absorption is a guess, and each is recorded against the edit it
-produced.** `edit::guesses` carries them and a caller is expected to print
-them, because a guess nobody can see is how the wrong file gets written and
-nobody learns why. Anything not on the list is refused rather than guessed
-at.
+**Each absorption is a guess, and each is recorded against the edit it produced.** `edit::guesses` carries them and a caller is expected to print them, because a guess nobody can see is how the wrong file gets written and nobody learns why. Anything not on the list is refused rather than guessed at.
 
 ## A fence that contradicts its file is an illustration
 
-Found the hard way (#364): forty-one lines of C became one line of `make`,
-because the last fenced block in a reply was an illustration and the harness
-took it for the edit.
+Found the hard way (#364): forty-one lines of C became one line of `make`, because the last fenced block in a reply was an illustration and the harness took it for the edit.
 
 So a fence whose own language contradicts the file it would be written to —
 ```` ```sh ```` against a `.c` file — is not an edit (#366). The model said

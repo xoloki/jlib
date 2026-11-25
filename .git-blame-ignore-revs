@@ -1,0 +1,19 @@
+# Commits that changed formatting without changing meaning.
+#
+# `git blame` on these files would otherwise point at the reflow rather than at
+# whoever wrote the sentence -- and these documents carry *why it is like that*,
+# which is the part worth attributing.
+#
+# It does nothing until you turn it on, which is the half people miss:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Per clone, because it is a local preference rather than a property of the
+# history. GitHub honours the file automatically; `git blame` on the command
+# line does not until the line above is run.
+#
+# One hash per line, longest-lived first, with a comment saying what it did.
+
+# docs: unwrap every doc -- prose on one line per paragraph, no hard wraps
+# (hash added in the follow-up commit, because it cannot be known until the
+#  commit it names exists)
