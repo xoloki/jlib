@@ -1,0 +1,127 @@
+[
+  {
+    "id": "ringbuffer-peek",
+    "file": "jlib/sys/ringbuffer.hh",
+    "kind": "add a member",
+    "request": "In ringbuffer, add a public member function `size_type peek(T* dst, size_type n) const` that copies up to n readable items into dst exactly as read() does, but without advancing m_read, and returns how many it copied. Put it after read(). Change nothing else.",
+    "must": [
+      "peek\\(T\\*\\s*dst,\\s*size_type n\\)\\s*const"
+    ],
+    "must_not": [],
+    "max_lost": 0
+  },
+  {
+    "id": "ringbuffer-noexcept",
+    "file": "jlib/sys/ringbuffer.hh",
+    "kind": "the same small change in five places",
+    "request": "Mark capacity(), readable(), writable(), empty() and full() in ringbuffer as noexcept. Change nothing else.",
+    "must": [
+      "capacity\\(\\) const noexcept",
+      "readable\\(\\) const noexcept",
+      "writable\\(\\) const noexcept",
+      "empty\\(\\) const noexcept",
+      "full\\(\\) const noexcept"
+    ],
+    "must_not": [],
+    "max_lost": 5
+  },
+  {
+    "id": "sampler-topk",
+    "file": "jlib/ai/sampler.cc",
+    "kind": "add validation",
+    "request": "In the sampler constructor, also refuse a top_k of zero, throwing exception(\"top_k must be at least one\") in the same style as the two checks already there. Change nothing else.",
+    "must": [
+      "top_k must be at least one",
+      "top_k\\s*(==\\s*0|<\\s*1)"
+    ],
+    "must_not": [],
+    "max_lost": 1
+  },
+  {
+    "id": "sampler-ties",
+    "file": "jlib/ai/sampler.cc",
+    "kind": "change one function's behaviour",
+    "request": "Change sampler::argmax so that when two logits are equal it returns the larger index rather than the smaller one. Change nothing else.",
+    "must": [
+      "logits\\[i\\]\\s*>=\\s*logits\\[std::size_t\\(best\\)\\]"
+    ],
+    "must_not": [
+      "logits\\[i\\]\\s*>\\s*logits\\[std::size_t\\(best\\)\\]"
+    ],
+    "max_lost": 1
+  },
+  {
+    "id": "listener-localhost",
+    "file": "jlib/sys/listener.cc",
+    "kind": "extend a condition",
+    "request": "Make peer::loopback() also return true when address is exactly the string \"localhost\". Change nothing else.",
+    "must": [
+      "\"localhost\""
+    ],
+    "must_not": [],
+    "max_lost": 1
+  },
+  {
+    "id": "listener-reuseport",
+    "file": "jlib/sys/listener.cc",
+    "kind": "add a line inside a loop",
+    "request": "In listener's constructor, immediately after the setsockopt call that sets SO_REUSEADDR, add a second setsockopt call setting SO_REUSEPORT with the same `on` value. Change nothing else.",
+    "must": [
+      "SO_REUSEPORT"
+    ],
+    "must_not": [],
+    "max_lost": 0
+  },
+  {
+    "id": "directory-rename",
+    "file": "jlib/sys/Directory.cc",
+    "kind": "rename locals in one function",
+    "request": "In Directory::list_subdirs, rename the local variable `d` to `paths` and the local variable `ret` to `subdirs`. Change nothing else, and in no other function.",
+    "must": [
+      "std::vector<std::string> paths\\s*=",
+      "subdirs\\.push_back\\(Directory\\(paths\\[i\\]\\)\\)",
+      "return subdirs;"
+    ],
+    "must_not": [],
+    "max_lost": 6
+  },
+  {
+    "id": "quant-upper",
+    "file": "jlib/ai/quant.hh",
+    "kind": "change three strings",
+    "request": "Make quant_name return the upper-case names llama.cpp uses: Q8_0, Q4_K and Q6_K. Change nothing else.",
+    "must": [
+      "\"Q8_0\"",
+      "\"Q4_K\"",
+      "\"Q6_K\""
+    ],
+    "must_not": [
+      "return \"q8_0\"",
+      "return \"q4_K\"",
+      "return \"q6_K\""
+    ],
+    "max_lost": 3
+  },
+  {
+    "id": "relay-idle",
+    "file": "jlib/sys/relay.hh",
+    "kind": "add a member to a template",
+    "request": "In relay, add a public member function `bool idle()` that returns true when done() is true and no items are waiting to be taken, taking m_items' mutex to check the queue the same way emit() does. Put it after done(). Change nothing else.",
+    "must": [
+      "bool idle\\(\\)"
+    ],
+    "must_not": [],
+    "max_lost": 0
+  },
+  {
+    "id": "openai-sort",
+    "file": "jlib/ai/openai.cc",
+    "kind": "a change in a large file",
+    "request": "In the models() overload that takes a std::vector<listing>, write the entries sorted by id: copy the vector, sort the copy by id with std::sort, and loop over the sorted copy. Change nothing else.",
+    "must": [
+      "std::sort"
+    ],
+    "must_not": [],
+    "max_lost": 1
+  }
+]
