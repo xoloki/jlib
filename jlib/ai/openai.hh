@@ -173,6 +173,26 @@ struct request {
     bool stream = false;
 
     /**
+     * Ask for one last chunk carrying the token counts.
+     *
+     * `stream_options: { include_usage: true }`, which is the protocol's own
+     * answer to the streaming path having no usage block. Without it a client
+     * that streams -- which is every interactive one -- cannot know what a
+     * reply cost or how full the context is, and #450's whole point is that
+     * the second number is the early warning for a KV cache that pages
+     * rather than failing (#437).
+     *
+     * **Opt-in, and that is load-bearing rather than polite.** The chunk it
+     * produces has an *empty* `choices` array, and a client that never asked
+     * for one may not survive it -- delta::parse refused exactly that shape
+     * until it learned to read this one. So a server sends it only to a
+     * client that said it could take it, which is also what OpenAI does.
+     *
+     * Ignored unless `stream` is set: a whole reply has its usage already.
+     */
+    bool include_usage = false;
+
+    /**
      * Absent means "whatever the server would have chosen", which is not the
      * same as zero -- zero is greedy and is a thing a caller can ask for.
      */
@@ -286,6 +306,17 @@ struct delta {
     finish why = finish::stop;
 
     /**
+     * Token counts, from the chunk `include_usage` asked for.
+     *
+     * That chunk has an empty `choices` array and nothing else of use, so a
+     * delta read from it is empty apart from these -- `has_usage` is how a
+     * caller tells it from a chunk that merely carried no text.
+     */
+    bool has_usage = false;
+    unsigned int prompt_tokens = 0;
+    unsigned int completion_tokens = 0;
+
+    /**
      * Read one `chat.completion.chunk`.
      *
      * @throws util::json::exception if it is not an object with a choices
@@ -351,9 +382,51 @@ std::string event(const std::string& json);
 /** The event that ends a stream: `data: [DONE]`. */
 std::string done();
 
+/**
+ * The last chunk of a stream that asked for `include_usage`.
+ *
+ * A `chat.completion.chunk` with an empty `choices` array and a `usage`
+ * object, sent after the chunk that finished and before `[DONE]`.
+ */
+std::string usage(const std::string& id, const std::string& model,
+                  std::int64_t created, unsigned int prompt_tokens,
+                  unsigned int completion_tokens);
+
+/**
+ * One model a server offers, and the most context it will take.
+ *
+ * **`context_length` is not in the OpenAI schema**, which lists names and
+ * nothing a client could size a request by. It is the GGUF's own key for the
+ * number, and jserve already holds it, so it is added rather than invented: a
+ * client that does not know the field ignores it, and one that does no longer
+ * has to be told on its command line what the server could have said. Other
+ * servers spell it `max_model_len` or `max_context_length`; this reads only
+ * its own spelling and says so.
+ *
+ * Zero means the server did not say, which is a different thing from a model
+ * with no context, and the writer omits the field rather than writing a 0.
+ */
+struct listing {
+    std::string id;
+    unsigned int context = 0;
+
+    /**
+     * A `GET /v1/models` body, read.
+     *
+     * @throws util::json::exception if it is not an object with a `data`
+     *         array. Lenient about each entry: one with no `id` is skipped,
+     *         because a list a client cannot name a model from is not a list
+     *         worth failing over half of.
+     */
+    static std::vector<listing> parse(const std::string& body);
+};
+
 /** A `GET /v1/models` body. */
 std::string models(const std::vector<std::string>& names,
                    std::int64_t created);
+
+/** The same, saying how much context each model takes where it is known. */
+std::string models(const std::vector<listing>& offered, std::int64_t created);
 
 /** An `id`, which the protocol wants unique per completion. */
 std::string new_id();

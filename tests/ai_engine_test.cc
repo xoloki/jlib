@@ -89,6 +89,43 @@ static void naming_a_model_does_not_load_it() {
     catch(ai::engine<float>::exception&) { threw = true; }
 
     ok("  a name cannot be added twice", threw);
+
+    // **A file that cannot be read says nothing, and loads nothing** (#450).
+    // A model list is not the place to learn a path is wrong, and a server
+    // that refused to start over it would turn one bad entry into an outage.
+    ok("  a context nobody can read is 0, not an error",
+       e.context("first") == 0);
+
+    ok("  and asking for it did not load anything", !e.loaded("first"));
+
+    ok("  nor does a name nobody added have one", e.context("third") == 0);
+}
+
+/** The ceiling, read from the file without loading it (#450). */
+static void the_context_comes_from_the_file(const std::string& path) {
+    std::cout << "\nthe context comes from the file (#450):\n";
+
+    ai::host_backend<float> b;
+    ai::engine<float> e(b);
+
+    e.add("m", path);
+
+    // Read the way a load would read it, and compared against that rather
+    // than against a number written into this test -- so the assertion is
+    // "the list agrees with the load", which is the property that matters.
+    const ai::gguf g(path);
+
+    const unsigned int file = ai::model<float>::config::from(g).context;
+
+    const unsigned int said = e.context("m");
+
+    ok("  it is the number a load would use", said == file && said > 0,
+       std::to_string(said) + " vs " + std::to_string(file));
+
+    // **The point of the whole method**: a model list must not cost a load.
+    ok("  without loading the model", !e.loaded("m"));
+
+    ok("  and asking again gives the same answer", e.context("m") == said);
 }
 
 /**
@@ -381,6 +418,7 @@ int main() {
                   << "exercised)\n";
     }
     else {
+        the_context_comes_from_the_file(path);
         a_model_serves_one_conversation_at_a_time(path);
         a_session_starts_with_an_empty_cache(path);
         a_session_carries_what_a_reply_needs(path);

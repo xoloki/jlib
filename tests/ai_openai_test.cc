@@ -640,6 +640,129 @@ static void it_lists_models() {
        std::string(data->obj(1)->get("id")) == "gemma");
 }
 
+/**
+ * `include_usage`, both directions (#450).
+ *
+ * #328's rule, which exists because three fields were found written and never
+ * read back only once the two ends were wired together: a protocol field gets
+ * a round trip before it gets a caller.
+ */
+static void usage_on_a_stream() {
+    std::cout << "\nusage on a stream (#450):\n";
+
+    oa::request q;
+
+    q.model = "m";
+    q.stream = true;
+    q.include_usage = true;
+    q.messages.push_back({ "user", "hi" });
+
+    const std::string wire = q.str();
+
+    ok("  it is asked for as stream_options",
+       wire.find("\"stream_options\"") != std::string::npos &&
+           wire.find("\"include_usage\"") != std::string::npos, wire);
+
+    ok("  and read back", oa::request::parse(wire).include_usage);
+
+    // **Not written without `stream`**: a whole reply already has its usage,
+    // and a server may reject stream_options on a request that does not
+    // stream at all.
+    q.stream = false;
+
+    ok("  not asked for when not streaming",
+       q.str().find("stream_options") == std::string::npos, q.str());
+
+    oa::request plain;
+
+    plain.model = "m";
+    plain.stream = true;
+    plain.messages.push_back({ "user", "hi" });
+
+    ok("  and absent stays absent",
+       plain.str().find("stream_options") == std::string::npos &&
+           !oa::request::parse(plain.str()).include_usage, plain.str());
+
+    // The chunk itself.
+    const std::string chunk = oa::usage("id", "m", 1, 499, 20);
+
+    oa::delta d;
+
+    std::string thrown;
+
+    try { d = oa::delta::parse(chunk); }
+    catch(std::exception& e) { thrown = e.what(); }
+
+    // **The assertion this section exists for.** delta::parse refused a chunk
+    // with no choices, which is exactly the usage chunk's shape -- so until it
+    // learned to read one, every client asking for usage would have been
+    // handed an exception for its trouble.
+    ok("  the usage chunk is read, empty choices and all", thrown.empty(),
+       thrown);
+
+    ok("  carrying its counts",
+       d.has_usage && d.prompt_tokens == 499 && d.completion_tokens == 20,
+       std::to_string(d.prompt_tokens) + "/" + std::to_string(d.completion_tokens));
+
+    ok("  and nothing else", d.content.empty() && d.calls.empty() && !d.done);
+
+    // Still refused: an empty chunk that says nothing at all is a server
+    // defect, and reading it as "fine" would hide one.
+    bool refused = false;
+
+    try {
+        oa::delta::parse("{\"object\":\"chat.completion.chunk\",\"choices\":[]}");
+    }
+    catch(std::exception&) { refused = true; }
+
+    ok("  an empty chunk with no usage is still refused", refused);
+
+    // An ordinary chunk is unchanged by any of this.
+    oa::delta plain_d;
+
+    plain_d.content = "hello";
+
+    const oa::delta back = oa::delta::parse(oa::chunk("id", "m", 1, plain_d));
+
+    ok("  and an ordinary chunk carries no usage", !back.has_usage &&
+       back.content == "hello");
+}
+
+/** context_length in a model list, both directions (#450). */
+static void a_model_list_says_how_much_context() {
+    std::cout << "\na model list says how much context (#450):\n";
+
+    std::vector<oa::listing> offered(2);
+
+    offered[0].id = "coder";
+    offered[0].context = 32768;
+    offered[1].id = "unknown";
+
+    const std::string body = oa::models(offered, 7);
+
+    const std::vector<oa::listing> back = oa::listing::parse(body);
+
+    ok("  both come back", back.size() == 2, std::to_string(back.size()));
+
+    ok("  with their names and the context that was known",
+       back.size() == 2 && back[0].id == "coder" && back[0].context == 32768 &&
+           back[1].id == "unknown", body);
+
+    // "Did not say" and "has none" are different things, and only the first
+    // is ever true -- so a missing number is omitted, not written as 0.
+    ok("  a context that was not known is omitted rather than written as 0",
+       body.find("\"context_length\": 0") == std::string::npos &&
+           body.find("\"context_length\":0") == std::string::npos &&
+           back.size() == 2 && back[1].context == 0, body);
+
+    // The names-only builder still writes a list a client can read.
+    const std::vector<oa::listing> names = oa::listing::parse(
+        oa::models(std::vector<std::string>({ "a", "b" }), 7));
+
+    ok("  and a list with no contexts at all still reads",
+       names.size() == 2 && names[0].id == "a" && names[0].context == 0);
+}
+
 static void ids_are_unique() {
     std::cout << "\nids are unique:\n";
 
@@ -1048,6 +1171,8 @@ int main() {
     a_partial_character_is_refused();
     it_frames_events();
     it_lists_models();
+    usage_on_a_stream();
+    a_model_list_says_how_much_context();
     ids_are_unique();
     errors_are_unwrappable();
     a_request_survives_the_round_trip();

@@ -57,6 +57,7 @@
 #include <unistd.h>
 
 namespace ai = jlib::ai;
+namespace oa = jlib::ai::openai;
 namespace apps = jlib::apps;
 namespace http = jlib::net::http;
 namespace sys = jlib::sys;
@@ -262,6 +263,15 @@ struct fake_engine {
     }
 
     std::vector<std::string> names() const { return m_names; }
+
+    /**
+     * A fixed ceiling, so the model list can be checked against a number this
+     * file chose (#450). The real one reads the GGUF; `ai_engine_test` has a
+     * file to read it from and this fake does not.
+     */
+    unsigned int context(const std::string& name) const {
+        return has(name) ? 4096u : 0u;
+    }
 
     /**
      * The sweeper's two calls, recorded rather than acted on (#278).
@@ -530,6 +540,74 @@ static void a_streamed_reply(jlib::net::http::server& s) {
            std::string(last->arr("choices")->obj(0)->get("finish_reason")) == "stop");
     }
     catch(std::exception& e) { ok("  the framing parses", false, e.what()); }
+
+    // **Not asked for, so not sent** -- and outside the try above, which is
+    // the point. The usage chunk has an empty `choices`, a client that did
+    // not ask for one may not survive it, and this is the guard on the
+    // clients already in use (#450). It sat inside that block, after an
+    // assertion that throws when the last chunk changes shape -- which is
+    // exactly what sending an unasked usage chunk does -- so the sabotage it
+    // was written for skipped it, and was caught only by accident.
+    bool usage = false;
+
+    for(const std::string& e : evs)
+        if(e.find("\"usage\"") != std::string::npos) usage = true;
+
+    ok("  and no usage chunk, since none was asked for", !usage);
+}
+
+/** include_usage, end to end through the server (#450). */
+static void a_stream_that_asked_for_usage(jlib::net::http::server& s) {
+    std::cout << "\na stream that asked for its token counts:\n";
+
+    g_script = script();
+    for(char c : std::string("Paris.")) g_script.tokens.push_back(int(c));
+
+    const reply a = post(s, R"({"model":"m","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"capital?"}]})");
+
+    ok("answers 200", a.status == 200, std::to_string(a.status));
+
+    const std::vector<std::string> evs = events(a.body);
+
+    if(evs.size() < 3) {
+        ok("  it sends enough events to look at", false,
+           std::to_string(evs.size()) + " events");
+
+        return;
+    }
+
+    // The last two before [DONE]: the chunk that finished, then the usage.
+    oa::delta used;
+    std::string thrown;
+
+    try { used = oa::delta::parse(evs[evs.size() - 2]); }
+    catch(std::exception& e) { thrown = e.what(); }
+
+    ok("  the chunk before [DONE] is the usage, and it parses", thrown.empty() &&
+       used.has_usage, thrown.empty() ? evs[evs.size() - 2] : thrown);
+
+    // Six tokens were scripted, so six were generated -- a number chosen here
+    // rather than one read back from the thing being tested.
+    ok("  counting the tokens that were generated", used.completion_tokens == 6,
+       std::to_string(used.completion_tokens));
+
+    ok("  and the prompt that was laid out", used.prompt_tokens > 0,
+       std::to_string(used.prompt_tokens));
+
+    try {
+        json::object::ptr finished = json::object::create(evs[evs.size() - 3]);
+
+        ok("  with the finish still on the chunk before it",
+           std::string(finished->arr("choices")->obj(0)->get("finish_reason")) ==
+               "stop", evs[evs.size() - 3]);
+    }
+    catch(std::exception& e) { ok("  the finishing chunk parses", false, e.what()); }
+
+    int bad = 0;
+
+    ok("  and the text is unchanged by any of it",
+       streamed(std::vector<std::string>(evs.begin(), evs.end() - 2), bad) ==
+           "Paris.");
 }
 
 static void a_character_that_arrives_in_pieces(jlib::net::http::server& s) {
@@ -960,6 +1038,13 @@ static void the_models_route(jlib::net::http::server& s) {
 
         ok("  naming the model it was given",
            std::string(o->arr("data")->obj(0)->get("id")) == "m", r.body());
+
+        // The ceiling a client sizes a request by, which it could otherwise
+        // only be told on its own command line (#450).
+        const std::vector<oa::listing> l = oa::listing::parse(r.body());
+
+        ok("  and how much context it takes",
+           l.size() == 1 && l[0].context == 4096, r.body());
     }
     catch(std::exception& e) { ok("the route answers", false, e.what()); }
 }
@@ -1415,6 +1500,7 @@ int main() {
     a_client_that_hangs_up_during_prefill(s);
     a_whole_reply(s);
     a_streamed_reply(s);
+    a_stream_that_asked_for_usage(s);
     a_character_that_arrives_in_pieces(s);
     a_reply_cut_mid_character(s);
     a_caller_that_asked_for_little(s);

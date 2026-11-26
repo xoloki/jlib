@@ -220,7 +220,51 @@ private:
 /** What the top line says, and what `/mode` changes. */
 struct state {
     std::string task = "(no task yet)";
-    std::string model = "(none)";
+
+    /**
+     * The model chosen, or empty for whatever the server picks.
+     *
+     * **This is what the next request asks for**, which it was not until
+     * #450: `/model NAME` set a field the header drew from, and every
+     * request was built from the command line's `--model` -- so choosing a
+     * model changed the top line and nothing else, since phase 2. compose()
+     * reads this now.
+     */
+    std::string model;
+
+    /** What the server lists, and the most context each takes (#450). */
+    std::vector<oa::listing> offered;
+
+    /** Whether `offered` came back from the server at all. */
+    bool listed = false;
+
+    /** Why it did not, when it did not. */
+    std::string list_error;
+
+    /** Set by `/model` to ask main() for a fresh list; see list_models(). */
+    bool want_list = false;
+
+    std::string model_name() const {
+        return model.empty() ? std::string("(server's default)") : model;
+    }
+
+    /**
+     * The most context the model in use takes; 0 when that is not known.
+     *
+     * **Not guessed for the server's default when several are offered.**
+     * jserve uses the first it was given, but nothing in the protocol says
+     * so, and a ceiling taken from the wrong model is worse than "?" -- it is
+     * the number #437's warning would be read against.
+     */
+    unsigned int ceiling() const {
+        if(model.empty())
+            return offered.size() == 1 ? offered[0].context : 0;
+
+        for(const oa::listing& l : offered)
+            if(l.id == model) return l.context;
+
+        return 0;
+    }
 
     /**
      * Which shape to ask the model to answer in.
@@ -252,8 +296,32 @@ struct state {
     // which says which it is.
     unsigned long long tokens_in = 0;
     unsigned long long tokens_out = 0;
+
+    /** What the last exchange occupied: its prompt and its reply. */
     unsigned int context_used = 0;
-    unsigned int context_total = 0;
+
+    /** Whether any exchange has reported its usage. */
+    bool counted = false;
+
+    /** The budget lay_out() fits files into; `--context`, not the ceiling. */
+    unsigned int budget = 8192;
+
+    // The last request's layout, for /files: what went in, what was left out
+    // and why, and what the estimator made of it.
+    std::vector<std::string> sent;
+    std::vector<std::string> dropped;
+    std::size_t estimate = 0;
+    bool laid_out = false;
+
+    // The last request's consumption, for /stats, against `rounds` and
+    // `attempts` above, which are the bounds.
+    unsigned int rounds_used = 0;
+    unsigned int attempts_used = 0;
+
+    // Seconds, for /stats: the last request, and every request together.
+    long last_elapsed = 0;
+    long total_elapsed = 0;
+    unsigned int requests = 0;
 
     /** Whether a request is in flight.  Owned by the UI thread. */
     bool working = false;
@@ -372,7 +440,10 @@ enum class news {
     token,     ///< a fragment, appended to the entry being streamed
     sealed,    ///< nothing more belongs to that entry
     counts,    ///< the numbers, for the status line and /stats
-    ask        ///< a write question; the worker is now blocked on the answer
+    ask,       ///< a write question; the worker is now blocked on the answer
+    layout,    ///< what lay_out() decided, for /files
+    tally,     ///< rounds and attempts consumed, at the end of a request
+    models     ///< what the server lists, or why it would not
 };
 
 struct event {
@@ -381,10 +452,23 @@ struct event {
     kind k = kind::note;
     std::string text;
 
+    // news::counts
     unsigned long long tokens_in = 0;
     unsigned long long tokens_out = 0;
     unsigned int context_used = 0;
-    unsigned int context_total = 0;
+    bool has_usage = false;
+
+    // news::layout
+    std::vector<std::string> sent;
+    std::vector<std::string> dropped;
+    std::size_t estimate = 0;
+
+    // news::tally
+    unsigned int rounds = 0;
+    unsigned int attempts = 0;
+
+    // news::models -- `text` carries the error when there is one
+    std::vector<oa::listing> offered;
 };
 
 /**
@@ -514,7 +598,10 @@ job compose(const options& o, const state& s, const std::string& request) {
     job j;
 
     j.url = o.url;
-    j.model = o.model;
+    // The model chosen *now*, which `/model` changes -- not `o.model`, which
+    // is only where the choice starts. Reading `o` here is how `/model NAME`
+    // was cosmetic from phase 2 until #450.
+    j.model = s.model;
     j.root = o.root;
 
     // **`/mode build on` with no --build has nothing to turn on.** The build
@@ -626,6 +713,23 @@ void work(sys::relay<event>& r, const job& j, confirmer& confirm) {
 
     for(const std::string& d : plan.dropped) say(kind::note, "left out " + d);
 
+    // **What the model will actually see, for /files.** lay_out() decides it
+    // and records why, and none of that was visible after the one line
+    // above scrolled away -- which is the question you most want answered
+    // when a model edits the wrong thing.
+    {
+        event e;
+
+        e.n = news::layout;
+        e.sent = plan.sent;
+        e.dropped = plan.dropped;
+        e.estimate = plan.estimate;
+
+        r.emit(e);
+    }
+
+    unsigned int rounds = 0;
+
     say(kind::note, std::to_string(plan.sent.size()) + " of " +
                     std::to_string(files.size()) + " file(s), about " +
                     std::to_string(plan.estimate) + " tokens of " +
@@ -649,9 +753,6 @@ void work(sys::relay<event>& r, const job& j, confirmer& confirm) {
     std::size_t prompt_tokens = 0;
     bool first = true;
 
-    unsigned long long in = 0;
-    unsigned long long out = 0;
-
     const jcode::exchange once =
         [&](const std::vector<ai::message>& turns,
             const std::string& declared) -> oa::answer
@@ -664,6 +765,13 @@ void work(sys::relay<event>& r, const job& j, confirmer& confirm) {
 
         req.model = j.model;
         req.stream = j.stream;
+
+        // The protocol's own answer to a stream having no usage block (#450),
+        // and the only way the context number below is ever non-zero on the
+        // default path. jserve sends it only because this asks.
+        req.include_usage = j.stream;
+
+        rounds++;
         req.max_tokens = j.tokens;
         req.tools = declared;
         req.messages = turns;
@@ -716,6 +824,12 @@ void work(sys::relay<event>& r, const job& j, confirmer& confirm) {
                             const oa::delta d = oa::delta::parse(one);
 
                             got += d.content;
+
+                            // The usage chunk, which carries nothing else.
+                            if(d.has_usage) {
+                                a.prompt_tokens = d.prompt_tokens;
+                                a.completion_tokens = d.completion_tokens;
+                            }
 
                             if(!d.content.empty()) {
                                 event e;
@@ -791,27 +905,24 @@ void work(sys::relay<event>& r, const job& j, confirmer& confirm) {
             if(!a.content.empty()) say(kind::model, a.content);
         }
 
-        // **Zero on the streaming path, and that is the protocol.** There is
-        // no usage block in a chunk, so these stay at nought and the drift
-        // line below has nothing to report -- the one thing `--no-stream`
-        // is still good for.
-        in += a.prompt_tokens;
-        out += a.completion_tokens;
-
         // The first reply is the one the estimate was made against.
         if(first) { prompt_tokens = a.prompt_tokens; first = false; }
 
+        // **This exchange's numbers, which absorb() adds**, rather than a
+        // running total it would overwrite. The running total was what this
+        // sent until #450, and absorb() assigned it -- so a session's tokens
+        // went back to this request's at every new prompt.
         event e;
 
         e.n = news::counts;
-        e.tokens_in = in;
-        e.tokens_out = out;
+        e.tokens_in = a.prompt_tokens;
+        e.tokens_out = a.completion_tokens;
+        e.has_usage = a.prompt_tokens || a.completion_tokens;
 
         // What this exchange occupied, not the session's total: the context
         // is a window the next request has to fit in, and a running sum of
         // every turn ever sent is not a thing that can overflow it.
         e.context_used = a.prompt_tokens + a.completion_tokens;
-        e.context_total = unsigned(j.context);
 
         r.emit(e);
 
@@ -878,6 +989,16 @@ void work(sys::relay<event>& r, const job& j, confirmer& confirm) {
         jcode::until_built(opening, tools, once, put, check, plan.sent,
                            j.attempts, j.rounds);
 
+    {
+        event e;
+
+        e.n = news::tally;
+        e.rounds = rounds;
+        e.attempts = done.made;
+
+        r.emit(e);
+    }
+
     for(const jcode::ran& c : done.calls)
         say(kind::tool, c.name +
                         (c.arguments.empty() ? std::string()
@@ -904,8 +1025,11 @@ void work(sys::relay<event>& r, const job& j, confirmer& confirm) {
                         "to was left alone");
     }
     else if(!r.wanted()) {
-        say(kind::note, "cancelled -- the reply so far is kept, and so is "
-                        "the conversation");
+        // **"and so is the conversation" used to end this line, and was
+        // false.** The reply is kept, in the transcript; but each prompt is
+        // laid out afresh, with no earlier turn in it, so there was never a
+        // conversation to keep. #461 is the thing itself.
+        say(kind::note, "cancelled -- the reply so far is kept");
     }
     else if(done.why == jcode::settled::built) {
         if(!j.build.empty()) say(kind::note, "and `" + j.build + "` passes");
@@ -1099,7 +1223,7 @@ private:
         // happens to be inverted.
         std::string bar = " " + s.task;
 
-        const std::string right = s.model + "  " + s.mode_name() +
+        const std::string right = s.model_name() + "  " + s.mode_name() +
             (s.build ? "  build" : "") + " ";
 
         while(int(bar.size()) + int(right.size()) < m_cols) bar += " ";
@@ -1268,10 +1392,17 @@ private:
     void status(const state& s) {
         char buf[256];
 
+        // **Against the model's ceiling, which is what #437's warning is
+        // read against** -- not the budget lay_out() fits files into, which
+        // is this program's own choice and says nothing about memory. A
+        // ceiling nobody reported is "?", not a number from somewhere else.
+        const unsigned int top = s.ceiling();
+
         std::snprintf(buf, sizeof(buf),
-                      " %llu in / %llu out   ctx %u/%u   rounds %u   attempts %u",
+                      " %llu in / %llu out   ctx %u/%s   rounds %u   attempts %u",
                       s.tokens_in, s.tokens_out, s.context_used,
-                      s.context_total, s.rounds, s.attempts);
+                      top ? std::to_string(top).c_str() : "?",
+                      s.rounds, s.attempts);
 
         std::string line = buf;
 
@@ -1350,9 +1481,9 @@ const char* HELP[] = {
     "/mode whole      send whole files",
     "/mode hunks      send search/replace hunks",
     "/mode build on   run the build between attempts",
-    "/model           the endpoint and model, or /model NAME to choose",
-    "/stats           tokens, context, rounds, attempts",
-    "/files           the files offered on the command line",
+    "/model           what the server offers, or /model NAME to choose",
+    "/stats           tokens, context against the model's ceiling, rounds, attempts",
+    "/files           what the last request put in front of the model, and why",
     "",
     "A prompt that starts with a slash is written //like-this.",
     "Enter sends; Ctrl-J adds a line without sending; Ctrl-U clears it.",
@@ -1434,58 +1565,149 @@ bool command(const std::string& line, state& s, transcript& t,
 
     if(c == "model") {
         if(w.size() > 1) {
-            s.model = w[1];
+            const std::string& want = w[1];
 
-            t.add(kind::note, "model " + s.model +
-                              " -- not checked against the endpoint yet");
+            // **Checked against the list when there is one, and refused when
+            // it is not on it.** A request naming a model the server does not
+            // have is a refusal one prompt later -- or, while #278's
+            // admission half is unbuilt, a load that pages -- and the moment
+            // to say so is now, while the name is still on the screen.
+            if(s.listed) {
+                bool there = false;
+
+                for(const oa::listing& l : s.offered)
+                    if(l.id == want) there = true;
+
+                if(!there) {
+                    t.add(kind::note, "no model called " + want + " at " +
+                                      o.url + " -- /model lists them");
+
+                    return true;
+                }
+            }
+
+            s.model = want;
+
+            // What switching means, said once: the next request goes there,
+            // and nothing already in the transcript is reinterpreted -- there
+            // is no conversation carried between prompts to reinterpret
+            // (#461), and the transcript is a record, not a context.
+            t.add(kind::note, "the next request goes to " + want +
+                              (s.listed ? std::string()
+                                        : " -- not checked: the list did not "
+                                          "come back"));
+
+            return true;
         }
-        else {
-            // There is an endpoint now, but asking it costs a `/v1/models`
-            // request this phase does not make. Naming the URL is the honest
-            // half of the answer; the list is #450.
-            t.add(kind::note, "model " + s.model + " at " + o.url);
-            t.add(kind::note, "the endpoint's own list is #450");
+
+        // The list as last fetched, now, and a fresh one asked for -- so the
+        // answer is immediate and also not stale for long.
+        if(s.listed) {
+            if(s.offered.empty()) t.add(kind::note, "the server offers no models");
+
+            for(const oa::listing& l : s.offered)
+                t.add(kind::note, std::string(l.id == s.model ? "* " : "  ") +
+                                  l.id +
+                                  (l.context ? "   context " +
+                                                   std::to_string(l.context)
+                                             : std::string("   context ?")));
+
+            if(s.model.empty())
+                t.add(kind::note, "none chosen, so the server picks; "
+                                  "/model NAME to choose");
         }
+        else if(!s.list_error.empty())
+            t.add(kind::note, "the last attempt to list them failed: " +
+                              s.list_error);
+        else
+            t.add(kind::note, "asking " + o.url + " what it offers");
+
+        s.want_list = true;
 
         return true;
     }
 
     if(c == "stats") {
-        t.add(kind::note, std::to_string(s.tokens_in) + " tokens in, " +
-                          std::to_string(s.tokens_out) + " out, context " +
-                          std::to_string(s.context_used) + " of " +
-                          std::to_string(s.context_total));
-
         // **Three kinds of nought, and a user staring at one needs told
-        // which.** Nothing sent yet; sent, but streaming, where the protocol
-        // puts no usage block in a chunk; or sent and counted. The first
-        // version tested `context_total`, which the counts event sets to the
-        // context size whether or not any tokens were counted -- so the
-        // streaming case said nothing at all and read as the third.
-        if(!s.context_total)
-            t.add(kind::note, "all zero: nothing has been sent yet");
-        else if(!s.tokens_in && !s.tokens_out)
-            t.add(kind::note, "no token count: a chunk carries no usage "
-                              "block, so these need --no-stream");
+        // which.** Nothing sent; sent, but nothing came back counted; or
+        // counted. An earlier version tested a field the counts event always
+        // set, so the second case said nothing and read as the third.
+        if(!s.requests && !s.working) {
+            t.add(kind::note, "nothing has been sent yet");
+
+            return true;
+        }
+
+        t.add(kind::note, std::to_string(s.tokens_in) + " tokens in, " +
+                          std::to_string(s.tokens_out) + " out, across " +
+                          std::to_string(s.requests) + " request(s) in " +
+                          std::to_string(s.total_elapsed) + "s");
+
+        if(!s.counted)
+            t.add(kind::note, "  no token count came back -- the server sent "
+                              "no usage, so these are not zero, only unknown");
+
+        // **The number #437 is about.** A KV cache grows with the
+        // conversation and a load that does not fit succeeds and pages, so
+        // "how full" is the early warning rather than decoration -- and it is
+        // read against the model's ceiling, not this program's budget.
+        const unsigned int top = s.ceiling();
+
+        t.add(kind::note, "  context " + std::to_string(s.context_used) +
+                          " of " + (top ? std::to_string(top)
+                                        : std::string("? -- the server did not "
+                                                      "say")) +
+                          (top && s.context_used
+                               ? " (" + std::to_string(
+                                     (100ull * s.context_used) / top) + "%)"
+                               : std::string()));
+
+        t.add(kind::note, "  files laid out against a budget of " +
+                          std::to_string(s.budget) + " -- see /files");
+
+        t.add(kind::note, "  last request: " +
+                          std::to_string(s.rounds_used) + " of " +
+                          std::to_string(s.rounds) + " rounds, " +
+                          std::to_string(s.attempts_used) + " of " +
+                          std::to_string(s.attempts) + " attempts, " +
+                          std::to_string(s.last_elapsed) + "s");
 
         return true;
     }
 
     if(c == "files") {
-        // The layout is decided on the worker thread and reported as prose,
-        // so there is no structured copy to show here yet. #450 carries the
-        // plan back and this grows a table.
-        if(o.names.empty())
-            t.add(kind::note, "no files were named on the command line");
-        else {
-            t.add(kind::note, std::to_string(o.names.size()) +
-                              " file(s) offered, under " + o.root + ":");
+        // **What the model actually saw**, which is the question you most
+        // want answered when it edits the wrong thing -- and which lay_out()
+        // always decided and nothing showed after its one line scrolled away.
+        if(!s.laid_out) {
+            if(o.names.empty())
+                t.add(kind::note, "no files were named on the command line");
+            else {
+                t.add(kind::note, std::to_string(o.names.size()) +
+                                  " file(s) offered under " + o.root +
+                                  "; nothing laid out until a request goes out:");
 
-            for(const std::string& n : o.names) t.add(kind::note, "  " + n);
+                for(const std::string& n : o.names) t.add(kind::note, "  " + n);
+            }
 
-            t.add(kind::note, "what actually fitted is said when a request "
-                              "goes out; a table is #450");
+            return true;
         }
+
+        t.add(kind::note, "the last request put " +
+                          std::to_string(s.sent.size()) + " file(s) in front "
+                          "of the model, about " + std::to_string(s.estimate) +
+                          " tokens against a budget of " +
+                          std::to_string(s.budget) + ":");
+
+        for(const std::string& n : s.sent) t.add(kind::note, "  sent  " + n);
+
+        // Each with its reason, which lay_out() records for exactly this --
+        // "the same policy as every other guess".
+        for(const std::string& d : s.dropped)
+            t.add(kind::note, "  left out  " + d);
+
+        if(s.dropped.empty())
+            t.add(kind::note, "  nothing was left out");
 
         return true;
     }
@@ -1493,6 +1715,44 @@ bool command(const std::string& line, state& s, transcript& t,
     t.add(kind::note, "no such command: /" + c + " -- try /help");
 
     return true;
+}
+
+/**
+ * Ask the server what it offers, on a thread of its own (#450).
+ *
+ * **Its own relay, not the request's.** The first version of this took the
+ * worker slot at startup, which meant a prompt typed while the list was in
+ * flight was refused with "still working" -- for a question the user never
+ * asked. A probe and a request are unrelated and run side by side.
+ *
+ * **A short timeout, deliberately not the request's ten minutes.** A model
+ * list is answered from memory; jserve reads every model's context at
+ * startup so that this route never touches a disk. Anything slower than a
+ * few seconds is a server that is not there, and the user should be told so
+ * while they can still do something about the URL.
+ */
+void list_models(sys::relay<event>& r, const std::string& url, double timeout) {
+    event e;
+
+    e.n = news::models;
+
+    try {
+        http::options net;
+
+        net.timeout = timeout;
+
+        const util::http::Response res =
+            http::get(util::URL(url + "/models"), util::http::fields(), net);
+
+        if(!res.ok())
+            e.text = "the server answered " + std::to_string(res.status()) +
+                     " " + res.reason();
+        else
+            e.offered = oa::listing::parse(res.body());
+    }
+    catch(std::exception& x) { e.text = x.what(); }
+
+    r.emit(e);
 }
 
 /**
@@ -1504,10 +1764,66 @@ bool command(const std::string& line, state& s, transcript& t,
 void absorb(const event& e, state& s, transcript& t) {
     switch(e.n) {
     case news::counts:
-        s.tokens_in = e.tokens_in;
-        s.tokens_out = e.tokens_out;
-        s.context_used = e.context_used;
-        s.context_total = e.context_total;
+        // Added, not assigned: the event is one exchange's, and the session's
+        // total is the sum. See the counts block in work().
+        s.tokens_in += e.tokens_in;
+        s.tokens_out += e.tokens_out;
+
+        if(e.has_usage) {
+            s.context_used = e.context_used;
+            s.counted = true;
+        }
+
+        return;
+
+    case news::layout:
+        s.sent = e.sent;
+        s.dropped = e.dropped;
+        s.estimate = e.estimate;
+        s.laid_out = true;
+
+        return;
+
+    case news::tally:
+        s.rounds_used = e.rounds;
+        s.attempts_used = e.attempts;
+
+        return;
+
+    case news::models:
+        if(e.text.empty()) {
+            s.offered = e.offered;
+            s.listed = true;
+            s.list_error.clear();
+
+            std::string names;
+
+            for(const oa::listing& l : e.offered)
+                names += (names.empty() ? "" : ", ") + l.id +
+                         (l.context ? " (" + std::to_string(l.context) + ")"
+                                    : std::string());
+
+            t.add(kind::note, "offered: " + (names.empty() ? std::string("nothing")
+                                                           : names));
+
+            // A name given with --model that the server does not offer is
+            // worth hearing about now, not as a refusal one request later.
+            if(!s.model.empty()) {
+                bool there = false;
+
+                for(const oa::listing& l : e.offered)
+                    if(l.id == s.model) there = true;
+
+                if(!there)
+                    t.add(kind::note, "but not " + s.model +
+                                      ", which is what the next request asks for");
+            }
+        }
+        else {
+            s.list_error = e.text;
+
+            t.add(kind::note, "could not list the models: " + e.text);
+        }
 
         return;
 
@@ -1613,7 +1929,9 @@ int main(int argc, char** argv) {
         else o.names.push_back(a);
     }
 
-    s.model = o.model.empty() ? std::string("(server's default)") : o.model;
+    // Where the choice starts; `/model` moves it, and compose() reads it.
+    s.model = o.model;
+    s.budget = unsigned(o.context);
 
     // SIGINT only sets a flag: endwin() has to run from the normal path or
     // the terminal is left without echo, and a handler cannot safely do it.
@@ -1650,6 +1968,17 @@ int main(int argc, char** argv) {
     // decides to leave, and the object it is waiting on must outlive that.
     std::shared_ptr<confirmer> confirm;
 
+    // **The model list, on a relay of its own** -- see list_models() for why
+    // it must not share the request's. Asked for once now, so the status
+    // line has a ceiling before anything is sent, and again on `/model`.
+    std::unique_ptr<sys::relay<event> > probe(new sys::relay<event>());
+
+    {
+        const std::string url = o.url;
+
+        probe->start([url](sys::relay<event>& r) { list_models(r, url, 5.0); });
+    }
+
     // When the request in flight went out, for the status line's clock.
     std::chrono::steady_clock::time_point began;
 
@@ -1660,6 +1989,36 @@ int main(int argc, char** argv) {
 
     for(;;) {
         if(g_interrupted) break;
+
+        // The model list: drained like the worker, with pump()'s ordering --
+        // take, and once done, take again -- and then gone.
+        if(probe) {
+            bool moved = false;
+
+            for(const event& e : probe->take()) { absorb(e, s, t); moved = true; }
+
+            if(probe->done()) {
+                for(const event& e : probe->take()) absorb(e, s, t);
+
+                probe->join();
+                probe.reset();
+
+                moved = true;
+            }
+
+            if(moved) sc.draw(t, s, prompt, caret);
+        }
+
+        // A fresh list, asked for by `/model`; never two at once.
+        if(s.want_list && !probe) {
+            s.want_list = false;
+
+            probe.reset(new sys::relay<event>());
+
+            const std::string url = o.url;
+
+            probe->start([url](sys::relay<event>& r) { list_models(r, url, 5.0); });
+        }
 
         // **Drained before a key is read, not after.** What the worker said
         // has to reach the screen whether or not anybody is typing, and
@@ -1699,6 +2058,13 @@ int main(int argc, char** argv) {
                 worker.reset();
 
                 s.working = false;
+
+                // For /stats. Taken from the clock the status line already
+                // keeps, so the two cannot disagree about how long it took.
+                s.last_elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - began).count();
+                s.total_elapsed += s.last_elapsed;
+                s.requests++;
                 s.streaming = false;
                 s.cancelling = false;
 
@@ -1962,6 +2328,12 @@ int main(int argc, char** argv) {
     // ofstream wide, and two seconds is a great deal longer than it -- but it
     // is a window, and closing it means atomic replacement inside apply(),
     // which is the library's to do and not this exit path's.
+    //
+    // The model list goes first and is simply asked to stop: its timeout is
+    // five seconds rather than ten minutes, and a relay that is still inside
+    // a connect is joined by its destructor within that.
+    if(probe) probe->stop();
+
     if(worker) {
         // **Abandon first.** A worker blocked on a write question would
         // otherwise sit out the whole grace below and be `_Exit`ed past --

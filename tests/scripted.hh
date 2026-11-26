@@ -107,6 +107,20 @@ struct script {
     double chunk_delay = 0;
 
     /**
+     * What `GET /v1/models` lists (#450).
+     *
+     * This answered *every* request with a chat completion, including a model
+     * listing -- which a client that never asked for one could not notice,
+     * and juanaco, which asks at startup, would have read as a broken server.
+     * Same rule as `stream` above: answer the question that was asked.
+     */
+    std::vector<ai::openai::listing> models =
+        std::vector<ai::openai::listing>(1, ai::openai::listing{ "m", 4096 });
+
+    /** Whether the last chat request asked for `include_usage`. */
+    bool include_usage = false;
+
+    /**
      * Read the request and answer nothing, until `closing`.
      *
      * **Bounded rather than forever, and that is not timidity.**
@@ -139,14 +153,38 @@ inline void serve(sys::socketstream& s, script& sc) {
         const std::string body =
             util::http::read_body(s, q.body_framing(), q.content_length());
 
+        // A model listing is not a completion, and is not counted as one: the
+        // tests that count requests are counting what the model was asked.
+        if(q.method() == "GET" &&
+           q.target().find("/models") != std::string::npos)
+        {
+            const std::string list = ai::openai::models(sc.models, 0);
+
+            std::ostringstream out;
+
+            out << "HTTP/1.1 200 OK\r\n"
+                << "Content-Type: application/json\r\n"
+                << "Content-Length: " << list.size() << "\r\n"
+                << "Connection: keep-alive\r\n\r\n" << list;
+
+            s << out.str() << std::flush;
+
+            continue;
+        }
+
         sc.requests++;
         sc.last_body = body;
 
         // The request decides.  Lenient about a body that will not parse:
         // one of these tests sends deliberate rubbish one day, and a server
         // that threw here would look like a client defect.
-        try { sc.stream = ai::openai::request::parse(body).stream; }
-        catch(std::exception&) { sc.stream = false; }
+        try {
+            const ai::openai::request asked = ai::openai::request::parse(body);
+
+            sc.stream = asked.stream;
+            sc.include_usage = asked.include_usage;
+        }
+        catch(std::exception&) { sc.stream = false; sc.include_usage = false; }
 
         if(sc.hang) {
             for(int i = 0; i < 300 && !sc.closing.load(); i++)
@@ -191,6 +229,14 @@ inline void serve(sys::socketstream& s, script& sc) {
 
             events.push_back(
                 ai::openai::event(ai::openai::chunk("id", "m", 1, last)));
+
+            // Only when asked, as jserve does -- see request::include_usage
+            // for why a client that did not ask must not be sent one. The
+            // counts are the same plausible ones the whole reply carries.
+            if(sc.include_usage)
+                events.push_back(ai::openai::event(ai::openai::usage(
+                    "id", "m", 1, unsigned(double(body.size()) / 3.8), 20)));
+
             events.push_back(ai::openai::done());
 
             // **Chunked, not Content-Length, and that distinction cost an
