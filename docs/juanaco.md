@@ -150,7 +150,7 @@ Every guard was broken and watched to fail. The findings that cost the most were
 - **The screen model has to model what curses actually sends.** ncurses shortens a line in the middle with a delete-character sequence when that is cheaper than rewriting it, and `vt.hh` discarded it — so `... streaming 0s` turning into `... asking 0s` was reconstructed as `askeaming 0s`, which no terminal ever showed. It surfaced only when a sabotage changed the line's length, which means any assertion on a line whose length changes could have been failing, or passing, for the wrong reason. `vt.hh` handles `DCH`, `ICH` and `ECH` now.
 - **An assertion that cannot fail is not one.** Two were caught before they ran: a request count compared against zero, true of any run at all, and an "Escape ends the attempt" check that could not fail without a build that made a second attempt the thing that would happen next.
 
-The default edit format is `whole`, measured rather than assumed: against a real model the `hunks` default failed a one-line edit, because jcode's filename leniency is whole-only (#457).
+The default edit format is `whole`, and it was a workaround before it was a choice: against a real model the `hunks` default failed a one-line edit, because jcode's filename leniency was whole-only. #457 fixed that — the same model and request now succeed in `hunks`, three runs of three — so `whole` stays the default only because it matches jcode's and is what jserve was verified against end to end.
 
 ## What a working juanaco does not establish
 

@@ -105,6 +105,14 @@ static std::string fence(const std::string& name, const std::string& body) {
     return name + "\n```\n" + body + "```\n";
 }
 
+/** The same name, ahead of one search/replace block instead of a fence. */
+static std::string hunk(const std::string& name, const std::string& search,
+                        const std::string& replace)
+{
+    return name + "\n<<<<<<< SEARCH\n" + search + "=======\n" + replace +
+           ">>>>>>> REPLACE\n";
+}
+
 // ---------------------------------------------------------------- parsing
 
 static void the_format_as_asked_for() {
@@ -1101,22 +1109,96 @@ static void the_envelope_a_model_actually_sends() {
           "basename" },
     };
 
-    for(const auto& c : cases) {
-        const jcode::reply r = jcode::parse(fence(c.name, "x\n"), KNOWN);
+    // **Through both formats, and that is the assertion whose absence was the
+    // defect** (#457). This table ran through `fence()` alone, so the hunks
+    // parser -- which took the line before its marker raw and cleaned
+    // nothing -- refused every one of these and no test could see it. A real
+    // model found it instead, with the `path/to/` case, in juanaco's default
+    // mode at the time.
+    for(const bool in_hunks : { false, true }) {
+        std::cout << (in_hunks ? "  as search/replace hunks:\n"
+                               : "  as whole files:\n");
 
-        ok(std::string("  ") + c.what + " is absorbed",
-           r.edits.size() == 1 && r.edits[0].name == c.wanted,
-           r.edits.empty() ? "no edit" : r.edits[0].name);
+        for(const auto& c : cases) {
+            const jcode::reply r = jcode::parse(
+                in_hunks ? hunk(c.name, "x\n", "y\n") : fence(c.name, "x\n"),
+                KNOWN);
 
-        // Absorbed is not the same as hidden.  This is the half of the policy
-        // that is easy to skip and is the whole reason leniency is safe.
-        const bool said = !r.edits.empty() && !r.edits[0].guesses.empty() &&
-            r.edits[0].guesses[0].find(c.says) != std::string::npos;
+            ok(std::string("    ") + c.what + " is absorbed",
+               r.edits.size() == 1 && r.edits[0].name == c.wanted,
+               r.edits.empty() ? "no edit" : r.edits[0].name);
 
-        ok(std::string("    and logged as a guess"), said,
-           r.edits.empty() || r.edits[0].guesses.empty()
-               ? "nothing logged" : r.edits[0].guesses[0]);
+            // Absorbed is not the same as hidden.  This is the half of the
+            // policy that is easy to skip and is the whole reason leniency
+            // is safe.
+            const bool said = !r.edits.empty() && !r.edits[0].guesses.empty() &&
+                r.edits[0].guesses[0].find(c.says) != std::string::npos;
+
+            ok(std::string("      and logged as a guess"), said,
+               r.edits.empty() || r.edits[0].guesses.empty()
+                   ? "nothing logged" : r.edits[0].guesses[0]);
+        }
     }
+}
+
+/**
+ * A guess belongs to the edit it is about (#457).
+ *
+ * The hunks parser collected every guess into one list and parse() pinned
+ * the whole list to the first edit, so with two files a guess about the
+ * second was recorded against the first -- where `edit::guesses` is
+ * documented as what was assumed to arrive at *that* edit's name.
+ */
+static void a_guess_belongs_to_its_own_edit() {
+    std::cout << "\na guess belongs to its own edit:\n";
+
+    const jcode::reply r = jcode::parse(
+        hunk("main.cc", "a\n", "b\n") + "\n" +
+        hunk("**src/util.cc**", "c\n", "d\n"), KNOWN);
+
+    ok("  two files, two edits", r.edits.size() == 2,
+       std::to_string(r.edits.size()));
+
+    if(r.edits.size() != 2) return;
+
+    ok("  the plainly named one carries no guess", r.edits[0].guesses.empty(),
+       r.edits[0].guesses.empty() ? "" : r.edits[0].guesses[0]);
+
+    ok("  and the bolded one carries its own",
+       r.edits[1].name == "src/util.cc" && r.edits[1].guesses.size() == 1 &&
+           r.edits[1].guesses[0].find("bold") != std::string::npos,
+       r.edits[1].name + ": " +
+           (r.edits[1].guesses.empty() ? "nothing" : r.edits[1].guesses[0]));
+
+    // Three hunks on one file, the name bolded each time: one guess, not
+    // three, because it is one assumption about one name.
+    const jcode::reply three = jcode::parse(
+        hunk("**main.cc**", "a\n", "b\n") + "\n" +
+        hunk("**main.cc**", "c\n", "d\n") + "\n" +
+        hunk("**main.cc**", "e\n", "f\n"), KNOWN);
+
+    ok("  the same guess about the same name is recorded once",
+       three.edits.size() == 1 && three.edits[0].hunks.size() == 3 &&
+           three.edits[0].guesses.size() == 1,
+       three.edits.empty() ? "no edit"
+                           : std::to_string(three.edits[0].guesses.size()) +
+                                 " guesses");
+
+    // **The careful prose rule, which hunks now shares.** A line with a
+    // space before a marker is narration -- unless it is exactly the name of
+    // a file that was sent, which the open-coded `find(' ')` this replaced
+    // could not tell apart.
+    const std::vector<std::string> spaced{ "my notes.md" };
+
+    const jcode::reply sp = jcode::parse(hunk("my notes.md", "a\n", "b\n"),
+                                         spaced);
+
+    ok("  a filename with a space survives when it is one that was sent",
+       sp.edits.size() == 1 && sp.edits[0].name == "my notes.md" &&
+           sp.edits[0].guesses.empty(),
+       sp.edits.empty() ? "no edit"
+                        : sp.edits[0].name + (sp.edits[0].guesses.empty()
+                                                  ? "" : ", guessed"));
 }
 
 static void a_block_with_no_name() {
@@ -1503,6 +1585,7 @@ int main() {
     the_loop_knows_why_it_stopped();
     what_the_tools_look_like_on_the_wire();
     the_envelope_a_model_actually_sends();
+    a_guess_belongs_to_its_own_edit();
     a_block_with_no_name();
     a_reply_that_stopped();
     applying_it();
