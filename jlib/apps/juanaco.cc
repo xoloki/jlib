@@ -273,16 +273,17 @@ struct state {
      * #447 pointed juanaco at a real jserve, and the default path failed on
      * the first trivial edit: Qwen2.5-Coder-7B answered with
      * `path/to/hello.cc` -- the prompt's own example prefix pasted back --
-     * and the edit was refused, because **jcode's leniency is whole-only**.
-     * `clean()` absorbs bold, backticks, a heading, a trailing colon and
-     * that prefix; `hunks_in` takes the line before the marker raw and
-     * calls none of it. The same model in `whole` omitted the filename
-     * entirely and was rescued.
+     * and the edit was refused, because jcode's leniency was whole-only:
+     * `hunks_in` took the line before the marker raw and cleaned nothing.
      *
-     * So this matches jcode, whose own reason is that `whole` is what jserve
-     * was verified against end to end. `hunks` stays a `/mode` away and is
-     * worth having -- #348 exists because the two fail differently -- but a
-     * default that cannot survive a one-line edit is not a choice.
+     * **That reason is gone** -- #457 runs the hunks parser's names through
+     * the same `clean()`, and the same model, same request, three runs out of
+     * three, now sends `path/to/hello.cc` and has it rescued with the guess
+     * on the record. What keeps `whole` the default is the reason left over:
+     * it matches jcode, whose own is that `whole` is what jserve was verified
+     * against end to end. Switching it is now a choice rather than a
+     * workaround, and not one a fix should make on the way past. `hunks` is
+     * a `/mode` away -- #348 exists because the two fail differently.
      */
     jcode::format edits = jcode::format::whole;
 

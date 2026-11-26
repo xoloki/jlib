@@ -1001,15 +1001,33 @@ std::vector<edit> hunks_in(const std::string& text, std::string& left,
 
         pending.clear();
 
-        if(who.empty() || who.find(' ') != std::string::npos) {
+        // What was assumed to arrive at *this block's* name, which is
+        // attached to the edit it names -- see below.
+        std::vector<std::string> said;
+
+        // **Cleaned by the same function the whole-file parser uses** (#457).
+        // This took the line raw, so every envelope clean() absorbs -- bold,
+        // backticks, a heading, a trailing colon, and the `path/to/` prefix
+        // pasted back out of the prompt's own example -- was refused in
+        // hunks and accepted in whole. Measured against a real model: the
+        // prefix one is not exotic, it is what Qwen2.5-Coder-7B sent for a
+        // one-line edit, and the edit was refused at containment.
+        //
+        // clean() also carries the careful version of "a space means prose",
+        // which this had open-coded as `find(' ')` -- the careful one lets an
+        // exact match against a file that was sent win over the heuristic,
+        // so a filename with a space in it survives.
+        if(!who.empty()) who = clean(who, known, said);
+
+        if(who.empty()) {
             if(!name.empty())
-                why.push_back("no filename before the search block; used the "
-                              "one before it: " + name);
+                said.push_back("no filename before the search block; used the "
+                               "one before it: " + name);
             else if(known.size() == 1) {
                 name = known[0];
 
-                why.push_back("no filename before the search block; only one "
-                              "file was sent: " + name);
+                said.push_back("no filename before the search block; only one "
+                               "file was sent: " + name);
             }
 
             who = name;
@@ -1058,6 +1076,17 @@ std::vector<edit> hunks_in(const std::string& text, std::string& left,
         if(!at) { out.push_back(edit()); at = &out.back(); at->name = name; }
 
         at->hunks.push_back(h);
+
+        // **Against the edit they are about.** Every guess went into one list
+        // that parse() pinned to the *first* edit, so with two files a guess
+        // about the second was recorded against the first -- and
+        // `edit::guesses` is documented as what was assumed to arrive at
+        // *that* edit's name. Once each: three hunks on one file whose name
+        // was bolded three times are one guess, not three.
+        for(const std::string& g : said)
+            if(std::find(at->guesses.begin(), at->guesses.end(), g) ==
+               at->guesses.end())
+                at->guesses.push_back(g);
     }
 
     if(!pending.empty()) left += pending + "\n";
@@ -1092,6 +1121,10 @@ reply parse(const std::string& text, const std::vector<std::string>& known) {
         // A reply is in one format or the other. Having found hunks, the rest
         // is prose -- and running the whole-file parser over it would read a
         // fenced example as a file to write.
+        // What is left in the shared list is about blocks that produced no
+        // edit at all -- one that never closed -- so there is no edit of its
+        // own to carry it, and the first one does. Name guesses are not here
+        // any more: hunks_in attaches each to the edit it is about.
         for(std::size_t i = 0; i < hunk_guesses.size(); i++)
             out.edits[0].guesses.push_back(hunk_guesses[i]);
 
