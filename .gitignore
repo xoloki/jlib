@@ -58,3 +58,7 @@ mnist_*.csv
 #
 #   curl -LO https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q8_0.gguf
 *.gguf
+
+# tools/edit-formats imports run.py from its siblings, so running them leaves
+# bytecode beside the source.
+__pycache__/

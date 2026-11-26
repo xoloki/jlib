@@ -56,6 +56,14 @@ EXTRA_DIST += tools/outline.sh tools/check-mermaid.sh
 EXTRA_DIST += tools/reflogits/dump_logits.cpp tools/reflogits/emit_header.py \
 	      tools/reflogits/README.md
 
+# Whole files or search/replace hunks, measured against a real model.  Never
+# run by make check -- it needs a model and a GPU and most of an hour -- but
+# shipped, for the reason tools/perf is: a number from a script nobody can see
+# is a number nobody can check.
+EXTRA_DIST += tools/edit-formats/run.py tools/edit-formats/reapply.py \
+	      tools/edit-formats/summarise.py tools/edit-formats/cases.json \
+	      tools/edit-formats/README.md
+
 # The diagrams in docs/ are rendered by GitHub and by nothing here, so a
 # syntax error in one is found by a human opening the page.  This catches the
 # forms that have actually broken: see tools/check-mermaid.sh.
