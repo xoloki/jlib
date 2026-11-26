@@ -109,6 +109,17 @@ private:
         unsigned int context = 0;
 
         /**
+         * The context the file declares, read once without loading it (#450).
+         *
+         * Atomics, outside `lock`, for the same reason as `freed`: this is
+         * asked by `/v1/models`, which must not wait for a conversation that
+         * holds the model for minutes. `declared` is stored before `asked`,
+         * so a reader that sees the flag sees the number.
+         */
+        std::atomic<unsigned int> declared{0};
+        std::atomic<bool> asked{false};
+
+        /**
          * When this model was last free, in steady-clock seconds; 0 if it is
          * not loaded.
          *
@@ -171,6 +182,29 @@ public:
 
     /** Whether it is in memory now. */
     bool loaded(const std::string& name) const;
+
+    /**
+     * The most context a model takes, without loading it; 0 when the file
+     * cannot say.
+     *
+     * Read with `model<T>::config::from` -- **the same function a load
+     * uses**, so the ceiling reported is the ceiling enforced rather than a
+     * second reading of the file that could disagree with it. That reads the
+     * metadata and no tensors: about 10 ms for each of a 7B Q4_K_M, a 1B and
+     * a 2B, best of five on an M-series laptop, so a server can afford it
+     * once per model at startup and should not on a request path.
+     *
+     * **Cached after the first ask, failure included.** A file that cannot be
+     * read answers 0, which is "did not say" rather than an error: a model
+     * list is not the place to learn that a path is wrong, and a server that
+     * refused to start over it would turn a model nobody asked for into an
+     * outage. The load will still fail loudly, at the request that tries it.
+     *
+     * Not the size of the KV cache, which grows with use -- and Llama 3.2 1B
+     * declares 131072, which is what this returns and not what anyone should
+     * expect to fit (#437).
+     */
+    unsigned int context(const std::string& name) const;
 
     /**
      * Exclusive use of one model, for the length of one conversation.
@@ -398,6 +432,31 @@ bool engine<T>::loaded(const std::string& name) const {
     // time it is answered, and taking the lock would make asking it wait for
     // a whole conversation.
     return bool(e->m);
+}
+
+template<typename T>
+unsigned int engine<T>::context(const std::string& name) const {
+    entry* e = find(name);
+
+    if(!e) return 0;
+
+    if(e->asked.load()) return e->declared.load();
+
+    unsigned int n = 0;
+
+    try {
+        const gguf g(e->path);
+
+        n = model<T>::config::from(g).context;
+    }
+    catch(std::exception&) { n = 0; }
+
+    // Two callers racing here both read the file and both store the same
+    // number, which costs ten milliseconds and nothing else.
+    e->declared.store(n);
+    e->asked.store(true);
+
+    return n;
 }
 
 template<typename T>

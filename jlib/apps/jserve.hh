@@ -385,6 +385,14 @@ public:
         for(const std::pair<std::string, std::string>& m : o.models)
             m_engine.add(m.first, m.second);
 
+        // **Read every model's context now, so the model list never has to.**
+        // Ten milliseconds a file, here, before anything is served -- rather
+        // than file I/O on the path that answers `/v1/models`, which the
+        // header above already records must not wait. A file that cannot be
+        // read answers 0 and does not stop the server; see engine::context.
+        for(const std::pair<std::string, std::string>& m : o.models)
+            m_engine.context(m.first);
+
         m_default = o.models.front().first;
 
         if(o.keep_alive) {
@@ -397,8 +405,20 @@ public:
     void wire(http::server& s) {
         s.route("GET", "/v1/models", [this](const http::server::Request&,
                                             http::server::response& r) {
-            r.status(200).type("application/json")
-             .body(oa::models(m_engine.names(), 0));
+            // With each model's context, which a client sizing a request
+            // could otherwise only be told on its command line (#450).
+            std::vector<oa::listing> offered;
+
+            for(const std::string& n : m_engine.names()) {
+                oa::listing l;
+
+                l.id = n;
+                l.context = m_engine.context(n);
+
+                offered.push_back(l);
+            }
+
+            r.status(200).type("application/json").body(oa::models(offered, 0));
         });
 
         s.route("POST", "/v1/chat/completions",
@@ -787,6 +807,16 @@ private:
                                        : oa::finish::stop;
 
         co_await out.write(oa::event(oa::chunk(id, name, now, last)));
+
+        // **Only when asked.** The usage chunk's `choices` is empty, which is
+        // the shape the protocol gives it and the shape a client that did not
+        // ask may not survive -- jlib's own delta::parse refused it until
+        // #450. So it goes to a client that said `include_usage` and no other.
+        if(req.include_usage)
+            co_await out.write(oa::event(oa::usage(id, name, now,
+                                                   unsigned(plan.ids.size()),
+                                                   made)));
+
         co_await out.write(oa::done());
     }
 

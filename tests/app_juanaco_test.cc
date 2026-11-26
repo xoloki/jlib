@@ -65,6 +65,7 @@
 
 #include <unistd.h>
 
+namespace oa = jlib::ai::openai;
 namespace sys = jlib::sys;
 namespace tests = jlib::tests;
 
@@ -266,6 +267,21 @@ int main() {
         until(p, [](const tests::vt& v) { return v.shows("juanaco"); }, 10.0);
 
         ok("  it starts and says what it is", shown(p).shows("juanaco"));
+
+        // **A list that cannot be had is said, not waited on** (#450). It is
+        // asked for at startup on a relay of its own, so a dead URL is known
+        // before anything is typed -- and the ceiling stays "?", not a number
+        // borrowed from somewhere else.
+        until(p, [](const tests::vt& v) {
+            return v.shows("could not list the models");
+        }, 10.0);
+
+        ok("  a server that cannot be listed is reported at startup",
+           shown(p).shows("could not list the models"), shown(p).dump());
+
+        ok("  and the ceiling is not guessed",
+           shown(p).row(STATUS_ROW).find("ctx 0/?") != std::string::npos,
+           "[" + shown(p).row(STATUS_ROW) + "]");
 
         ok("  the task is in the header",
            shown(p).find("fix the off-by-one") == 0,
@@ -476,19 +492,20 @@ int main() {
 
             ok("  the layout was reported", v.shows("1 of 1 file(s)"), v.dump());
 
-            // **No drift line here, and that is the protocol.** The estimate
-            // can only be checked against a usage block, and a chunk has
-            // none -- so this is asserted in the --no-stream section and its
-            // absence is asserted here, which is the pair that says the two
-            // paths really do differ.
-            ok("  and no drift line, there being no usage block to check it "
-               "against",
-               !v.shows("the server counted"), v.dump());
+            // **The drift line, on the streaming path, since #450.** It was
+            // asserted *absent* here: a chunk had no usage block, so the
+            // estimate could only be checked with --no-stream. The usage
+            // chunk `include_usage` asks for is what turned that round.
+            ok("  and what the token guess was worth, from the usage chunk",
+               v.shows("the server counted"), v.dump());
+
+            ok("  which it asked for", sc.include_usage,
+               sc.last_body.substr(0, 200));
         }
 
-        // **A chunk carries no usage block**, so on the streaming path the
-        // counters stay at nought -- and /stats has to say which kind of
-        // zero that is rather than leaving a user to read it as a defect.
+        // **Counted on the streaming path now** (#450). The scripted endpoint
+        // reports 20 completion tokens a request, so the number is one this
+        // file chose rather than one read back from what is being tested.
         p.send("/stats\r");
 
         until(p, [](const tests::vt& v) { return v.shows("tokens in,"); }, 10.0);
@@ -496,8 +513,11 @@ int main() {
         {
             const tests::vt v = shown(p);
 
-            ok("  /stats says why streaming has no token count",
-               v.shows("a chunk carries no usage block"), v.dump());
+            ok("  /stats counts the tokens a stream reported",
+               v.shows(" 20 out, across 1 request(s)"), v.dump());
+
+            ok("  and the context against the model's ceiling",
+               v.shows(" of 4096 ("), v.dump());
 
             ok("  and the status line is back to idle",
                v.row(STATUS_ROW).find("idle") != std::string::npos,
@@ -1394,6 +1414,225 @@ int main() {
 
         ok("  and the drift line with it",
            shown(p).shows("the server counted"), shown(p).dump());
+
+        p.send("/quit\r");
+
+        ok("  /quit leaves", p.wait_for_exit(10.0) == 0);
+    }
+
+    {
+        std::cout << "\n/model, against what the server lists:\n";
+
+        tests::tree tr;
+
+        tr.put("hello.cc", "int main() { return 1; }\n");
+
+        sc.content = tests::listing("hello.cc", "int main() { return 0; }\n");
+
+        sc.models = { oa::listing{ "m", 4096 }, oa::listing{ "other", 2048 } };
+
+        tests::pty p({ prog, "--url", url, "--root", tr.path, "--yes",
+                       "hello.cc" }, ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("offered:"); }, 10.0);
+
+        ok("  the list arrives at startup, each with its context",
+           shown(p).shows("offered: m (4096), other (2048)"), shown(p).dump());
+
+        // **Two offered and none chosen, so the ceiling is not guessed.**
+        // jserve uses the first, but the protocol does not say so, and a
+        // ceiling read off the wrong model is the number #437's warning
+        // would be judged against.
+        ok("  with two offered and none chosen, the ceiling is not guessed",
+           shown(p).row(STATUS_ROW).find("ctx 0/?") != std::string::npos,
+           "[" + shown(p).row(STATUS_ROW) + "]");
+
+        p.send("/model nosuch\r");
+
+        until(p, [](const tests::vt& v) {
+            return v.shows("no model called nosuch");
+        }, 10.0);
+
+        ok("  a name the server does not offer is refused, now",
+           shown(p).shows("no model called nosuch"), shown(p).dump());
+
+        ok("  and changes nothing",
+           shown(p).row(0).find("(server's default)") != std::string::npos,
+           shown(p).row(0));
+
+        p.send("/model other\r");
+
+        until(p, [](const tests::vt& v) {
+            return v.shows("the next request goes to other");
+        }, 10.0);
+
+        {
+            const tests::vt v = shown(p);
+
+            ok("  choosing one says what that means",
+               v.shows("the next request goes to other"), v.dump());
+
+            ok("  the top line names it", v.row(0).find("other") != std::string::npos,
+               v.row(0));
+
+            ok("  and the ceiling is that model's",
+               v.row(STATUS_ROW).find("/2048") != std::string::npos,
+               "[" + v.row(STATUS_ROW) + "]");
+        }
+
+        p.send("make it return zero\r");
+
+        until(p, [](const tests::vt& v) { return v.shows("written hello.cc"); },
+              20.0);
+
+        // **The assertion with teeth.** `/model NAME` set a field the header
+        // drew from and every request was built from `--model`, so from
+        // phase 2 until #450 choosing a model changed the top line and
+        // nothing else -- and every assertion above would have passed.
+        ok("  and the request really asks for it",
+           sc.last_body.find("\"model\": \"other\"") != std::string::npos,
+           sc.last_body.substr(0, 160));
+
+        p.send("/model\r");
+
+        until(p, [](const tests::vt& v) { return v.shows("* other"); }, 10.0);
+
+        ok("  /model lists them, marking the one in use",
+           shown(p).shows("* other   context 2048") &&
+               shown(p).shows("  m   context 4096"), shown(p).dump());
+
+        p.send("/quit\r");
+
+        ok("  /quit leaves", p.wait_for_exit(10.0) == 0);
+
+        sc.models = std::vector<oa::listing>(1, oa::listing{ "m", 4096 });
+    }
+
+    {
+        std::cout << "\n/files, after a layout that left something out:\n";
+
+        tests::tree tr;
+
+        tr.put("hello.cc", "int main() { return 1; }\n");
+
+        // Far over the budget below, so lay_out() has to drop it -- whole,
+        // never truncated, and with its reason recorded.
+        tr.put("big.cc", std::string(20000, 'x') + "\n");
+
+        sc.content = tests::listing("hello.cc", "int main() { return 0; }\n");
+
+        tests::pty p({ prog, "--url", url, "--root", tr.path, "--yes",
+                       "--context", "1500", "hello.cc", "big.cc" }, ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("offered:"); }, 10.0);
+
+        p.send("/files\r");
+
+        until(p, [](const tests::vt& v) {
+            return v.shows("nothing laid out until a request goes out");
+        }, 10.0);
+
+        ok("  before a request, it says nothing has been laid out yet",
+           shown(p).shows("nothing laid out until a request goes out"),
+           shown(p).dump());
+
+        p.send("make it return zero\r");
+
+        until(p, [](const tests::vt& v) { return v.shows("written hello.cc"); },
+              20.0);
+
+        p.send("/files\r");
+
+        until(p, [](const tests::vt& v) { return v.shows("  sent  hello.cc"); },
+              10.0);
+
+        {
+            const tests::vt v = shown(p);
+
+            ok("  afterwards, what the model saw", v.shows("  sent  hello.cc"),
+               v.dump());
+
+            ok("  and what it did not, with the reason",
+               v.shows("  left out  big.cc (") && v.shows("of 1500 already used)"),
+               v.dump());
+
+            ok("  against the budget that decided it",
+               v.shows("against a budget of 1500"), v.dump());
+        }
+
+        p.send("/quit\r");
+
+        ok("  /quit leaves", p.wait_for_exit(10.0) == 0);
+    }
+
+    {
+        std::cout << "\n/stats, across two requests:\n";
+
+        tests::tree tr;
+
+        tr.put("hello.cc", "int main() { return 1; }\n");
+
+        sc.content = tests::listing("hello.cc", "int main() { return 0; }\n");
+
+        tests::pty p({ prog, "--url", url, "--root", tr.path, "--yes",
+                       "hello.cc" }, ROWS, COLS);
+
+        until(p, [](const tests::vt& v) { return v.shows("offered:"); }, 10.0);
+
+        p.send("/stats\r");
+
+        until(p, [](const tests::vt& v) {
+            return v.shows("nothing has been sent yet");
+        }, 10.0);
+
+        ok("  before anything is sent it says so",
+           shown(p).shows("nothing has been sent yet"), shown(p).dump());
+
+        p.send("make it return zero\r");
+
+        until(p, [](const tests::vt& v) { return v.shows("written hello.cc"); },
+              20.0);
+
+        until(p, [](const tests::vt& v) {
+            return v.row(STATUS_ROW).find("idle") != std::string::npos;
+        }, 10.0);
+
+        // A second request: the file already says what the model sends, so
+        // nothing is written -- and the tokens still count.
+        p.send("again\r");
+
+        until(p, [](const tests::vt& v) {
+            return v.shows("already what the model sent");
+        }, 20.0);
+
+        until(p, [](const tests::vt& v) {
+            return v.row(STATUS_ROW).find("idle") != std::string::npos;
+        }, 10.0);
+
+        p.send("/stats\r");
+
+        until(p, [](const tests::vt& v) { return v.shows("across 2 request(s)"); },
+              10.0);
+
+        {
+            const tests::vt v = shown(p);
+
+            // **The assertion with teeth.** The counts event carried a
+            // per-request running total and absorb() *assigned* it, so the
+            // session's tokens went back to the last request's at every new
+            // prompt. 20 a request, twice, is 40 -- not 20.
+            ok("  tokens add up across requests, rather than restarting",
+               v.shows(" 40 out, across 2 request(s)"), v.dump());
+
+            ok("  against the model's ceiling", v.shows(" of 4096 ("), v.dump());
+
+            ok("  and the last request's consumption, against its bounds",
+               v.shows("last request: 1 of 8 rounds, 1 of 3 attempts"), v.dump());
+
+            ok("  and the status line agrees about the ceiling",
+               v.row(STATUS_ROW).find("/4096") != std::string::npos,
+               "[" + v.row(STATUS_ROW) + "]");
+        }
 
         p.send("/quit\r");
 

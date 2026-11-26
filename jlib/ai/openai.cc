@@ -132,6 +132,15 @@ request request::parse(const std::string& body) {
     r.model = root->get("model").str_or("");
     r.stream = root->get("stream").bool_or(false);
 
+    if(root->has("stream_options")) {
+        util::json::object::ptr so;
+
+        try { so = root->obj("stream_options"); }
+        catch(util::json::exception&) {}
+
+        if(so) r.include_usage = so->get("include_usage").bool_or(false);
+    }
+
     if(root->has("temperature")) {
         r.has_temperature = true;
         r.temperature = float(root->get("temperature").double_or(0));
@@ -676,6 +685,16 @@ std::string request::str() const {
     // be asking for greedy sampling and a one-token reply.
     if(stream) root->add("stream", true);
 
+    // Only alongside `stream`: a whole reply already has its usage, and a
+    // server is entitled to reject stream_options without it.
+    if(stream && include_usage) {
+        util::json::object::ptr so = util::json::object::create();
+
+        so->add("include_usage", true);
+
+        root->add("stream_options", so);
+    }
+
     if(has_temperature) root->add("temperature", double(temperature));
 
     if(max_tokens) root->add("max_tokens", max_tokens);
@@ -704,6 +723,27 @@ delta delta::parse(const std::string& json) {
 
     try { choices = root->arr("choices"); }
     catch(util::json::exception&) {}
+
+    // **The usage chunk**, which `include_usage` asked for: `choices` empty
+    // and `usage` set. Read here rather than refused, because this is the one
+    // chunk that is supposed to look like that -- and still refused without
+    // a `usage`, because an empty chunk that says nothing is a server defect
+    // worth hearing about. Also read when a server puts usage on the last
+    // ordinary chunk instead, which the protocol allows.
+    util::json::object::ptr used;
+
+    if(root->has("usage")) {
+        try { used = root->obj("usage"); }
+        catch(util::json::exception&) {}
+    }
+
+    if(used) {
+        d.has_usage = true;
+        d.prompt_tokens = unsigned(used->get("prompt_tokens").int_or(0));
+        d.completion_tokens = unsigned(used->get("completion_tokens").int_or(0));
+    }
+
+    if((!choices || !choices->size()) && used) return d;
 
     if(!choices || !choices->size())
         throw util::json::exception("a chat completion chunk with no choices");
@@ -908,24 +948,97 @@ std::string done() { return "data: [DONE]\n\n"; }
 std::string models(const std::vector<std::string>& names,
                    std::int64_t created)
 {
+    std::vector<listing> offered;
+
+    for(const std::string& n : names) {
+        listing l;
+
+        l.id = n;
+
+        offered.push_back(l);
+    }
+
+    return models(offered, created);
+}
+
+std::string models(const std::vector<listing>& offered, std::int64_t created) {
     util::json::object::ptr root = util::json::object::create();
 
     root->add("object", std::string("list"));
 
     util::json::array::ptr data = util::json::array::create();
 
-    for(const std::string& n : names) {
+    for(const listing& l : offered) {
         util::json::object::ptr m = util::json::object::create();
 
-        m->add("id", n);
+        m->add("id", l.id);
         m->add("object", std::string("model"));
         m->add("created", (unsigned int)(created));
         m->add("owned_by", std::string("jlib"));
+
+        // Omitted rather than written as 0: "did not say" and "has none" are
+        // different, and only the first is ever true.
+        if(l.context) m->add("context_length", l.context);
 
         data->add(m);
     }
 
     root->add("data", data);
+
+    return root->str();
+}
+
+std::vector<listing> listing::parse(const std::string& body) {
+    util::json::object::ptr root = util::json::object::create(body);
+
+    if(!root) throw util::json::exception("a model list that is not an object");
+
+    util::json::array::ptr data = root->arr("data");
+
+    std::vector<listing> out;
+
+    for(std::size_t i = 0; data && i < data->size(); i++) {
+        util::json::object::ptr m = data->obj(i);
+
+        if(!m) continue;
+
+        listing l;
+
+        l.id = m->get("id").str_or("");
+
+        if(l.id.empty()) continue;
+
+        l.context = unsigned(m->get("context_length").int_or(0));
+
+        out.push_back(l);
+    }
+
+    return out;
+}
+
+std::string usage(const std::string& id, const std::string& model,
+                  std::int64_t created, unsigned int prompt_tokens,
+                  unsigned int completion_tokens)
+{
+    util::json::object::ptr root = util::json::object::create();
+
+    root->add("id", id);
+    root->add("object", std::string("chat.completion.chunk"));
+    root->add("created", (unsigned int)(created));
+    root->add("model", model);
+
+    // **Empty, and that is the shape the protocol specifies** for this one
+    // chunk. See request::include_usage for why it is only ever sent to a
+    // client that asked.
+    root->add("choices", util::json::array::create());
+
+    util::json::object::ptr u = util::json::object::create();
+
+    u->add("prompt_tokens", prompt_tokens);
+    u->add("completion_tokens", completion_tokens);
+    u->add("total_tokens", prompt_tokens + completion_tokens);
+
+    root->add("usage", u);
 
     return root->str();
 }

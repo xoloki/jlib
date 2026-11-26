@@ -46,9 +46,19 @@
  *
  * `CUP` (`ESC[r;cH`), `VPA` (`ESC[rd`), the four one-axis moves
  * (`ESC[nA/B/C/D`), `EL` (`ESC[K`, `ESC[0K`, `ESC[1K`, `ESC[2K`), `ED`
- * (`ESC[J`, `ESC[2J`), and `CR`, `LF` and `BS`. Every other CSI -- colour,
- * scroll regions, cursor visibility -- is parsed and discarded, and the two
- * character-set sequences (`ESC(B`) are skipped.
+ * (`ESC[J`, `ESC[2J`), the three character edits -- `DCH` (`ESC[nP`), `ICH`
+ * (`ESC[n@`) and `ECH` (`ESC[nX`) -- and `CR`, `LF` and `BS`. Every other
+ * CSI -- colour, scroll regions, cursor visibility -- is parsed and
+ * discarded, and the two character-set sequences (`ESC(B`) are skipped.
+ *
+ * **The character edits were added after they bit, which is this file's
+ * rule.** ncurses shortens a line in the middle with `DCH` when that is
+ * cheaper than rewriting it -- measured for #450: one `ESC[nP` to turn
+ * `... streaming 0s` into `... asking 0s` -- and discarding it reconstructed
+ * `askeaming 0s`, which no terminal ever showed. It surfaced only because a
+ * sabotage changed the line's length, which means an assertion on any line
+ * whose length changes could have been failing, or passing, for the wrong
+ * reason. xterm's terminfo offers all three, so all three are here.
  *
  * ### What it does not model, and where that will bite
  *
@@ -138,6 +148,9 @@ public:
     int cursor_col() const { return m_col; }
 
 private:
+    /** One cell; callers keep `r` and `c` inside the screen. */
+    char& cell(int r, int c) { return m_cells[std::size_t(r * m_cols + c)]; }
+
     void put(char ch) {
         if(m_row >= 0 && m_row < m_rows && m_col >= 0 && m_col < m_cols)
             m_cells[std::size_t(m_row * m_cols + m_col)] = ch;
@@ -213,6 +226,38 @@ private:
 
         case 'K': erase_line(n.empty() ? 0 : n[0]); break;
         case 'J': erase_all(); break;
+
+        // Delete characters: the rest of the line shifts left, and blanks
+        // come in at the right margin.
+        case 'P': {
+            const int k = n.empty() || !n[0] ? 1 : n[0];
+
+            for(int c = m_col; c < m_cols; c++)
+                cell(m_row, c) = c + k < m_cols ? cell(m_row, c + k) : ' ';
+
+            break;
+        }
+
+        // Insert blanks: the rest of the line shifts right, and what passes
+        // the right margin is lost.
+        case '@': {
+            const int k = n.empty() || !n[0] ? 1 : n[0];
+
+            for(int c = m_cols - 1; c >= m_col; c--)
+                cell(m_row, c) = c - k >= m_col ? cell(m_row, c - k) : ' ';
+
+            break;
+        }
+
+        // Erase characters: blanks in place, nothing moves.
+        case 'X': {
+            const int k = n.empty() || !n[0] ? 1 : n[0];
+
+            for(int c = m_col; c < m_cols && c < m_col + k; c++)
+                cell(m_row, c) = ' ';
+
+            break;
+        }
 
         default: break;                                 // SGR, scroll region…
         }
