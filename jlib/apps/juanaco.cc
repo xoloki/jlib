@@ -947,9 +947,13 @@ void work(sys::relay<event>& r, const job& j, confirmer& confirm) {
             event e;
 
             e.n = news::ask;
+            // With what it touches (#464): `write openai.cc? lines 964-989
+            // of 1074` says which part of the file is about to change, where
+            // `write openai.cc?` alone was answered yes in front of a reply
+            // about to turn 1074 lines into 22.
             e.text = std::string(d.what == jcode::outcome::created ? "create"
                                                                    : "write") +
-                     " " + d.name + "?";
+                     " " + d.name + "? " + jcode::extent(d);
 
             r.emit(e);
 

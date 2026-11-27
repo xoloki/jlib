@@ -500,7 +500,7 @@ attempts until_built(std::vector<ai::message> turns,
 
 /** What became of one edit. */
 enum class outcome {
-    written,     ///< the file on disk now holds what the model said
+    written,     ///< the file on disk now holds what the model said, where it goes
     unchanged,   ///< it already did, byte for byte -- nothing was done
     created,     ///< it did not exist before
     refused      ///< see the reason
@@ -513,7 +513,34 @@ struct result {
     outcome what = outcome::refused;
     std::string why;              ///< set when refused
     std::vector<std::string> guesses;
+
+    /**
+     * How many lines the file had, and would have; 0 before a file that does
+     * not exist yet.
+     */
+    std::size_t before = 0;
+    std::size_t after = 0;
+
+    /**
+     * The lines of the file the edit replaces, from one (#464).
+     *
+     * The whole file for a hunk edit and for a block that is the whole file;
+     * a smaller span for a block that apply() placed as a part of it. Carried
+     * so a person asked about a write sees what it touches: a question that
+     * said only `write jlib/ai/openai.cc?` was answered yes in front of a
+     * reply about to turn 1074 lines into 22.
+     */
+    std::size_t from = 0;
+    std::size_t to = 0;
 };
+
+/**
+ * What a result touches, for a question or a line of output:
+ * `lines 964-989 of 1074` for a block placed as a part of the file,
+ * `203 to 190 lines` for one that replaced all of it, and `12 lines` for a
+ * file that does not exist yet.
+ */
+std::string extent(const result& r);
 
 /**
  * Put the edits on disk under `root`.
@@ -526,6 +553,13 @@ struct result {
  * `created` is separate for the same reason: a name matching nothing that was
  * sent is either a new file or a hallucination, and only the caller knows
  * which.
+ *
+ * **A whole-file block replaces the part of the file it covers** (#464), not
+ * necessarily the whole of it. A well-formed whole file covers everything and
+ * replaces it as before; a block a model sent instead of the whole file --
+ * one function, or the file without its licence header -- replaces only what
+ * it covers, and one that cannot be placed with certainty is refused. The
+ * rule, and what it costs, is at place() in jcode.cc.
  *
  * **Containment is by resolution, not inspection.** The name came from a
  * model, which makes it untrusted by construction. The parent directory is

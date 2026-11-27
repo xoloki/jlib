@@ -578,6 +578,15 @@ int main() {
 
             ok("  a question appears", asked, v.dump());
 
+            // **With what it touches** (#464) -- for a one-line file replaced
+            // whole, its size -- which is what makes the question a check:
+            // `write openai.cc?` was the whole of it when a reply was about to
+            // turn 1074 lines into 22.
+            ok("  saying what it would touch",
+               question_on(v).find("write hello.cc? 1 to 1 lines") !=
+                   std::string::npos,
+               "[" + v.row(PROMPT_ROW) + "]");
+
             ok("  naming the file and the keys",
                question_on(v).find("write hello.cc?") != std::string::npos,
                "[" + v.row(PROMPT_ROW) + "]");
@@ -618,7 +627,7 @@ int main() {
             ok("  and says so", v.shows("left hello.cc alone"), v.dump());
 
             ok("  and the answer is on the record",
-               v.shows("asked: write hello.cc? no"), v.dump());
+               v.shows("asked: write hello.cc? 1 to 1 lines no"), v.dump());
 
             // **The dialog borrows the row; it does not clear it.** The
             // draft comes back exactly, and without the `q` that was not an
@@ -1047,7 +1056,7 @@ int main() {
            std::to_string(prompts) + " prompts");
 
         ok("  about the file that could be written",
-           p.seen().find("write hello.cc? [y/N]") != std::string::npos);
+           p.seen().find("write hello.cc? 1 to 1 lines [y/N]") != std::string::npos);
 
         ok("  and no leaves it alone", tr.get("hello.cc") == "original\n",
            "[" + tr.get("hello.cc") + "]");
