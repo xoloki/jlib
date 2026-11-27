@@ -117,6 +117,22 @@ def cause(err, what, lost, max_lost, missing, ok_syntax):
     m = re.search(r"^jcode: refused (\S+): (.*)$", err, re.M)
 
     if m and re.search(r"filename\.\w+$", m.group(1)): return "placeholder name"
+
+    # **A whole-file block that could not be placed** (#464) is a cause of its
+    # own, and before the hunk rule below on purpose: its reasons say "not in
+    # the file" too, and that rule labelled the first refusal of one, in
+    # sampler-ties, a search that did not match.
+    if m and re.match(r"(this block|too many of this block)", m.group(2)):
+        for pattern, label in (
+                (r"first (line is|\d+ lines are) not in", "its first line is not in the file"),
+                (r"last (line is|\d+ lines are) not in", "its last line is not in the file"),
+                (r"leaves out", "it leaves out part of the file"),
+                (r"no line in common", "nothing to place it by"),
+                (r"alike", "too many lines alike")):
+            if re.search(pattern, m.group(2)): return "not placed: " + label
+
+        return "not placed: " + m.group(2)[:60]
+
     if m and re.search(r"(not in|does not (appear|match)|twice|more than once)",
                        m.group(2)): return "search text did not match"
     if m: return "refused: " + m.group(2)[:60]

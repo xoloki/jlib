@@ -484,10 +484,13 @@ int main(int argc, char** argv) {
 
         if(!o.yes)
             ask = [](const jcode::result& r) {
+                // With what it touches, so the question is a check rather
+                // than a formality: `write jlib/ai/openai.cc? lines 964-989
+                // of 1074` (#464).
                 return confirm(std::string("jcode: ") +
                                (r.what == jcode::outcome::created ? "create"
                                                                   : "write") +
-                               " " + r.name + "?")
+                               " " + r.name + "? " + jcode::extent(r))
                     ? jcode::consent::yes : jcode::consent::no;
             };
 

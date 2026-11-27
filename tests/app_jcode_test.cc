@@ -1359,6 +1359,460 @@ static void applying_it() {
     }
 }
 
+/**
+ * A blank line in a block is in the file it writes.
+ *
+ * From #365 to #464 none was, unless it held a space: the search/replace
+ * parser holds each line back in case it is the filename before a marker,
+ * tested the held line for being empty to know whether there was one, and so
+ * never let an empty line go. Every file jcode wrote whole lost every empty
+ * line in it -- sampler.cc all 51 of its own, in the measurement -- and the
+ * measurement called that edit correct, because it judged by non-blank
+ * lines.
+ */
+static void a_blank_line_is_a_line() {
+    std::cout << "\na blank line is a line:\n";
+
+    const std::string body = "int a;\n\nint b;\n\n\nint c;\n";
+
+    const struct { const char* what; std::string reply; std::vector<std::string> sent; } replies[] = {
+        { "", fence("main.cc", body), KNOWN },
+        { ", after prose with blank lines of its own",
+          "I changed one line.\n\nHere is the file:\n\n" + fence("main.cc", body), KNOWN },
+        { ", named or not",
+          "Here it is:\n\n```\n" + body + "```\n", std::vector<std::string>{ "main.cc" } },
+    };
+
+    for(const auto& one : replies) {
+        const jcode::reply r = jcode::parse(one.reply, one.sent);
+
+        ok(std::string("a fenced block keeps its blank lines") + one.what,
+           r.edits.size() == 1 && r.edits[0].content == body,
+           r.edits.size() != 1
+               ? std::to_string(r.edits.size()) + " edits"
+               : std::to_string(std::count(r.edits[0].content.begin(),
+                                           r.edits[0].content.end(), '\n')) +
+                     " lines");
+    }
+}
+
+/**
+ * Function `k` of a file of them, alike to every other but for its name and
+ * its number -- so that `return y;` and `}` say nothing about where they are.
+ */
+static std::string function(int k, int add, const std::string& last = "return y;") {
+    return "int f" + std::to_string(k) + "(int x) {\n    int y = x + " +
+           std::to_string(add) + ";\n    " + last + "\n}\n";
+}
+
+/**
+ * Ten of them under a two-line header: 53 lines, with f5 at 24 to 27. From
+ * function `x` on they end in `return x;`, which is then in the file more
+ * than once and no anchor.
+ */
+static std::string functions(int x = 11) {
+    std::string out = "// a header a model may leave out\n"
+                      "// and its second line\n\n";
+
+    for(int k = 1; k <= 10; k++)
+        out += function(k, k, k >= x ? "return x;" : "return y;") + "\n";
+
+    return out;
+}
+
+/** `text` with the first `from` in it replaced by `to`. */
+static std::string with(std::string text, const std::string& from,
+                        const std::string& to)
+{
+    const std::size_t at = text.find(from);
+
+    if(at != std::string::npos) text.replace(at, from.size(), to);
+
+    return text;
+}
+
+/** One file, one fence for it, apply(): what came of it, and the file now. */
+static std::pair<jcode::result, std::string>
+placing(const tree& t, const std::string& file, const std::string& block)
+{
+    t.put("main.cc", file);
+
+    const std::vector<jcode::result> got =
+        jcode::apply(jcode::parse(fence("main.cc", block), KNOWN), t.path);
+
+    jcode::result r;
+
+    if(got.size() == 1) r = got[0];
+    else r.why = std::to_string(got.size()) + " results";
+
+    return { r, read(t, "main.cc") };
+}
+
+/** What a result says, for a failing assertion. */
+static std::string told(const jcode::result& r) {
+    return std::string(jcode::spell(r.what)) + ", " + jcode::extent(r) +
+           (r.why.empty() ? "" : ": " + r.why);
+}
+
+/**
+ * A whole-file block replaces the part of the file it accounts for (#464).
+ *
+ * Measured against a real model: asked for whole files, it sometimes returns
+ * only the part it changed, and jcode wrote that over the file -- sampler.cc
+ * 203 lines to 8, openai.cc 1074 to 22 -- and reported `written`. These are
+ * the measured shapes, the shapes each version of the rule got wrong, and
+ * what a whole file must still do.
+ */
+static void a_part_goes_where_it_belongs() {
+    std::cout << "\na part of a file goes where it belongs (#464):\n";
+
+    tree t;
+
+    if(t.path.empty()) { ok("a temp tree", false); return; }
+
+    const std::string file = functions();
+    const std::string f5 = function(5, 50);   // the one function, changed
+
+    {
+        // **The measured shape, exactly**: one file sent, and the reply a
+        // nameless fence holding only the function it changed. parse() gives
+        // it the only name there is, and that is where it was written over
+        // the whole file.
+        t.put("main.cc", file);
+
+        const jcode::reply r = jcode::parse(
+            "Here is the change:\n\n```\n" + f5 + "```\n",
+            std::vector<std::string>{ "main.cc" });
+
+        ok("a nameless fence is given the only file's name, as before",
+           r.edits.size() == 1 && r.edits[0].name == "main.cc");
+
+        const std::vector<jcode::result> got = jcode::apply(r, t.path);
+
+        ok("  and is written over the function it is, and nothing else",
+           got.size() == 1 && got[0].what == jcode::outcome::written &&
+               jcode::extent(got[0]) == "lines 24-27 of 53",
+           got.empty() ? "nothing" : told(got[0]));
+
+        // The assertion that matters: not that it was written, but that the
+        // rest of the file is still there.
+        ok("  with every other line of the file kept around it",
+           read(t, "main.cc") == with(file, "x + 5;", "x + 50;"));
+    }
+
+    {
+        // The other measured shape: the whole file but its first lines -- in
+        // listener.cc a licence and the #includes -- which are kept.
+        const auto got = placing(t, file,
+                                 with(file.substr(file.find("int f1")),
+                                      "x + 3;", "x + 30;"));
+
+        ok("a file without its head replaces what it has",
+           got.first.what == jcode::outcome::written &&
+               jcode::extent(got.first) == "lines 4-53 of 53",
+           told(got.first));
+
+        ok("  and the head is kept", got.second == with(file, "x + 3;", "x + 30;"));
+    }
+
+    {
+        // And the third, from sampler.cc: the model rewrote the function's
+        // first line (`sampler::int argmax(`), so where it begins is not in
+        // the file, and placing it anyway would corrupt the line above.
+        t.put("main.cc", file);
+
+        const std::vector<jcode::result> got = jcode::apply(
+            jcode::parse("```\n" + with(function(5, 5), "int f5(", "sampler::int f5(") +
+                             "```\n",
+                         std::vector<std::string>{ "main.cc" }),
+            t.path);
+
+        ok("a part whose first line is not in the file is refused",
+           got.size() == 1 && got[0].what == jcode::outcome::refused &&
+               got[0].why.find("first line is not in the file") != std::string::npos,
+           got.empty() ? "nothing" : told(got[0]));
+
+        ok("  saying the name was guessed", !got.empty() &&
+           got[0].why.find("guessed") != std::string::npos);
+
+        ok("  and the file is untouched", read(t, "main.cc") == file);
+    }
+
+    {
+        const auto got = placing(t, file, f5 + "// and a line the file does not have\n");
+
+        ok("so is one whose last line is not",
+           got.first.what == jcode::outcome::refused &&
+               got.first.why.find("last line is not in the file") != std::string::npos,
+           told(got.first));
+
+        ok("  and the file is untouched", got.second == file);
+    }
+
+    {
+        // **The seam**: two snippets pasted together, and the function
+        // between them nowhere in the reply. Placed, it would be deleted.
+        const auto got = placing(t, file, f5 + function(7, 70));
+
+        ok("two parts with the code between them left out are refused",
+           got.first.what == jcode::outcome::refused &&
+               got.first.why.find("leaves out 4 lines") != std::string::npos,
+           told(got.first));
+
+        ok("  and the file is untouched", got.second == file);
+    }
+
+    {
+        // **What that costs, asserted so that it stays a decision**: a part
+        // that deletes a line inside itself has the seam's shape exactly.
+        const auto got = placing(t, file, "int f5(int x) {\n    return y;\n}\n");
+
+        ok("a part that deletes a line inside itself is refused too",
+           got.first.what == jcode::outcome::refused &&
+               got.first.why.find("leaves out 1 line ") != std::string::npos,
+           told(got.first));
+    }
+
+    {
+        // **Where a part ends, by what it costs.** It adds a line and changes
+        // its `return y;` to the `return x;` that f8 to f10 end in. Lined up
+        // for the most lines in common, it reached theirs, and was written
+        // over f6 to f8.
+        const std::string many = functions(8);
+
+        const auto got = placing(t, many,
+                                 "int f5(int x) {\n    int y = x + 5;\n"
+                                 "    y *= 2;\n    return x;\n}\n");
+
+        ok("a part ends at its own closing brace, not a later one like it",
+           got.first.what == jcode::outcome::written &&
+               jcode::extent(got.first) == "lines 24-27 of 53",
+           told(got.first));
+
+        ok("  and every other function is still there",
+           got.second == with(many, "x + 5;\n    return y;",
+                              "x + 5;\n    y *= 2;\n    return x;"));
+    }
+
+    {
+        // **And on its own last line.** Its last two lines became one, and
+        // cheapest alone left both unmatched -- cheaper than replacing three
+        // lines with two -- and refused it as a part with no known end.
+        const auto got = placing(t, file, "int f5(int x) {\n    return x + 5;\n}\n");
+
+        ok("a part that shortens itself is written",
+           got.first.what == jcode::outcome::written &&
+               jcode::extent(got.first) == "lines 24-27 of 53",
+           told(got.first));
+
+        ok("  as what it says",
+           got.second == with(file, "    int y = x + 5;\n    return y;\n",
+                              "    return x + 5;\n"));
+    }
+
+    {
+        // **A whole file is still the whole file**, whatever it changed at
+        // its edges or between them -- and blank lines are no evidence of
+        // anything: an earlier version counted them, and refused correct
+        // whole files whose blank lines the model had tidied.
+        std::string tidy;
+
+        for(std::size_t from = 0; from < file.size();) {
+            const std::size_t nl = file.find('\n', from);
+            const std::string line = file.substr(from, nl + 1 - from);
+
+            if(line != "\n") tidy += line;
+
+            from = nl + 1;
+        }
+
+        const struct { const char* what; std::string block; const char* extent; } whole[] = {
+            { "its first line changed",
+              "// a changed header\n" + file.substr(file.find('\n') + 1), "53 to 53 lines" },
+            { "a function deleted from its middle",
+              with(file, function(6, 6) + "\n", ""), "53 to 48 lines" },
+            { "a function appended", file + function(11, 11), "53 to 57 lines" },
+            { "its blank lines collapsed", tidy, "53 to 42 lines" },
+        };
+
+        for(const auto& w : whole) {
+            const auto got = placing(t, file, w.block);
+
+            ok(std::string("a whole file with ") + w.what + " replaces the file",
+               got.first.what == jcode::outcome::written &&
+                   jcode::extent(got.first) == w.extent && got.second == w.block,
+               told(got.first));
+        }
+    }
+
+    {
+        // **The one comparison.** No line in common that occurs once in each,
+        // so nothing to place it by: a block at least as long as the file
+        // replaces it, which is how a one-line file is edited at all; a
+        // shorter one is refused, which is what stops a reply holding only a
+        // new function from being written over the file.
+        t.put("one.cc", "int main() { return 1; }\n");
+
+        const std::vector<jcode::result> got = jcode::apply(
+            jcode::parse(fence("one.cc", "int main() { return 0; }\n"),
+                         std::vector<std::string>{ "one.cc" }), t.path);
+
+        ok("a one-line file is replaced",
+           got.size() == 1 && got[0].what == jcode::outcome::written &&
+               read(t, "one.cc") == "int main() { return 0; }\n",
+           got.empty() ? "nothing" : told(got[0]));
+
+        const auto lone = placing(t, file, "int g(int x) {\n    return x * 2;\n}\n");
+
+        ok("a shorter block with nothing to place it by is refused",
+           lone.first.what == jcode::outcome::refused &&
+               lone.first.why.find("no line in common") != std::string::npos,
+           told(lone.first));
+
+        ok("  and the file is untouched", lone.second == file);
+    }
+
+    {
+        const auto got = placing(t, file, function(5, 5));
+
+        ok("a part that changes nothing is unchanged, not written",
+           got.first.what == jcode::outcome::unchanged, told(got.first));
+    }
+
+    {
+        // A block whose last line has no newline, with the file going on
+        // after it: f6 must not end up on the end of f5's closing brace.
+        t.put("main.cc", file);
+
+        jcode::edit e;
+
+        e.name = "main.cc";
+        e.content = f5.substr(0, f5.size() - 1);
+
+        jcode::reply r;
+
+        r.edits.push_back(e);
+
+        jcode::apply(r, t.path);
+
+        ok("a part with no newline at its end keeps the line after it apart",
+           read(t, "main.cc") == with(file, "x + 5;", "x + 50;"));
+    }
+
+    {
+        // **Hunks are untouched by any of it**: a SEARCH with an empty
+        // REPLACE deletes the text it names, which is a decision and not an
+        // omission.
+        t.put("main.cc", file);
+
+        const std::size_t f2 = file.find("int f2");
+
+        const std::vector<jcode::result> got = jcode::apply(
+            jcode::parse(hunk("main.cc", file.substr(f2), ""), KNOWN), t.path);
+
+        ok("a hunk that deletes most of a file is written",
+           got.size() == 1 && got[0].what == jcode::outcome::written &&
+               read(t, "main.cc") == file.substr(0, f2),
+           got.empty() ? "nothing" : told(got[0]));
+
+        ok("  and says how big the file was and is",
+           !got.empty() && jcode::extent(got[0]) == "53 to 8 lines",
+           got.empty() ? "" : jcode::extent(got[0]));
+    }
+
+    {
+        const std::vector<jcode::result> got = jcode::apply(
+            jcode::parse(fence("fresh.cc", file), std::vector<std::string>{}),
+            t.path, true);
+
+        ok("a new file says only how big it is",
+           !got.empty() && got[0].what == jcode::outcome::created &&
+               jcode::extent(got[0]) == "53 lines",
+           got.empty() ? "" : jcode::extent(got[0]));
+    }
+
+    {
+        // **Refused before anyone is asked, and asked with what it touches.**
+        // deliver() runs apply() as a dry run first, so a block that cannot
+        // be placed is a line with its reason and never a question, and a
+        // question names the lines it would replace.
+        t.put("main.cc", file);
+
+        int asked = 0;
+
+        std::vector<std::string> said;
+
+        const bool wrote = jcode::deliver(
+            jcode::parse(fence("main.cc", f5 + function(7, 70)), KNOWN), t.path,
+            [&said](const std::string& l) { said.push_back(l); },
+            [&asked](const jcode::result&) { asked++; return jcode::consent::yes; });
+
+        bool why = false;
+
+        for(const std::string& l : said)
+            if(l.find("refused main.cc") != std::string::npos &&
+               l.find("leaves out") != std::string::npos)
+                why = true;
+
+        ok("deliver() never asks about a block it cannot place",
+           asked == 0 && !wrote, std::to_string(asked) + " asked");
+
+        ok("  and says why", why);
+
+        ok("  and the file is untouched", read(t, "main.cc") == file);
+
+        said.clear();
+
+        std::string question;
+
+        jcode::deliver(jcode::parse(fence("main.cc", f5), KNOWN), t.path,
+                       [&said](const std::string& l) { said.push_back(l); },
+                       [&question](const jcode::result& r) {
+                           question = jcode::extent(r);
+                           return jcode::consent::yes;
+                       });
+
+        ok("  a question says which lines it would replace",
+           question == "lines 24-27 of 53", question);
+
+        bool landed = false;
+
+        for(const std::string& l : said)
+            if(l == "written main.cc, lines 24-27 of 53") landed = true;
+
+        ok("  and so does the line saying it was written", landed,
+           said.empty() ? "nothing said" : said.back());
+    }
+
+    {
+        // **The bound on lining up.** Thousands of lines alike on both sides
+        // and changed near their start would cost a table that size, and are
+        // refused rather than paid for; the same lines reproduced cost
+        // nothing, so a change at their end is written.
+        const std::string head = "the one line unique to both\n";
+
+        std::string rows;
+
+        for(int i = 0; i < 2100; i++) rows += "0,\n";
+
+        const auto first = placing(t, head + rows, head + "1,\n" + rows.substr(3));
+
+        ok("thousands of lines alike, changed at their start, are refused",
+           first.first.what == jcode::outcome::refused &&
+               first.first.why.find("alike") != std::string::npos,
+           told(first.first));
+
+        ok("  and the file is untouched", first.second == head + rows);
+
+        const auto last = placing(t, head + rows, head + rows.substr(3) + "1,\n");
+
+        ok("  but changed at their end, are written",
+           last.first.what == jcode::outcome::written &&
+               jcode::extent(last.first) == "2101 to 2101 lines",
+           told(last.first));
+    }
+}
+
 static void what_it_will_not_write() {
     std::cout << "\nwhat it will not write, whatever the model says:\n";
 
@@ -1584,6 +2038,8 @@ int main() {
     the_agent_loop();
     the_loop_knows_why_it_stopped();
     what_the_tools_look_like_on_the_wire();
+    a_blank_line_is_a_line();
+    a_part_goes_where_it_belongs();
     the_envelope_a_model_actually_sends();
     a_guess_belongs_to_its_own_edit();
     a_block_with_no_name();

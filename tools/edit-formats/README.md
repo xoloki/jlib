@@ -71,8 +71,24 @@ Qwen2.5-Coder-7B-Instruct-Q4_K_M at `--temp 0.2`, through jserve on an M-series 
 
 **Whole: 6 of 10 correct, and 3 of 10 destroyed code while jcode reported `written`** (#464). The line counts in the table are the files' own, before and after; the lines-lost check, which ignores blank lines, counted 146, 33 and 760. In two of those three the change itself was right and the file around it was gone.
 
+**And all six correct ones stripped the file of its empty lines** — `sampler.cc` all 51 of its blank lines, `Directory.cc` the 4 of its 24 that held nothing at all; the 20 holding spaces survived. That was jcode, not the model: from #365 until #464 found it, an empty line in a reply never reached the whole-file parser. Lines lost ignores blank lines on purpose, so that a re-indent is not a loss, and so could not see it; read the whole column as correct in its code and wrong in its layout. Hunk edits kept every line.
+
 **Hunks: 0 of 10 as jcode handled them**, every one refused for its filename (#465). Behind the names, the seven replies that really were hunks were **5 correct and 2 refused, and none destroyed anything**. The other three ignored the format and sent a whole file.
 
 **Output**: a genuine hunk reply had a median of ~166 tokens against ~1,758 for a whole file — the difference between seconds and minutes, at the 4.1–9.1 tok/s the correct whole-file edits came out at here, prefill included. Wall times varied two- to three-fold between batches with swap and other load, so they are in the logs and not in this table.
 
 What it says: **hunks are the safer format and the cheaper one, and they are unusable until #465 is fixed.** Whole is usable today and destroys files three times in ten. #464 needs fixing whichever format is the default.
+
+## Rerun after #464
+
+**Whole: 8 of 10 correct, and none destroyed.** #464 places a whole-file block in the part of the file it covers rather than writing it over all of it, and keeps the empty lines. The ten whole-format cases were rerun with that jcode on 2026-11-27. Every reply came back the same size as before, token for token, so the replies are the same and the difference is jcode's:
+
+| case | before #464 | after |
+| --- | --- | --- |
+| `sampler-ties` | **destroyed the file: 203 lines → 8** | refused: its first line, rewritten by the model, is not in the file; file untouched |
+| `listener-localhost` | **297 lines → 197** around a correct change | **correct**: `lines 37-297 of 297`, the licence and `#include`s kept |
+| `openai-sort` | **destroyed the file: 1074 lines → 22** | **correct**: `lines 964-989 of 1074` |
+| the six correct ones | correct in their code, every empty line gone | **correct**, each exactly the file the model sent |
+| `ringbuffer-noexcept` | wrote nothing | wrote nothing |
+
+The conclusion above changes in one half: whole format destroyed no file here, and what it costs instead is a refusal or, in one documented shape, a line kept that should have gone (see `place()` in `jlib/apps/jcode.cc`). Hunks are still the cheaper format by ten times in tokens, and still unusable until #465.

@@ -30,6 +30,7 @@
 #include <cctype>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 
 #include <limits.h>
 #include <stdlib.h>
@@ -983,13 +984,23 @@ std::vector<edit> hunks_in(const std::string& text, std::string& left,
     // before an opening marker belongs to the block, not to the prose.
     std::string pending;
 
+    // Whether one is held at all. **An empty line is a line too**: this used
+    // to test `pending` for being empty, so an empty line was held and never
+    // let go, and every one in the reply was gone before the whole-file
+    // parser saw it -- every file jcode wrote whole, from #365 until #464
+    // found it, lost every empty line it had, and kept only the blank lines
+    // that held a space. Nothing that judged an edit by its non-blank lines
+    // could see it, and nothing did.
+    bool held = false;
+
     while(std::getline(in, line)) {
         const std::string trimmed = util::trim(line);
 
         if(trimmed.compare(0, 7, "<<<<<<<") != 0) {
-            if(!pending.empty()) left += pending + "\n";
+            if(held) left += pending + "\n";
 
             pending = line;
+            held = true;
 
             if(!trimmed.empty()) previous = trimmed;
 
@@ -1000,6 +1011,7 @@ std::vector<edit> hunks_in(const std::string& text, std::string& left,
         std::string who = util::trim(pending);
 
         pending.clear();
+        held = false;
 
         // What was assumed to arrive at *this block's* name, which is
         // attached to the edit it names -- see below.
@@ -1089,7 +1101,7 @@ std::vector<edit> hunks_in(const std::string& text, std::string& left,
                 at->guesses.push_back(g);
     }
 
-    if(!pending.empty()) left += pending + "\n";
+    if(held) left += pending + "\n";
 
     return out;
 }
@@ -1331,6 +1343,488 @@ std::string slurp(const std::string& path, bool& found) {
 
 }
 
+namespace {
+
+/** The lines of a text, each keeping its newline; a last line may have none. */
+std::vector<std::string> lines_of(const std::string& text) {
+    std::vector<std::string> out;
+
+    std::size_t from = 0;
+
+    while(from < text.size()) {
+        const std::size_t nl = text.find('\n', from);
+
+        if(nl == std::string::npos) { out.push_back(text.substr(from)); break; }
+
+        out.push_back(text.substr(from, nl + 1 - from));
+
+        from = nl + 1;
+    }
+
+    return out;
+}
+
+/** A line as placement compares it: no trailing space, tab, CR or newline. */
+std::string bare(const std::string& line) {
+    std::size_t n = line.size();
+
+    while(n && (line[n - 1] == '\n' || line[n - 1] == '\r' ||
+                line[n - 1] == ' ' || line[n - 1] == '\t')) n--;
+
+    return line.substr(0, n);
+}
+
+bool blank(const std::string& line) {
+    for(char c : line) if(!std::isspace(static_cast<unsigned char>(c))) return false;
+
+    return true;
+}
+
+typedef std::vector<std::pair<std::size_t, std::size_t> > pairs_t;
+
+/**
+ * The most cells align() will spend lining two runs up: sixteen megabytes.
+ *
+ * Its table has a row for each line of the block's run and a column for each
+ * of the file's, and a run is what lies between two lines unique to both --
+ * a few lines, in code, even when the file side is the rest of a long file --
+ * less whatever the two share at their start, which costs nothing. What
+ * comes near this is thousands of lines alike on both sides and changed near
+ * their start: a table of data, not code, and refused rather than paid for.
+ */
+const std::size_t ALIGN_CELLS = std::size_t(1) << 22;
+
+/**
+ * Line a run of the block, `b`, up against a run of the file, `a`, from the
+ * start of each. Pairs are (line in a, line in b).
+ *
+ * **Between two anchors** (`to_edge` false) all of `a` is the block's to
+ * account for, and the most lines in common wins, matched as early in `a` as
+ * they can be -- so that two snippets pasted together show the run of the
+ * file between them as the gap it is, not as a match against the copy of
+ * `return y; }` in the function they left out.
+ *
+ * **Beyond the first or last anchor** (`to_edge`) `a` runs on to the edge of
+ * the file, and only part of it is the block's: the part that ends on the
+ * run's own last line -- the block's last line, or its first, which place()
+ * hands over with both runs reversed -- and of those the **cheapest to
+ * account for**. Each line of the file the block passes over costs one, as
+ * does each line of the block that matches nothing, and the file beyond the
+ * part is free; between two that cost the same, the one with more lines in
+ * common. When that line is nowhere in `a`, the cheapest part of any kind,
+ * and place() decides what an unmatched end means.
+ *
+ * Neither half is decoration. Most lines in common was the first rule here,
+ * and it matched a block that added a line to a function and changed its
+ * `return y;` to the `return x;` two later functions had to theirs, and wrote
+ * it over the three functions in between: cheapest is what stops that.
+ * Cheapest alone was the second, and it refused a function whose last two
+ * lines became one, because leaving both of the block's lines unmatched cost
+ * less than replacing three lines with two, and an unmatched last line is a
+ * part with no known end: ending on the run's own last line is what stops
+ * that.
+ *
+ * False, with nothing matched, when the two are too long to line up within
+ * ALIGN_CELLS.
+ */
+bool align(const std::vector<std::size_t>& a, const std::vector<std::size_t>& b,
+           bool to_edge, pairs_t& out)
+{
+    out.clear();
+
+    // A start the two share is matched as it stands, which is where either
+    // rule would put it anyway: a run the block reproduces is never the
+    // table's to pay for.
+    std::size_t same = 0;
+
+    while(same < a.size() && same < b.size() && a[same] == b[same]) {
+        out.push_back({ same, same });
+        same++;
+    }
+
+    const std::size_t n = b.size() - same, m = a.size() - same;
+
+    if(!n || !m) return true;
+
+    if(n + 1 > ALIGN_CELLS / (m + 1)) { out.clear(); return false; }
+
+    std::vector<unsigned> table((n + 1) * (m + 1), 0);
+
+    auto dp = [&](std::size_t x, std::size_t y) -> unsigned& {
+        return table[x * (m + 1) + y];
+    };
+
+    // The rest, from where they first differ: element x of the block's run
+    // is b[same + x - 1] here, and y of the file's a[same + y - 1].
+    auto same_line = [&](std::size_t x, std::size_t y) {
+        return b[same + x - 1] == a[same + y - 1];
+    };
+
+    for(std::size_t x = 1; x <= n; x++)
+        for(std::size_t y = 1; y <= m; y++)
+            dp(x, y) = same_line(x, y) ? dp(x - 1, y - 1) + 1
+                                       : std::max(dp(x - 1, y), dp(x, y - 1));
+
+    // How much of the file's run is the block's: y lines of it, and the
+    // block's x0 lines lined up within them.
+    std::size_t y = 0, x0 = n;
+
+    pairs_t rest;
+
+    if(to_edge) {
+        // k lines of the file with `matched` of them in common cost
+        // (k - matched) + (n - matched).
+        auto cost = [&](std::size_t k, std::size_t matched) {
+            return k + n - 2 * matched;
+        };
+
+        // Ending on the block's last line, matched to the file's line k.
+        std::size_t end = 0;
+
+        for(std::size_t k = 1; k <= m; k++) {
+            if(!same_line(n, k)) continue;
+
+            const std::size_t now = dp(n - 1, k - 1) + 1;
+            const std::size_t was = end ? dp(n - 1, end - 1) + 1 : 0;
+
+            if(!end || cost(k, now) < cost(end, was) ||
+               (cost(k, now) == cost(end, was) && now > was))
+                end = k;
+        }
+
+        if(end) {
+            rest.push_back({ same + end - 1, same + n - 1 });
+
+            y = end - 1;
+            x0 = n - 1;
+        }
+        else
+            for(std::size_t k = 1; k <= m; k++)
+                if(cost(k, dp(n, k)) < cost(y, dp(n, y)) ||
+                   (cost(k, dp(n, k)) == cost(y, dp(n, y)) && dp(n, k) > dp(n, y)))
+                    y = k;
+    }
+    else
+        // The shortest stretch of the run that does as well as all of it.
+        while(dp(n, y) < dp(n, m)) y++;
+
+    for(std::size_t x = x0; x && y;) {
+        if(same_line(x, y) && dp(x, y) == dp(x - 1, y - 1) + 1) {
+            rest.push_back({ same + y - 1, same + x - 1 });
+            x--;
+            y--;
+        }
+        else if(dp(x - 1, y) >= dp(x, y - 1)) x--;
+        else y--;
+    }
+
+    out.insert(out.end(), rest.rbegin(), rest.rend());
+
+    return true;
+}
+
+/** `1 line`, `4 lines`. */
+std::string lines(std::size_t n) {
+    return std::to_string(n) + (n == 1 ? " line" : " lines");
+}
+
+/** Where a whole-file block goes in the file, or why it cannot go anywhere. */
+struct placement {
+    bool ok = false;
+    std::string content;      ///< the file as it would be
+    std::size_t from = 0;     ///< the first line replaced, from one
+    std::size_t to = 0;       ///< and the last
+    std::string why;          ///< when not ok
+};
+
+/**
+ * Put a block where it belongs in the file, rather than over all of it (#464).
+ *
+ * ## The assumption this replaces
+ *
+ * A whole-file block was taken to *be* the whole file, and that one
+ * assumption was the only way jcode could destroy one. Asked for whole files,
+ * a model sometimes returns only the part it changed, and the measurement in
+ * tools/edit-formats watched that turn a 1074-line openai.cc into the 22
+ * lines of one function, a 203-line sampler.cc into 8, and a 297-line
+ * listener.cc into the same file without its licence and `#include`s -- each
+ * reported `written`, and in two of the three the change itself was right.
+ *
+ * So a block replaces **the part of the file it accounts for**. A well-formed
+ * whole file accounts for all of it and replaces it, exactly as before; a
+ * block that is one function replaces that function.
+ *
+ * ## How it is placed
+ *
+ * By the lines that occur exactly once in the file and exactly once in the
+ * block, chained in order -- patience diff's idea, and for the same reason: a
+ * unique line says where it is, and `}` or `return true;` says nothing. Every
+ * other line of the block is then lined up against the file's, between two of
+ * those anchors and beyond the first and last, by align() -- whose comment
+ * says why those are two different rules, each learned from a case the other
+ * got wrong. That is how a function's closing brace is found even when the
+ * line before it changed, which the first version, widening each anchor over
+ * identical neighbours, could not do.
+ *
+ * **Blank lines are invisible to all of it.** They carry no position, and
+ * models add and drop them freely: an earlier version counted them, and
+ * refused two correct whole-file edits because the model had collapsed a
+ * blank line at the end of each.
+ *
+ * ## What a part of the file may do
+ *
+ * Change what it shows, and nothing else. At each edge, the block's own lines
+ * beyond what it shares with the file either do not exist -- it is a part,
+ * and the file's lines there are kept -- or are at least as many as the
+ * file's there, and replace them: that is a whole file whose first or last
+ * lines changed. Fewer is refused, because then where the block begins or
+ * ends is not known; that is the shape of a fragment whose first line the
+ * model rewrote, and of one with a new comment above the function, and
+ * placing either by guesswork would corrupt the lines beside it.
+ *
+ * And inside, a part may not leave out a run of the file without putting
+ * anything in its place. That is the seam between two snippets pasted
+ * together, and deleting the code between them is the same destruction in
+ * miniature. A *whole* file may leave a run out -- it reproduced everything
+ * else, so the gap is a deletion -- which is how whole-file format deletes at
+ * all.
+ *
+ * **What that costs, said out loud.** A fragment that deletes lines inside
+ * the code it shows has exactly the seam's shape, and is refused: a whole
+ * file or a hunk can delete, and a fragment cannot. And where a block ends
+ * among lines that say nothing about where they are, it ends at the nearest,
+ * and the file keeps the rest. So a whole file that deletes its last function
+ * reads as one that left it out -- refused, or unchanged if that was all it
+ * left out -- and one that gives one of its three closing braces a comment
+ * keeps the brace as well, which is the one way placement writes a file
+ * wrong. That one is a line kept rather than code lost, and not silent: the
+ * question says `lines 1-19 of 20`, where a whole file says `20 to 20 lines`.
+ *
+ * ## The one comparison
+ *
+ * A block with no line in common with the file that occurs once in each
+ * cannot be placed, and replaces the file only if it has at least as many
+ * lines -- the edge rule above, applied to both edges at once. That is what
+ * lets a one-line file be edited at all, and what refuses a block holding
+ * only a new function instead of writing it over everything. It also refuses
+ * a whole file rewritten shorter that keeps no line the old one had once
+ * only, which is the price.
+ */
+placement place(const std::string& had, const std::string& want) {
+    placement p;
+
+    const std::vector<std::string> a = lines_of(had);
+    const std::vector<std::string> b = lines_of(want);
+
+    // The non-blank lines, each as a number -- one per distinct line, so that
+    // lines compare as integers -- and where each one really is.
+    std::unordered_map<std::string, std::size_t> id;
+
+    auto number = [&](const std::string& line) {
+        return id.emplace(bare(line), id.size()).first->second;
+    };
+
+    std::vector<std::size_t> ia, ib, na, nb;
+
+    for(std::size_t k = 0; k < a.size(); k++)
+        if(!blank(a[k])) { ia.push_back(k); na.push_back(number(a[k])); }
+
+    for(std::size_t k = 0; k < b.size(); k++)
+        if(!blank(b[k])) { ib.push_back(k); nb.push_back(number(b[k])); }
+
+    std::vector<std::size_t> in_a(id.size(), 0), in_b(id.size(), 0);
+    std::vector<std::size_t> where(id.size(), 0);
+
+    for(std::size_t i = 0; i < na.size(); i++) { in_a[na[i]]++; where[na[i]] = i; }
+
+    for(std::size_t x : nb) in_b[x]++;
+
+    // (line in the file, line in the block) for every line unique to both,
+    // in the block's order.
+    pairs_t pairs;
+
+    for(std::size_t j = 0; j < nb.size(); j++)
+        if(in_a[nb[j]] == 1 && in_b[nb[j]] == 1) pairs.push_back({ where[nb[j]], j });
+
+    // The longest chain of them in the file's order too: a line the block
+    // moved is not evidence of where the block is.
+    std::vector<std::size_t> tails;
+    std::vector<std::size_t> prev(pairs.size(), pairs.size());
+
+    for(std::size_t k = 0; k < pairs.size(); k++) {
+        const auto at = std::lower_bound(tails.begin(), tails.end(), k,
+                                         [&](std::size_t t, std::size_t q) {
+                                             return pairs[t].first < pairs[q].first;
+                                         });
+
+        if(at != tails.begin()) prev[k] = *(at - 1);
+
+        if(at == tails.end()) tails.push_back(k);
+        else *at = k;
+    }
+
+    pairs_t anchor;
+
+    for(std::size_t k = tails.empty() ? pairs.size() : tails.back();
+        k < pairs.size(); k = prev[k])
+        anchor.push_back(pairs[k]);
+
+    std::reverse(anchor.begin(), anchor.end());
+
+    if(anchor.empty()) {
+        if(nb.size() >= na.size()) {
+            p.ok = true;
+            p.content = want;
+            p.from = a.empty() ? 0 : 1;
+            p.to = a.size();
+
+            return p;
+        }
+
+        p.why = "this block is shorter than the file and has no line in "
+                "common with it that occurs once in each, so where it goes is "
+                "not known";
+
+        return p;
+    }
+
+    // Every other line, lined up between the anchors and beyond them: the
+    // file's lines a0 to a1 against the block's b0 to b1, from a0 -- or,
+    // before the first anchor, from a1 backwards.
+    pairs_t all;
+
+    bool fits = true;
+
+    auto line_up = [&](std::size_t a0, std::size_t a1, std::size_t b0,
+                       std::size_t b1, bool backwards, bool to_edge) {
+        std::vector<std::size_t> x(na.begin() + std::ptrdiff_t(a0),
+                                   na.begin() + std::ptrdiff_t(a1));
+        std::vector<std::size_t> y(nb.begin() + std::ptrdiff_t(b0),
+                                   nb.begin() + std::ptrdiff_t(b1));
+
+        if(backwards) {
+            std::reverse(x.begin(), x.end());
+            std::reverse(y.begin(), y.end());
+        }
+
+        pairs_t got;
+
+        if(!align(x, y, to_edge, got)) fits = false;
+
+        if(backwards) {
+            std::reverse(got.begin(), got.end());
+
+            for(auto& g : got) g = { a1 - 1 - g.first, b1 - 1 - g.second };
+        }
+        else
+            for(auto& g : got) g = { a0 + g.first, b0 + g.second };
+
+        all.insert(all.end(), got.begin(), got.end());
+    };
+
+    line_up(0, anchor.front().first, 0, anchor.front().second, true, true);
+
+    for(std::size_t k = 0; k < anchor.size(); k++) {
+        all.push_back(anchor[k]);
+
+        const bool last = k + 1 == anchor.size();
+
+        line_up(anchor[k].first + 1, last ? na.size() : anchor[k + 1].first,
+                anchor[k].second + 1, last ? nb.size() : anchor[k + 1].second,
+                false, last);
+    }
+
+    if(!fits) {
+        p.why = "too many of this block's lines are alike to line it up with "
+                "the file";
+
+        return p;
+    }
+
+    const std::size_t i0 = all.front().first, j0 = all.front().second;
+    const std::size_t i1 = all.back().first,  j1 = all.back().second;
+
+    const std::size_t lead_b = j0, lead_a = i0;
+    const std::size_t trail_b = nb.size() - 1 - j1, trail_a = na.size() - 1 - i1;
+
+    if(lead_b > 0 && lead_b < lead_a) {
+        p.why = (lead_b == 1 ? std::string("this block's first line is")
+                             : "this block's first " + lines(lead_b) + " are") +
+                " not in the file, so where it begins is not known";
+
+        return p;
+    }
+
+    if(trail_b > 0 && trail_b < trail_a) {
+        p.why = (trail_b == 1 ? std::string("this block's last line is")
+                              : "this block's last " + lines(trail_b) + " are") +
+                " not in the file, so where it ends is not known";
+
+        return p;
+    }
+
+    const bool head = lead_b > 0 || lead_a == 0;     // reaches the file's start
+    const bool tail = trail_b > 0 || trail_a == 0;   // and its end
+
+    // Inside a part: two lines next to each other in the block, with a run of
+    // the file between them, is a run the block left out.
+    if(!(head && tail))
+        for(std::size_t k = 0; k + 1 < all.size(); k++)
+            if(all[k + 1].second == all[k].second + 1 &&
+               all[k + 1].first > all[k].first + 1) {
+                p.why = "this block leaves out " +
+                        lines(all[k + 1].first - all[k].first - 1) +
+                        " of the file between two parts it shows, and is not "
+                        "the whole file";
+
+                return p;
+            }
+
+    // In real lines now. At an edge the block reaches, it owns everything to
+    // the file's edge, blank lines included; at an edge where it is only a
+    // part, the file keeps its own lines -- and its own blank lines -- and
+    // the block's are dropped there.
+    const std::size_t s = head ? 0 : ia[i0];
+    const std::size_t e = tail ? a.size() - 1 : ia[i1];
+    const std::size_t bf = head ? 0 : ib[j0];
+    const std::size_t bt = tail ? b.size() - 1 : ib[j1];
+
+    std::string out;
+
+    for(std::size_t k = 0; k < s; k++) out += a[k];
+
+    for(std::size_t k = bf; k <= bt; k++) {
+        out += b[k];
+
+        // A block whose last line has no newline still needs one when the
+        // file goes on after it.
+        if(k == bt && !b[k].empty() && b[k].back() != '\n' && e + 1 < a.size())
+            out += '\n';
+    }
+
+    for(std::size_t k = e + 1; k < a.size(); k++) out += a[k];
+
+    p.ok = true;
+    p.content = out;
+    p.from = s + 1;
+    p.to = e + 1;
+
+    return p;
+}
+
+}
+
+std::string extent(const result& r) {
+    if(!r.before) return std::to_string(r.after) + " lines";
+
+    if(r.from == 1 && r.to == r.before)
+        return std::to_string(r.before) + " to " + std::to_string(r.after) +
+               " lines";
+
+    return "lines " + std::to_string(r.from) + "-" + std::to_string(r.to) +
+           " of " + std::to_string(r.before);
+}
+
 std::vector<result> apply(const reply& r, const std::string& root, bool dry_run)
 {
     std::vector<result> out;
@@ -1458,6 +1952,40 @@ std::vector<result> apply(const reply& r, const std::string& root, bool dry_run)
             if(bad) { out.push_back(one); continue; }
         }
 
+        // **A whole-file block goes where it belongs**, not over the file
+        // (#464) -- resolved here, against the file, for the same reason the
+        // hunks above are: it needs the file, and parse() promises not to
+        // touch one. See place() for the rule and what it costs.
+        if(found && e.hunks.empty()) {
+            const placement at = place(had, e.content);
+
+            if(!at.ok) {
+                // A block with no filename of its own was given this one, and
+                // the person deciding what to do next should know that.
+                bool guessed = false;
+
+                for(const std::string& g : e.guesses)
+                    if(g.find("no filename before the fence") != std::string::npos)
+                        guessed = true;
+
+                one.why = at.why +
+                          (guessed ? std::string(" -- and it had no filename of "
+                                                 "its own, so this one was "
+                                                 "guessed")
+                                   : std::string()) +
+                          "; ask for the whole file, or for search/replace hunks";
+
+                out.push_back(one);
+
+                continue;
+            }
+
+            want = at.content;
+
+            one.from = at.from;
+            one.to = at.to;
+        }
+
         if(found && had == want) {
             // Not "written".  The model returned what it was given, and
             // saying it applied an edit would be the harness lie.
@@ -1466,6 +1994,16 @@ std::vector<result> apply(const reply& r, const std::string& root, bool dry_run)
             out.push_back(one);
 
             continue;
+        }
+
+        one.before = found ? lines_of(had).size() : 0;
+        one.after = lines_of(want).size();
+
+        // A hunk edit, or a new file, is described by its size; only a placed
+        // block names the lines it replaced.
+        if(!one.from) {
+            one.from = one.before ? 1 : 0;
+            one.to = one.before;
         }
 
         one.what = found ? outcome::written : outcome::created;
@@ -1540,7 +2078,7 @@ bool deliver(const reply& r, const std::string& root, const teller& say,
         const char* verb = d.what == outcome::created ? "create" : "write";
 
         if(dry_run) {
-            say(std::string("would ") + verb + " " + d.name);
+            say(std::string("would ") + verb + " " + d.name + ", " + extent(d));
 
             continue;
         }
@@ -1575,7 +2113,13 @@ bool deliver(const reply& r, const std::string& root, const teller& say,
     bool wrote = false;
 
     for(const result& w : jcode::apply(going, root)) {
+        // The size on the record, so a write that took more than it should
+        // shows it even under --yes, where nobody was asked (#464).
+        const bool landed = w.what == outcome::written ||
+                            w.what == outcome::created;
+
         say(std::string(spell(w.what)) + " " + w.name +
+            (landed ? ", " + extent(w) : std::string()) +
             (w.why.empty() ? std::string() : ": " + w.why));
 
         if(w.what == outcome::written || w.what == outcome::created)
