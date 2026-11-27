@@ -92,3 +92,28 @@ What it says: **hunks are the safer format and the cheaper one, and they are unu
 | `ringbuffer-noexcept` | wrote nothing | wrote nothing |
 
 The conclusion above changes in one half: whole format destroyed no file here, and what it costs instead is a refusal or, in one documented shape, a line kept that should have gone (see `place()` in `jlib/apps/jcode.cc`). Hunks are still the cheaper format by ten times in tokens, and still unusable until #465.
+
+## Rerun after #465
+
+**Hunks: 8 of 10 applied and 5 correct, where before every one was refused for its name.** The prompt now shows the model its real file when one is sent, and `clean()` maps the example's name back when a model copies it anyway; no reply used `path/to/filename.cc`, and none was refused for its name. Both halves ran on 2026-11-27 (`build/edit-formats/names`).
+
+| case | hunks | whole |
+| --- | --- | --- |
+| `ringbuffer-peek` | **correct**, ~588 tok | **correct**, ~1776 tok |
+| `ringbuffer-noexcept` | refused: the search text left out the comments between the functions it showed | **correct** — before, it wrote nothing |
+| `sampler-topk` | wrong: folded the new check into the old one and rewrote its message | **correct** |
+| `sampler-ties` | **correct**, ~77 tok | **correct** — before, a fragment, refused |
+| `listener-localhost` | **correct**, ~42 tok | **correct** |
+| `listener-reuseport` | wrong: redeclared `on`, and does not compile | **correct** |
+| `directory-rename` | wrong: renamed the declarations, not their uses | **correct** |
+| `quant-upper` | **correct**, ~116 tok | **correct** |
+| `relay-idle` | **correct**, ~77 tok | **correct** |
+| `openai-sort` | not applied: a correct hunk, sent with a tool call (#469) | no result: still generating after 44 minutes when the harness's time limit stopped it |
+
+**The three wrong hunks are the model's edits applied as written**, not jcode's: each SEARCH matched exactly once and was replaced by what the model sent. Two of the three do not compile, which is what jcode's `--build` loop hands back to the model; this harness does not run it. The one hunk refused was refused correctly — its SEARCH was not text in the file — and the one not applied was correct, lost to #469.
+
+**Whole: 9 of 9 correct, and the new prompt changed whole-file replies too**: shown its real filename, the model sent the whole file in two cases where before it sent a fragment or nothing.
+
+**Output**: a median hunk reply of ~84 tokens against ~1,776 for a whole file, and a median of 104 s against 258 s a case.
+
+What it says: **hunks apply now**, at a twentieth of the tokens; **whole was right more often in this run**, 9 of 9 against 5 of 10. Two of the wrong hunks went wrong in lines the hunk did not show — the uses of the renamed variables, the `on` already declared above — which a whole file makes the model write out, and one hunk's SEARCH was not the file's text. Neither format destroyed a file. Which should be the default is that trade, and it is worth measuring once more with a build loop on before deciding, to see how many of the wrong hunks a compile error recovers.

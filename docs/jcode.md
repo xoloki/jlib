@@ -33,6 +33,8 @@ The two are alternatives rather than layers: a reply is in one form or the other
 
 Models get the wrapper wrong constantly — they bold the filename, end it with a colon, make it a heading, wrap it in backticks, or paste the `path/to` prefix out of the prompt's own example. A harness that refuses a reply over any of that is useless, so each is absorbed.
 
+**They also copy the prompt's example, whole** (#465). Shown `path/to/filename.cc`, Qwen2.5-Coder-7B wrote it verbatim in nine hunk replies of ten — for a header too — and `path/to/quant.hh` for `jlib/ai/quant.hh` in the tenth, and every one was refused for its name, five of them correct edits. So the example shows the file itself when exactly one is sent. With several it keeps `path/to/filename.cc`, deliberately: a model copying the first file's name onto the second file's edit would put a whole file over the wrong one, where a name no file has costs only a refusal. Behind that, `clean()` maps the example's name to the file sent when only one was, drops the example's directory from in front of a real name, and takes a name that is the end of exactly one path sent — `quant.hh` or `ai/quant.hh` for `jlib/ai/quant.hh`, never `i/quant.hh`. Any other directory is left alone: `src/quant.hh` may be the file the model means to create, and taking its basename, which jcode used to do, would have written to the one that exists.
+
 **Each absorption is a guess, and each is recorded against the edit it produced.** `edit::guesses` carries them and a caller is expected to print them, because a guess nobody can see is how the wrong file gets written and nobody learns why. Anything not on the list is refused rather than guessed at.
 
 ## A fence that contradicts its file is an illustration
