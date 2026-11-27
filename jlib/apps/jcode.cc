@@ -46,6 +46,38 @@ namespace {
 /** Longer than any name a model means, and shorter than a paragraph. */
 const std::size_t NAME_LIMIT = 250;
 
+/**
+ * The filename both prompts show when there is no real one to show (#465).
+ *
+ * **A model copies it.** Measured: shown this as the example and given one
+ * file in a subdirectory, Qwen2.5-Coder-7B wrote `path/to/filename.cc`
+ * verbatim in nine hunk replies of ten -- for `ringbuffer.hh` as well -- and
+ * every one was refused for its name. So the prompt shows the real file
+ * instead when exactly one was sent, and clean() knows this one for what it
+ * is when the prompt still had to show it.
+ */
+const std::string PLACEHOLDER = "path/to/filename.cc";
+
+/** Its directory, which a model sends back in front of a real name. */
+const std::string PLACEHOLDER_DIR = "path/to/";
+
+/**
+ * The prompt's example, or the name in it: `path/to/filename.cc`, and the
+ * same with no directory or another extension, because a model adapts the
+ * one and drops the other. Only ever asked of a name no file sent has.
+ */
+bool placeholder(const std::string& name) {
+    std::string rest = name;
+
+    if(rest.compare(0, PLACEHOLDER_DIR.size(), PLACEHOLDER_DIR) == 0)
+        rest = rest.substr(PLACEHOLDER_DIR.size());
+
+    if(rest.compare(0, 8, "filename") != 0) return false;
+
+    return rest.size() == 8 ||
+           (rest[8] == '.' && rest.find('/') == std::string::npos);
+}
+
 /** Whether a line is a fence: three or more backticks, or three tildes. */
 bool fenced(const std::string& line, std::string& info) {
     const std::string s = util::trim(line);
@@ -145,12 +177,6 @@ bool fence_contradicts(const std::string& info, const std::string& name) {
     return false;     // a language nobody here knows says nothing
 }
 
-std::string basename_of(const std::string& path) {
-    const std::string::size_type at = path.find_last_of('/');
-
-    return at == std::string::npos ? path : path.substr(at + 1);
-}
-
 /**
  * The name a model meant, and what had to be assumed to get there.
  *
@@ -229,25 +255,64 @@ std::string clean(std::string name, const std::vector<std::string>& known,
         return std::string();
     }
 
-    // The prefix out of the prompt's own example.  A model that was shown
-    // `path/to/filename.js` will send `path/to/` back, and the file it means
-    // is the one whose basename matches.
-    if(!name.empty() && !known.empty() &&
-       std::find(known.begin(), known.end(), name) == known.end())
-    {
-        const std::string base = basename_of(name);
+    if(name.empty() || std::find(known.begin(), known.end(), name) != known.end())
+        return name;
 
-        if(base != name &&
-           std::find(known.begin(), known.end(), base) != known.end())
-        {
-            why.push_back("no file called \"" + name + "\" was sent, but \"" +
-                          base + "\" was; took the basename");
+    // **The prompt's own example, sent back whole** (#465). There is no such
+    // file, and with only one file sent there is no question which was
+    // meant; with several there is, and the name is left to match nothing.
+    if(placeholder(name)) {
+        if(known.size() == 1) {
+            why.push_back("\"" + name + "\" is the name in the prompt's "
+                          "example, not a file; only one file was sent: " +
+                          known[0]);
 
-            name = base;
+            return known[0];
         }
+
+        return name;
     }
 
-    return name;
+    // **Or its directory, in front of a real name.** Shown `path/to/`, a
+    // model sends it back: `path/to/hello.cc` for a file at the root, and
+    // measured, `path/to/quant.hh` for `jlib/ai/quant.hh`.
+    std::string rest = name;
+
+    const bool example = rest.compare(0, PLACEHOLDER_DIR.size(),
+                                      PLACEHOLDER_DIR) == 0;
+
+    if(example) rest = rest.substr(PLACEHOLDER_DIR.size());
+
+    // **And the end of a path that was sent**, whole components at a time:
+    // `quant.hh` or `ai/quant.hh` for `jlib/ai/quant.hh`, never `i/quant.hh`,
+    // and only when one file ends that way. This took the basename alone
+    // and compared it against the paths sent, which is why `path/to/quant.hh`
+    // was refused: every path sent had a directory in front.
+    //
+    // **What is deliberately not done** is the other half of what that rule
+    // did: take a basename behind *any* directory. `src/hello.cc` for
+    // `hello.cc` became `hello.cc` -- and `src/hello.cc` may be the file the
+    // model means to create. Only `path/to/` is known to be no directory at
+    // all.
+    std::vector<std::string> ends;
+
+    for(const std::string& k : known)
+        if(k == rest ||
+           (k.size() > rest.size() && k[k.size() - rest.size() - 1] == '/' &&
+            k.compare(k.size() - rest.size(), rest.size(), rest) == 0))
+            ends.push_back(k);
+
+    if(ends.size() != 1) return name;
+
+    if(example)
+        why.push_back("\"" + PLACEHOLDER_DIR + "\" is the directory in the "
+                      "prompt's example, not a real one; took \"" + ends[0] +
+                      "\", the file sent whose path ends \"" + rest + "\"");
+    else
+        why.push_back("no file called \"" + name + "\" was sent; took \"" +
+                      ends[0] + "\", the one file sent whose path ends that way");
+
+    return ends[0];
 }
 
 }
@@ -286,7 +351,13 @@ std::size_t estimate_tokens(const std::string& text) {
     return std::size_t(double(text.size()) / BYTES_PER_TOKEN) + 1;
 }
 
-std::string system_prompt(const std::vector<tool>& tools, format want) {
+std::string system_prompt(const std::vector<tool>& tools, format want,
+                          const std::string& example)
+{
+    // The real file when there is one to show, because the example is what
+    // a model copies (#465); see PLACEHOLDER.
+    const std::string shown = example.empty() ? PLACEHOLDER : example;
+
     // **Registering a tool is not the same as telling the model it has one.**
     //
     // Measured: with read_file and search registered but unmentioned here, a
@@ -334,8 +405,8 @@ std::string system_prompt(const std::vector<tool>& tools, format want) {
             "\n"
             "When you change a file you MUST answer with search and replace "
             "blocks, in this format and no other:\n"
-            "\n"
-            "path/to/filename.cc\n"
+            "\n" +
+            shown + "\n"
             "<<<<<<< SEARCH\n"
             "the lines exactly as they are now\n"
             "=======\n"
@@ -360,8 +431,8 @@ std::string system_prompt(const std::vector<tool>& tools, format want) {
         "\n"
         "When you change a file you MUST return its entire new contents, in "
         "this format and no other:\n"
-        "\n"
-        "path/to/filename.cc\n"
+        "\n" +
+        shown + "\n"
         "```\n"
         "the whole file, from its first line to its last\n"
         "```\n"
@@ -382,7 +453,14 @@ plan lay_out(const std::string& request, const std::vector<source>& files,
 {
     plan out;
 
-    const std::string system = system_prompt(tools, want);
+    // **The example names the file, when there is one** (#465). With
+    // several, it does not: a model copies the example's name, and given the
+    // first file's name, a block meant for the second would be written to the
+    // first -- a whole-file one over it. `path/to/filename.cc` is a name no
+    // file has, so copying it costs a refusal rather than a file.
+    const std::string system =
+        system_prompt(tools, want, files.size() == 1 ? files[0].name
+                                                     : std::string());
 
     // The two that are never dropped, costed first: without the system turn
     // the reply is in no format at all, and without the request there is

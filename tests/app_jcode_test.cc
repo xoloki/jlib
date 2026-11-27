@@ -30,6 +30,7 @@
 
 #include <jlib/apps/jcode.hh>
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -1106,7 +1107,7 @@ static void the_envelope_a_model_actually_sends() {
         { "a heading",        "## main.cc",  "main.cc", "heading" },
         { "a trailing colon", "main.cc:",    "main.cc", "colon" },
         { "the prompt's own path prefix", "path/to/main.cc", "main.cc",
-          "basename" },
+          "example" },
     };
 
     // **Through both formats, and that is the assertion whose absence was the
@@ -1138,6 +1139,141 @@ static void the_envelope_a_model_actually_sends() {
                r.edits.empty() || r.edits[0].guesses.empty()
                    ? "nothing logged" : r.edits[0].guesses[0]);
         }
+    }
+}
+
+/**
+ * The name in the prompt's example is the one a model writes (#465).
+ *
+ * Measured: shown `path/to/filename.cc` and given one file in a subdirectory,
+ * Qwen2.5-Coder-7B wrote the example's name verbatim in nine hunk replies of
+ * ten -- `filename.cc` for `ringbuffer.hh` too -- and in the tenth the
+ * example's directory in front of the real name, `path/to/quant.hh` for
+ * `jlib/ai/quant.hh`. All ten were refused, and five were correct edits.
+ */
+static void the_name_in_the_prompts_example() {
+    std::cout << "\nthe name in the prompt's example (#465):\n";
+
+    // **The prompt shows the real file, when there is one.**
+    for(const jcode::format f : { jcode::format::whole, jcode::format::hunks }) {
+        const char* const after = f == jcode::format::hunks ? "<<<<<<< SEARCH" : "```";
+        const char* const which = f == jcode::format::hunks ? "hunks" : "whole files";
+
+        const std::string named = jcode::system_prompt({}, f, "jlib/ai/sampler.cc");
+
+        ok(std::string("asking for ") + which + ", the example is the file sent",
+           named.find(std::string("jlib/ai/sampler.cc\n") + after) != std::string::npos &&
+               named.find("path/to/") == std::string::npos);
+
+        const std::string plain = jcode::system_prompt({}, f);
+
+        ok("  and with no file to show, a name no file has",
+           plain.find(std::string("path/to/filename.cc\n") + after) != std::string::npos);
+    }
+
+    {
+        // lay_out() is what decides, and it shows a file only when there is
+        // exactly one: given the first of two, a model copying the example
+        // would put the second's edit under the first's name.
+        const std::vector<jcode::source> one{ { "jlib/ai/sampler.cc", "int x;\n" } };
+        const std::vector<jcode::source> two{ { "jlib/ai/sampler.cc", "int x;\n" },
+                                              { "jlib/ai/quant.hh", "int y;\n" } };
+
+        const jcode::plan p1 = jcode::lay_out("fix it", one, 100000, {},
+                                              jcode::format::hunks);
+        const jcode::plan p2 = jcode::lay_out("fix it", two, 100000, {},
+                                              jcode::format::hunks);
+
+        ok("one file sent, and the system turn's example is that file",
+           !p1.turns.empty() &&
+               p1.turns[0].second.find("jlib/ai/sampler.cc\n<<<<<<< SEARCH") !=
+                   std::string::npos);
+
+        ok("  two, and it is neither of them",
+           !p2.turns.empty() &&
+               p2.turns[0].second.find("path/to/filename.cc\n<<<<<<< SEARCH") !=
+                   std::string::npos);
+    }
+
+    // **What clean() makes of the names a model sends.** Each through both
+    // formats, because #457's lesson was that a table run through one parser
+    // says nothing about the other.
+    const std::vector<std::string> sampler{ "jlib/ai/sampler.cc" };
+    const std::vector<std::string> ringbuffer{ "jlib/sys/ringbuffer.hh" };
+    const std::vector<std::string> quant{ "jlib/ai/quant.hh" };
+    const std::vector<std::string> quants{ "jlib/ai/quant.hh", "tools/quant.hh" };
+    const std::vector<std::string> root{ "main.cc" };
+
+    const struct {
+        const char* what; const char* name; const std::vector<std::string>& sent;
+        const char* wanted; const char* says;
+    } cases[] = {
+        { "the example's name, one file sent", "path/to/filename.cc", sampler,
+          "jlib/ai/sampler.cc", "prompt's example" },
+        { "  for a header too, as measured", "path/to/filename.cc", ringbuffer,
+          "jlib/sys/ringbuffer.hh", "prompt's example" },
+        { "  or without its directory", "filename.cc", sampler,
+          "jlib/ai/sampler.cc", "prompt's example" },
+        { "  but not with two files sent: which was meant is not known",
+          "path/to/filename.cc", KNOWN, "path/to/filename.cc", nullptr },
+        { "the example's directory in front of a file in another, as measured",
+          "path/to/quant.hh", quant, "jlib/ai/quant.hh", "directory in the prompt's example" },
+        { "the end of a path that was sent", "ai/quant.hh", quant,
+          "jlib/ai/quant.hh", "ends that way" },
+        { "  or its basename", "quant.hh", quant, "jlib/ai/quant.hh", "ends that way" },
+        { "  in whole components only", "i/quant.hh", quant, "i/quant.hh", nullptr },
+        { "  and from one file only", "quant.hh", quants, "quant.hh", nullptr },
+        { "another directory is left alone: it may be a file to create",
+          "src/quant.hh", quant, "src/quant.hh", nullptr },
+        { "  at the root too, which the old rule took the basename of",
+          "src/main.cc", root, "src/main.cc", nullptr },
+    };
+
+    for(const bool in_hunks : { false, true }) {
+        std::cout << (in_hunks ? "  as search/replace hunks:\n"
+                               : "  as whole files:\n");
+
+        for(const auto& c : cases) {
+            const jcode::reply r = jcode::parse(
+                in_hunks ? hunk(c.name, "x\n", "y\n") : fence(c.name, "x\n"), c.sent);
+
+            const bool named = r.edits.size() == 1 && r.edits[0].name == c.wanted;
+
+            const bool said = r.edits.size() == 1 &&
+                (c.says ? !r.edits[0].guesses.empty() &&
+                              r.edits[0].guesses[0].find(c.says) != std::string::npos
+                        : r.edits[0].guesses.empty());
+
+            ok(std::string("    ") + c.what, named && said,
+               r.edits.size() != 1
+                   ? std::to_string(r.edits.size()) + " edits"
+                   : r.edits[0].name + (r.edits[0].guesses.empty()
+                                            ? std::string()
+                                            : " -- " + r.edits[0].guesses[0]));
+        }
+    }
+
+    {
+        // **And through apply(), into a file in a subdirectory**: the measured
+        // quant-upper reply's name, on a hunk that matches.
+        tree t;
+
+        if(t.path.empty()) { ok("a temp tree", false); return; }
+
+        ::mkdir((t.path + "/jlib").c_str(), 0755);
+        ::mkdir((t.path + "/jlib/ai").c_str(), 0755);
+
+        t.put("jlib/ai/quant.hh", "int lower = 1;\n");
+
+        const std::vector<jcode::result> got = jcode::apply(
+            jcode::parse(hunk("path/to/quant.hh", "int lower = 1;\n", "int upper = 1;\n"),
+                         quant), t.path);
+
+        ok("a hunk under `path/to/quant.hh` is written to jlib/ai/quant.hh",
+           got.size() == 1 && got[0].what == jcode::outcome::written &&
+               read(t, "jlib/ai/quant.hh") == "int upper = 1;\n",
+           got.empty() ? "nothing" : std::string(jcode::spell(got[0].what)) +
+                                        (got[0].why.empty() ? "" : ": " + got[0].why));
     }
 }
 
@@ -2038,6 +2174,7 @@ int main() {
     the_agent_loop();
     the_loop_knows_why_it_stopped();
     what_the_tools_look_like_on_the_wire();
+    the_name_in_the_prompts_example();
     a_blank_line_is_a_line();
     a_part_goes_where_it_belongs();
     the_envelope_a_model_actually_sends();

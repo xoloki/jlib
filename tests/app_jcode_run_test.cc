@@ -256,7 +256,7 @@ int main() {
         ok("  and both guesses are printed",
            r.err.find("guessed:") != std::string::npos &&
            r.err.find("bold") != std::string::npos &&
-           r.err.find("basename") != std::string::npos, r.err);
+           r.err.find("prompt's example") != std::string::npos, r.err);
     }
 
     {

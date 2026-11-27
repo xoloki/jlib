@@ -194,9 +194,15 @@ enum class format {
     hunks    ///< filename, then search/replace blocks
 };
 
+/**
+ * `example` is the file to show in the format's example -- lay_out() passes
+ * the file being sent when there is exactly one -- and empty shows
+ * `path/to/filename.cc`, a name no file has (#465).
+ */
 std::string system_prompt(const std::vector<tool>& tools =
                               std::vector<tool>(),
-                          format want = format::whole);
+                          format want = format::whole,
+                          const std::string& example = std::string());
 
 /**
  * How many tokens a string is likely to be, erring high.
